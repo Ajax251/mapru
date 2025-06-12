@@ -1,38 +1,65 @@
-// Содержимое файла: /api/weather.js
+// File: /api/weather.js
 
+/**
+ * Универсальная серверная функция для обработки API-запросов.
+ * @param {object} request - Объект входящего запроса.
+ * @param {object} response - Объект ответа сервера.
+ */
 export default async function handler(request, response) {
-  // 1. Получаем название города из параметров запроса
-  // Например, если запрос был /api/weather?city=Nurlat, то cityName будет "Nurlat"
-  const cityName = request.query.city;
+  // Определяем, какую услугу запросил клиент (погода или временная зона)
+  const { service, city, lat, lon } = request.query;
 
-  // 2. Получаем секретный API ключ из переменных окружения Vercel
-  // process.env.API_KEY_WEATHER - это безопасный способ доступа к ключу
-  const apiKey = process.env.API_KEY_WEATHER;
+  // Получаем секретные ключи из переменных окружения Vercel
+  // Мы используем префикс VITE_ для совместимости с Vite, но это не обязательно.
+  const weatherApiKey = process.env.VITE_WEATHER_API_KEY;
+  const geonamesUsername = process.env.VITE_GEONAMES_USERNAME;
 
-  // 3. Проверяем, что название города было передано
-  if (!cityName) {
-    return response.status(400).json({ message: 'Error: City parameter is required' });
+  // --- Обработка запроса погоды ---
+  if (service === 'weather') {
+    if (!city) {
+      return response.status(400).json({ message: 'Параметр "city" обязателен для запроса погоды.' });
+    }
+    if (!weatherApiKey) {
+      return response.status(500).json({ message: 'Ключ API для погоды не настроен на сервере.' });
+    }
+
+    const weatherApiUrl = `https://api.openweathermap.org/data/2.5/forecast?q=${encodeURIComponent(city)}&appid=${weatherApiKey}&units=metric&lang=ru`;
+
+    try {
+      const apiResponse = await fetch(weatherApiUrl);
+      const data = await apiResponse.json();
+      
+      // Просто пересылаем ответ от OpenWeatherMap клиенту как есть
+      return response.status(apiResponse.status).json(data);
+    } catch (error) {
+      console.error('Ошибка на стороне сервера при запросе погоды:', error);
+      return response.status(500).json({ message: 'Не удалось получить данные о погоде.' });
+    }
   }
 
-  // 4. Проверяем, что API ключ доступен на сервере
-  if (!apiKey) {
-    return response.status(500).json({ message: 'Error: Weather API Key is not configured on the server' });
+  // --- Обработка запроса временной зоны ---
+  if (service === 'timezone') {
+    if (!lat || !lon) {
+      return response.status(400).json({ message: 'Параметры "lat" и "lon" обязательны для запроса временной зоны.' });
+    }
+    if (!geonamesUsername) {
+      return response.status(500).json({ message: 'Логин для GeoNames не настроен на сервере.' });
+    }
+
+    const timezoneApiUrl = `https://secure.geonames.org/timezoneJSON?lat=${lat}&lng=${lon}&username=${geonamesUsername}`;
+
+    try {
+      const apiResponse = await fetch(timezoneApiUrl);
+      const data = await apiResponse.json();
+      
+      // Пересылаем ответ от GeoNames клиенту
+      return response.status(apiResponse.status).json(data);
+    } catch (error)      {
+      console.error('Ошибка на стороне сервера при запросе временной зоны:', error);
+      return response.status(500).json({ message: 'Не удалось получить данные о временной зоне.' });
+    }
   }
 
-  // 5. Формируем URL для запроса к OpenWeatherMap
-  const apiUrl = `https://api.openweathermap.org/data/2.5/forecast?q=${encodeURIComponent(cityName)}&appid=${apiKey}&units=metric&lang=ru`;
-
-  // 6. Выполняем запрос и пересылаем ответ клиенту
-  try {
-    const weatherResponse = await fetch(apiUrl);
-    const weatherData = await weatherResponse.json();
-    
-    // Отправляем клиенту (в ваш <script> в index.html) статус и данные,
-    // которые мы получили от OpenWeatherMap
-    response.status(weatherResponse.status).json(weatherData);
-  } catch (error) {
-    // Если произошла ошибка сети на сервере Vercel
-    console.error('Server-side weather fetch error:', error);
-    response.status(500).json({ message: 'Error: Failed to fetch weather data from the provider' });
-  }
+  // --- Если параметр service не указан или некорректен ---
+  return response.status(400).json({ message: 'Неверный или отсутствующий параметр "service". Укажите "weather" или "timezone".' });
 }
