@@ -1,0 +1,1860 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Supabase Admin Panel</title>
+    <link id="favicon" rel="icon" href="https://i.ibb.co/dwfpm1yF/supabase-96.png" type="image/png">
+    <script src="https://cdn.tailwindcss.com"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
+    <style>
+        body { font-family: 'Inter', sans-serif; }
+        .sidebar { width: 320px; transition: transform 0.3s ease-in-out; }
+        .main-content { transition: margin-left 0.3s ease-in-out; }
+        .loading-overlay { position: fixed; top: 0; left: 0; width: 100%; height: 100%; background-color: rgba(0,0,0,0.6); z-index: 9999; display: flex; flex-direction: column; justify-content: center; align-items: center; color: white; font-size: 1.5rem; }
+        .spinner { border: 4px solid rgba(255, 255, 255, 0.3); border-radius: 50%; border-top: 4px solid #fff; width: 40px; height: 40px; animation: spin 1s linear infinite; }
+        @keyframes spin { 0% { transform: rotate(0deg); } 100% { transform: rotate(360deg); } }
+        #exportProgressContainer { margin-top: 20px; background-color: rgba(0,0,0,0.75); padding: 20px; border-radius: 8px; color: white; text-align: center; min-width: 320px; }
+        #exportProgressBar { width: 100%; margin-top: 8px; margin-bottom: 12px; }
+        #sqlScriptContent { max-height: 200px; overflow-y: auto; }
+        #bucketFilesModal th .sort-indicator { margin-left: 4px; }
+        #bucketFilesTableBody tr.selected-row td { background-color: #ef4444 !important; color: white !important; }
+        #bucketFilesTableBody tr.selected-row:hover td { background-color: #dc2626 !important; }
+        .drop-zone-active { border: 2px dashed #3b82f6 !important; background-color: rgba(59, 130, 246, 0.1) !important; }
+        #tableViewContent table { table-layout: fixed; width: 100%; }
+        #tableViewContent th, #tableViewContent td { padding: 8px 12px; border: 1px solid #e5e7eb; text-align: left; vertical-align: top; }
+        #tableViewContent th { background-color: #f9fafb; font-weight: 600; }
+        #tableViewContent td { max-width: 350px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+        #tableViewContent td:hover { overflow: visible; white-space: normal; word-break: break-all; }
+    </style>
+</head>
+<body class="bg-gray-100 text-gray-800">
+
+    <div id="loadingOverlay" class="loading-overlay hidden">
+        <div id="loadingSpinnerSection">
+            <div class="spinner"></div>
+            <span id="loadingMessage" class="ml-3 mt-2">Загрузка...</span>
+        </div>
+        <div id="exportProgressContainer" class="hidden">
+            <p id="exportProgressMessage">Операция...</p>
+            <progress id="exportProgressBar" value="0" max="100"></progress>
+            <div class="flex justify-center mt-2 space-x-2">
+                <button id="pauseExportBtn" class="bg-yellow-500 hover:bg-yellow-600 text-black font-semibold py-2 px-4 rounded text-sm">Пауза</button>
+                <button id="cancelExportBtn" class="bg-red-600 hover:bg-red-700 text-white font-semibold py-2 px-4 rounded text-sm">Отмена</button>
+            </div>
+        </div>
+    </div>
+
+    <div class="flex h-screen">
+        <aside id="sidebar" class="sidebar bg-gray-800 text-white p-6 space-y-6 fixed top-0 left-0 h-full overflow-y-auto">
+            <h1 class="text-2xl font-semibold">Supabase Admin</h1>
+            <div>
+                <h2 class="text-lg font-medium mb-2">Подключение</h2>
+                <form id="connectionForm" class="space-y-3">
+                    <input type="text" id="connName" placeholder="Имя подключения (имя файла)" class="w-full p-2 rounded bg-gray-700 text-white border border-gray-600 focus:ring-indigo-500 focus:border-indigo-500" required>
+                    <input type="url" id="connUrl" placeholder="Supabase URL (https://xyz.supabase.co)" class="w-full p-2 rounded bg-gray-700 text-white border border-gray-600 focus:ring-indigo-500 focus:border-indigo-500" required>
+                    <input type="password" id="connKey" placeholder="Service Role Secret" class="w-full p-2 rounded bg-gray-700 text-white border border-gray-600 focus:ring-indigo-500 focus:border-indigo-500" required>
+                    <button type="submit" id="connectButton" class="w-full bg-indigo-600 hover:bg-indigo-700 text-white font-bold py-2 px-4 rounded">Подключиться</button>
+                </form>
+                <div class="mt-3 flex space-x-2">
+                    <button id="saveConnectionFileButton" class="w-1/2 bg-green-600 hover:bg-green-700 text-white font-bold py-2 px-4 rounded text-sm">Сохранить</button>
+                    <button id="loadConnectionFileButton" class="w-1/2 bg-blue-600 hover:bg-blue-700 text-white font-bold py-2 px-4 rounded text-sm">Открыть</button>
+                </div>
+            </div>
+            <hr class="border-gray-700 my-6">
+            <div id="sqlSetupSection" class="p-1 bg-gray-700 rounded-lg">
+                <h3 class="text-md font-semibold mb-2 text-center">SQL Настройка</h3>
+                <p class="text-xs mb-2 px-2">Для работы панели выполните SQL скрипт в вашем Supabase проекте (SQL Editor):</p>
+                <div class="relative bg-gray-900 p-3 rounded m-2">
+                    <button id="copySqlButton" class="absolute top-2 right-2 bg-indigo-500 hover:bg-indigo-600 text-white px-2 py-1 text-xs rounded z-10">Копировать SQL</button>
+                    <pre><code id="sqlScriptContent" class="text-xs language-sql whitespace-pre-wrap break-all">
+-- SQL скрипты для Supabase Admin Panel
+
+-- 1. Функция для тестирования соединения
+CREATE OR REPLACE FUNCTION test_connection_schema()
+RETURNS TABLE (schema_name information_schema.sql_identifier) AS $$
+BEGIN
+    RETURN QUERY SELECT s.schema_name FROM information_schema.schemata s LIMIT 1;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 2. Функция для получения списка пользовательских таблиц
+CREATE OR REPLACE FUNCTION get_public_user_tables()
+RETURNS TABLE (table_name information_schema.sql_identifier) AS $$
+BEGIN
+    RETURN QUERY
+    SELECT t.table_name
+    FROM information_schema.tables t
+    WHERE t.table_schema = 'public'
+      AND t.table_type = 'BASE TABLE'
+      AND t.table_name NOT LIKE 'pg_%'
+      AND t.table_name NOT LIKE 'sql_%'
+      AND t.table_name NOT IN (
+        'supabase_migrations', 'pg_stat_statements', 'pg_stat_statements_info',
+        'spatial_ref_sys', 'geography_columns', 'geometry_columns'
+      )
+    ORDER BY t.table_name;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 3. Функция для поиска данных в таблице (с пагинацией)
+CREATE OR REPLACE FUNCTION search_table_data(
+    p_table_name TEXT,
+    p_search_text TEXT,
+    p_limit INT,
+    p_offset INT
+)
+RETURNS SETOF JSON -- Возвращает строки в формате JSON
+AS $$
+DECLARE
+    searchable_cols TEXT[];
+    where_clause TEXT := '1=1';
+    search_word TEXT;
+    query TEXT;
+    order_by_col TEXT;
+BEGIN
+    -- Находим все колонки, в которых можно искать (текстовые и json/jsonb)
+    SELECT array_agg(column_name::TEXT)
+    INTO searchable_cols
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = p_table_name
+      AND (
+        data_type IN ('character varying', 'text', 'character') OR
+        udt_name IN ('json', 'jsonb')
+      );
+
+    -- Если есть поисковый текст и колонки для поиска
+    IF p_search_text IS NOT NULL AND p_search_text != '' AND array_length(searchable_cols, 1) > 0 THEN
+        where_clause := '';
+        -- Для каждого слова в поисковом запросе
+        FOREACH search_word IN ARRAY string_to_array(p_search_text, ' ')
+        LOOP
+            IF search_word != '' THEN
+                IF where_clause != '' THEN
+                    where_clause := where_clause || ' AND ';
+                END IF;
+                -- Строим OR условие для одного слова по всем колонкам
+                where_clause := where_clause || '(' || array_to_string(
+                    ARRAY(
+                        SELECT format('%I::text ILIKE %L', col_name, '%' || search_word || '%')
+                        FROM unnest(searchable_cols) AS col_name
+                    ),
+                    ' OR '
+                ) || ')';
+            END IF;
+        END LOOP;
+    END IF;
+
+    -- Находим первичный ключ для стабильной сортировки
+    SELECT kcu.column_name INTO order_by_col
+    FROM information_schema.table_constraints AS tc
+    JOIN information_schema.key_column_usage AS kcu
+        ON tc.constraint_name = kcu.constraint_name AND tc.table_schema = kcu.table_schema
+    WHERE tc.constraint_type = 'PRIMARY KEY'
+    AND tc.table_schema = 'public' AND tc.table_name = p_table_name
+    LIMIT 1;
+
+    -- Если первичный ключ не найден, используем первую колонку таблицы как запасной вариант
+    IF order_by_col IS NULL THEN
+        SELECT column_name INTO order_by_col
+        FROM information_schema.columns
+        WHERE table_schema = 'public' AND table_name = p_table_name
+        ORDER BY ordinal_position
+        LIMIT 1;
+    END IF;
+
+    -- Строим и выполняем безопасный динамический запрос с правильной сортировкой
+    query := format(
+        'SELECT to_json(t.*) FROM public.%I AS t WHERE %s ORDER BY t.%I LIMIT %s OFFSET %s',
+        p_table_name,
+        where_clause,
+        order_by_col, -- Используем найденную колонку для сортировки
+        p_limit,
+        p_offset
+    );
+
+    RETURN QUERY EXECUTE query;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+-- 4. Функция для подсчета строк при поиске
+CREATE OR REPLACE FUNCTION search_table_count(
+    p_table_name TEXT,
+    p_search_text TEXT
+)
+RETURNS INT
+AS $$
+DECLARE
+    searchable_cols TEXT[];
+    where_clause TEXT := '1=1';
+    search_word TEXT;
+    query TEXT;
+    row_count INT;
+BEGIN
+    -- Логика определения колонок и построения WHERE такая же, как в search_table_data
+    SELECT array_agg(column_name::TEXT)
+    INTO searchable_cols
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = p_table_name
+      AND (
+        data_type IN ('character varying', 'text', 'character') OR
+        udt_name IN ('json', 'jsonb')
+      );
+
+    IF p_search_text IS NOT NULL AND p_search_text != '' AND array_length(searchable_cols, 1) > 0 THEN
+        where_clause := '';
+        FOREACH search_word IN ARRAY string_to_array(p_search_text, ' ')
+        LOOP
+            IF search_word != '' THEN
+                IF where_clause != '' THEN
+                    where_clause := where_clause || ' AND ';
+                END IF;
+                where_clause := where_clause || '(' || array_to_string(
+                    ARRAY(
+                        SELECT format('%I::text ILIKE %L', col_name, '%' || search_word || '%')
+                        FROM unnest(searchable_cols) AS col_name
+                    ),
+                    ' OR '
+                ) || ')';
+            END IF;
+        END LOOP;
+    END IF;
+
+    query := format('SELECT count(*) FROM public.%I WHERE %s', p_table_name, where_clause);
+    EXECUTE query INTO row_count;
+    RETURN row_count;
+END;
+$$ LANGUAGE plpgsql SECURITY DEFINER;
+
+
+-- Выдаем права на все функции
+GRANT EXECUTE ON FUNCTION public.test_connection_schema() TO service_role;
+GRANT EXECUTE ON FUNCTION public.get_public_user_tables() TO service_role;
+GRANT EXECUTE ON FUNCTION public.search_table_data(TEXT, TEXT, INT, INT) TO service_role;
+GRANT EXECUTE ON FUNCTION public.search_table_count(TEXT, TEXT) TO service_role;
+                    </code></pre>
+                </div>
+            </div>
+        </aside>
+
+        <main id="mainContent" class="main-content flex-1 p-8 overflow-y-auto ml-[320px]">
+            <button id="toggleSidebarButton" class="fixed top-4 left-4 z-20 bg-gray-700 text-white p-2 rounded md:hidden">☰</button>
+            <div id="welcomeMessage" class="text-center">
+            </div>
+            <div id="dashboard" class="hidden">
+                <div class="flex justify-between items-center mb-6">
+                    <h2 class="text-3xl font-bold">Панель: <span id="currentConnectionName" class="text-indigo-600"></span></h2>
+                    <button id="disconnectButton" class="bg-red-500 hover:bg-red-600 text-white font-bold py-2 px-4 rounded">Отключиться</button>
+                </div>
+                <div class="grid grid-cols-1 md:grid-cols-2 gap-8">
+                    <section>
+                        <div class="flex justify-between items-center mb-2">
+                             <h3 class="text-2xl font-semibold">Таблицы (схема: public)</h3>
+                             <div id="globalExportButtons" class="hidden space-x-2">
+                                <button id="exportAllSqlBtn" class="text-xs bg-blue-600 hover:bg-blue-700 text-white px-3 py-1.5 rounded shadow" title="Экспорт всех таблиц в SQL (ZIP)">Все SQL</button>
+                                <button id="exportAllCsvBtn" class="text-xs bg-green-600 hover:bg-green-700 text-white px-3 py-1.5 rounded shadow" title="Экспорт всех таблиц в CSV (ZIP)">Все CSV</button>
+                                <button id="exportAllXlsxBtn" class="text-xs bg-teal-600 hover:bg-teal-700 text-white px-3 py-1.5 rounded shadow" title="Экспорт всех таблиц в XLSX (ZIP)">Все XLSX</button>
+                            </div>
+                        </div>
+                        <div id="tablesList" class="space-y-3 bg-white p-4 rounded-lg shadow"></div>
+                    </section>
+                    <section>
+                        <h3 class="text-2xl font-semibold mb-4">Buckets (Хранилище)</h3>
+                        <div id="bucketsList" class="space-y-3 bg-white p-4 rounded-lg shadow"></div>
+                    </section>
+                </div>
+            </div>
+            <div id="statusMessages" class="mt-4 p-3 rounded fixed bottom-4 right-4 z-[9998] max-w-md"></div>
+        </main>
+    </div>
+
+    <!-- Bucket Files Modal -->
+    <div id="bucketFilesModal" class="fixed inset-0 bg-gray-800 bg-opacity-75 flex items-center justify-center z-[10000] hidden p-4">
+        <div class="bg-white rounded-lg shadow-xl w-[90vw] h-[90vh] flex flex-col">
+            <div class="flex justify-between items-center p-4 border-b">
+                <h3 id="bucketFilesModalTitle" class="text-xl font-semibold">Files in Bucket</h3>
+                <div>
+                    <button id="deleteSelectedModalFilesBtn" class="bg-red-700 hover:bg-red-800 text-white font-semibold py-1.5 px-3 rounded text-sm mr-2">Удалить выбранные</button>
+                    <button id="downloadSelectedModalFilesBtn" class="bg-blue-500 hover:bg-blue-600 text-white font-semibold py-1.5 px-3 rounded text-sm mr-2">Сохранить выбранные</button>
+                    <button id="exportFileListTxtBtn" class="bg-green-500 hover:bg-green-600 text-white font-semibold py-1.5 px-3 rounded text-sm mr-2">Сохранить список (TXT)</button>
+                    <button id="closeBucketFilesModalBtn" class="bg-red-500 hover:bg-red-600 text-white font-semibold py-1.5 px-3 rounded text-sm">&times; Закрыть</button>
+                </div>
+            </div>
+            <div id="modalDropZone" class="overflow-auto flex-grow p-4 border-2 border-transparent">
+                <table id="bucketFilesTable" class="min-w-full divide-y divide-gray-200 table-fixed">
+                    <thead class="bg-gray-50 sticky top-0 z-10">
+                        <tr>
+                            <th scope="col" class="w-2/6 px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer" data-sort-key="name">Имя<span class="sort-indicator"></span></th>
+                            <th scope="col" class="w-1/6 px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer" data-sort-key="size">Размер<span class="sort-indicator"></span></th>
+                            <th scope="col" class="w-1/6 px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider cursor-pointer" data-sort-key="last_modified">Изменен<span class="sort-indicator"></span></th>
+                            <th scope="col" class="w-2/6 px-4 py-3 text-left text-xs font-medium text-gray-500 uppercase tracking-wider">Полный путь</th>
+                        </tr>
+                    </thead>
+                    <tbody id="bucketFilesTableBody" class="bg-white divide-y divide-gray-200">
+                    </tbody>
+                </table>
+            </div>
+        </div>
+    </div>
+
+    <!-- Table View Modal -->
+    <div id="tableViewModal" class="fixed inset-0 bg-gray-800 bg-opacity-75 flex items-center justify-center z-[10001] hidden p-4">
+        <div class="bg-white rounded-lg shadow-xl w-[95vw] h-[95vh] flex flex-col">
+            <div class="flex justify-between items-center p-4 border-b">
+                <h3 id="tableViewModalTitle" class="text-xl font-semibold">Table Data</h3>
+                <button id="closeTableViewModalBtn" class="bg-red-500 hover:bg-red-600 text-white font-semibold py-1.5 px-3 rounded text-sm">&times; Закрыть</button>
+            </div>
+            <div id="tableViewContent" class="overflow-auto flex-grow p-4">
+                <!-- Таблица будет вставлена сюда с помощью JS -->
+            </div>
+            <div class="p-3 border-t space-y-3">
+                <div class="w-full">
+                     <input type="text" id="tableViewSearchInput" placeholder="Фильтр по текстовым и JSON колонкам (например, 'текст1 текст2')..." class="w-full p-2 rounded border border-gray-300 focus:ring-indigo-500 focus:border-indigo-500">
+                </div>
+                <div id="tableViewPagination" class="flex justify-between items-center text-sm">
+                    <button id="prevPageBtn" class="bg-indigo-500 hover:bg-indigo-600 text-white font-semibold py-1.5 px-4 rounded disabled:bg-gray-400 disabled:cursor-not-allowed">Предыдущая</button>
+                    <span id="pageInfo" class="font-medium text-gray-700"></span>
+                    <button id="nextPageBtn" class="bg-indigo-500 hover:bg-indigo-600 text-white font-semibold py-1.5 px-4 rounded disabled:bg-gray-400 disabled:cursor-not-allowed">Следующая</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+
+<script>
+    const { createClient } = supabase;
+    let supabaseClient = null;
+    let currentConnectionDetails = null;
+    let currentExportAbortController = null;
+    let isExportProcessActive = false;
+    let isExportPaused = false;
+    let pauseResolver = null;
+    let currentlyListedTables = [];
+
+    // Bucket View State
+    let currentBucketFilesData = [];
+    let currentViewBucketName = '';
+    let currentSortKey = 'name';
+    let currentSortOrder = 'asc';
+    let bucketViewAbortController = null;
+    let selectedFilePathsInModal = new Set();
+
+    // Table View State
+    let currentViewTableName = '';
+    let currentPage = 1;
+    const PAGE_SIZE = 50;
+    let totalRows = 0;
+ 
+
+
+    const el = (id) => document.getElementById(id);
+    const connectionForm = el('connectionForm');
+    const connNameInput = el('connName');
+    const connUrlInput = el('connUrl');
+    const connKeyInput = el('connKey');
+    const saveConnectionFileButton = el('saveConnectionFileButton');
+    const loadConnectionFileButton = el('loadConnectionFileButton');
+
+    const dashboardEl = el('dashboard');
+    const welcomeMessageEl = el('welcomeMessage');
+    const currentConnectionNameEl = el('currentConnectionName');
+    const disconnectButton = el('disconnectButton');
+    const tablesListEl = el('tablesList');
+    const bucketsListEl = el('bucketsList');
+    const statusMessagesEl = el('statusMessages');
+    const loadingOverlay = el('loadingOverlay');
+    const loadingMessageEl = el('loadingMessage');
+    const loadingSpinnerSection = el('loadingSpinnerSection');
+    const exportProgressContainer = el('exportProgressContainer');
+    const exportProgressMessage = el('exportProgressMessage');
+    const exportProgressBar = el('exportProgressBar');
+    const cancelExportBtn = el('cancelExportBtn');
+    const pauseExportBtn = el('pauseExportBtn');
+    const sidebar = el('sidebar');
+    const mainContent = el('mainContent');
+    const toggleSidebarButton = el('toggleSidebarButton');
+    const copySqlButton = el('copySqlButton');
+    const sqlScriptContentEl = el('sqlScriptContent');
+    const globalExportButtons = el('globalExportButtons');
+    const exportAllSqlBtn = el('exportAllSqlBtn');
+    const exportAllCsvBtn = el('exportAllCsvBtn');
+    const exportAllXlsxBtn = el('exportAllXlsxBtn');
+
+    // Bucket Modal Elements
+    const bucketFilesModal = el('bucketFilesModal');
+    const bucketFilesModalTitle = el('bucketFilesModalTitle');
+    const closeBucketFilesModalBtn = el('closeBucketFilesModalBtn');
+    const exportFileListTxtBtn = el('exportFileListTxtBtn');
+    const bucketFilesTableBody = el('bucketFilesTableBody');
+    const downloadSelectedModalFilesBtn = el('downloadSelectedModalFilesBtn');
+    const deleteSelectedModalFilesBtn = el('deleteSelectedModalFilesBtn');
+    const modalDropZone = el('modalDropZone');
+
+    // Table View Modal Elements
+    const tableViewModal = el('tableViewModal');
+    const tableViewModalTitle = el('tableViewModalTitle');
+    const closeTableViewModalBtn = el('closeTableViewModalBtn');
+    const tableViewContent = el('tableViewContent');
+    const tableViewPagination = el('tableViewPagination');
+    const prevPageBtn = el('prevPageBtn');
+    const nextPageBtn = el('nextPageBtn');
+    const pageInfo = el('pageInfo');
+    const tableViewSearchInput = el('tableViewSearchInput');
+
+
+    exportAllSqlBtn.addEventListener('click', () => exportAllTables('sql'));
+    exportAllCsvBtn.addEventListener('click', () => exportAllTables('csv'));
+    exportAllXlsxBtn.addEventListener('click', () => exportAllTables('xlsx'));
+
+    function showLoading(message = 'Загрузка...', showSpinner = true, showProgress = false) {
+        loadingMessageEl.textContent = message;
+        loadingSpinnerSection.style.display = showSpinner ? 'flex' : 'none';
+        exportProgressContainer.style.display = showProgress ? 'block' : 'none';
+        loadingOverlay.classList.remove('hidden');
+        if (showProgress) {
+            pauseExportBtn.textContent = isExportPaused ? 'Возобновить' : 'Пауза';
+            pauseExportBtn.style.display = 'inline-block';
+            cancelExportBtn.style.display = 'inline-block';
+        } else {
+            pauseExportBtn.style.display = 'none';
+            cancelExportBtn.style.display = 'none';
+        }
+    }
+
+    function hideLoading() {
+        loadingOverlay.classList.add('hidden');
+        isExportProcessActive = false; isExportPaused = false;
+        if (pauseResolver) { pauseResolver(); pauseResolver = null; }
+        pauseExportBtn.style.display = 'none'; cancelExportBtn.style.display = 'none';
+    }
+
+    function displayStatus(message, type = 'info') {
+        statusMessagesEl.textContent = message;
+        statusMessagesEl.className = 'mt-4 p-3 rounded fixed bottom-4 right-4 z-[9998] max-w-md shadow-lg ';
+        const types = { error: ['bg-red-100', 'text-red-700', 'border', 'border-red-400'], success: ['bg-green-100', 'text-green-700', 'border', 'border-green-400'], warning: ['bg-yellow-100', 'text-yellow-700', 'border', 'border-yellow-400'], info: ['bg-blue-100', 'text-blue-700', 'border', 'border-blue-400'] };
+        statusMessagesEl.classList.add(...(types[type] || types.info));
+        setTimeout(() => { statusMessagesEl.textContent = ''; statusMessagesEl.className = 'mt-4 p-3 rounded fixed bottom-4 right-4 z-[9998] max-w-md'; }, 7000);
+    }
+
+    function downloadFile(filename, content, contentType) {
+        const blob = (content instanceof Blob) ? content : new Blob([content], { type: contentType });
+        saveAs(blob, filename);
+    }
+
+    toggleSidebarButton.addEventListener('click', () => {
+        sidebar.classList.toggle('-translate-x-full');
+        requestAnimationFrame(() => {
+            const sidebarWidth = sidebar.classList.contains('-translate-x-full') ? '0px' : `${sidebar.offsetWidth}px`;
+            mainContent.style.marginLeft = sidebarWidth;
+        });
+    });
+
+    function adjustMainContentMargin() {
+        if (window.innerWidth < 768) { sidebar.classList.add('-translate-x-full'); mainContent.style.marginLeft = '0'; }
+        else { sidebar.classList.remove('-translate-x-full'); mainContent.style.marginLeft = `${sidebar.offsetWidth}px`; }
+    }
+    window.addEventListener('resize', adjustMainContentMargin);
+
+    copySqlButton.addEventListener('click', () => {
+        const textToCopy = sqlScriptContentEl.textContent || sqlScriptContentEl.innerText;
+        if (navigator.clipboard?.writeText) {
+            navigator.clipboard.writeText(textToCopy)
+                .then(() => displayStatus('SQL скрипт скопирован!', 'success'))
+                .catch(err => { displayStatus('Не удалось скопировать. Выделите вручную.', 'error'); });
+        } else {
+            const selection = window.getSelection(); const range = document.createRange();
+            range.selectNodeContents(sqlScriptContentEl); selection.removeAllRanges(); selection.addRange(range);
+            try { document.execCommand('copy'); displayStatus('SQL скрипт выделен (нажмите Ctrl+C).', 'info'); }
+            catch (err) { displayStatus('Не удалось скопировать. Выделите вручную.', 'error'); }
+            selection.removeAllRanges();
+        }
+    });
+
+    function obfuscateData(data) {
+        try {
+            const stringifiedData = JSON.stringify(data);
+            if (typeof TextEncoder === "undefined") { return btoa(unescape(encodeURIComponent(stringifiedData))); }
+            const utf8Bytes = new TextEncoder().encode(stringifiedData);
+            let binaryString = '';
+            utf8Bytes.forEach((byte) => { binaryString += String.fromCharCode(byte); });
+            return btoa(binaryString);
+        } catch (e) { console.error("Obfuscation failed:", e); throw new Error("Не удалось закодировать данные подключения."); }
+    }
+
+    function deobfuscateData(obfuscatedString) {
+        try {
+            let decodedString;
+            if (typeof TextDecoder === "undefined") { decodedString = decodeURIComponent(escape(atob(obfuscatedString))); }
+            else {
+                const binaryString = atob(obfuscatedString);
+                const bytes = new Uint8Array(binaryString.length);
+                for (let i = 0; i < binaryString.length; i++) { bytes[i] = binaryString.charCodeAt(i); }
+                decodedString = new TextDecoder().decode(bytes);
+            }
+            return JSON.parse(decodedString);
+        } catch (e) { console.error("Deobfuscation failed:", e); throw new Error("Не удалось раскодировать данные. Файл поврежден или имеет неверный формат."); }
+    }
+
+    connectionForm.addEventListener('submit', (e) => {
+        e.preventDefault();
+        const name = connNameInput.value.trim();
+        const url = connUrlInput.value.trim();
+        const key = connKeyInput.value.trim();
+        if (!name || !url || !key) { displayStatus('Все поля (Имя, URL, Ключ) обязательны для подключения.', 'warning'); return; }
+        try { new URL(url); } catch (_) { displayStatus('Неверный URL.', 'error'); return; }
+        connectToSupabase({ name, url, key });
+    });
+
+    saveConnectionFileButton.addEventListener('click', () => {
+        const name = connNameInput.value.trim();
+        const url = connUrlInput.value.trim();
+        const key = connKeyInput.value.trim();
+        if (!name || !url || !key) { displayStatus('Заполните Имя, URL и Ключ для сохранения.', 'warning'); return; }
+        try { new URL(url); } catch (_) { displayStatus('Неверный URL для сохранения.', 'error'); return; }
+        const connectionData = { url, key };
+        try {
+            const obfuscatedContent = obfuscateData(connectionData);
+            const fileName = name.replace(/[^a-z0-9_\-.]/gi, '_') + '.spb';
+            downloadFile(fileName, obfuscatedContent, 'application/octet-stream');
+            displayStatus(`Настройки подключения сохранены в файл: ${fileName}`, 'success');
+        } catch (error) { displayStatus(`Ошибка сохранения файла: ${error.message}`, 'error'); }
+    });
+
+     loadConnectionFileButton.addEventListener('click', async () => {
+        try {
+            const input = document.createElement('input');
+            input.type = 'file'; input.accept = '.spb';
+            input.onchange = async (event) => {
+                const file = event.target.files[0];
+                if (file) {
+                    const reader = new FileReader();
+                    reader.onload = async (e) => {
+                        try {
+                            const obfuscatedContent = e.target.result;
+                            const connectionData = deobfuscateData(obfuscatedContent);
+                            if (connectionData && connectionData.url && connectionData.key) {
+                                const connectionName = file.name.replace(/\.spb$/i, '');
+                                connNameInput.value = connectionName;
+                                connUrlInput.value = connectionData.url;
+                                connKeyInput.value = connectionData.key;
+                                await connectToSupabase({
+                                    name: connectionName,
+                                    url: connectionData.url,
+                                    key: connectionData.key
+                                });
+                            } else {
+                                throw new Error("Файл не содержит корректных данных URL и Ключа.");
+                            }
+                        } catch (loadErr) {
+                            displayStatus(`Ошибка загрузки, обработки файла или авто-подключения: ${loadErr.message}`, 'error');
+                            showDisconnectedState();
+                        }
+                    };
+                    reader.onerror = () => {
+                        displayStatus(`Ошибка чтения файла: ${reader.error}`, 'error');
+                        showDisconnectedState();
+                    }
+                    reader.readAsText(file);
+                }
+            };
+            input.click();
+        } catch (err) {
+            displayStatus(`Не удалось инициировать загрузку файла: ${err.message}`, 'error');
+            showDisconnectedState();
+        }
+    });
+
+    async function connectToSupabase(connection) {
+        showLoading('Подключение...');
+        try {
+            if (supabaseClient?.removeAllChannels) supabaseClient.removeAllChannels();
+            supabaseClient = createClient(connection.url, connection.key, { auth: { autoRefreshToken: false, persistSession: false, detectSessionInUrl: false } });
+            const { error: testErrorRpc } = await supabaseClient.rpc('test_connection_schema');
+            if (testErrorRpc) {
+                let rpcErrorMsg = `Ошибка RPC 'test_connection_schema': ${testErrorRpc.message}.`;
+                if (testErrorRpc.code === '42883' || testErrorRpc.message?.toLowerCase().includes("does not exist")) rpcErrorMsg += ` Убедитесь, что функция создана (см. 'SQL Настройка').`;
+                throw new Error(rpcErrorMsg);
+            }
+            currentConnectionDetails = connection;
+            currentConnectionNameEl.textContent = connection.name;
+            welcomeMessageEl.classList.add('hidden');
+            dashboardEl.classList.remove('hidden');
+            displayStatus(`Подключено к: ${connection.name}`, 'success');
+            if (window.innerWidth < 768 && !sidebar.classList.contains('-translate-x-full')) { toggleSidebarButton.click(); }
+            await loadDashboardData();
+        } catch (err) {
+            supabaseClient = null; currentConnectionDetails = null;
+            let errMsg = `Ошибка подключения: ${err.message || 'Неизвестная ошибка'}`;
+            if (err.message?.toLowerCase().includes("failed to fetch")) errMsg = `Сетевая ошибка или неверный URL: ${connection.url}.`;
+            else if (err.message?.includes("JWT") || err.status === 401) errMsg = `Ошибка авторизации. Проверьте Service Role Secret.`;
+            displayStatus(errMsg, 'error'); showDisconnectedState();
+        } finally { hideLoading(); }
+    }
+
+    disconnectButton.addEventListener('click', () => {
+        if (supabaseClient?.removeAllChannels) supabaseClient.removeAllChannels();
+        supabaseClient = null; currentConnectionDetails = null; showDisconnectedState(); displayStatus('Отключено.', 'info');
+    });
+
+    function showDisconnectedState() {
+        dashboardEl.classList.add('hidden'); welcomeMessageEl.classList.remove('hidden');
+        tablesListEl.innerHTML = ''; bucketsListEl.innerHTML = ''; currentConnectionNameEl.textContent = '';
+        currentlyListedTables = []; globalExportButtons.classList.add('hidden');
+    }
+
+    async function loadDashboardData() {
+        if (!supabaseClient) return; showLoading('Загрузка данных...');
+        try { await Promise.all([loadTables(), loadBuckets()]); }
+        catch (err) { displayStatus(`Ошибка загрузки данных: ${err.message}`, 'error'); }
+        finally { hideLoading(); }
+    }
+
+    async function loadTables() {
+        tablesListEl.innerHTML = '<p class="text-gray-500">Загрузка таблиц...</p>';
+        currentlyListedTables = []; globalExportButtons.classList.add('hidden');
+        try {
+            const { data: tables, error } = await supabaseClient.rpc('get_public_user_tables');
+            if (error) {
+                let rpcErrorMsg = `Ошибка RPC 'get_public_user_tables': ${error.message}.`;
+                if (error.code === '42883' || error.message?.toLowerCase().includes("does not exist")) rpcErrorMsg += ` Убедитесь, что функция создана (см. 'SQL Настройка').`;
+                throw new Error(rpcErrorMsg);
+            }
+            if (!tables || tables.length === 0) { tablesListEl.innerHTML = '<p class="text-gray-500">Таблицы не найдены.</p>'; return; }
+            tablesListEl.innerHTML = '';
+            currentlyListedTables = tables.map(t => t.table_name);
+            globalExportButtons.classList.remove('hidden');
+            tables.forEach(table => {
+                const tableName = table.table_name;
+                const item = document.createElement('div');
+                item.className = 'border p-3 rounded-md bg-gray-50 shadow-sm flex justify-between items-center';
+                const titleElem = document.createElement('h4');
+                titleElem.className = 'text-lg font-medium text-indigo-700'; titleElem.textContent = tableName;
+                const buttonContainer = document.createElement('div');
+                buttonContainer.className = 'flex space-x-1';
+                const createButton = (text, bgColor, handler) => {
+                    const btn = document.createElement('button');
+                    btn.className = `text-xs ${bgColor} hover:${bgColor.replace('500', '600')} text-white px-2 py-1 rounded`;
+                    btn.textContent = text; btn.addEventListener('click', handler); return btn;
+                };
+                buttonContainer.appendChild(createButton('Просмотр', 'bg-sky-500', () => viewTableData(tableName)));
+                buttonContainer.appendChild(createButton('SQL', 'bg-blue-500', () => exportTable(tableName, 'sql')));
+                buttonContainer.appendChild(createButton('CSV', 'bg-green-500', () => exportTable(tableName, 'csv')));
+                buttonContainer.appendChild(createButton('XLSX', 'bg-teal-500', () => exportTable(tableName, 'xlsx')));
+                item.appendChild(titleElem); item.appendChild(buttonContainer); tablesListEl.appendChild(item);
+            });
+        } catch (err) { tablesListEl.innerHTML = `<p class="text-red-500">Ошибка загрузки таблиц: ${err.message}</p>`; }
+    }
+
+    async function loadBuckets() {
+        bucketsListEl.innerHTML = '<p class="text-gray-500">Загрузка buckets...</p>';
+        try {
+            const { data: buckets, error } = await supabaseClient.storage.listBuckets();
+            if (error) throw error;
+            if (buckets.length === 0) { bucketsListEl.innerHTML = '<p class="text-gray-500">Buckets не найдены.</p>'; return; }
+            bucketsListEl.innerHTML = '';
+            buckets.forEach(bucket => {
+                const item = document.createElement('div');
+                item.className = 'border p-3 rounded-md bg-gray-50 shadow-sm flex justify-between items-center';
+                const titleElem = document.createElement('h4');
+                titleElem.className = 'text-lg font-medium text-purple-700'; titleElem.textContent = bucket.name;
+                const buttonContainer = document.createElement('div'); buttonContainer.className = 'flex space-x-1';
+                const createButton = (text, bgColor, handler, title = '') => {
+                    const btn = document.createElement('button');
+                    btn.className = `text-xs ${bgColor} hover:${bgColor.replace('500', '600').replace('600', '700')} text-white px-2 py-1 rounded`;
+                    if (bgColor.includes('yellow') || bgColor.includes('lime')) btn.classList.add('text-black');
+                    btn.textContent = text; btn.title = title; btn.addEventListener('click', handler); return btn;
+                };
+                buttonContainer.appendChild(createButton('Обзор', 'bg-lime-500', () => viewBucketFiles(bucket.name), 'Просмотр файлов в bucket'));
+                buttonContainer.appendChild(createButton('Загрузить', 'bg-purple-500', () => uploadFileToBucket(bucket.name), 'Загрузить файл(ы) в этот bucket'));
+                buttonContainer.appendChild(createButton('Файлы', 'bg-yellow-500', () => exportBucket(bucket.name, 'files'), 'Файлы в выбранную папку'));
+                buttonContainer.appendChild(createButton('Синхр.', 'bg-cyan-500', () => syncBucket(bucket.name), 'Скачать из bucket только новые файлы (относительно выбранных локально)'));
+                buttonContainer.appendChild(createButton('ZIP', 'bg-orange-500', () => exportBucket(bucket.name, 'zip'), 'Весь bucket в ZIP'));
+                item.appendChild(titleElem); item.appendChild(buttonContainer); bucketsListEl.appendChild(item);
+            });
+        } catch (err) { bucketsListEl.innerHTML = `<p class="text-red-500">Ошибка загрузки buckets: ${err.message}</p>`; }
+    }
+
+    async function uploadFileToBucket(bucketName, filesToUploadFromDrop = null, dropTargetBucket = null) {
+        if (!supabaseClient || !currentConnectionDetails) {
+            displayStatus('Нет подключения.', 'error');
+            return;
+        }
+
+        const effectiveBucketName = dropTargetBucket || bucketName;
+        let filesToProcess = filesToUploadFromDrop;
+
+        if (!filesToProcess) {
+            const fileInput = document.createElement('input');
+            fileInput.type = 'file';
+            fileInput.multiple = true;
+            fileInput.style.display = 'none';
+
+            const files = await new Promise(resolve => {
+                fileInput.onchange = (event) => {
+                    document.body.removeChild(fileInput);
+                    resolve(event.target.files);
+                };
+                fileInput.oncancel = () => {
+                    document.body.removeChild(fileInput);
+                    resolve(null);
+                };
+                document.body.appendChild(fileInput);
+                fileInput.click();
+            });
+
+            if (!files || files.length === 0) {
+                displayStatus('Файлы не выбраны или выбор отменен.', 'info');
+                return;
+            }
+            filesToProcess = Array.from(files);
+        }
+
+        if (!filesToProcess || filesToProcess.length === 0) return;
+
+        let basePathInBucket = "";
+        if (filesToProcess.length > 1 && !filesToUploadFromDrop) {
+            basePathInBucket = prompt(`Введите путь к папке в bucket "${effectiveBucketName}" для загрузки ${filesToProcess.length} файлов (оставьте пустым для корня bucket):`, "");
+            if (basePathInBucket === null) {
+                displayStatus('Загрузка отменена.', 'info');
+                return;
+            }
+            basePathInBucket = basePathInBucket.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+            if (basePathInBucket) {
+                basePathInBucket += '/';
+            }
+        }
+
+        let successfulUploads = 0;
+        let failedUploads = 0;
+        const totalFiles = filesToProcess.length;
+
+        currentExportAbortController = new AbortController();
+        isExportProcessActive = true;
+        showLoading(`Загрузка ${totalFiles} файл(ов) в bucket "${effectiveBucketName}"...`, false, true);
+        exportProgressBar.value = 0;
+        exportProgressBar.max = totalFiles;
+
+        for (let i = 0; i < totalFiles; i++) {
+            if (currentExportAbortController.signal.aborted) {
+                failedUploads += (totalFiles - i);
+                break;
+            }
+            const file = filesToProcess[i];
+            exportProgressMessage.textContent = `Загрузка ${file.name} (${i + 1}/${totalFiles})...`;
+
+            let filePathInBucket;
+            if (filesToUploadFromDrop) {
+                filePathInBucket = file.name;
+            } else if (totalFiles > 1) {
+                filePathInBucket = basePathInBucket + file.name;
+            } else {
+                const singleFilePath = prompt(`Введите путь и имя файла в bucket "${effectiveBucketName}" (например, "folder/image.png" или "image.png"):`, file.name);
+                if (singleFilePath === null) {
+                    displayStatus(`Загрузка файла ${file.name} отменена.`, 'info');
+                    failedUploads++;
+                    exportProgressBar.value = i + 1;
+                    continue;
+                }
+                filePathInBucket = singleFilePath.trim().replace(/\\/g, '/').replace(/^\/+|\/+$/g, '');
+                if (!filePathInBucket) {
+                    displayStatus(`Путь к файлу ${file.name} в bucket не указан. Пропуск.`, 'warning');
+                    failedUploads++;
+                    exportProgressBar.value = i + 1;
+                    continue;
+                }
+            }
+            filePathInBucket = filePathInBucket.replace(/^\/+|\/+$/g, '');
+
+            try {
+                const { error: initialUploadError } = await supabaseClient.storage
+                    .from(effectiveBucketName)
+                    .upload(filePathInBucket, file, { upsert: false, signal: currentExportAbortController.signal });
+
+                if (initialUploadError) {
+                    if (initialUploadError.name === 'AbortError') throw initialUploadError;
+                    if (initialUploadError.message && (initialUploadError.message.includes("The resource already exists") || initialUploadError.statusCode === '409' || initialUploadError.error === 'Duplicate')) {
+                        const overwrite = confirm(`Файл "${filePathInBucket}" уже существует в bucket "${effectiveBucketName}". Перезаписать?`);
+                        if (overwrite) {
+                            exportProgressMessage.textContent = `Перезапись ${file.name}...`;
+                            const { error: upsertError } = await supabaseClient.storage
+                                .from(effectiveBucketName)
+                                .upload(filePathInBucket, file, { upsert: true, signal: currentExportAbortController.signal });
+                            if (upsertError) { if (upsertError.name === 'AbortError') throw upsertError; throw upsertError; }
+                            successfulUploads++;
+                        } else {
+                            failedUploads++;
+                        }
+                    } else {
+                        throw initialUploadError;
+                    }
+                } else {
+                    successfulUploads++;
+                }
+            } catch (uploadError) {
+                if (uploadError.name === 'AbortError') {
+                    failedUploads += (totalFiles - i);
+                    break;
+                }
+                displayStatus(`Ошибка загрузки ${file.name}: ${uploadError.message}`, 'error');
+                failedUploads++;
+            }
+            exportProgressBar.value = i + 1;
+            await new Promise(r => setTimeout(r, 10));
+        }
+
+        hideLoading();
+        isExportProcessActive = false;
+        currentExportAbortController = null;
+        let summaryMessage = "";
+        if (successfulUploads > 0) summaryMessage += `Успешно загружено: ${successfulUploads}. `;
+        if (failedUploads > 0) summaryMessage += `Не удалось загрузить: ${failedUploads}.`;
+         if (currentExportAbortController && currentExportAbortController.signal.aborted && (totalFiles - successfulUploads - failedUploads > 0)) {
+            summaryMessage += ` Остальные отменены.`;
+        }
+
+        if (summaryMessage) {
+            displayStatus(summaryMessage, failedUploads > 0 && successfulUploads === 0 ? 'error' : (failedUploads > 0 ? 'warning' : 'success'));
+        }
+
+        if (filesToUploadFromDrop && successfulUploads > 0) {
+            await viewBucketFiles(effectiveBucketName);
+        }
+    }
+
+
+    pauseExportBtn.addEventListener('click', () => {
+        isExportPaused = !isExportPaused;
+        pauseExportBtn.textContent = isExportPaused ? 'Возобновить' : 'Пауза';
+        if (!isExportPaused && pauseResolver) { pauseResolver(); pauseResolver = null; }
+        if (isExportPaused && isExportProcessActive) { loadingMessageEl.textContent = `(Приостановлено) ${exportProgressMessage.textContent}`; }
+        else if (!isExportPaused && isExportProcessActive) { loadingMessageEl.textContent = exportProgressMessage.textContent; }
+    });
+
+    cancelExportBtn.addEventListener('click', () => {
+        if (currentExportAbortController) { currentExportAbortController.abort(); }
+        isExportProcessActive = false; isExportPaused = false;
+        if (pauseResolver) { pauseResolver(); pauseResolver = null; }
+        hideLoading(); displayStatus('Операция отменена.', 'warning');
+    });
+
+    async function checkPauseAndAbort(progressMsgUpdateFn) {
+        if (currentExportAbortController && currentExportAbortController.signal.aborted) { throw { name: 'AbortError', message: 'cancelled' }; }
+        if (isExportPaused) {
+            const originalMessage = exportProgressMessage.textContent;
+            const loadingOverlayVisible = !loadingOverlay.classList.contains('hidden');
+            if (loadingOverlayVisible) loadingMessageEl.textContent = `(Приостановлено) ${originalMessage}`;
+            exportProgressMessage.textContent = `(Приостановлено) ${originalMessage}`;
+            await new Promise(resolve => { pauseResolver = resolve; });
+            if (currentExportAbortController && currentExportAbortController.signal.aborted) { throw { name: 'AbortError', message: 'cancelled_during_pause' }; }
+            exportProgressMessage.textContent = originalMessage;
+            if (loadingOverlayVisible) loadingMessageEl.textContent = originalMessage;
+            if (progressMsgUpdateFn) progressMsgUpdateFn();
+        }
+    }
+
+    async function saveFileToDirectory(baseDirHandle, fullPathInBucket, blob) {
+        const pathParts = fullPathInBucket.split('/').filter(part => part.length > 0);
+        const fileName = pathParts.pop();
+        let currentDirHandle = baseDirHandle;
+        for (const part of pathParts) { currentDirHandle = await currentDirHandle.getDirectoryHandle(part, { create: true }); }
+        const fileHandle = await currentDirHandle.getFileHandle(fileName, { create: true });
+        const writable = await fileHandle.createWritable();
+        await writable.write(blob); await writable.close();
+    }
+
+    async function exportTable(tableName, format, returnContentOnly = false) {
+        if (!supabaseClient || !currentConnectionDetails) { if (!returnContentOnly) displayStatus('Нет подключения.', 'error'); return null; }
+        let localAbortController;
+        if (!returnContentOnly) {
+            isExportProcessActive = true; isExportPaused = false;
+            localAbortController = new AbortController(); currentExportAbortController = localAbortController;
+            showLoading(`Экспорт ${tableName} в ${format.toUpperCase()}...`, false, true);
+            exportProgressMessage.textContent = `Подготовка к экспорту ${tableName}...`;
+            exportProgressBar.removeAttribute('value'); exportProgressBar.removeAttribute('max');
+        } else { localAbortController = currentExportAbortController; }
+        try {
+            let allData = []; let offset = 0; const pageSize = 1000; let hasMore = true; let pageCount = 0; let totalRowsFetched = 0;
+            const updateProgressMsg = () => { if (!returnContentOnly) exportProgressMessage.textContent = `Загрузка ${tableName}: страница ${pageCount + 1}, получено ${totalRowsFetched} строк...`; };
+            updateProgressMsg();
+            while (hasMore) {
+                if (!returnContentOnly) await checkPauseAndAbort(updateProgressMsg);
+                else if (isExportPaused && pauseResolver) await new Promise(r => {pauseResolver = r});
+                const { data: chunk, error } = await supabaseClient.from(tableName).select('*', { head: false, count: 'none' })
+                    .range(offset, offset + pageSize - 1).abortSignal(localAbortController?.signal);
+                if (error) { if (error.name === 'AbortError') throw error; throw error; }
+                if (chunk && chunk.length > 0) {
+                    allData.push(...chunk); totalRowsFetched += chunk.length; offset += pageSize; pageCount++;
+                    if (chunk.length < pageSize) hasMore = false;
+                } else { hasMore = false; }
+                updateProgressMsg();
+                if (hasMore && !returnContentOnly) await new Promise(resolve => setTimeout(resolve, 30));
+            }
+            const data = allData;
+            if (data === null || data.length === 0) {
+                if (!returnContentOnly) displayStatus(`Таблица "${tableName}" пуста.`, 'info');
+                return returnContentOnly ? { name: tableName, content: null, format: format } : null;
+            }
+            if (!returnContentOnly) { exportProgressMessage.textContent = `Обработка ${data.length} строк для ${tableName} в ${format.toUpperCase()}...`; exportProgressBar.removeAttribute('value'); }
+            let fileContent, contentType, arrayBufferContent;
+            const connNameSafe = currentConnectionDetails.name.replace(/[^a-z0-9]/gi, '_');
+            let baseFileName = `${connNameSafe}_${tableName}_${new Date().toISOString().slice(0,10).replace(/-/g,'')}`;
+            let actualFileName;
+            switch (format) {
+                case 'csv':
+                    const headers = Object.keys(data[0]);
+                    const csvRows = [headers.map(h => `"${h.replace(/"/g, '""')}"`).join(',')];
+                    data.forEach(row => csvRows.push(headers.map(header => {
+                        let val = row[header];
+                        if (val === null || typeof val === 'undefined') return '';
+                        if (typeof val === 'object') val = JSON.stringify(val);
+                        return `"${(''+val).replace(/"/g, '""')}"`;
+                    }).join(',')));
+                    fileContent = csvRows.join('\n'); actualFileName = `${baseFileName}.csv`; contentType = 'text/csv;charset=utf-8;';
+                    break;
+                case 'sql':
+                    let sql = `BEGIN;\n-- Экспорт таблицы: ${tableName} (${data.length} строк)\nTRUNCATE TABLE "public"."${tableName}" RESTART IDENTITY CASCADE;\n\n`;
+                    const BATCH_SIZE_SQL = 500;
+                    for (let i = 0; i < data.length; i += BATCH_SIZE_SQL) {
+                        if (!returnContentOnly) await checkPauseAndAbort(() => { exportProgressMessage.textContent = `Генерация SQL для ${tableName}: ${i}/${data.length} строк...`; });
+                        else if (isExportPaused && pauseResolver) await new Promise(r => {pauseResolver = r});
+                        const batch = data.slice(i, i + BATCH_SIZE_SQL);
+                        batch.forEach(row => {
+                            const columns = Object.keys(row).map(col => `"${col}"`).join(', ');
+                            const values = Object.values(row).map(val => {
+                                if (val === null) return 'NULL';
+                                if (typeof val === 'string') return `'${val.replace(/'/g, "''")}'`;
+                                if (typeof val === 'boolean') return val ? 'TRUE' : 'FALSE';
+                                if (val instanceof Date) return `'${val.toISOString()}'`;
+                                if (typeof val === 'object') return `'${JSON.stringify(val).replace(/'/g, "''")}'`;
+                                return val;
+                            }).join(', ');
+                            sql += `INSERT INTO "public"."${tableName}" (${columns}) VALUES (${values});\n`;
+                        });
+                        if (!returnContentOnly) await new Promise(resolve => setTimeout(resolve, 0));
+                    }
+                    sql += `COMMIT;\n`; fileContent = sql; actualFileName = `${baseFileName}.sql`; contentType = 'application/sql;charset=utf-8;';
+                    break;
+                case 'xlsx':
+                    const ws = XLSX.utils.json_to_sheet(data); const wb = XLSX.utils.book_new();
+                    XLSX.utils.book_append_sheet(wb, ws, tableName.substring(0,30).replace(/[\\/?*\[\]:]/g, '_'));
+                    arrayBufferContent = XLSX.write(wb, { bookType: 'xlsx', type: 'array' });
+                    actualFileName = `${baseFileName}.xlsx`; contentType = "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet";
+                    break;
+                default: if (!returnContentOnly) displayStatus(`Неизвестный формат: ${format}`, 'error'); return null;
+            }
+            if (returnContentOnly) { return { name: tableName, fileName: actualFileName, content: format === 'xlsx' ? arrayBufferContent : fileContent, format: format, contentType: contentType }; }
+            else { downloadFile(actualFileName, format === 'xlsx' ? arrayBufferContent : fileContent, contentType); displayStatus(`Таблица ${tableName} (${data.length} строк) экспортирована.`, 'success'); }
+        } catch (err) {
+            if (err.name === 'AbortError' || err.message?.startsWith('cancelled')) { if (!returnContentOnly) displayStatus(`Экспорт ${tableName} отменен.`, 'warning'); }
+            else if (!returnContentOnly) { displayStatus(`Ошибка экспорта ${tableName}: ${err.message}`, 'error'); }
+            return null;
+        } finally { if (!returnContentOnly) { hideLoading(); currentExportAbortController = null; } }
+    }
+
+    async function exportAllTables(format) {
+        if (currentlyListedTables.length === 0) { displayStatus('Нет таблиц для экспорта.', 'info'); return; }
+        if (!supabaseClient || !currentConnectionDetails) { displayStatus('Нет подключения.', 'error'); return; }
+        isExportProcessActive = true; isExportPaused = false; currentExportAbortController = new AbortController();
+        showLoading(`Экспорт всех таблиц в ${format.toUpperCase()}...`, false, true);
+        exportProgressMessage.textContent = `Подготовка к экспорту ${currentlyListedTables.length} таблиц...`;
+        exportProgressBar.value = 0; exportProgressBar.max = currentlyListedTables.length;
+        const zip = new JSZip(); let exportedCount = 0;
+        try {
+            for (const tableName of currentlyListedTables) {
+                await checkPauseAndAbort(() => { exportProgressMessage.textContent = `Экспорт таблицы: ${tableName} (${currentlyListedTables.indexOf(tableName) + 1}/${currentlyListedTables.length})`; });
+                exportProgressMessage.textContent = `Экспорт таблицы: ${tableName} (${currentlyListedTables.indexOf(tableName) + 1}/${currentlyListedTables.length})`;
+                const exportResult = await exportTable(tableName, format, true);
+                if (currentExportAbortController.signal.aborted) throw { name: 'AbortError', message: 'cancelled_batch_table' };
+                if (exportResult && exportResult.content) { zip.file(exportResult.fileName, exportResult.content); exportedCount++; }
+                exportProgressBar.value = currentlyListedTables.indexOf(tableName) + 1;
+                await new Promise(resolve => setTimeout(resolve, 30));
+            }
+            if (currentExportAbortController.signal.aborted) throw { name: 'AbortError', message: 'cancelled_before_zip' };
+            if (exportedCount === 0 && !currentExportAbortController.signal.aborted) { displayStatus('Не удалось экспортировать ни одной таблицы.', 'warning'); hideLoading(); return; }
+            exportProgressMessage.textContent = `Создание ZIP (${exportedCount} файлов)...`; exportProgressBar.removeAttribute('value');
+            const zipBlob = await zip.generateAsync(
+                { type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } },
+                (metadata) => {
+                    if (currentExportAbortController.signal.aborted) throw { name: 'AbortError', message: 'cancelled_during_zip_generation' };
+                    exportProgressMessage.textContent = `Сжатие ZIP: ${metadata.percent.toFixed(0)}%`;
+                    if (exportProgressBar.max !== 100) exportProgressBar.max = 100; exportProgressBar.value = metadata.percent;
+                }
+            );
+            if (currentExportAbortController.signal.aborted) throw { name: 'AbortError', message: 'cancelled_after_zip_generation' };
+            const connNameSafe = currentConnectionDetails.name.replace(/[^a-z0-9]/gi, '_');
+            const zipFileName = `${connNameSafe}_all_tables_${format}_${new Date().toISOString().slice(0,10).replace(/-/g,'')}.zip`;
+            saveAs(zipBlob, zipFileName); displayStatus(`Экспортировано ${exportedCount} таблиц в ${zipFileName}.`, 'success');
+        } catch (err) {
+            if (err.name === 'AbortError' || err.message?.startsWith('cancelled')) { displayStatus('Пакетный экспорт отменен.', 'warning'); }
+            else { displayStatus(`Ошибка пакетного экспорта: ${err.message}`, 'error'); }
+        } finally { hideLoading(); currentExportAbortController = null; }
+    }
+
+    async function exportBucket(bucketName, mode) {
+        if (!supabaseClient || !currentConnectionDetails) { displayStatus('Нет подключения.', 'error'); return; }
+        isExportProcessActive = true; isExportPaused = false; currentExportAbortController = new AbortController();
+        showLoading(`Экспорт bucket ${bucketName}...`, false, true);
+        exportProgressMessage.textContent = `Список файлов из ${bucketName}...`;
+        exportProgressBar.value = 0; exportProgressBar.removeAttribute('max');
+        try {
+            let allFiles = [];
+            const updateListProgress = () => { exportProgressMessage.textContent = `Список файлов из ${bucketName}: найдено ${allFiles.length}...`; };
+            async function listAllFilesRecursive(currentPath = '') {
+                if (currentExportAbortController.signal.aborted) throw { name: 'AbortError', message: 'cancelled' };
+                await checkPauseAndAbort(updateListProgress);
+                let localOffset = 0; const limit = 100; let localHasMore = true;
+                while(localHasMore) {
+                    if (currentExportAbortController.signal.aborted) throw { name: 'AbortError', message: 'cancelled' };
+                    await checkPauseAndAbort(updateListProgress);
+                    const { data: listedFiles, error: listError } = await supabaseClient.storage.from(bucketName)
+                        .list(currentPath, { limit, offset: localOffset, sortBy: { column: 'name', order: 'asc' }, signal: currentExportAbortController.signal });
+                    if (listError) { if (listError.name === 'AbortError') throw listError; throw listError; }
+                    for (const file of listedFiles) {
+                        if (currentExportAbortController.signal.aborted) throw { name: 'AbortError', message: 'cancelled' };
+                        await checkPauseAndAbort(updateListProgress);
+                        const filePath = currentPath ? `${currentPath}/${file.name}` : file.name;
+                        if (file.id === null) await listAllFilesRecursive(filePath); else allFiles.push({ ...file, fullPath: filePath });
+                        updateListProgress();
+                    }
+                    localHasMore = listedFiles.length >= limit; localOffset += limit;
+                     if (localHasMore) await new Promise(r => setTimeout(r, 10));
+                }
+            }
+            await listAllFilesRecursive();
+            if (allFiles.length === 0 && !currentExportAbortController.signal.aborted) { displayStatus(`Bucket "${bucketName}" пуст.`, 'info'); hideLoading(); return; }
+            if (currentExportAbortController.signal.aborted) throw {name: 'AbortError', message: 'cancelled_listing_bucket'};
+            exportProgressBar.max = allFiles.length;
+            if (mode === 'files') {
+                let chosenDirectoryHandle;
+                let writePermissionInitiallyGranted = false;
+
+                try {
+                    if (!window.showDirectoryPicker) {
+                        displayStatus('Браузер не поддерживает выбор директории. Файлы будут загружены по одному.', 'warning');
+                    } else {
+                        const handle = await window.showDirectoryPicker();
+                        if (handle) {
+                            chosenDirectoryHandle = handle;
+                            if (await handle.queryPermission({ mode: 'readwrite' }) === 'granted') {
+                                writePermissionInitiallyGranted = true;
+                            } else {
+                                if (await handle.requestPermission({ mode: 'readwrite' }) === 'granted') {
+                                    writePermissionInitiallyGranted = true;
+                                } else {
+                                    displayStatus('Права на запись в выбранную директорию не предоставлены. Файлы будут загружены по одному (saveAs).', 'warning');
+                                }
+                            }
+                        }
+                    }
+                } catch (err) {
+                    if (err.name === 'AbortError' || err.message.toLowerCase().includes('user aborted') || err.message.toLowerCase().includes('user cancel')) {
+                        displayStatus('Выбор директории отменен.', 'info'); hideLoading(); return;
+                    }
+                    displayStatus(`Ошибка выбора директории или первоначального запроса прав: ${err.message}. Файлы будут загружены по одному.`, 'warning');
+                    chosenDirectoryHandle = null;
+                    writePermissionInitiallyGranted = false;
+                }
+
+                let downloadedCount = 0;
+                const updateDownloadProgress = () => { exportProgressMessage.textContent = `Скачивание: ${allFiles[downloadedCount]?.name || ''} (${downloadedCount + 1}/${allFiles.length})`; };
+                for (const file of allFiles) {
+                    await checkPauseAndAbort(updateDownloadProgress); updateDownloadProgress();
+                    try {
+                        const { data: blob, error: downloadError } = await supabaseClient.storage.from(bucketName)
+                            .download(file.fullPath, { signal: currentExportAbortController.signal });
+                        if (downloadError) { if (downloadError.name === 'AbortError') throw downloadError; console.warn(`Ошибка скачивания ${file.fullPath}: ${downloadError.message}`); continue; }
+                        if (chosenDirectoryHandle && writePermissionInitiallyGranted) {
+                            try { await saveFileToDirectory(chosenDirectoryHandle, file.fullPath, blob); }
+                            catch (saveError) { displayStatus(`Ошибка сохр. ${file.name} в директорию: ${saveError.message}. Попытка saveAs.`, 'warning'); saveAs(blob, file.fullPath.split('/').pop()); }
+                        } else { saveAs(blob, file.fullPath.split('/').pop()); }
+                        downloadedCount++; exportProgressBar.value = downloadedCount;
+                    } catch (err) { if (err.name === 'AbortError') throw err; console.warn(`Ошибка обработки ${file.fullPath}: ${err.message}`); }
+                    await new Promise(r => setTimeout(r, 50));
+                }
+                if (!currentExportAbortController.signal.aborted) displayStatus(`Скачано ${downloadedCount} файлов.`, 'success');
+            } else if (mode === 'zip') {
+                const zip = new JSZip(); let filesAddedToZip = 0;
+                const updateZipAddProgress = () => { exportProgressMessage.textContent = `В ZIP: ${allFiles[filesAddedToZip]?.name || ''} (${filesAddedToZip + 1}/${allFiles.length})`; };
+                for (const file of allFiles) {
+                    await checkPauseAndAbort(updateZipAddProgress); updateZipAddProgress();
+                    try {
+                        const { data: blob, error: downloadError } = await supabaseClient.storage.from(bucketName)
+                            .download(file.fullPath, { signal: currentExportAbortController.signal });
+                        if (downloadError) { if (downloadError.name === 'AbortError') throw downloadError; console.warn(`Ошибка скачивания ${file.fullPath} для ZIP: ${downloadError.message}`); continue; }
+                        zip.file(file.fullPath, blob, { binary: true }); filesAddedToZip++; exportProgressBar.value = filesAddedToZip;
+                    } catch (err) { if (err.name === 'AbortError') throw err; console.warn(`Ошибка добавления ${file.fullPath} в ZIP: ${err.message}`); }
+                     await new Promise(r => setTimeout(r, 10));
+                }
+                if (filesAddedToZip === 0 && !currentExportAbortController.signal.aborted) { displayStatus(`Нет файлов для ZIP.`, 'info'); hideLoading(); return; }
+                if (currentExportAbortController.signal.aborted) throw {name: 'AbortError', message: 'cancelled_before_bucket_zip'};
+                exportProgressMessage.textContent = `Создание ZIP (${filesAddedToZip} файлов)...`; exportProgressBar.removeAttribute('value');
+                const content = await zip.generateAsync(
+                    { type: "blob", compression: "DEFLATE", compressionOptions: { level: 6 } },
+                    (metadata) => {
+                        if (currentExportAbortController.signal.aborted) throw {name: 'AbortError', message: 'cancelled_during_bucket_zip_generation'};
+                        exportProgressMessage.textContent = `Сжатие ZIP: ${metadata.percent.toFixed(0)}%`;
+                        if (exportProgressBar.max !== 100) exportProgressBar.max = 100; exportProgressBar.value = metadata.percent;
+                    }
+                );
+                if (currentExportAbortController.signal.aborted) throw {name: 'AbortError', message: 'cancelled_after_bucket_zip_generation'};
+                const connNameSafe = currentConnectionDetails.name.replace(/[^a-z0-9]/gi, '_');
+                const zipFileName = `${connNameSafe}_${bucketName}_${new Date().toISOString().slice(0,10).replace(/-/g,'')}.zip`;
+                saveAs(content, zipFileName); displayStatus(`Bucket ${bucketName} экспортирован в ZIP.`, 'success');
+            }
+        } catch (err) {
+             if (err.name === 'AbortError' || err.message?.startsWith('cancelled')) { displayStatus('Экспорт bucket отменен.', 'warning'); }
+             else { displayStatus(`Ошибка экспорта bucket: ${err.message}`, 'error'); }
+        } finally { hideLoading(); currentExportAbortController = null; }
+    }
+
+    async function syncBucket(bucketName) {
+        if (!supabaseClient || !currentConnectionDetails) {
+            displayStatus('Нет подключения.', 'error');
+            return;
+        }
+
+        let localFileRelativePaths = [];
+        let chosenDirectoryHandle = null;
+        const tempInputId = 'syncBucketDirectoryInput';
+
+        try {
+            displayStatus("1/2: Выберите папку, содержащую уже загруженные файлы. Новые файлы будут сохранены сюда же.", "info");
+
+            if (!window.showDirectoryPicker) {
+                const selectedFiles = await new Promise((resolve) => {
+                    let fileInput = document.getElementById(tempInputId);
+                    if (fileInput) fileInput.remove();
+
+                    fileInput = document.createElement('input');
+                    fileInput.type = 'file';
+                    fileInput.webkitdirectory = true;
+                    fileInput.mozdirectory = true;
+                    fileInput.directory = true;
+                    fileInput.style.display = 'none';
+                    fileInput.id = tempInputId;
+                    document.body.appendChild(fileInput);
+
+                    let filesSelectedProcessed = false;
+                    const cleanupAndResolve = (value) => {
+                        if (filesSelectedProcessed) return;
+                        filesSelectedProcessed = true;
+                        if (document.getElementById(tempInputId)) document.getElementById(tempInputId).remove();
+                        window.removeEventListener('focus', focusHandler);
+                        resolve(value);
+                    };
+                    fileInput.onchange = (event) => {
+                        cleanupAndResolve(Array.from(event.target.files));
+                        event.target.value = null;
+                    };
+                    fileInput.oncancel = () => cleanupAndResolve([]);
+                    const focusHandler = () => {
+                        setTimeout(() => { if (!filesSelectedProcessed) cleanupAndResolve([]); }, 500);
+                    };
+                    window.addEventListener('focus', focusHandler, { once: true });
+                    fileInput.click();
+                });
+
+                if (selectedFiles.length === 0) {
+                    displayStatus('Папка с локальными файлами не выбрана или выбор отменен. Синхронизация прекращена.', 'info');
+                    return;
+                }
+                localFileRelativePaths = selectedFiles.map(f => f.webkitRelativePath || f.name);
+                 displayStatus(`Проанализировано ${localFileRelativePaths.length} файлов в выбранной папке (через input[type=file]).`, 'success');
+
+            } else {
+                const handle = await window.showDirectoryPicker();
+                if (!handle) {
+                    displayStatus('Не удалось получить хэндл директории. Синхронизация прекращена.', 'error');
+                    return;
+                }
+                chosenDirectoryHandle = handle;
+
+                let canWriteToHandle = false;
+                if (await chosenDirectoryHandle.queryPermission({ mode: 'readwrite' }) === 'granted') {
+                    canWriteToHandle = true;
+                } else {
+                    if (await chosenDirectoryHandle.requestPermission({ mode: 'readwrite' }) === 'granted') {
+                        canWriteToHandle = true;
+                    }
+                }
+                window.syncCanWriteToHandle = canWriteToHandle;
+
+                if (!window.syncCanWriteToHandle) {
+                    displayStatus('Права на ЗАПИСЬ в выбранную директорию не предоставлены. Существующие файлы будут прочитаны, но НОВЫЕ файлы будут скачаны через "Сохранить как".', 'warning');
+                }
+
+                async function getFilesInDirectory(dirHandle, currentPath = "") {
+                    const files = [];
+                    for await (const entry of dirHandle.values()) {
+                        const entryPath = currentPath ? `${currentPath}/${entry.name}` : entry.name;
+                        if (entry.kind === 'file') {
+                            files.push(entryPath);
+                        } else if (entry.kind === 'directory') {
+                            const subDirHandle = await dirHandle.getDirectoryHandle(entry.name);
+                            files.push(...await getFilesInDirectory(subDirHandle, entryPath));
+                        }
+                    }
+                    return files;
+                }
+                try {
+                    localFileRelativePaths = await getFilesInDirectory(chosenDirectoryHandle);
+                    displayStatus(`Проанализировано ${localFileRelativePaths.length} файлов в выбранной папке "${chosenDirectoryHandle.name}".`, 'success');
+                } catch (readDirError) {
+                    displayStatus(`Ошибка чтения содержимого выбранной папки: ${readDirError.message}. Синхронизация не может быть продолжена.`, 'error');
+                    return;
+                }
+            }
+
+        } catch (err) {
+            if (err.name === 'AbortError' || err.message.toLowerCase().includes('user aborted') || err.message.toLowerCase().includes('user cancel')) {
+                displayStatus('Выбор папки отменен. Синхронизация прекращена.', 'info');
+            } else {
+                displayStatus(`Ошибка при выборе или анализе папки: ${err.message || 'Неизвестная ошибка'}. Синхронизация прекращена.`, 'error');
+            }
+            if (document.getElementById(tempInputId)) document.getElementById(tempInputId).remove();
+            return;
+        }
+
+        const proceed = confirm(`2/2: Запомнено ${localFileRelativePaths.length} относительных путей локальных файлов для исключения.\nНовые файлы из bucket "${bucketName}" будут сохранены в эту же папку.\n\nНачать синхронизацию?`);
+
+        if (!proceed) {
+            displayStatus('Синхронизация отменена пользователем.', 'info');
+            return;
+        }
+
+        isExportProcessActive = true;
+        isExportPaused = false;
+        currentExportAbortController = new AbortController();
+        showLoading(`Синхронизация bucket ${bucketName}...`, false, true);
+        exportProgressMessage.textContent = `Анализ файлов в bucket "${bucketName}"...`;
+        exportProgressBar.value = 0;
+        exportProgressBar.removeAttribute('max');
+
+        try {
+            let allBucketFilesInfo = [];
+            const updateSyncListProgress = () => {
+                exportProgressMessage.textContent = `Анализ bucket "${bucketName}": найдено ${allBucketFilesInfo.length} файлов...`;
+            };
+
+            async function listAllFilesRecursiveInner(currentPath = '') {
+                if (currentExportAbortController.signal.aborted) throw { name: 'AbortError', message: 'cancelled' };
+                await checkPauseAndAbort(updateSyncListProgress);
+                let localOffset = 0; const limit = 100; let localHasMore = true;
+                while (localHasMore) {
+                    if (currentExportAbortController.signal.aborted) throw { name: 'AbortError', message: 'cancelled' };
+                    await checkPauseAndAbort(updateSyncListProgress);
+                    const { data: listedFiles, error: listError } = await supabaseClient.storage.from(bucketName)
+                        .list(currentPath, { limit, offset: localOffset, sortBy: { column: 'name', order: 'asc' }, signal: currentExportAbortController.signal });
+                    if (listError) { if (listError.name === 'AbortError') throw listError; throw listError; }
+                    for (const file of listedFiles) {
+                        if (currentExportAbortController.signal.aborted) throw { name: 'AbortError', message: 'cancelled' };
+                        await checkPauseAndAbort(updateSyncListProgress);
+                        const filePath = currentPath ? `${currentPath}/${file.name}` : file.name;
+                        if (file.id === null) {
+                            await listAllFilesRecursiveInner(filePath);
+                        } else {
+                            allBucketFilesInfo.push({ name: file.name, fullPath: filePath, id: file.id });
+                        }
+                        updateSyncListProgress();
+                    }
+                    localHasMore = listedFiles.length >= limit; localOffset += limit;
+                    if (localHasMore) await new Promise(r => setTimeout(r, 10));
+                }
+            }
+            await listAllFilesRecursiveInner();
+            if (currentExportAbortController.signal.aborted) throw { name: 'AbortError', message: 'cancelled_sync_list' };
+
+            const filesToDownload = allBucketFilesInfo.filter(bucketFile =>
+                !localFileRelativePaths.includes(bucketFile.fullPath)
+            );
+
+            if (filesToDownload.length === 0 && !currentExportAbortController.signal.aborted) {
+                displayStatus(`Все файлы из bucket "${bucketName}" уже присутствуют в выбранной локальной папке или bucket пуст.`, 'success');
+                hideLoading(); return;
+            }
+            if (currentExportAbortController.signal.aborted) throw { name: 'AbortError', message: 'cancelled_sync_analysis' };
+
+            exportProgressBar.max = filesToDownload.length;
+            let downloadedCount = 0;
+
+            const updateSyncOpProgress = (fileName) => {
+                exportProgressMessage.textContent = `Скачивание нового файла: ${fileName} (${downloadedCount + 1}/${filesToDownload.length})`;
+            };
+
+            for (const fileToDownloadInfo of filesToDownload) {
+                await checkPauseAndAbort(() => updateSyncOpProgress(fileToDownloadInfo.name));
+                updateSyncOpProgress(fileToDownloadInfo.name);
+                try {
+                    const { data: blob, error: downloadError } = await supabaseClient.storage.from(bucketName)
+                        .download(fileToDownloadInfo.fullPath, { signal: currentExportAbortController.signal });
+
+                    if (downloadError) {
+                        if (downloadError.name === 'AbortError') throw downloadError;
+                        console.warn(`Ошибка скачивания ${fileToDownloadInfo.fullPath}: ${downloadError.message}`);
+                        continue;
+                    }
+
+                    if (chosenDirectoryHandle && window.syncCanWriteToHandle) {
+                        try {
+                            await saveFileToDirectory(chosenDirectoryHandle, fileToDownloadInfo.fullPath, blob);
+                        }
+                        catch (saveError) {
+                            displayStatus(`Ошибка сохр. ${fileToDownloadInfo.name} в выбранную директорию: ${saveError.message}. Попытка saveAs.`, 'warning');
+                            saveAs(blob, fileToDownloadInfo.name);
+                        }
+                    } else {
+                        saveAs(blob, fileToDownloadInfo.name);
+                    }
+                    downloadedCount++; exportProgressBar.value = downloadedCount;
+                } catch (err) {
+                    if (err.name === 'AbortError') throw err;
+                    console.warn(`Ошибка обработки ${fileToDownloadInfo.fullPath}: ${err.message}`);
+                }
+                await new Promise(r => setTimeout(r, 50));
+            }
+
+            if (!currentExportAbortController.signal.aborted) {
+                displayStatus(`Синхронизация завершена. Скачано новых файлов: ${downloadedCount}.`, 'success');
+            }
+
+        } catch (err) {
+            if (err.name === 'AbortError' || err.message?.startsWith('cancelled')) {
+                displayStatus('Синхронизация отменена.', 'warning');
+            } else {
+                displayStatus(`Ошибка синхронизации: ${err.message}`, 'error');
+            }
+        } finally {
+            hideLoading(); currentExportAbortController = null;
+            let tempInputElem = document.getElementById(tempInputId);
+            if (tempInputElem) tempInputElem.remove();
+            delete window.syncCanWriteToHandle;
+        }
+    }
+
+    function formatFileSize(bytes, decimals = 2) {
+        if (bytes === 0 || bytes === null || typeof bytes === 'undefined') return '0 Bytes';
+        const k = 1024;
+        const dm = decimals < 0 ? 0 : decimals;
+        const sizes = ['Bytes', 'KB', 'MB', 'GB', 'TB', 'PB', 'EB', 'ZB', 'YB'];
+        const i = Math.floor(Math.log(bytes) / Math.log(k));
+        return parseFloat((bytes / Math.pow(k, i)).toFixed(dm)) + ' ' + sizes[i];
+    }
+
+    function formatDate(isoString) {
+        if (!isoString) return 'N/A';
+        try {
+            const date = new Date(isoString);
+            return date.toLocaleString('ru-RU', { year: 'numeric', month: '2-digit', day: '2-digit', hour: '2-digit', minute: '2-digit' });
+        } catch (e) {
+            return 'Invalid Date';
+        }
+    }
+
+    async function fetchAllFilesForView(bucketName, abortSignal) {
+        let filesMetadata = [];
+        const updateProgress = (count) => {
+            if (!loadingOverlay.classList.contains('hidden')) {
+                 loadingMessageEl.textContent = `Получение списка файлов из ${bucketName}: найдено ${count}...`;
+            }
+        };
+
+        async function listRecursive(currentPath = '') {
+            if (abortSignal?.aborted) throw { name: 'AbortError', message: 'cancelled_listing_for_view' };
+            let localOffset = 0;
+            const limit = 500;
+            let localHasMore = true;
+
+            while (localHasMore) {
+                if (abortSignal?.aborted) throw { name: 'AbortError', message: 'cancelled_listing_for_view' };
+                const { data: listedFiles, error: listError } = await supabaseClient.storage
+                    .from(bucketName)
+                    .list(currentPath, {
+                        limit,
+                        offset: localOffset,
+                        sortBy: { column: 'name', order: 'asc' },
+                        signal: abortSignal
+                    });
+
+                if (listError) throw listError;
+
+                for (const file of listedFiles) {
+                    if (abortSignal?.aborted) throw { name: 'AbortError', message: 'cancelled_listing_for_view' };
+                    const filePath = currentPath ? `${currentPath}/${file.name}` : file.name;
+                    if (file.id === null) {
+                        await listRecursive(filePath);
+                    } else {
+                        filesMetadata.push({
+                            name: file.name,
+                            fullPath: filePath,
+                            size: file.metadata?.size || 0,
+                            last_modified: file.metadata?.lastModified || file.updated_at || file.created_at,
+                        });
+                        updateProgress(filesMetadata.length);
+                    }
+                }
+                localHasMore = listedFiles.length >= limit;
+                localOffset += limit;
+                if (localHasMore) await new Promise(r => setTimeout(r, 20));
+            }
+        }
+        await listRecursive();
+        return filesMetadata;
+    }
+
+    function renderBucketFilesTable() {
+        bucketFilesTableBody.innerHTML = '';
+        updateSortIndicators();
+
+        const sortedData = [...currentBucketFilesData].sort((a, b) => {
+            let valA, valB;
+            if (currentSortKey === 'name') {
+                valA = a.name?.toLowerCase() || '';
+                valB = b.name?.toLowerCase() || '';
+            } else if (currentSortKey === 'size') {
+                valA = a.size;
+                valB = b.size;
+            } else if (currentSortKey === 'last_modified') {
+                valA = new Date(a.last_modified || 0).getTime();
+                valB = new Date(b.last_modified || 0).getTime();
+            } else {
+                return 0;
+            }
+
+            if (valA < valB) return currentSortOrder === 'asc' ? -1 : 1;
+            if (valA > valB) return currentSortOrder === 'asc' ? 1 : -1;
+            return 0;
+        });
+
+        sortedData.forEach(file => {
+            const row = bucketFilesTableBody.insertRow();
+            row.dataset.filePath = file.fullPath;
+            if (selectedFilePathsInModal.has(file.fullPath)) {
+                row.classList.add('selected-row');
+            }
+
+            row.addEventListener('contextmenu', (event) => {
+                event.preventDefault();
+                const filePath = row.dataset.filePath;
+                if (selectedFilePathsInModal.has(filePath)) {
+                    selectedFilePathsInModal.delete(filePath);
+                    row.classList.remove('selected-row');
+                } else {
+                    selectedFilePathsInModal.add(filePath);
+                    row.classList.add('selected-row');
+                }
+            });
+
+            row.insertCell().textContent = file.name;
+            row.insertCell().textContent = formatFileSize(file.size);
+            row.insertCell().textContent = formatDate(file.last_modified);
+            const pathCell = row.insertCell();
+            pathCell.textContent = file.fullPath;
+            pathCell.title = file.fullPath;
+            pathCell.classList.add('truncate');
+        });
+    }
+
+    function updateSortIndicators() {
+        document.querySelectorAll('#bucketFilesTable thead th .sort-indicator').forEach(span => span.textContent = '');
+        const activeTh = document.querySelector(`#bucketFilesTable thead th[data-sort-key="${currentSortKey}"]`);
+        if (activeTh) {
+            activeTh.querySelector('.sort-indicator').textContent = currentSortOrder === 'asc' ? ' ▲' : ' ▼';
+        }
+    }
+
+    async function viewBucketFiles(bucketName) {
+        if (!supabaseClient) {
+            displayStatus('Нет подключения.', 'error');
+            return;
+        }
+        currentBucketFilesData = [];
+        selectedFilePathsInModal.clear();
+        currentViewBucketName = bucketName;
+        currentSortKey = 'name';
+        currentSortOrder = 'asc';
+
+        if(bucketViewAbortController) bucketViewAbortController.abort();
+        bucketViewAbortController = new AbortController();
+        showLoading(`Получение списка файлов из ${bucketName}...`, true, false);
+
+        try {
+            currentBucketFilesData = await fetchAllFilesForView(bucketName, bucketViewAbortController.signal);
+            if (bucketViewAbortController.signal.aborted) {
+                displayStatus(`Просмотр файлов для ${bucketName} отменен.`, 'info');
+                return;
+            }
+            bucketFilesModalTitle.textContent = `Файлы в bucket: ${bucketName} (${currentBucketFilesData.length})`;
+            renderBucketFilesTable();
+            bucketFilesModal.classList.remove('hidden');
+        } catch (err) {
+            if (err.name === 'AbortError' || err.message?.includes('cancelled')) {
+                displayStatus(`Просмотр файлов для ${bucketName} отменен.`, 'info');
+            } else {
+                displayStatus(`Ошибка получения списка файлов для ${bucketName}: ${err.message}`, 'error');
+            }
+        } finally {
+            hideLoading();
+        }
+    }
+
+    function exportFileListToTxt() {
+        if (currentBucketFilesData.length === 0) {
+            displayStatus('Нет файлов для экспорта.', 'info');
+            return;
+        }
+        const header = `Список имен файлов из bucket: ${currentViewBucketName}\n\n`;
+        const content = currentBucketFilesData.map(file => file.name).join('\n');
+
+        const fullContent = header + content;
+        const connNameSafe = currentConnectionDetails?.name.replace(/[^a-z0-9]/gi, '_') || 'connection';
+        const fileName = `${connNameSafe}_${currentViewBucketName}_filenames_list_${new Date().toISOString().slice(0,10).replace(/-/g,'')}.txt`;
+        downloadFile(fileName, fullContent, 'text/plain;charset=utf-8;');
+        displayStatus('Список имен файлов сохранен.', 'success');
+    }
+
+    async function downloadSelectedModalFiles() {
+        if (selectedFilePathsInModal.size === 0) {
+            displayStatus('Нет выбранных файлов для скачивания.', 'info');
+            return;
+        }
+        if (!supabaseClient || !currentViewBucketName) {
+            displayStatus('Нет активного bucket для скачивания.', 'error');
+            return;
+        }
+
+        currentExportAbortController = new AbortController();
+        isExportProcessActive = true;
+        showLoading(`Скачивание выбранных файлов...`, false, true);
+        exportProgressBar.value = 0;
+        exportProgressBar.max = selectedFilePathsInModal.size;
+
+        let downloadedCount = 0;
+        let failedCount = 0;
+
+        for (const filePath of selectedFilePathsInModal) {
+            if (currentExportAbortController.signal.aborted) {
+                failedCount += (selectedFilePathsInModal.size - downloadedCount - failedCount);
+                break;
+            }
+            exportProgressMessage.textContent = `Скачивание: ${filePath.split('/').pop()} (${downloadedCount + failedCount + 1}/${selectedFilePathsInModal.size})`;
+            try {
+                const { data: blob, error: downloadError } = await supabaseClient.storage
+                    .from(currentViewBucketName)
+                    .download(filePath, { signal: currentExportAbortController.signal });
+
+                if (downloadError) {
+                    if (downloadError.name === 'AbortError') throw downloadError;
+                    console.warn(`Ошибка скачивания ${filePath}: ${downloadError.message}`);
+                    failedCount++;
+                } else {
+                    saveAs(blob, filePath.split('/').pop());
+                    downloadedCount++;
+                }
+            } catch (err) {
+                 if (err.name === 'AbortError') {
+                    failedCount += (selectedFilePathsInModal.size - downloadedCount - failedCount);
+                    break;
+                }
+                console.warn(`Ошибка обработки ${filePath}: ${err.message}`);
+                failedCount++;
+            }
+            exportProgressBar.value = downloadedCount + failedCount;
+            await new Promise(r => setTimeout(r, 50));
+        }
+
+        hideLoading();
+        isExportProcessActive = false;
+        currentExportAbortController = null;
+
+        let summaryMsg = "";
+        if (downloadedCount > 0) summaryMsg += `Успешно скачано: ${downloadedCount}. `;
+        if (failedCount > 0) summaryMsg += `Не удалось скачать: ${failedCount}.`;
+        if (selectedFilePathsInModal.size > 0 && (downloadedCount + failedCount) < selectedFilePathsInModal.size && currentExportAbortController?.signal.aborted ) {
+             summaryMsg += ` Остальные отменены.`;
+        }
+
+
+        if (summaryMsg) {
+            displayStatus(summaryMsg, failedCount > 0 && downloadedCount === 0 ? 'error' : (failedCount > 0 ? 'warning' : 'success'));
+        }
+        selectedFilePathsInModal.clear();
+        renderBucketFilesTable(); // Re-render to clear selections visually
+    }
+
+    async function deleteSelectedModalFiles() {
+        if (selectedFilePathsInModal.size === 0) {
+            displayStatus('Нет выбранных файлов для удаления.', 'info');
+            return;
+        }
+        if (!supabaseClient || !currentViewBucketName) {
+            displayStatus('Нет активного bucket для удаления файлов.', 'error');
+            return;
+        }
+
+        const confirmation = confirm(`Вы уверены, что хотите удалить ${selectedFilePathsInModal.size} выбранных файл(ов) из bucket "${currentViewBucketName}"? Это действие необратимо.`);
+        if (!confirmation) {
+            displayStatus('Удаление отменено.', 'info');
+            return;
+        }
+
+        currentExportAbortController = new AbortController();
+        isExportProcessActive = true;
+        showLoading(`Удаление выбранных файлов...`, false, true);
+        exportProgressBar.value = 0;
+        exportProgressBar.max = selectedFilePathsInModal.size;
+
+        let deletedCount = 0;
+        let failedCount = 0;
+        const filesToDelete = Array.from(selectedFilePathsInModal); // Convert Set to Array for consistent iteration
+
+        for (const filePath of filesToDelete) {
+            if (currentExportAbortController.signal.aborted) {
+                 failedCount += (filesToDelete.length - deletedCount - failedCount);
+                break;
+            }
+            exportProgressMessage.textContent = `Удаление: ${filePath.split('/').pop()} (${deletedCount + failedCount + 1}/${filesToDelete.length})`;
+            try {
+                const { error } = await supabaseClient.storage
+                    .from(currentViewBucketName)
+                    .remove([filePath], { signal: currentExportAbortController.signal });
+
+                if (error) {
+                    if (error.name === 'AbortError') throw error;
+                    console.warn(`Ошибка удаления ${filePath}: ${error.message}`);
+                    failedCount++;
+                } else {
+                    deletedCount++;
+                }
+            } catch (err) {
+                if (err.name === 'AbortError') {
+                    failedCount += (filesToDelete.length - deletedCount - failedCount);
+                    break;
+                }
+                console.warn(`Ошибка обработки удаления ${filePath}: ${err.message}`);
+                failedCount++;
+            }
+            exportProgressBar.value = deletedCount + failedCount;
+            await new Promise(r => setTimeout(r, 50));
+        }
+
+        hideLoading();
+        isExportProcessActive = false;
+        currentExportAbortController = null;
+
+        let summaryMsg = "";
+        if (deletedCount > 0) summaryMsg += `Успешно удалено: ${deletedCount}. `;
+        if (failedCount > 0) summaryMsg += `Не удалось удалить: ${failedCount}.`;
+
+        if (filesToDelete.length > 0 && (deletedCount + failedCount) < filesToDelete.length && currentExportAbortController?.signal.aborted ) {
+             summaryMsg += ` Остальные отменены.`;
+        }
+
+        if (summaryMsg) {
+            displayStatus(summaryMsg, failedCount > 0 && deletedCount === 0 ? 'error' : (failedCount > 0 ? 'warning' : 'success'));
+        }
+
+        selectedFilePathsInModal.clear();
+        if (deletedCount > 0) {
+            await viewBucketFiles(currentViewBucketName);
+        } else {
+            renderBucketFilesTable();
+        }
+    }
+
+    // --- Bucket Modal Listeners ---
+    downloadSelectedModalFilesBtn.addEventListener('click', downloadSelectedModalFiles);
+    deleteSelectedModalFilesBtn.addEventListener('click', deleteSelectedModalFiles);
+    closeBucketFilesModalBtn.addEventListener('click', () => {
+        if (bucketViewAbortController) { bucketViewAbortController.abort(); bucketViewAbortController = null; }
+        bucketFilesModal.classList.add('hidden');
+        currentBucketFilesData = []; selectedFilePathsInModal.clear();
+    });
+    exportFileListTxtBtn.addEventListener('click', exportFileListToTxt);
+    document.querySelectorAll('#bucketFilesTable thead th[data-sort-key]').forEach(th => {
+        th.addEventListener('click', () => {
+            const sortKey = th.dataset.sortKey;
+            if (currentSortKey === sortKey) { currentSortOrder = currentSortOrder === 'asc' ? 'desc' : 'asc'; }
+            else { currentSortKey = sortKey; currentSortOrder = 'asc'; }
+            renderBucketFilesTable();
+        });
+    });
+    modalDropZone.addEventListener('dragover', (event) => {
+        event.preventDefault(); modalDropZone.classList.add('drop-zone-active');
+    });
+    modalDropZone.addEventListener('dragleave', () => { modalDropZone.classList.remove('drop-zone-active'); });
+    modalDropZone.addEventListener('drop', async (event) => {
+        event.preventDefault(); modalDropZone.classList.remove('drop-zone-active');
+        const files = event.dataTransfer.files;
+        if (files.length > 0) { await uploadFileToBucket(null, Array.from(files), currentViewBucketName); }
+    });
+
+
+    // --- Table View Functions & Listeners ---
+
+    async function viewTableData(tableName) {
+        if (!supabaseClient) {
+            displayStatus('Нет подключения.', 'error');
+            return;
+        }
+        currentViewTableName = tableName;
+        currentPage = 1;
+        totalRows = 0;
+        tableViewSearchInput.value = '';
+
+        tableViewModalTitle.textContent = `Просмотр таблицы: ${tableName}`;
+        tableViewModal.classList.remove('hidden');
+        tableViewContent.innerHTML = `<div class="text-center p-8 text-gray-500">Загрузка данных...</div>`;
+        tableViewPagination.classList.add('hidden');
+
+        await fetchAndRenderTablePage();
+    }
+    
+    async function fetchAndRenderTablePage() {
+        if (!currentViewTableName) return;
+        
+        tableViewContent.innerHTML = `<div class="text-center p-8 text-gray-500">Загрузка страницы ${currentPage}...</div>`;
+
+        const offset = (currentPage - 1) * PAGE_SIZE;
+        const searchText = tableViewSearchInput.value.trim();
+        
+        let data, error, count;
+
+        try {
+            // Вызываем RPC для получения данных и количества строк одним махом,
+            // передавая поисковый текст. Если текст пуст, функции вернут все записи.
+            const { data: rpcData, error: rpcError } = await supabaseClient.rpc('search_table_data', {
+                p_table_name: currentViewTableName,
+                p_search_text: searchText,
+                p_limit: PAGE_SIZE,
+                p_offset: offset
+            });
+            const { data: countData, error: countError } = await supabaseClient.rpc('search_table_count', {
+                p_table_name: currentViewTableName,
+                p_search_text: searchText
+            });
+
+            if (rpcError || countError) throw rpcError || countError;
+            
+            data = rpcData;
+            count = countData;
+
+            if (count !== null) {
+                totalRows = count;
+            }
+
+            if (!data || data.length === 0) {
+                tableViewContent.innerHTML = `<div class="text-center p-8 text-gray-500">${searchText ? 'Записи, соответствующие фильтру, не найдены.' : 'В таблице нет данных.'}</div>`;
+                updatePaginationControls();
+                return;
+            }
+
+            const table = document.createElement('table');
+            const thead = table.createTHead();
+            const headerRow = thead.insertRow();
+            const headers = Object.keys(data[0]);
+            headers.forEach(headerText => {
+                const th = document.createElement('th');
+                th.textContent = headerText;
+                headerRow.appendChild(th);
+            });
+
+            const tbody = table.createTBody();
+            data.forEach(rowData => {
+                const row = tbody.insertRow();
+                headers.forEach(header => {
+                    const cell = row.insertCell();
+                    let cellValue = rowData[header];
+                    
+                    if (cellValue === null) {
+                        cell.textContent = 'NULL';
+                        cell.className = 'italic text-gray-400';
+                    } else if (typeof cellValue === 'object') {
+                        cell.textContent = JSON.stringify(cellValue);
+                    } else {
+                        cell.textContent = cellValue;
+                    }
+                    cell.title = cell.textContent;
+                });
+            });
+
+            tableViewContent.innerHTML = '';
+            tableViewContent.appendChild(table);
+            updatePaginationControls();
+
+        } catch (err) {
+            let errMsg = `Ошибка загрузки данных: ${err.message}`;
+            if (err.code === '42883') {
+                 errMsg += `. Убедитесь, что вы выполнили обновленный SQL скрипт из секции "SQL Настройка".`;
+            }
+            tableViewContent.innerHTML = `<div class="text-center p-8 text-red-500">${errMsg}</div>`;
+            tableViewPagination.classList.add('hidden');
+        }
+    }
+
+    function updatePaginationControls() {
+        if (totalRows === 0 && !tableViewSearchInput.value.trim()) {
+            tableViewPagination.classList.add('hidden');
+            return;
+        }
+
+        const totalPages = Math.ceil(totalRows / PAGE_SIZE);
+        
+        prevPageBtn.disabled = (currentPage <= 1);
+        nextPageBtn.disabled = (currentPage >= totalPages);
+
+        const startRow = (currentPage - 1) * PAGE_SIZE + 1;
+        const endRow = Math.min(currentPage * PAGE_SIZE, totalRows);
+        
+        pageInfo.textContent = totalRows > 0 ? `Записи ${startRow} - ${endRow} из ${totalRows}` : `Найдено 0 записей`;
+        if (totalPages > 1) {
+             pageInfo.textContent += ` (Страница ${currentPage} из ${totalPages})`;
+        }
+        
+        tableViewPagination.classList.remove('hidden');
+    }
+
+tableViewSearchInput.addEventListener('keydown', (event) => {
+    // Проверяем, была ли нажата клавиша Enter
+    if (event.key === 'Enter') {
+        // Предотвращаем стандартное поведение (например, отправку формы)
+        event.preventDefault(); 
+        // Сбрасываем на первую страницу и запускаем поиск
+        currentPage = 1;
+        fetchAndRenderTablePage();
+    }
+});
+
+    prevPageBtn.addEventListener('click', () => {
+        if (currentPage > 1) {
+            currentPage--;
+            fetchAndRenderTablePage();
+        }
+    });
+
+    nextPageBtn.addEventListener('click', () => {
+        const totalPages = Math.ceil(totalRows / PAGE_SIZE);
+        if (currentPage < totalPages) {
+            currentPage++;
+            fetchAndRenderTablePage();
+        }
+    });
+
+    closeTableViewModalBtn.addEventListener('click', () => {
+        tableViewModal.classList.add('hidden');
+        currentViewTableName = '';
+    });
+    
+
+    document.addEventListener('DOMContentLoaded', () => {
+        adjustMainContentMargin();
+        welcomeMessageEl.classList.remove('hidden');
+        dashboardEl.classList.add('hidden');
+    });
+</script>
+</body>
+</html>
