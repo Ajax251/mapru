@@ -1,0 +1,194 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Отладка Gemini Stream</title>
+    <style>
+        body { font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif; margin: 0; background-color: #f7f7f7; display: flex; flex-direction: column; height: 100vh; }
+        .container { display: flex; flex: 1; overflow: hidden; }
+        .chat-container { flex: 1; display: flex; flex-direction: column; border-right: 1px solid #ddd; }
+        #chat-window { flex-grow: 1; padding: 20px; overflow-y: auto; background-color: #fff; }
+        .message { display: flex; margin-bottom: 20px; }
+        .avatar { width: 40px; height: 40px; border-radius: 50%; background-color: #007bff; color: white; display: flex; align-items: center; justify-content: center; font-weight: bold; margin-right: 15px; flex-shrink: 0; }
+        .ai .avatar { background-color: #28a745; }
+        .message-content { padding: 12px 16px; border-radius: 18px; max-width: 80%; line-height: 1.5; white-space: pre-wrap; }
+        .user .message-content { background-color: #007bff; color: white; border-top-left-radius: 0; }
+        .ai .message-content { background-color: #e9ecef; color: #333; border-top-right-radius: 0; }
+        .error .message-content { background-color: #f8d7da; color: #721c24; }
+        form { display: flex; padding: 15px; border-top: 1px solid #ddd; background-color: #f0f2f5; }
+        input { flex-grow: 1; border: 1px solid #ccc; border-radius: 20px; padding: 12px 18px; font-size: 16px; }
+        input:focus { outline: none; border-color: #007bff; }
+        button { background: #007bff; color: white; border: none; border-radius: 50%; width: 48px; height: 48px; font-size: 20px; margin-left: 10px; cursor: pointer; transition: background-color 0.2s; }
+        button:disabled { background: #aaa; cursor: not-allowed; }
+        
+        .debug-container { flex-basis: 40%; max-width: 40%; padding: 20px; background: #282c34; color: #abb2bf; overflow-y: auto; font-family: "Courier New", Courier, monospace; display: flex; flex-direction: column; }
+        .debug-container h3 { margin-top: 0; color: #61afef; border-bottom: 1px solid #444; padding-bottom: 5px;}
+        .debug-log { flex-grow: 1; background: #21252b; padding: 10px; border-radius: 5px; white-space: pre-wrap; word-wrap: break-word; font-size: 13px; overflow-y: auto; }
+        .log-entry { margin-bottom: 8px; padding-bottom: 8px; border-bottom: 1px dashed #444; }
+        .log-entry:last-child { border-bottom: none; }
+        .log-time { color: #56b6c2; margin-right: 10px; }
+        .log-chunk { color: #98c379; }
+        .log-parsed { color: #e5c07b; }
+        .log-error { color: #e06c75; font-weight: bold; }
+        .log-info { color: #c678dd; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <div class="chat-container">
+            <div id="chat-window">
+                <div class="message ai">
+                    <div class="avatar">AI</div>
+                    <div class="message-content">Готов к работе!</div>
+                </div>
+            </div>
+            <form id="chat-form">
+                <input type="text" id="user-input" placeholder="Введите ваш вопрос..." autocomplete="off">
+                <button type="submit" id="send-button">➤</button>
+            </form>
+        </div>
+        <div class="debug-container">
+            <h3>Логи</h3>
+            <div id="debug-log" class="debug-log"></div>
+        </div>
+    </div>
+
+<script>
+    const PROXY_BASE_URL = "https://ver-olive-delta.vercel.app";
+    const MODEL_NAME = "gemini-2.5-flash-preview-05-20"; 
+
+    const chatForm = document.getElementById('chat-form');
+    const userInput = document.getElementById('user-input');
+    const sendButton = document.getElementById('send-button');
+    const chatWindow = document.getElementById('chat-window');
+    const debugLog = document.getElementById('debug-log');
+
+    let conversationHistory = [];
+
+    function logDebug(message, type = 'info') {
+        const time = new Date().toLocaleTimeString();
+        const entry = document.createElement('div');
+        entry.className = `log-entry log-${type}`;
+        entry.innerHTML = `<span class="log-time">[${time}]</span> ${message}`;
+        debugLog.appendChild(entry);
+        debugLog.scrollTop = debugLog.scrollHeight;
+    }
+
+    chatForm.addEventListener('submit', async (event) => {
+        event.preventDefault();
+        const userMessageText = userInput.value.trim();
+        if (!userMessageText) return;
+
+        debugLog.innerHTML = ''; 
+        logDebug('Начало нового запроса...', 'info');
+
+        sendButton.disabled = true;
+        userInput.value = '';
+        displayMessage(userMessageText, 'user');
+
+        conversationHistory.push({ role: "user", parts: [{ text: userMessageText }] });
+        const aiMessageContainer = createAiMessageContainer();
+
+        try {
+            // ====================== КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ ЗДЕСЬ ======================
+            // Добавляем "?stream=true", чтобы наш сервер понял, что нужен поток.
+            // Также можно использовать стандартный для Google параметр "?alt=sse",
+            // но наш сервер написан под "stream=true".
+            const requestUrl = `${PROXY_BASE_URL}/v1beta/models/${MODEL_NAME}:streamGenerateContent?stream=true`;
+            // =======================================================================
+            
+            logDebug(`Отправка запроса на: ${requestUrl}`, 'info');
+
+            const response = await fetch(requestUrl, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ contents: conversationHistory })
+            });
+            
+            logDebug(`Статус ответа: ${response.status} ${response.statusText}`, response.ok ? 'info' : 'error');
+
+            if (!response.ok) {
+                const errorText = await response.text();
+                logDebug(`Тело ответа с ошибкой: <pre>${errorText}</pre>`, 'error');
+                throw new Error(`HTTP ${response.status}: ${errorText}`);
+            }
+
+            const reader = response.body.getReader();
+            const decoder = new TextDecoder();
+            let fullAiResponseText = "";
+
+            logDebug('Начало чтения потока...', 'info');
+
+            while (true) {
+                const { value, done } = await reader.read();
+                if (done) {
+                    logDebug('Поток завершен.', 'info');
+                    break;
+                }
+                
+                const chunk = decoder.decode(value, { stream: true });
+                logDebug(`Получен сырой чанк: <span class="log-chunk">${chunk.replace(/\n/g, '\\n')}</span>`, 'info');
+
+                const lines = chunk.split('\n');
+                
+                for (const line of lines) {
+                    if (line.trim().startsWith('data: ')) {
+                        const jsonDataString = line.substring(6).trim();
+                        if (!jsonDataString) continue;
+
+                        logDebug(`Найдена строка с данными: ${jsonDataString}`, 'info');
+                        try {
+                            const jsonData = JSON.parse(jsonDataString);
+                            const textPart = jsonData?.candidates?.[0]?.content?.parts?.[0]?.text;
+
+                            if (textPart) {
+                                fullAiResponseText += textPart;
+                                aiMessageContainer.textContent = fullAiResponseText;
+                                chatWindow.scrollTop = chatWindow.scrollHeight;
+                            }
+                        } catch (e) {
+                            logDebug(`Ошибка парсинга JSON в чанке: ${e.message}`, 'error');
+                        }
+                    }
+                }
+            }
+            
+            if (fullAiResponseText.trim() === "") {
+                logDebug('Итоговый ответ пустой.', 'error');
+                aiMessageContainer.textContent = "[ИИ не предоставил ответ]";
+            }
+
+            conversationHistory.push({ role: "model", parts: [{ text: fullAiResponseText }] });
+
+        } catch (error) {
+            console.error('Критическая ошибка:', error);
+            logDebug(`Критическая ошибка: ${error.message}`, 'error');
+            aiMessageContainer.textContent = `Произошла ошибка: ${error.message}`;
+            aiMessageContainer.parentElement.parentElement.classList.add('error');
+        } finally {
+            sendButton.disabled = false;
+            userInput.focus();
+            logDebug('Запрос завершен.', 'info');
+        }
+    });
+
+    function displayMessage(text, role) {
+        const messageDiv = document.createElement('div');
+        messageDiv.className = `message ${role}`;
+        messageDiv.innerHTML = `
+            <div class="avatar">${role === 'user' ? 'Вы' : 'AI'}</div>
+            <div class="message-content">${text}</div>
+        `;
+        chatWindow.appendChild(messageDiv);
+        chatWindow.scrollTop = chatWindow.scrollHeight;
+        return messageDiv.querySelector('.message-content');
+    }
+
+    function createAiMessageContainer() {
+        return displayMessage("...", 'ai');
+    }
+</script>
+
+</body>
+</html>
