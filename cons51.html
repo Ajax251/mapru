@@ -844,7 +844,7 @@ const AI_SYSTEM_PROMPT_HISTORIAN = `Ты — "Исторический Нави�
 document.addEventListener('DOMContentLoaded', () => {
     // ==========================================================
     // ===== ОТЛАДОЧНЫЙ РЕЖИМ: Установите true для отладки =====
-    const DEBUG_MODE = true;
+    const DEBUG_MODE = false;
     // ==========================================================
 
     const VERCEL_API_URL = "https://ver-olive-delta.vercel.app/v1beta/models/gemini-2.5-flash-preview-05-20:generateContent";
@@ -1074,119 +1074,132 @@ document.addEventListener('DOMContentLoaded', () => {
         }
     };
   
-    const handleRequest = async (queryOverride = null, modeOverride = null) => {
-        if (currentApiMode === 'gemini' && !apiKey) {
-            showApiKeyModal();
-            return;
-        }
+  const handleRequest = async (queryOverride = null, modeOverride = null) => {
+    if (currentApiMode === 'gemini' && !apiKey) {
+        showApiKeyModal();
+        return;
+    }
 
-        let userQuery = queryOverride || queryInput.value.trim();
-        userQuery = userQuery.replace(/"/g, "'");
-        if (!userQuery) return;
+    let userQuery = queryOverride || queryInput.value.trim();
+    // Эту замену лучше убрать, так как она может ломать JSON в запросах
+    // userQuery = userQuery.replace(/"/g, "'"); 
+    if (!userQuery) return;
 
-        const modeToSend = modeOverride || currentMode;
-        if (!modeToSend) return;
-        const state = modeStates[modeToSend];
-        
-        if (!queryOverride) {
-            queryInput.value = '';
-            queryInput.style.height = '24px';
-        }
+    const modeToSend = modeOverride || currentMode;
+    if (!modeToSend) return;
+    const state = modeStates[modeToSend];
+    
+    if (!queryOverride) {
+        queryInput.value = '';
+        queryInput.style.height = '24px';
+    }
 
-        state.lastFailedQuery = null;
-        if (state.isLoading) return;
+    state.lastFailedQuery = null;
+    if (state.isLoading) return;
 
-        const startTime = performance.now(); 
-        state.isLoading = true;
-        state.controller = new AbortController();
-        state.conversationHistory.push({ role: 'user', parts: [{ text: userQuery }] });
-        
-        if (currentMode === modeToSend) {
-            state.responseHTML = getLoaderHTML(modeToSend);
-            updateUIForCurrentMode();
-        } else {
-            updateButtonIndicators();
-        }
+    const startTime = performance.now(); 
+    state.isLoading = true;
+    state.controller = new AbortController();
+    state.conversationHistory.push({ role: 'user', parts: [{ text: userQuery }] });
+    
+    if (currentMode === modeToSend) {
+        state.responseHTML = getLoaderHTML(modeToSend);
+        updateUIForCurrentMode();
+    } else {
+        updateButtonIndicators();
+    }
 
-        const requestBody = {
-            contents: state.conversationHistory, 
-            systemInstruction: { parts: [{ text: modeConfigs[modeToSend].prompt }] }
-        };
-
-        const apiUrl = currentApiMode === 'gemini' 
-            ? `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`
-            : VERCEL_API_URL;
-        
-        // [ИЗМЕНЕНИЕ] Логика отладки
-        if (DEBUG_MODE && currentApiMode === 'gemini') {
-            const debugInfo = {
-                "--- DEBUG LOG ---": "Copy this entire text and send it for analysis.",
-                "Timestamp": new Date().toISOString(),
-                "API Mode": currentApiMode,
-                "Intended URL": apiUrl,
-                "Request Body": JSON.stringify(requestBody, null, 2)
-            };
-            const logHTML = `<div style="text-align: left; background: #eee; padding: 15px; border-radius: 8px;"><pre style="white-space: pre-wrap; word-wrap: break-word;">${JSON.stringify(debugInfo, null, 2)}</pre></div>`;
-            
-            state.isLoading = false;
-            state.conversationHistory.pop(); // убираем последний запрос из истории
-            state.responseHTML = logHTML;
-            updateUIForCurrentMode();
-            return; // Прерываем выполнение, не отправляя запрос
-        }
-        
-        try {
-            const response = await fetch(apiUrl, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(requestBody),
-                signal: state.controller.signal
-            });
-            
-            if (!response.ok) {
-                if (currentApiMode === 'gemini' && (response.status === 400 || response.status === 403)) {
-                    throw new Error(`Ошибка авторизации (${response.status}). Проверьте ваш API-ключ.`);
-                }
-                throw new Error(`Ошибка сети: ${response.status} ${response.statusText}`);
-            }
-            
-            const geminiData = await response.json();
-            if (!geminiData.candidates || geminiData.candidates.length === 0 || !geminiData.candidates[0].content) {
-                const reason = geminiData.promptFeedback?.blockReason || 'Ответ был заблокирован моделью.';
-                throw new Error(`Не удалось сгенерировать ответ. Причина: ${reason}`);
-            }
-            
-            const endTime = performance.now();
-            const aiResponseText = geminiData.candidates[0].content.parts[0].text;
-            
-            state.responseTime = endTime - startTime; 
-            state.conversationHistory.push({ role: 'model', parts: [{ text: aiResponseText }] });
-            state.responseHTML = marked.parse(aiResponseText);
-            
-            if (currentMode !== modeToSend) {
-                state.hasNewResponse = true;
-            }
-        } catch (error) {
-            state.conversationHistory.pop();
-            
-            if (error.name === 'AbortError') {
-                state.responseHTML = getErrorHTML('Запрос был отменен пользователем.');
-            } else if (error.message.includes("Ошибка авторизации")) {
-                state.lastFailedQuery = userQuery;
-                state.responseHTML = getFriendlyErrorHTML(error.message, true, apiKey);
-            } else {
-                state.lastFailedQuery = userQuery;
-                state.responseHTML = getFriendlyErrorHTML("Не удалось связаться с сервером. Проверьте ваше интернет-соединение.");
-            }
-        } finally {
-            state.isLoading = false;
-            state.controller = null;
-            if (currentMode === modeToSend) {
-                updateUIForCurrentMode();
-            }
-            updateButtonIndicators();
-        }
+    const requestBody = {
+        contents: state.conversationHistory, 
+        systemInstruction: { parts: [{ text: modeConfigs[modeToSend].prompt }] }
     };
+
+    const apiUrl = currentApiMode === 'gemini' 
+        ? `https://generativelanguage.googleapis.com/v1beta/models/${GEMINI_MODEL}:generateContent?key=${apiKey}`
+        : VERCEL_API_URL;
+    
+    if (DEBUG_MODE && currentApiMode === 'gemini') {
+        // Логика отладки остается полезной
+        const debugInfo = {
+            "--- DEBUG LOG ---": "Copy this entire text and send it for analysis.",
+            "Timestamp": new Date().toISOString(),
+            "API Mode": currentApiMode,
+            "Intended URL": apiUrl,
+            "Request Body": JSON.stringify(requestBody, null, 2)
+        };
+        const logHTML = `<div style="text-align: left; background: #eee; padding: 15px; border-radius: 8px;"><pre style="white-space: pre-wrap; word-wrap: break-word;">${JSON.stringify(debugInfo, null, 2)}</pre></div>`;
+        
+        state.isLoading = false;
+        state.conversationHistory.pop();
+        state.responseHTML = logHTML;
+        updateUIForCurrentMode();
+        return;
+    }
+    
+    try {
+        const response = await fetch(apiUrl, {
+            method: 'POST',
+            // ================== ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ ==================
+            // Мы явно создаем объект Headers и устанавливаем ТОЛЬКО
+            // необходимый заголовок. Это предотвращает добавление
+            // браузером нежелательных параметров (вроде charset),
+            // на которые может ругаться API Google.
+            headers: new Headers({
+                'Content-Type': 'application/json'
+            }),
+            // ==========================================================
+            body: JSON.stringify(requestBody),
+            signal: state.controller.signal
+        });
+        
+        if (!response.ok) {
+            // Анализируем тело ошибки, чтобы получить больше информации
+            const errorBody = await response.json().catch(() => ({})); // если тело не JSON
+            const errorMessage = errorBody.error?.message || `HTTP error! status: ${response.status}`;
+            
+            if (response.status === 400) {
+                 throw new Error(`Ошибка запроса (400). Проверьте API-ключ и ограничения. Детали: ${errorMessage}`);
+            }
+            throw new Error(errorMessage);
+        }
+        
+        const geminiData = await response.json();
+        if (!geminiData.candidates || geminiData.candidates.length === 0 || !geminiData.candidates[0].content) {
+            const reason = geminiData.promptFeedback?.blockReason || 'Ответ был заблокирован моделью.';
+            throw new Error(`Не удалось сгенерировать ответ. Причина: ${reason}`);
+        }
+        
+        const endTime = performance.now();
+        const aiResponseText = geminiData.candidates[0].content.parts[0].text;
+        
+        state.responseTime = endTime - startTime; 
+        state.conversationHistory.push({ role: 'model', parts: [{ text: aiResponseText }] });
+        state.responseHTML = marked.parse(aiResponseText);
+        
+        if (currentMode !== modeToSend) {
+            state.hasNewResponse = true;
+        }
+    } catch (error) {
+        state.conversationHistory.pop();
+        
+        if (error.name === 'AbortError') {
+            state.responseHTML = getErrorHTML('Запрос был отменен пользователем.');
+        } else if (error.message.includes("Ошибка запроса (400)")) {
+            state.lastFailedQuery = userQuery;
+            state.responseHTML = getFriendlyErrorHTML(error.message, true, apiKey);
+        } else {
+            state.lastFailedQuery = userQuery;
+            state.responseHTML = getFriendlyErrorHTML(`Произошла ошибка: ${error.message}`);
+        }
+    } finally {
+        state.isLoading = false;
+        state.controller = null;
+        if (currentMode === modeToSend) {
+            updateUIForCurrentMode();
+        }
+        updateButtonIndicators();
+    }
+};
     
     const startNewChat = () => {
         if (!currentMode) return;
