@@ -773,10 +773,11 @@ body.dark-theme .container, body.dark-theme #chat-container, body.dark-theme #in
         let requestBody;
         let fetchOptions = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
         
+       // ... внутри функции sendMessage ...
         try {
             const apiModeConfig = API_MODES[currentApiMode];
             const isMapruappProxy = currentApiMode === 'mapruapp';
-
+            
             // Тело запроса теперь всегда в формате OpenRouter
             requestBody = {
                 model: selectedModel.id,
@@ -789,11 +790,18 @@ body.dark-theme .container, body.dark-theme #chat-container, body.dark-theme #in
                 if (!isMapruappProxy) {
                     // Для Vercel и Direct мы должны преобразовать формат на клиенте
                     const geminiContents = openRouterHistory.map(msg => ({
-                        role: msg.role === 'user' ? 'user' : 'model',
+                        role: msg.role === 'model' ? 'model' : (msg.role === 'system' ? 'user' : 'user'), // Gemini не имеет system, делаем его user
                         parts: Array.isArray(msg.content) 
                                ? msg.content.map(p => p.type === 'text' ? ({text: p.text}) : ({inlineData: {mimeType: getMimeTypeFromBase64(p.image_url.url), data: p.image_url.url.split(',')[1]}}))
                                : [{text: msg.content}]
-                    }));
+                    })).filter(c => !(c.role === 'user' && c.parts.every(p => !p.text && !p.inlineData))); // Удаляем пустые системные
+                    
+                    // Объединяем системные инструкции с первым сообщением пользователя
+                    if (geminiContents.length > 1 && geminiContents[0].role === 'user') {
+                        const systemParts = geminiContents.shift().parts;
+                        geminiContents[0].parts.unshift(...systemParts);
+                    }
+                    
                     requestBody = { contents: geminiContents };
                 }
             } else if (selectedModel.apiType === 'anthropic') {
@@ -821,14 +829,32 @@ body.dark-theme .container, body.dark-theme #chat-container, body.dark-theme #in
             
             let botReplyText = null;
             
-            // Ответ от всех API теперь приходит в формате OpenRouter
-            botReplyText = data.choices?.[0]?.message?.content || "[Пустой или некорректный ответ от API]";
+            // --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
+            // Теперь проверяем, в каком формате пришел ответ
+            if (currentApiMode === 'mapruapp') {
+                // Ваш прокси возвращает формат OpenRouter
+                botReplyText = data.choices?.[0]?.message?.content;
+            } else {
+                // Vercel, Direct и Anthropic возвращают "родные" форматы
+                if (selectedModel.apiType === 'gemini') {
+                     if (data.candidates?.[0]?.content?.parts) {
+                        botReplyText = data.candidates[0].content.parts.map(part => part.text || '').join('');
+                    } else if (data.promptFeedback?.blockReason) {
+                        botReplyText = `[Ответ заблокирован. Причина: ${data.promptFeedback.blockReason}]`;
+                    }
+                } else if (selectedModel.apiType === 'anthropic') {
+                    if (data.content?.[0]?.text) {
+                        botReplyText = data.content.map(block => block.type === "text" ? block.text : "").join("");
+                    }
+                }
+            }
+            // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
             if (botReplyText) {
                 displayMessage('bot', botReplyText, null, null, false, duration);
                 chatHistory.push({ sender: 'bot', text: botReplyText });
             } else {
-                 displayMessage('bot', "[Не удалось извлечь текст из ответа API]", null, null, false, duration);
+                 displayMessage('bot', "[Пустой или некорректный ответ от API]", null, null, false, duration);
             }
 
         } catch (error) {
