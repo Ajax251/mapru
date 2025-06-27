@@ -1972,7 +1972,6 @@ const placemarkColorIndices = new Map();
 
                 // Определяем кастомный макет для метки
 
-let ownershipFilterState = 0; // 0: все с заливкой, 1: отфильтрованные с заливкой, 2: отфильтрованные без заливки
 
 // Функция для получения следующего цвета по порядку
 function getNextStandardColor(placemark) {
@@ -3380,18 +3379,16 @@ document.addEventListener('DOMContentLoaded', async () => {
                 );
 
                 // Кастомный макет для подсказки (без изменений)
-               customHintLayout = ymaps.templateLayoutFactory.createClass(
-                    '<div class="custom-hint" style="min-width: 220px;">' + // Немного увеличим минимальную ширину для новых полей
-                        '<strong>$[properties.hintContent.cadastralNumber]</strong>' +
+                customHintLayout = ymaps.templateLayoutFactory.createClass(
+                    '<div class="custom-hint">' + // Use the class from the first snippet
+                        '<strong>$[properties.hintContent.cadastralNumber]</strong>' + // Display CN prominently
+                         // Use classes for address/area if defined, otherwise just use the content
                         '<div class="hint-address">$[properties.hintContent.address]</div>' +
                         '<div class="hint-area">$[properties.hintContent.area]</div>' +
-                        // Условное отображение стоимости, ВРИ и НОВЫХ полей
+                        // --- Add Cost and VRI conditional display ---
                         '{% if properties.hintContent.cost %} <div class="hint-cost">Стоимость: $[properties.hintContent.cost] руб./м²</div> {% endif %}' +
-                        '{% if properties.hintContent.vri %} <div class="hint-vri">ВРИ: $[properties.hintContent.vri]</div> {% endif %}' +
-                        // --- НАЧАЛО ИЗМЕНЕНИЙ: Добавляем строки для формы собственности и типа права ---
-                        '{% if properties.hintContent.ownershipType %} <div class="hint-ownership" style="color: #4a5568;">Форма собственности: $[properties.hintContent.ownershipType]</div> {% endif %}' +
-                        '{% if properties.hintContent.rightType %} <div class="hint-right" style="color: #4a5568;">Тип права: $[properties.hintContent.rightType]</div> {% endif %}' +
-                        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
+                        '{% if properties.hintContent.vri %} <div class="hint-vri">Разрешенное использование: $[properties.hintContent.vri]</div> {% endif %}' +
+                        // --- End Cost and VRI ---
                     '</div>',
                     {
                         build: function () {
@@ -7064,8 +7061,9 @@ async function processAndDrawParcels(features, source) {
                  const areaText = getAreaText(parcelOptions); // Assumes getAreaText helper exists
                  const costIndex = parcelOptions.cost_index !== undefined && parcelOptions.cost_index !== null && isFinite(parseFloat(parcelOptions.cost_index)) ? parseFloat(parcelOptions.cost_index) : null;
                  const vri = parcelOptions.permitted_use_established_by_document || null;
-               const ownershipType = parcelOptions.ownership_type || '-';
-                 const rightType = parcelOptions.right_type || '-';
+                 const ownershipType = parcelOptions.ownership_type || 'Не указано';
+                 const rightType = parcelOptions.right_type || 'Не указано';
+                 const ownershipInfoText = `${ownershipType} | ${rightType}`; // Combine for the hint
 
                  const isDeclared = !parcelOptions.specified_area && !parcelOptions.land_record_area_verified && !parcelOptions.land_record_area && (parcelOptions.land_record_area_declaration || parcelOptions.declared_area);
                  // Use specific colors based on source or theme? For now, keep it based on declaration.
@@ -7073,17 +7071,14 @@ async function processAndDrawParcels(features, source) {
                  const finalStrokeColor = isAreaSearchSource ? '#FF4500' : (isDeclared ? polygonStyle.declaredParcelsColor : polygonStyle.parcelsColor);
 
 
-             // Создаем hintContent со всеми нужными полями
+                 // Create hint content including ownership
                  const hintContent = {
                      cadastralNumber: `${cadastralNumber}`,
                      address: `${address}`,
                      area: `Площадь: ${areaText}`,
                      cost: costIndex !== null ? costIndex.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) : null,
                      vri: vri,
-                     // --- НАЧАЛО ИЗМЕНЕНИЙ: Добавляем поля для макета ---
-                     ownershipType: ownershipType,
-                     rightType: rightType
-                     // --- КОНЕЦ ИЗМЕНЕНИЙ ---
+                     ownershipInfo: ownershipInfoText
                  };
 
                  // --- Create Polygon ---
@@ -9965,25 +9960,17 @@ function handleOwnershipLegendClick(event) {
     if (!listItem) return;
 
     const clickedKey = listItem.dataset.ownershipKey;
-    if (clickedKey === undefined) return;
+    if (!clickedKey) return; // Should have the key stored
 
-    // Проверяем, изменилась ли категория или это повторный клик по той же
-    if (selectedOwnershipFromLegend !== clickedKey) {
-        // Клик по новой категории - начинаем цикл с первого шага
-        selectedOwnershipFromLegend = clickedKey;
-        ownershipFilterState = 1; // 1: отфильтрованные с заливкой
+    // Toggle selection state
+    if (selectedOwnershipFromLegend === clickedKey) {
+        selectedOwnershipFromLegend = null; // Deselect
     } else {
-        // Повторный клик по той же категории - переключаем состояние
-        ownershipFilterState = (ownershipFilterState + 1) % 3;
-        // Если вернулись в состояние "показать все", сбрасываем ключ выбора
-        if (ownershipFilterState === 0) {
-            selectedOwnershipFromLegend = null;
-        }
+        selectedOwnershipFromLegend = clickedKey; // Select
     }
 
     updateOwnershipLegendSelectionVisuals();
     applyOwnershipFilter();
-    updatePlacemarksVisibility(); // Обновляем видимость меток после смены фильтра
 }
 
 function updateOwnershipLegendSelectionVisuals() {
@@ -9995,80 +9982,90 @@ function updateOwnershipLegendSelectionVisuals() {
 }
 
 function applyOwnershipFilter() {
-    // Эта проверка важна, чтобы фильтр не работал, когда тема "Собственность" неактивна
     if (currentTheme !== 'ownership') {
-        // Очищаем временные метки, если они остались от предыдущего использования темы
+        // Clear any existing filter placemarks if theme is not 'ownership'
         if (ownershipFilterPlacemarks.size > 0) {
             ownershipFilterPlacemarks.forEach(placemark => {
-                if (map?.geoObjects.indexOf(placemark) !== -1) map.geoObjects.remove(placemark);
+                if (map?.geoObjects.indexOf(placemark) !== -1) {
+                    map.geoObjects.remove(placemark);
+                }
             });
             ownershipFilterPlacemarks.clear();
         }
-        // Убедимся, что все полигоны видимы, когда тема отключается
-        polygons.forEach(obj => {
-             if (obj instanceof ymaps.Polygon) obj.options.set('visible', true);
-        });
+         // Reset selection state if necessary
+         if (selectedOwnershipFromLegend !== null) {
+             selectedOwnershipFromLegend = null;
+             updateOwnershipLegendSelectionVisuals();
+         }
         return;
     }
 
-    console.log(`Применение фильтра Собственности. Состояние: ${ownershipFilterState}, Выбрано: ${selectedOwnershipFromLegend}`);
+    console.log(`Applying Ownership filter. Selected: ${selectedOwnershipFromLegend === null ? 'None (Show All)' : selectedOwnershipFromLegend}`);
+    const placemarkPreset = 'islands#violetIcon'; // Use a different color for ownership filter placemarks
+    const placemarkZIndex = 650; // Slightly different Z-index
+    const cnsToShowPlacemark = new Set();
 
-    // Проходим по всем полигонам на карте
     polygons.forEach(obj => {
         if (obj instanceof ymaps.Polygon && (obj.properties?.get('isParcelInQuarter') || obj.properties?.get('isFoundInArea'))) {
-            // Получаем ключ собственности для текущего полигона
             const options = obj.properties.get('featureData')?.properties?.options || {};
             const ownership = options.ownership_type || 'Не указано';
             const rightType = options.right_type || 'Не указано';
             const parcelKey = `${ownership}|${rightType}`;
+            const cadastralNumber = obj.properties.get('cadastralNumber');
+            let fillColor = '#00000000'; // Default transparent
 
-            // Задаем значения по умолчанию
-            let fillColor = '#00000000'; // Прозрачная заливка
-            let isVisible = true;        // Видимость
+            if (!cadastralNumber) return;
 
-            // Применяем логику в зависимости от состояния клика
-            switch (ownershipFilterState) {
-                // Состояние 0: Показать все участки с их тематической заливкой
-                case 0:
-                    isVisible = true;
-                    if (ownershipColorMap.has(parcelKey)) {
-                        fillColor = `${ownershipColorMap.get(parcelKey)}E6`; // 90% непрозрачности
-                    }
-                    break;
+            const shouldMatch = selectedOwnershipFromLegend !== null && parcelKey === selectedOwnershipFromLegend;
+            const showAll = selectedOwnershipFromLegend === null;
 
-                // Состояние 1: Отфильтрованные с заливкой, остальные - только контур (НОВАЯ ЛОГИКА)
-                case 1:
-                    isVisible = true; // Все участки видимы
-                    if (parcelKey === selectedOwnershipFromLegend) {
-                        // Если участок соответствует фильтру, заливаем его
-                        if (ownershipColorMap.has(parcelKey)) {
-                            fillColor = `${ownershipColorMap.get(parcelKey)}E6`;
-                        }
-                    } else {
-                        // Если не соответствует - оставляем прозрачным (только контур)
-                        fillColor = '#00000000';
-                    }
-                    break;
+            // --- Fill Color Logic ---
+            if (showAll) {
+                if (ownershipColorMap.has(parcelKey)) {
+                    fillColor = `${ownershipColorMap.get(parcelKey)}E6`; // 90% opacity
+                } else {
+                     fillColor = '#CCCCCC'; // Default grey if key not found
+                }
+            } else if (shouldMatch) {
+                 if (ownershipColorMap.has(parcelKey)) {
+                     fillColor = `${ownershipColorMap.get(parcelKey)}E6`;
+                 } else {
+                     fillColor = '#CCCCCC';
+                 }
+            } // Else: fillColor remains transparent
 
-                // Состояние 2: Отфильтрованные без заливки, остальные - скрыты
-                case 2:
-                    if (parcelKey === selectedOwnershipFromLegend) {
-                        isVisible = true;
-                        fillColor = '#00000000'; // Прозрачная заливка
-                    } else {
-                        isVisible = false; // Скрываем остальные участки
-                    }
-                    break;
-            }
-
-            // Применяем рассчитанные стили к полигону
             obj.options.set('fillColor', fillColor);
-            obj.options.set('visible', isVisible);
+
+            // --- Temporary Placemark Logic ---
+            const existingPlacemark = ownershipFilterPlacemarks.get(cadastralNumber);
+
+            if (shouldMatch) {
+                cnsToShowPlacemark.add(cadastralNumber);
+                if (!existingPlacemark) {
+                    const bounds = obj.geometry.getBounds();
+                    if (bounds?.[0]?.[0] !== undefined && isFinite(bounds[0][0])) {
+                        const centerGeo = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
+                        const tempPlacemark = new ymaps.Placemark(centerGeo, { hintContent: `${cadastralNumber}\n${parcelKey}` }, {
+                            preset: placemarkPreset,
+                            zIndex: placemarkZIndex
+                        });
+                        map.geoObjects.add(tempPlacemark);
+                        ownershipFilterPlacemarks.set(cadastralNumber, tempPlacemark);
+                    }
+                }
+            }
         }
     });
 
-    // После применения стилей обновляем видимость меток, так как некоторые полигоны могли быть скрыты
-    updatePlacemarksVisibility();
+    // --- Remove Placemarks that are no longer needed ---
+    ownershipFilterPlacemarks.forEach((placemark, cn) => {
+        if (!cnsToShowPlacemark.has(cn)) {
+            if (map?.geoObjects.indexOf(placemark) !== -1) {
+                map.geoObjects.remove(placemark);
+            }
+            ownershipFilterPlacemarks.delete(cn);
+        }
+    });
 }
   
     // ГЛАВНАЯ ФУНКЦИЯ ПОИСКА СМЕЖНЫХ
@@ -11685,9 +11682,8 @@ function setActiveTheme(theme) {
             vriFilterPlacemarks.clear();
         }
     }
-   if ((previousTheme === 'ownership' && theme !== 'ownership') || theme === 'none') {
+    if ((previousTheme === 'ownership' && theme !== 'ownership') || theme === 'none') {
          selectedOwnershipFromLegend = null;
-         ownershipFilterState = 0; // <-- ДОБАВИТЬ ЭТУ СТРОКУ
          updateLegendSelectionVisuals();
          if (ownershipFilterPlacemarks.size > 0) {
             ownershipFilterPlacemarks.forEach(placemark => {
@@ -13323,25 +13319,23 @@ async function drawFoundParcels(parcels, markAsFoundInArea = false) {
                  const costIndex = parcelOptions.cost_index !== undefined && parcelOptions.cost_index !== null && isFinite(parseFloat(parcelOptions.cost_index)) ? parseFloat(parcelOptions.cost_index) : null;
                  const vri = parcelOptions.permitted_use_established_by_document || null;
                  // Extract ownership info
-                const ownershipType = parcelOptions.ownership_type || '-';
-                 const rightType = parcelOptions.right_type || '-';
+                 const ownershipType = parcelOptions.ownership_type || 'Не указано';
+                 const rightType = parcelOptions.right_type || 'Не указано';
+                 const ownershipInfoText = `${ownershipType} | ${rightType}`; // Combine for the hint
 
                  const isDeclared = !parcelOptions.specified_area && !parcelOptions.land_record_area_verified && !parcelOptions.land_record_area && (parcelOptions.land_record_area_declaration || parcelOptions.declared_area);
                  const strokeColor = isDeclared ? polygonStyle.declaredParcelsColor : polygonStyle.parcelsColor;
 
                  // Create hint content including ownership
-             const hintContent = {
+                 const hintContent = {
                      cadastralNumber: `${cadastralNumber}`,
                      address: `${address}`,
                      area: `Площадь: ${areaText}`,
                      cost: costIndex !== null ? costIndex.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) : null,
                      vri: vri,
-                     // --- НАЧАЛО ИЗМЕНЕНИЙ: Добавляем поля для макета ---
-                     ownershipType: ownershipType,
-                     rightType: rightType
-                     // --- КОНЕЦ ИЗМЕНЕНИЙ ---
+                     ownershipInfo: ownershipInfoText // Added ownership info here
                  };
-                 
+
                  // --- Create Polygon ---
                  const polygonProperties = {
                      hintContent: hintContent, // Use updated hintContent
