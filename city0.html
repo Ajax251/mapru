@@ -464,100 +464,96 @@ async function _fetchCityInfoFromAIInternal(cityName, supabaseKeyToSave) {
         function updateMap(lat, lon, prevCoords = null) { if(!map)initMap();const newCenter=[lat,lon];const zoomLevels={initial:10,flyOut:5,arrival:10,final:13};if(prevCoords){const polyline=new ymaps.Polyline([[prevCoords.lat,prevCoords.lon],[lat,lon]],{},{strokeColor:'white',strokeWidth:3,strokeOpacity:0.7,strokeStyle:'dash'});map.geoObjects.add(polyline);map.setCenter([prevCoords.lat,prevCoords.lon],zoomLevels.flyOut,{duration:1500}).then(()=>map.setCenter(newCenter,zoomLevels.arrival,{duration:2000})).then(()=>{map.geoObjects.remove(polyline);map.setCenter(newCenter,zoomLevels.final,{duration:2000});});}else{map.setCenter(newCenter,zoomLevels.arrival,{duration:2000}).then(()=>map.setCenter(newCenter,zoomLevels.final,{duration:2000}));}}
         function updateWeatherIcon(iconCode) { const iconMapping={'01d':'fa-sun','01n':'fa-moon','02d':'fa-cloud-sun','02n':'fa-cloud-moon','03d':'fa-cloud','03n':'fa-cloud','04d':'fa-cloud-meatball','04n':'fa-cloud-meatball','09d':'fa-cloud-showers-heavy','09n':'fa-cloud-showers-heavy','10d':'fa-cloud-rain','10n':'fa-cloud-rain','11d':'fa-bolt','11n':'fa-bolt','13d':'fa-snowflake','13n':'fa-snowflake','50d':'fa-smog','50n':'fa-smog',};const iconClass=iconMapping[iconCode]||'fa-question';weatherIcon.className='weather-icon fas '+iconClass;return iconClass;}
         
-        async function updateWeather(city) {
-            showLoader(`Загрузка "${city}"...`);
+async function updateWeather(city) {
+    showLoader(`Загрузка "${city}"...`);
 
-            // 1. Геокодирование через Яндекс
-            let yandexGeoData;
-            try {
-                yandexGeoData = await geocodeCityWithYandex(city);
-                if (!yandexGeoData) throw new Error(`Яндекс.Карты не смогли найти: ${city}`);
-            } catch (error) {
-                hideLoader();
-                showNotification(error.message, 'error', 'map-marker-alt');
-                return;
-            }
+    // 1. Геокодирование через Яндекс
+    let yandexGeoData;
+    try {
+        yandexGeoData = await geocodeCityWithYandex(city);
+        if (!yandexGeoData) throw new Error(`Яндекс.Карты не смогли найти: ${city}`);
+    } catch (error) {
+        hideLoader();
+        showNotification(error.message, 'error', 'map-marker-alt');
+        return;
+    }
 
-            // 2. === ИСПРАВЛЕНИЕ ЛОГИКИ СОСТОЯНИЯ ===
-            // При запросе нового города мы немедленно аннулируем старые данные AI.
-            currentAiCityData = null;
-            isAiCityDataLoading = true; // Устанавливаем флаг загрузки
+    // 2. === ГЛАВНОЕ ИЗМЕНЕНИЕ: СБРОС СТАРОГО СОСТОЯНИЯ ===
+    // При запросе нового города мы немедленно аннулируем старые данные AI.
+    currentAiCityData = null;
+    isAiCityDataLoading = true; // Устанавливаем флаг загрузки
+    
+    // Обновляем ключевые идентификаторы для нового города
+    currentSupabaseCityKey = constructSupabaseKey(yandexGeoData.countryCode, yandexGeoData.adminRegion, yandexGeoData.cityName);
+    currentCityNameForAiQuery = yandexGeoData.cityName;
+    currentCity = yandexGeoData.cityName;
+    cityCoordinates = { lat: yandexGeoData.coords[0], lon: yandexGeoData.coords[1] };
+    
+    // Если панель уже открыта, немедленно обновляем ее до состояния "Загрузка..."
+    // Это предотвращает отображение данных старого города.
+    if (cityInfoPanel.classList.contains('visible')) {
+        renderCityInfoPanelState();
+    }
 
-            // ***ШАГ 1 ИСПРАВЛЕНИЯ: Сохраняем предыдущие координаты ПЕРЕД их перезаписью***
-            // В этот момент cityCoordinates все еще хранит данные предыдущего города.
-            previousCityCoords = cityCoordinates ? { ...cityCoordinates } : null;
+    // 3. === ЗАПУСК ВСЕХ ЗАГРУЗОК ПАРАЛЛЕЛЬНО ===
+    // Запускаем запрос погоды и информации о городе одновременно, не дожидаясь друг друга.
+    const weatherPromise = tryFetchWeather(yandexGeoData.cityName);
+    const cityInfoPromise = getCityInfo(currentSupabaseCityKey, currentCityNameForAiQuery);
 
-            // Обновляем ключевые идентификаторы для нового города
-            currentSupabaseCityKey = constructSupabaseKey(yandexGeoData.countryCode, yandexGeoData.adminRegion, yandexGeoData.cityName);
-            currentCityNameForAiQuery = yandexGeoData.cityName;
-            currentCity = yandexGeoData.cityName;
-            cityCoordinates = { lat: yandexGeoData.coords[0], lon: yandexGeoData.coords[1] };
-            
-            // Если панель уже открыта, немедленно обновляем ее до состояния "Загрузка..."
-            // Это предотвращает отображение данных старого города.
-            if (cityInfoPanel.classList.contains('visible')) {
-                renderCityInfoPanelState();
-            }
+    // Дожидаемся выполнения обоих запросов.
+    // Нам важен результат только от погоды, т.к. getCityInfo обновляет глобальную переменную.
+    let [weatherData] = await Promise.all([weatherPromise, cityInfoPromise]);
 
-            // 3. === ЗАПУСК ВСЕХ ЗАГРУЗОК ПАРАЛЛЕЛЬНО ===
-            // Запускаем запрос погоды и информации о городе одновременно, не дожидаясь друг друга.
-            const weatherPromise = tryFetchWeather(yandexGeoData.cityName);
-            const cityInfoPromise = getCityInfo(currentSupabaseCityKey, currentCityNameForAiQuery);
+    // 4. Вторая попытка для погоды, если первая не удалась, а AI дал подсказку.
+    // К этому моменту cityInfoPromise уже выполнился и currentAiCityData обновлен.
+    if (!weatherData && currentAiCityData && currentAiCityData.open_weather_map_name) {
+        showNotification(`Используем уточненное имя: "${currentAiCityData.open_weather_map_name}"`, 'success', 'check-circle');
+        weatherData = await tryFetchWeather(currentAiCityData.open_weather_map_name);
+    }
+    
+    // 5. Финальная обработка и отображение
+    hideLoader();
 
-            // Дожидаемся выполнения обоих запросов.
-            // Нам важен результат только от погоды, т.к. getCityInfo обновляет глобальную переменную.
-            let [weatherData] = await Promise.all([weatherPromise, cityInfoPromise]);
+    if (weatherData) {
+        // ... (весь блок отображения погоды остается без изменений) ...
+        timezone = await getTimezoneByCoordinates(cityCoordinates.lat, cityCoordinates.lon);
+        updateDateTime();
+        const owmResolvedCityName = weatherData.city.name;
+        cityNameElement.textContent = owmResolvedCityName;
+        cityNameElement.href = `https://yandex.ru/maps/?pt=${cityCoordinates.lon},${cityCoordinates.lat}&z=12&l=map`;
+        localStorage.setItem('weatherCity', yandexGeoData.cityName);
+        const weather = weatherData.list[0];
+        temperatureElement.textContent = `${Math.round(weather.main.temp)}°C`;
+        descriptionElement.textContent = weather.weather[0].description;
+        feelsLikeElement.textContent = `${Math.round(weather.main.feels_like)}°C`;
+        humidityElement.textContent = `${weather.main.humidity}%`;
+        windSpeedElement.textContent = `${weather.wind.speed.toFixed(1)} м/с`;
+        updateWeatherIcon(weather.weather[0].icon);
+        const weatherDetailsLink = `https://www.gismeteo.ru/search/${encodeURIComponent(owmResolvedCityName)}/`;
+        temperatureLink.href = weatherDetailsLink;
+        iconLink.href = weatherDetailsLink;
+        forecastContainer.innerHTML = '';
+        const tomorrowsForecasts = weatherData.list.filter(item => { const itemDate = new Date(item.dt_txt); const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1); return itemDate.getDate() === tomorrow.getDate() && itemDate.getHours() === 15; });
+        if (tomorrowsForecasts.length > 0) { const tomorrowWeather = tomorrowsForecasts[0]; const forecastDiv = document.createElement('div'); forecastDiv.innerHTML = `<i class="fas ${updateWeatherIcon(tomorrowWeather.weather[0].icon)}" style="font-size:24px;"></i><div>${Math.round(tomorrowWeather.main.temp)}°C, ${tomorrowWeather.weather[0].description}</div>`; forecastContainer.appendChild(forecastDiv); } else { forecastContainer.innerHTML = '<div>Прогноз на завтра (15:00) недоступен</div>'; }
+        if (previousCityCoords && previousCityName) { const distance = calculateDistance(previousCityCoords.lat, previousCityCoords.lon, cityCoordinates.lat, cityCoordinates.lon); distanceInfo.innerHTML = `<span>${previousCityName} <i class="fas fa-plane"></i> ${owmResolvedCityName}: </span><span class="distance-value"><strong>0.0</strong> км</span>`; distanceInfo.classList.add('visible'); const distanceValueElement = distanceInfo.querySelector('.distance-value strong'); if (distanceValueElement) animateDistanceValue(distanceValueElement, distance); } else { distanceInfo.classList.remove('visible'); distanceInfo.innerHTML = ''; }
+        previousCityName = owmResolvedCityName;
+    } else {
+        showNotification(`Не удалось получить данные о погоде для "${currentCityNameForAiQuery}"`, 'error', 'exclamation-triangle');
+        temperatureElement.textContent = `--°C`;
+        descriptionElement.textContent = 'Ошибка загрузки';
+        feelsLikeElement.textContent = `--°C`;
+        humidityElement.textContent = `--%`;
+        windSpeedElement.textContent = `-- м/с`;
+        weatherIcon.className = 'weather-icon fas fa-question-circle';
+        cityNameElement.textContent = currentCityNameForAiQuery;
+    }
+    
+    updateMap(cityCoordinates.lat, cityCoordinates.lon, previousCityCoords);
+    previousCityCoords = { ...cityCoordinates };
 
-            // 4. Вторая попытка для погоды, если первая не удалась, а AI дал подсказку.
-            // К этому моменту cityInfoPromise уже выполнился и currentAiCityData обновлен.
-            if (!weatherData && currentAiCityData && currentAiCityData.open_weather_map_name) {
-                showNotification(`Используем уточненное имя: "${currentAiCityData.open_weather_map_name}"`, 'success', 'check-circle');
-                weatherData = await tryFetchWeather(currentAiCityData.open_weather_map_name);
-            }
-            
-            // 5. Финальная обработка и отображение
-            hideLoader();
-
-            if (weatherData) {
-                // ... (весь блок отображения погоды остается без изменений) ...
-                timezone = await getTimezoneByCoordinates(cityCoordinates.lat, cityCoordinates.lon);
-                updateDateTime();
-                const owmResolvedCityName = weatherData.city.name;
-                cityNameElement.textContent = owmResolvedCityName;
-                cityNameElement.href = `https://yandex.ru/maps/?pt=${cityCoordinates.lon},${cityCoordinates.lat}&z=12&l=map`;
-                localStorage.setItem('weatherCity', yandexGeoData.cityName);
-                const weather = weatherData.list[0];
-                temperatureElement.textContent = `${Math.round(weather.main.temp)}°C`;
-                descriptionElement.textContent = weather.weather[0].description;
-                feelsLikeElement.textContent = `${Math.round(weather.main.feels_like)}°C`;
-                humidityElement.textContent = `${weather.main.humidity}%`;
-                windSpeedElement.textContent = `${weather.wind.speed.toFixed(1)} м/с`;
-                updateWeatherIcon(weather.weather[0].icon);
-                const weatherDetailsLink = `https://www.gismeteo.ru/search/${encodeURIComponent(owmResolvedCityName)}/`;
-                temperatureLink.href = weatherDetailsLink;
-                iconLink.href = weatherDetailsLink;
-                forecastContainer.innerHTML = '';
-                const tomorrowsForecasts = weatherData.list.filter(item => { const itemDate = new Date(item.dt_txt); const tomorrow = new Date(); tomorrow.setDate(tomorrow.getDate() + 1); return itemDate.getDate() === tomorrow.getDate() && itemDate.getHours() === 15; });
-                if (tomorrowsForecasts.length > 0) { const tomorrowWeather = tomorrowsForecasts[0]; const forecastDiv = document.createElement('div'); forecastDiv.innerHTML = `<i class="fas ${updateWeatherIcon(tomorrowWeather.weather[0].icon)}" style="font-size:24px;"></i><div>${Math.round(tomorrowWeather.main.temp)}°C, ${tomorrowWeather.weather[0].description}</div>`; forecastContainer.appendChild(forecastDiv); } else { forecastContainer.innerHTML = '<div>Прогноз на завтра (15:00) недоступен</div>'; }
-                if (previousCityCoords && previousCityName) { const distance = calculateDistance(previousCityCoords.lat, previousCityCoords.lon, cityCoordinates.lat, cityCoordinates.lon); distanceInfo.innerHTML = `<span>${previousCityName} <i class="fas fa-plane"></i> ${owmResolvedCityName}: </span><span class="distance-value"><strong>0.0</strong> км</span>`; distanceInfo.classList.add('visible'); const distanceValueElement = distanceInfo.querySelector('.distance-value strong'); if (distanceValueElement) animateDistanceValue(distanceValueElement, distance); } else { distanceInfo.classList.remove('visible'); distanceInfo.innerHTML = ''; }
-                previousCityName = owmResolvedCityName;
-            } else {
-                showNotification(`Не удалось получить данные о погоде для "${currentCityNameForAiQuery}"`, 'error', 'exclamation-triangle');
-                temperatureElement.textContent = `--°C`;
-                descriptionElement.textContent = 'Ошибка загрузки';
-                feelsLikeElement.textContent = `--°C`;
-                humidityElement.textContent = `--%`;
-                windSpeedElement.textContent = `-- м/с`;
-                weatherIcon.className = 'weather-icon fas fa-question-circle';
-                cityNameElement.textContent = currentCityNameForAiQuery;
-            }
-            
-            // ***ШАГ 2 ИСПРАВЛЕНИЯ: Удалена строка `previousCityCoords = { ...cityCoordinates };`***
-            updateMap(cityCoordinates.lat, cityCoordinates.lon, previousCityCoords);
-
-            // Финальный рендер панели с уже загруженными (или не загруженными) данными.
-            renderCityInfoPanelState();
-        }
+    // Финальный рендер панели с уже загруженными (или не загруженными) данными.
+    renderCityInfoPanelState();
+}
 
         function calculateShoelaceArea(coordinatesRing) {let area=0;const n=coordinatesRing.length;if(n<3)return 0;for(let i=0;i<n;i++){const p1=coordinatesRing[i];const p2=coordinatesRing[(i+1)%n];if(p1&&p2&&typeof p1[0]==='number'&&typeof p1[1]==='number'&&typeof p2[0]==='number'&&typeof p2[1]==='number'){area+=(p1[0]*p2[1])-(p2[0]*p1[1]);}else{console.warn("Invalid coordinate pair in Shoelace calculation:",p1,p2);return 0;}} return Math.abs(area/2.0);}
         async function queryMunicipalInfo(latitude, longitude) { const toEPSG3857=(lat,lon)=>{if(typeof proj4==='undefined')throw new Error("proj4 is not defined");return proj4("EPSG:4326","EPSG:3857",[lon,lat]);};const centerPoint=toEPSG3857(latitude,longitude);const centerX=centerPoint[0];const centerY=centerPoint[1];const polygonSizeMeters=0.15;const halfSize=polygonSizeMeters/2;const minX=centerX-halfSize;const minY=centerY-halfSize;const maxX=centerX+halfSize;const maxY=centerY+halfSize;const width=512;const height=512;const i=width/2;const j=height/2;const bbox=`${minX},${minY},${maxX},${maxY}`;const url=`https://nspd.gov.ru/api/aeggis/v4/${NSP_MUNICIPAL_LAYER_ID}/wms?REQUEST=GetFeatureInfo&QUERY_LAYERS=${NSP_MUNICIPAL_LAYER_ID}&SERVICE=WMS&VERSION=1.3.0&FORMAT=image%2Fpng%2F&STYLES=&TRANSPARENT=true&LAYERS=${NSP_MUNICIPAL_LAYER_ID}&RANDOM=${Math.random()}&INFO_FORMAT=application%2Fjson&FEATURE_COUNT=10&I=${i}&J=${j}&WIDTH=${width}&HEIGHT=${height}&CRS=EPSG%3A3857&BBOX=${bbox}`;try{const response=await fetch(url);if(!response.ok)throw new Error(`NSPD API error: ${response.status}`);const data=await response.json();return data;}catch(error){console.error('Error fetching municipal data from NSPD:',error);showNotification('Ошибка запроса границ: '+error.message,'error','exclamation-triangle');return null;}}
