@@ -420,14 +420,16 @@
             
 
             <div class="settings-controls-wrapper">
-                <div class="settings-control-group">
-                    <label for="model-selector">1. Выберите модель</label>
-                                      <select id="model-selector">
-                        <option value="gemini-2.5-flash-lite-preview-06-17" data-api-type="gemini" selected>Gemini 2.5 Flash Lite (быстрая)</option>
-                        <option value="gemini-2.5-flash" data-api-type="gemini">Gemini 2.5 Flash (стандартная)</option>
-                        <!-- <option value="claude-sonnet-4-20250514" data-api-type="anthropic">Claude 4 Sonnet</option> -->
-                        <option value="kimi-k2" data-api-type="openrouter">Kimi-K2 (тестовая)</option>
-                    </select>
+               <div class="settings-control-group">
+    <label for="model-selector">1. Выберите модель</label>
+    <select id="model-selector">
+        <option value="gemini-2.5-flash-lite-preview-06-17" data-api-type="gemini" selected>Gemini 2.5 Flash Lite (быстрая)</option>
+        <option value="gemini-2.5-flash" data-api-type="gemini">Gemini 2.5 Flash (стандартная)</option>
+      <!--   <option value="claude-sonnet-4-20250514" data-api-type="anthropic">Claude 4 Sonnet</option> -->
+    
+        <option value="kimi-k2" data-api-type="openrouter">Kimi-K2</option>
+    </select>
+</div>
 
                 <div class="settings-control-group">
                     <label>2. Выберите режим подключения</label>
@@ -446,6 +448,10 @@
     </div>
 
 <script>
+    const OPENROUTER_MODEL_IDS = {
+    "kimi-k2": "moonshotai/kimi-k2:free"
+};
+
 // --- СИСТЕМНЫЕ ПРОМПТЫ ---
     const AI_SYSTEM_PROMPT_SYMPTOMS = `Ты — 'Медицинский Консультант-Помощник', высокопрофессиональный, эмпатичный и ответственный ИИ-ассистент. Твоя главная задача — предоставлять структурированную и объективную информацию по медицинским запросам пользователей, помогая им лучше понять свое состояние и принять взвешенное решение об обращении к врачу.
 
@@ -786,22 +792,11 @@ document.addEventListener('DOMContentLoaded', () => {
             isNativeFormat: false, // Ожидает формат OpenRouter
             icon: '<i class="fa-solid fa-server icon"></i>'
         },
-          'vercel': {
+              'vercel': {
             uiName: 'Прокси (Vercel)',
-            url: (modelId, apiType) => {
-                if (apiType === 'gemini') {
-                    return `${VERCEL_PROXY_BASE_URL}/proxy/gemini/v1beta/models/${modelId}:generateContent`;
-                }
-                if (apiType === 'anthropic') {
-                    return `${VERCEL_PROXY_BASE_URL}/proxy/langdock/anthropic/eu/v1/messages`;
-                }
-                // Добавляем URL для openrouter
-                if (apiType === 'openrouter') {
-                    return `${VERCEL_PROXY_BASE_URL}/proxy/openrouter/chat/completions`;
-                }
-                return null; // Возвращаем null если тип не поддерживается
-            },
-            isNativeFormat: true, 
+            geminiUrl: (modelId) => `${VERCEL_PROXY_BASE_URL}/proxy/gemini/v1beta/models/${modelId}:generateContent`,
+            claudeUrl: () => `${VERCEL_PROXY_BASE_URL}/proxy/langdock/anthropic/eu/v1/messages`,
+            openRouterUrl: () => `${VERCEL_PROXY_BASE_URL}/proxy/openrouter/chat/completions`,
             icon: '<i class="fa-solid fa-cloud icon"></i>'
         },
         'direct': {
@@ -1020,7 +1015,7 @@ document.addEventListener('DOMContentLoaded', () => {
     const printResponse = () => window.print();
 
     // --- 6. Главная функция запроса ---
-    const handleRequest = async (queryOverride = null, modeOverride = null) => {
+     const handleRequest = async (queryOverride = null, modeOverride = null) => {
         const modeToSend = modeOverride || currentMode;
         if (!modeToSend) return;
 
@@ -1071,41 +1066,44 @@ document.addEventListener('DOMContentLoaded', () => {
         try {
             const apiModeConfig = API_MODES[currentApiMode];
             
-            // Определяем URL
-            apiUrl = apiModeConfig.url(currentModelId, currentApiType, apiKey);
-            if (!apiUrl) throw new Error(`Режим '${apiModeConfig.uiName}' не поддерживает ${currentApiType}.`);
+            const openRouterMessages = [];
+            openRouterMessages.push({ role: 'system', content: systemPrompt });
+            state.conversationHistory.forEach(msg => {
+                const role = msg.role === 'model' ? 'assistant' : 'user';
+                openRouterMessages.push({ role: role, content: msg.content });
+            });
 
-                if (apiModeConfig.isNativeFormat) {
-                // Формируем "родной" формат для Vercel и Direct
+            if (currentApiMode === 'mapruapp') {
+                apiUrl = apiModeConfig.url();
+                let modelIdToSend = (currentApiType === 'openrouter' && OPENROUTER_MODEL_IDS[currentModelId]) 
+                                    ? OPENROUTER_MODEL_IDS[currentModelId] 
+                                    : currentModelId;
+                requestBody = { model: modelIdToSend, messages: openRouterMessages, max_tokens: 4096 };
+            } else { // Vercel and Direct logic
                 if (currentApiType === 'gemini') {
+                    apiUrl = apiModeConfig.url(currentModelId, currentApiType, apiKey);
                     const geminiContents = state.conversationHistory.map(msg => ({
-                        role: msg.role === 'model' ? 'model' : 'user', 
-                        parts: [{ text: msg.content }]
+                        role: msg.role === 'user' ? 'user' : 'model', parts: [{ text: msg.content }]
                     }));
                     requestBody = { contents: geminiContents, systemInstruction: { parts: [{text: systemPrompt}] } };
-                } else if (currentApiType === 'anthropic') { // anthropic
+                } else if (currentApiType === 'anthropic') {
+                    apiUrl = apiModeConfig.claudeUrl();
                     const claudeMessages = state.conversationHistory.map(msg => ({
-                        role: msg.role === 'model' ? 'assistant' : 'user', 
-                        content: msg.content
+                        role: msg.role === 'user' ? 'user' : 'assistant', content: msg.content
                     }));
                     requestBody = { model: currentModelId, messages: claudeMessages, system: systemPrompt, max_tokens: 4096 };
-                } else if (currentApiType === 'openrouter') { // openrouter
-                    // Формат OpenRouter такой же, как у нашего прокси
-                    const openRouterMessages = [];
-                    openRouterMessages.push({ role: 'system', content: systemPrompt });
-                    state.conversationHistory.forEach(msg => {
-                        openRouterMessages.push({ role: msg.role === 'model' ? 'assistant' : 'user', content: msg.content });
-                    });
-                    requestBody = { model: currentModelId, messages: openRouterMessages, max_tokens: 4096 };
+                } else if (currentApiType === 'openrouter') {
+                    apiUrl = apiModeConfig.openRouterUrl();
+                    requestBody = {
+                        model: OPENROUTER_MODEL_IDS[currentModelId] || currentModelId,
+                        messages: openRouterMessages,
+                        max_tokens: 4096
+                    };
                 }
-            } else {
-                // Формируем формат OpenRouter для MapRuApp
-                const openRouterMessages = [];
-                openRouterMessages.push({ role: 'system', content: systemPrompt });
-                state.conversationHistory.forEach(msg => {
-                    openRouterMessages.push({ role: msg.role === 'model' ? 'assistant' : 'user', content: msg.content });
-                });
-                requestBody = { model: currentModelId, messages: openRouterMessages, max_tokens: 4096 };
+            }
+
+            if (!apiUrl) {
+                throw new Error(`Не удалось определить URL для API режима '${currentApiMode}' и типа модели '${currentApiType}'.`);
             }
 
             fetchOptions.body = JSON.stringify(requestBody);
@@ -1122,15 +1120,12 @@ document.addEventListener('DOMContentLoaded', () => {
             const endTime = performance.now();
             let aiResponseText;
 
-                     // Разбор ответа в зависимости от формата
-            if (apiModeConfig.isNativeFormat && currentApiType !== 'openrouter') {
-                if (currentApiType === 'gemini') {
-                    aiResponseText = data.candidates?.[0]?.content?.parts[0]?.text;
-                } else { // anthropic
-                    aiResponseText = data.content?.[0]?.text;
-                }
-            } else { // OpenRouter format (для mapruapp и для openrouter через vercel)
+            if (currentApiMode === 'mapruapp' || currentApiType === 'openrouter') {
                 aiResponseText = data.choices?.[0]?.message?.content;
+            } else if (currentApiType === 'gemini') {
+                aiResponseText = data.candidates?.[0]?.content?.parts[0]?.text;
+            } else if (currentApiType === 'anthropic') {
+                aiResponseText = data.content?.[0]?.text;
             }
 
             if (!aiResponseText) {
