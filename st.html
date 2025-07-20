@@ -313,7 +313,7 @@ window.addEventListener('load', () => {
     // --- CONFIGURATION ---
     const LINK_EXTRACTOR_API_BASE = "https://linkextractor.vercel.app";
     const VERCEL_PROXY_BASE_URL = "https://ver-olive-delta.vercel.app";
-    const AI_PROXY_BASE_URL = "https://ver-olive-delta.vercel.app"; // Main proxy for AI
+    const MAPRUAPP_PROXY_BASE_URL = "https://mapruapp.ru";
     const DEFAULT_MODEL_ID = "gemini-2.5-flash-lite-preview-06-17";
 
     // --- SYSTEM PROMPT ---
@@ -400,7 +400,7 @@ window.addEventListener('load', () => {
 
     // --- STATE VARIABLES ---
     let apiKey = null;
-    let currentApiMode = 'proxy';
+    let currentApiMode = 'mapruapp'; // Default to mapruapp
     let currentModelId = DEFAULT_MODEL_ID;
     let currentApiType = "gemini";
     let isLoading = false;
@@ -481,14 +481,14 @@ window.addEventListener('load', () => {
             if (urlPattern.test(userQuery)) {
                 responseContainer.innerHTML = getLoaderHTML('Извлекаю содержимое страницы...');
                 const sourceCode = await fetchPageSource(userQuery);
-                finalPromptForAI = sourceCode; // The AI will now receive the full HTML
+                finalPromptForAI = sourceCode;
             }
             
             responseContainer.innerHTML = getLoaderHTML('Анализирую данные...');
             
             conversationHistory.push({ role: 'user', content: finalPromptForAI });
             
-            const aiResponseText = await getAIResponse(finalPromptForAI);
+            const aiResponseText = await getAIResponse();
 
             conversationHistory.push({ role: 'model', content: aiResponseText });
             const finalHtml = marked.parse(aiResponseText);
@@ -513,7 +513,6 @@ window.addEventListener('load', () => {
     
     async function fetchPageSource(url) {
         const formData = new FormData();
-        // Ensure URL has a protocol for the backend
         let fullUrl = url.startsWith('http://') || url.startsWith('https://') ? url : `http://${url}`;
         formData.append('url_input', fullUrl);
         
@@ -526,63 +525,75 @@ window.addEventListener('load', () => {
         if (!response.ok) {
             try {
                 const errorData = await response.json();
-                throw new Error(errorData.detail || `Не удалось загрузить страницу. Статус: ${response.status}`);
+                throw new Error(errorData.detail || `Не удалось загрузить страницу: ${response.statusText}`);
             } catch(e) {
-                 throw new Error(`Не удалось загрузить страницу. Статус: ${response.status}`);
+                 throw new Error(`Не удалось загрузить страницу. Убедитесь, что URL корректен и сайт доступен. Статус: ${response.status}`);
             }
         }
         
         const data = await response.json();
         if (!data.source_html) {
-            throw new Error('Сервис не смог извлечь исходный код страницы. Возможно, сайт недоступен или защищен.');
+            throw new Error('Сервис не смог извлечь исходный код страницы. Возможно, сайт недоступен или защищен от парсинга.');
         }
         return data.source_html;
     }
 
-    async function getAIResponse(prompt) {
-        const apiModeConfig = MODELS.find(m => m.id === currentModelId);
-        
+    async function getAIResponse() {
         let apiUrl, requestBody;
         const fetchOptions = {
             method: 'POST',
             headers: { 'Content-Type': 'application/json' },
             signal: controller.signal
         };
+        
+        const isMapruappProxy = currentApiMode === 'mapruapp';
 
-        const systemInstruction = { role: 'system', parts: [{ text: AI_SYSTEM_PROMPT_ANALYST }] };
-        const geminiContents = [
-            ...conversationHistory.map(msg => ({
-                role: msg.role === 'user' ? 'user' : 'model',
-                parts: [{ text: msg.content }]
-            }))
-        ];
-
-        if (currentApiType === 'gemini') {
-            apiUrl = currentApiMode === 'direct' 
-                ? `https://generativelanguage.googleapis.com/v1beta/models/${currentModelId}:generateContent?key=${apiKey}`
-                : `${AI_PROXY_BASE_URL}/v1beta/models/${currentModelId}:generateContent`;
-            requestBody = { contents: geminiContents, systemInstruction: systemInstruction.parts[0] };
-        } else if (currentApiType === 'anthropic') {
-            apiUrl = `${AI_PROXY_BASE_URL}/proxy/langdock/anthropic/eu/v1/messages`;
-            const claudeMessages = conversationHistory.map(msg => ({
-                role: msg.role === 'user' ? 'user' : 'assistant', content: msg.content
-            }));
-            requestBody = { model: currentModelId, messages: claudeMessages, system: AI_SYSTEM_PROMPT_ANALYST, max_tokens: 4096 };
+        if (isMapruappProxy) {
+            apiUrl = `${MAPRUAPP_PROXY_BASE_URL}/ai/api/v1/chat/completions`;
+            const messages = [
+                { role: 'system', content: AI_SYSTEM_PROMPT_ANALYST },
+                ...conversationHistory.map(msg => ({ role: msg.role === 'user' ? 'user' : 'assistant', content: msg.content }))
+            ];
+            requestBody = { model: currentModelId, messages: messages, max_tokens: 4096 };
+        } else { // Vercel Proxy or Direct
+            if (currentApiType === 'gemini') {
+                apiUrl = currentApiMode === 'direct' 
+                    ? `https://generativelanguage.googleapis.com/v1beta/models/${currentModelId}:generateContent?key=${apiKey}`
+                    : `${VERCEL_PROXY_BASE_URL}/v1beta/models/${currentModelId}:generateContent`;
+                
+                const geminiContents = conversationHistory.map(msg => ({
+                    role: msg.role === 'user' ? 'user' : 'model',
+                    parts: [{ text: msg.content }]
+                }));
+                // CORRECTED PAYLOAD STRUCTURE
+                const systemInstruction = { parts: [{ text: AI_SYSTEM_PROMPT_ANALYST }] };
+                requestBody = { contents: geminiContents, systemInstruction: systemInstruction };
+            
+            } else if (currentApiType === 'anthropic') {
+                apiUrl = `${VERCEL_PROXY_BASE_URL}/proxy/langdock/anthropic/eu/v1/messages`;
+                const claudeMessages = conversationHistory.map(msg => ({
+                    role: msg.role === 'user' ? 'user' : 'assistant', content: msg.content
+                }));
+                requestBody = { model: currentModelId, messages: claudeMessages, system: AI_SYSTEM_PROMPT_ANALYST, max_tokens: 4096 };
+            }
         }
-
+        
         fetchOptions.body = JSON.stringify(requestBody);
         const response = await fetch(apiUrl, fetchOptions);
 
         if (!response.ok) {
             const errorBody = await response.json().catch(() => ({}));
             let errorMessage = errorBody.error?.message || JSON.stringify(errorBody) || `HTTP ошибка! Статус: ${response.status}`;
-            const isKeyError = response.status === 400 && /API_KEY/.test(errorMessage.toUpperCase());
+            const isKeyError = response.status === 400 && /API_KEY|INVALID_ARGUMENT/i.test(errorMessage.toUpperCase());
             throw new Error(errorMessage, { cause: { isKeyError } });
         }
         
         const data = await response.json();
         let aiResponseText = "";
-        if (currentApiType === 'gemini') {
+
+        if (isMapruappProxy) {
+             aiResponseText = data.choices?.[0]?.message?.content;
+        } else if (currentApiType === 'gemini') {
             aiResponseText = data.candidates?.[0]?.content?.parts?.[0]?.text;
         } else if (currentApiType === 'anthropic') {
             aiResponseText = data.content?.[0]?.text;
@@ -601,11 +612,15 @@ window.addEventListener('load', () => {
         if (isLoading && controller) {
             controller.abort();
         }
+        isLoading = false;
+        controller = null;
         conversationHistory = [];
         responseContainer.innerHTML = welcomeMessageHTML;
         responseActions.style.display = 'none';
         queryInput.value = '';
         queryInput.style.height = 'auto';
+        queryInput.disabled = false;
+        sendButton.disabled = false;
     };
 
     const updateUIOnRequestStart = () => {
@@ -614,29 +629,40 @@ window.addEventListener('load', () => {
         queryInput.disabled = true;
         sendButton.disabled = true;
         responseActions.style.display = 'none';
-        responseContainer.innerHTML = getLoaderHTML('Подготовка к анализу...');
     };
 
     const getLoaderHTML = (text) => {
-        return `<div class="loader"><i class="fa-solid fa-flask-vial loader-icon"></i><p>${text}</p><button id="cancel-btn">Отменить</button></div>`;
+        const html = `<div class="loader"><i class="fa-solid fa-flask-vial loader-icon"></i><p>${text}</p><button id="cancel-btn">Отменить</button></div>`;
+        // We need to re-add the event listener every time the loader is created.
+        setTimeout(() => {
+            const cancelBtn = document.getElementById('cancel-btn');
+            if (cancelBtn) cancelBtn.addEventListener('click', () => { if(controller) controller.abort(); });
+        }, 0);
+        return html;
     };
     
     const getFriendlyErrorHTML = (errorMsg, isKeyError = false) => {
         let keyInfo = isKeyError ? `<p style="margin-top:10px;"><small>Похоже, проблема в API-ключе.</small></p>` : '';
         let buttonHTML = isKeyError
-            ? `<button class="action-btn" onclick="document.getElementById('settings-btn').click()" style="background-color: var(--new-chat-color); margin-top: 20px;"><i class="fa-solid fa-key"></i> Проверить настройки</button>`
-            : `<button class="action-btn" onclick="location.reload()" style="background-color: var(--primary-color); margin-top: 20px;"><i class="fa-solid fa-rotate-right"></i> Начать заново</button>`;
+            ? `<button class="action-btn" id="check-settings-btn" style="background-color: var(--new-chat-color); margin-top: 20px;"><i class="fa-solid fa-key"></i> Проверить настройки</button>`
+            : `<button class="action-btn" id="retry-btn" style="background-color: var(--primary-color); margin-top: 20px;"><i class="fa-solid fa-rotate-right"></i> Начать заново</button>`;
+        
+        setTimeout(() => {
+            const checkSettingsBtn = document.getElementById('check-settings-btn');
+            const retryBtn = document.getElementById('retry-btn');
+            if (checkSettingsBtn) checkSettingsBtn.addEventListener('click', openSettingsModal);
+            if (retryBtn) retryBtn.addEventListener('click', startNewAnalysis);
+        }, 0);
+
         return `<div class="welcome-message" style="color: var(--danger-color);"><i class="fa-solid fa-triangle-exclamation fa-2x"></i><h3 style="color: var(--danger-color); border: none; margin-top:15px;">Ошибка анализа</h3><p>${errorMsg}</p>${keyInfo}${buttonHTML}</div>`;
     };
 
-    document.getElementById('response-wrapper').addEventListener('click', e => {
-        if (e.target && e.target.id === 'cancel-btn') {
-            if(controller) controller.abort();
-        }
-    });
-
     // --- SETTINGS ---
     const API_MODES = {
+        'mapruapp': { // RESTORED
+            uiName: 'Прокси (MapRuApp)',
+            icon: '<i class="fa-solid fa-server icon"></i>'
+        },
         'proxy': {
             uiName: 'Прокси (Vercel)',
             icon: '<i class="fa-solid fa-cloud icon"></i>'
@@ -745,7 +771,7 @@ window.addEventListener('load', () => {
         modelSelector.value = currentModelId;
 
         const savedApiMode = localStorage.getItem('analystApiMode');
-        currentApiMode = API_MODES[savedApiMode] ? savedApiMode : 'proxy';
+        currentApiMode = API_MODES[savedApiMode] ? savedApiMode : 'mapruapp';
         
         const selectedOption = modelSelector.options[modelSelector.selectedIndex];
         if(selectedOption) currentApiType = selectedOption.dataset.apiType;
