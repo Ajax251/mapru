@@ -182,7 +182,7 @@
                     <select id="model-selector"></select>
                 </div>
                 <div class="settings-control-group">
-                    <label for="page-scraper-selector">2. Выберите сервис для извлечения кода/текста</label>
+                    <label for="page-scraper-selector">2. Выберите сервис для извлечения HTML-кода</label>
                     <select id="page-scraper-selector">
                         <option value="vercel" selected>Vercel</option>
                         <option value="mapruapp">MapRuApp</option>
@@ -200,10 +200,8 @@ window.addEventListener('load', () => {
     const MAPRUAPP_PROXY_BASE_URL = "https://mapruapp.ru";
     
     // API endpoints for scraping/extraction
-    const VERCEL_LINK_EXTRACTOR_API = `${VERCEL_PROXY_BASE_URL}/api/extract-html-from-url`;
-    const MAPRUAPP_SCRAPER_API = `${MAPRUAPP_PROXY_BASE_URL}/page-scraper/get-source`;
-    // NEW: Proxied text extractor to solve CORS issues
-    const PROXIED_TEXT_EXTRACTOR_API = `${VERCEL_PROXY_BASE_URL}/api/extract-text-from-url`;
+    const VERCEL_HTML_EXTRACTOR_API = `${VERCEL_PROXY_BASE_URL}/api/extract-html-from-url`;
+    const MAPRUAPP_UNIVERSAL_EXTRACTOR_API = `${MAPRUAPP_PROXY_BASE_URL}/get-source`;
 
     const MODELS = [
         { id: "gemini-2.5-flash-lite-preview-06-17", uiName: "Gemini 2.5 Flash Lite (быстрая)", apiType: "gemini" },
@@ -249,7 +247,7 @@ window.addEventListener('load', () => {
 
 ---
 
-### **СТРУКТУРА ОТВЕТА (ОБЯЗАТЕЛЬНА):**
+### **СТРУКТРУРА ОТВЕТА (ОБЯЗАТЕЛЬНА):**
 # 📄 Анализ содержимого
 ### 🎯 Основная идея документа
 [В 2-3 предложениях изложи главную мысль или цель текста. О чем этот документ?]
@@ -333,14 +331,16 @@ window.addEventListener('load', () => {
             let systemPrompt, userPromptWithData, initialData, displayUserMessage;
             
             if (isContentAnalysis) {
+                // В режиме анализа контента (PDF)
                 showScreen('loading', 'Извлекаю текст из документа...');
-                initialData = await fetchContentText(url);
+                initialData = await fetchContentText(url); // Используем новую, исправленную функцию
                 systemPrompt = AI_SYSTEM_PROMPT_CONTENT_ANALYST;
                 userPromptWithData = `Проанализируй следующий текст:\n\n---\n${initialData}\n---`;
                 displayUserMessage = `Анализ содержимого по ссылке: ${url}`;
             } else {
+                // В режиме анализа HTML
                 showScreen('loading', 'Извлекаю код страницы...');
-                initialData = await fetchPageSource(url);
+                initialData = await fetchPageSource(url); // Эта функция по-прежнему использует выбор из настроек
                 systemPrompt = AI_SYSTEM_PROMPT_F1_ADVANCED;
                 userPromptWithData = `${AI_SYSTEM_PROMPT_F1_ADVANCED}\n\n--- НАЧАЛО HTML-КОДА ---\n${initialData}\n--- КОНЕЦ HTML-КОДА ---`;
                 displayUserMessage = `Создание инструкции для сайта: ${url}`;
@@ -349,9 +349,7 @@ window.addEventListener('load', () => {
             showScreen('loading', 'Анализирую и создаю ответ...');
             
             chatHistory.push({ role: 'system', content: systemPrompt });
-            // Push the data-heavy prompt for AI context, but it won't be rendered (see renderChatHistory)
             chatHistory.push({ role: 'user', content: userPromptWithData });
-            // Push a clean message for the user to see
             chatHistory.push({ role: 'user_display', content: displayUserMessage });
 
             const aiResponseText = await getAIResponse(chatHistory);
@@ -398,82 +396,82 @@ window.addEventListener('load', () => {
         }
     };
     
-    // NEW: Helper function to fetch from a specific scraper service
+    // Функция для извлечения HTML, которая уважает выбор пользователя и имеет fallback
     async function _fetchWithScraperService(serviceName, url) {
         let apiUrl, options;
         const fullUrl = url.startsWith('http://') || url.startsWith('https://') ? url : `https://${url}`;
 
         if (serviceName === 'mapruapp') {
-            apiUrl = MAPRUAPP_SCRAPER_API;
-            options = {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url: fullUrl }), signal: controller?.signal
-            };
+            apiUrl = MAPRUAPP_UNIVERSAL_EXTRACTOR_API;
         } else { // 'vercel' is the default
-            apiUrl = VERCEL_LINK_EXTRACTOR_API;
-            options = {
-                method: 'POST', headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ url: fullUrl }), signal: controller?.signal
-            };
+            apiUrl = VERCEL_HTML_EXTRACTOR_API;
         }
 
+        options = {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ url: fullUrl }), signal: controller?.signal
+        };
+        
         const response = await fetch(apiUrl, options);
         if (!response.ok) {
             const errorData = await response.json().catch(() => ({}));
             throw new Error(errorData.detail || errorData.error || `Сервис ${serviceName} не смог загрузить страницу. Статус: ${response.status}`);
         }
         const data = await response.json();
-        const sourceHtml = data.source_html || data.content;
+        // Ваш сервер возвращает 'content', сервер Vercel возвращал 'source_html'
+        const sourceHtml = data.content || data.source_html;
         if (!sourceHtml) {
-             throw new Error(`Сервис ${serviceName} не смог извлечь исходный код.`);
+             throw new Error(`Сервис ${serviceName} не смог извлечь контент.`);
         }
         return sourceHtml;
     }
 
-    // UPDATED: fetchPageSource now includes automatic fallback logic
     async function fetchPageSource(url) {
         const primaryService = currentPageScraperService;
         const fallbackService = primaryService === 'vercel' ? 'mapruapp' : 'vercel';
 
         try {
-            console.log(`Attempting to fetch with primary service: ${primaryService}`);
+            console.log(`Attempting to fetch HTML with primary service: ${primaryService}`);
             return await _fetchWithScraperService(primaryService, url);
         } catch (primaryError) {
-            console.warn(`Primary service (${primaryService}) failed:`, primaryError.message);
+            console.warn(`Primary service (${primaryService}) for HTML failed:`, primaryError.message);
             console.log(`Falling back to service: ${fallbackService}`);
             loadingText.textContent = `Основной сервис не отвечает, пробую резервный...`;
             
             try {
                 return await _fetchWithScraperService(fallbackService, url);
             } catch (fallbackError) {
-                console.error(`Fallback service (${fallbackService}) also failed:`, fallbackError.message);
-                throw new Error(`Оба сервиса извлечения данных не смогли обработать ссылку.`);
+                console.error(`Fallback service (${fallbackService}) for HTML also failed:`, fallbackError.message);
+                throw new Error(`Оба сервиса извлечения HTML не смогли обработать ссылку.`);
             }
         }
     }
     
-    // UPDATED: fetchContentText now uses a proxy to avoid CORS errors
+    // Эта функция теперь ПРИНУДИТЕЛЬНО использует ваш сервер mapruapp для PDF
     async function fetchContentText(url) {
-        // This function now sends a POST request to our own proxy, which then fetches the URL.
-        // This avoids browser-based CORS restrictions.
+        console.log("Forcing PDF/Text extraction via mapruapp.ru");
         try {
-            const response = await fetch(PROXIED_TEXT_EXTRACTOR_API, {
+            // Запрос всегда идет на ваш универсальный экстрактор
+            const response = await fetch(MAPRUAPP_UNIVERSAL_EXTRACTOR_API, {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ url: url }),
                 signal: controller?.signal
             });
+
              if (!response.ok) {
                 const errorData = await response.json().catch(() => ({}));
-                throw new Error(errorData.error || `Сервис извлечения текста ответил с ошибкой: ${response.status}`);
+                throw new Error(errorData.error || `Сервер mapruapp ответил с ошибкой: ${response.status}`);
             }
             const data = await response.json();
-            if (!data.text || data.text.trim() === '') {
-                throw new Error('Не удалось извлечь значимый текст из источника.');
+
+            // Проверяем, что сервер вернул именно текст, а не HTML
+            if (data.content_type !== 'text/plain' || !data.content) {
+                throw new Error('Сервер mapruapp не смог извлечь текст из PDF/документа.');
             }
-            return data.text;
+            return data.content; // Возвращаем чистый текст
         } catch (error) {
-            throw new Error(`Ошибка при извлечении текста: ${error.message}`);
+            throw new Error(`Ошибка при извлечении текста через mapruapp: ${error.message}`);
         }
     }
     
@@ -535,7 +533,6 @@ window.addEventListener('load', () => {
         return aiResponseText;
     }
 
-    // UPDATED: renderChatHistory now hides the data-heavy initial user prompt
     function renderChatHistory() {
         chatHistoryContainer.innerHTML = '';
         
@@ -612,6 +609,7 @@ window.addEventListener('load', () => {
             modelSelector.appendChild(option);
         });
     }
+    
     function saveAndCloseSettings() {
         currentModelId = modelSelector.value;
         currentPageScraperService = pageScraperSelector.value;
@@ -620,6 +618,7 @@ window.addEventListener('load', () => {
         settingsModalOverlay.classList.remove('show');
         updateSettingsDisplay();
     }
+
     function loadSettings() {
         currentModelId = localStorage.getItem('f1_modelId') || DEFAULT_MODEL_ID;
         currentPageScraperService = localStorage.getItem('f1_scraperService') || 'vercel';
@@ -627,10 +626,12 @@ window.addEventListener('load', () => {
         pageScraperSelector.value = currentPageScraperService;
         updateSettingsDisplay();
     }
+
     function updateSettingsDisplay() {
         const selectedModel = MODELS.find(m => m.id === currentModelId) || {uiName: "Неизвестная модель"};
         const scraperName = pageScraperSelector.options[pageScraperSelector.selectedIndex].text;
-        currentSettingsDisplay.textContent = `Модель: ${selectedModel.uiName.split('(')[0].trim()} | Извлечение: ${scraperName.split('(')[0].trim()}`;
+        // Текст в интерфейсе теперь более точно отражает реальность
+        currentSettingsDisplay.textContent = `Модель: ${selectedModel.uiName.split('(')[0].trim()} | HTML-экстрактор: ${scraperName.split('(')[0].trim()}`;
     }
 
     initializeApp();
