@@ -651,24 +651,41 @@ async function getAiAnalysisOfCurrentData() {
 }
 
 async function generateAndRunSql(userQuery) {
-    // ИЗМЕНЕНИЕ: Уточнены правила для ИИ, чтобы он использовал `ilike` и `OR` для поиска нескольких товаров
-    const system_prompt = `Ты - эксперт по SQL и базе данных PostgreSQL. Твоя задача - преобразовать запрос пользователя в ОДИН SQL-запрос. СТРУКТУРА ТАБЛИЦЫ 'prices': store (text), product_name (text), price (numeric), created_at (timestamp). ПРАВИЛА: 1. Для диаграмм верни колонки 'label' и 'value'. Если группируешь по названию товара, постарайся вернуть и 'store'. 2. Если пользователь просит найти ОДНУ запись по ОДНОМУ КРИТЕРИЮ (например, "самые дешевые шины"), верни ВСЕ колонки (*) этой строки с помощью \`ORDER BY ... LIMIT 1\`. 3. Для агрегации (среднее/кол-во) используй AVG, COUNT. 4. Для поиска по тексту используй 'ilike'. Например, для "шины" используй \`product_name ilike '%шины%'\`. 5. Если пользователь перечисляет несколько товаров (например, "шины, аккумулятор"), используй несколько 'ilike' с оператором 'OR'. Пример: \`(product_name ilike '%шины%' OR product_name ilike '%аккумулятор%')\`. НЕ используй \`IN ('шины', 'аккумулятор')\`. 6. Твой ответ должен содержать ТОЛЬКО SQL-код. Без объяснений.`;
-    const sqlQuery = await callAI(system_prompt, userQuery);
-    
-    const cleanedFromMarkdown = sqlQuery.replace(/^```(?:sql)?\s*|\s*```$/g, '').trim();
-    const cleanedSqlQuery = cleanedFromMarkdown.replace(/;\s*$/, '');
+    // ИЗМЕНЕНИЕ: Исправлена синтаксическая ошибка. Внутренние обратные кавычки экранированы с помощью \`
+    const system_prompt = `Ты - эксперт по SQL и базе данных PostgreSQL. Твоя задача - преобразовать запрос пользователя в ОДИН SQL-запрос. СТРУКТУРА ТАБЛИЦЫ 'prices': store (text), product_name (text), price (numeric), created_at (timestamp). ПРАВИЛА:
+1.  **Диаграммы**: Если пользователь просит "диаграмму", верни колонки 'label' и 'value'.
+2.  **Агрегация**: Для запросов "средняя цена", "количество" используй AVG, COUNT.
+3.  **Поиск минимума/максимума**: Если запрос содержит слова "минимальная", "максимальная", "самая дешевая/дорогая", используй \`ORDER BY price ASC/DESC LIMIT 1\` и верни все колонки (*).
+4.  **Поиск нескольких минимумов**: Если пользователь ищет минимум для НЕСКОЛЬКИХ товаров (например, "минимальные шины, ryzen"), это сложный случай, который будет обработан на клиенте. Твоя задача - просто найти все товары, содержащие эти слова, используя 'OR'. Пример: \`(product_name ilike '%шины%' OR product_name ilike '%ryzen%')\`. НЕ добавляй LIMIT.
+5.  **Общий поиск**: Если запрос — это просто поиск товаров (например, "найди все шины"), ВЕРНИ ВСЕ НАЙДЕННЫЕ ТОВАРЫ. НЕ ИСПОЛЬЗУЙ \`LIMIT\`.
+6.  **Поиск по тексту**: Всегда используй 'ilike'. Пример: \`product_name ilike '%шины%'\`.
+7.  **Формат ответа**: Твой ответ должен содержать ТОЛЬКО SQL-код. Без объяснений.`;
+        
+    let finalSqlQuery = '';
 
-    const { data, error } = await supabaseClient.rpc('execute_sql', { sql_query: cleanedSqlQuery });
+    const multiMinMatch = userQuery.match(/(минимальные?|самые? деш[её]вые)\s(.+)/i);
+    if (multiMinMatch && multiMinMatch[2] && multiMinMatch[2].split(/,| и /).length > 1) {
+        const items = multiMinMatch[2].split(/,| и /).map(item => item.trim()).filter(Boolean);
+        finalSqlQuery = items.map(item => 
+            `(SELECT * FROM prices WHERE product_name ILIKE '%${item}%' ORDER BY price ASC LIMIT 1)`
+        ).join(' UNION ALL ');
+    } else {
+        const sqlQuery = await callAI(system_prompt, userQuery);
+        const cleanedFromMarkdown = sqlQuery.replace(/^```(?:sql)?\s*|\s*```$/g, '').trim();
+        finalSqlQuery = cleanedFromMarkdown.replace(/;\s*$/, '');
+    }
+
+    const { data, error } = await supabaseClient.rpc('execute_sql', { sql_query: finalSqlQuery });
     
     if (error) { throw new Error(`Ошибка выполнения SQL: ${error.message}`); }
     if (!data || data.length === 0) { return { type: 'text', content: '<p>По вашему запросу ничего не найдено.</p>' }; }
 
     const keys = Object.keys(data[0]);
-    const isSingleRowResult = keys.includes('product_name') && keys.includes('price') && data.length === 1;
-    const isAggregation = !isSingleRowResult && (keys.includes('avg') || keys.includes('count'));
+    const isItemResult = keys.includes('product_name') && keys.includes('price');
+    const isAggregation = !isItemResult && (keys.includes('avg') || keys.includes('count'));
     const isChartData = keys.includes('label') && keys.includes('value');
 
-    if (isSingleRowResult) {
+    if (isItemResult && data.length === 1 && !multiMinMatch) { 
         return { type: 'single_item', data: data[0] };
     } else if (isAggregation) {
         const result = data[0];
@@ -678,8 +695,9 @@ async function generateAndRunSql(userQuery) {
         return { type: 'text', content: html + '</ul>' };
     } else if (isChartData) {
         return { type: 'chart', data: data, title: userQuery };
+    } else if (isItemResult) {
+        return { type: 'table', data: data };
     } else {
-        // Если вернулось несколько строк, выводим их как таблицу
         return { type: 'table', data: data };
     }
 }
@@ -687,15 +705,20 @@ async function generateAndRunSql(userQuery) {
 
 function handleAiResponse(response) {
     if (response.type === 'text') {
+        // Текстовые ответы (агрегация, ошибки) остаются в чате
         addMessageToChat(response.content, 'ai');
     } else if (response.type === 'chart') {
+        // Диаграммы рендерятся в визуальной области
         renderChartInVisualArea(response.data);
+        // В чат идет только уведомление
         addMessageToChat(`Я построил диаграмму по вашему запросу: "${response.title}"`, 'ai');
     } else if (response.type === 'table') {
+        // Таблицы с товарами рендерятся в визуальной области
         renderTableInVisualArea(response.data);
+        // В чат идет только уведомление
         addMessageToChat(`Я нашел ${response.data.length} записей и вывел их в визуальной области выше.`, 'ai');
     } else if (response.type === 'single_item') {
-        // НОВЫЙ БЛОК: красиво форматируем вывод одной найденной строки
+        // Ответ с одним товаром (мин/макс) остается в чате для наглядности
         const item = response.data;
         let html = `<p>Вот что я нашел:</p>
                     <ul style="list-style-type: none; padding-left: 0;">
