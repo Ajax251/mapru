@@ -1577,24 +1577,6 @@ function convertToCsv(headers, dataArray) {
     return [headerRow, ...dataRows].join('\n');
 }
 
-// Функция для копирования кадастрового номера и открытия egrn.html
-function copyAndOpen(cadNum) {
-    if (!cadNum) return; // Проверка, что кадастровый номер не пустой
-
-    navigator.clipboard.writeText(cadNum)
-        .then(() => {
-            showNotification(`Номер ${cadNum} скопирован в буфер`, 'success');
-            // Открываем новую вкладку. Предполагается, что egrn.html 
-            // при загрузке будет использовать номер из буфера обмена.
-            window.open('egrn.html', '_blank');
-        })
-        .catch(err => {
-            console.error('Ошибка при копировании:', err);
-            showNotification('Не удалось скопировать кадастровый номер', 'error');
-        });
-}
-
-
 // --- Helper function for adding delay ---
 function sleep(ms) {
   return new Promise(resolve => setTimeout(resolve, ms));
@@ -2026,15 +2008,18 @@ async function exportToExcel() {
 }
 
 
-// Основная функция запроса данных (финальная версия)
+// Основная функция запроса данных
 function fetchData(keepModalOpen = false) {
     const cadastralNumber = document.getElementById('cadastralNumber').value;
-
+    
+      // Если поле пустое, открываем окно поиска
     if (!cadastralNumber.trim()) {
         openSite();
         return;
     }
+    
 
+    // Меняем заголовок страницы на введенный кадастровый номер
     document.title = `${cadastralNumber}`;
 
     if (!isValidCadastralNumber(cadastralNumber)) {
@@ -2042,7 +2027,7 @@ function fetchData(keepModalOpen = false) {
         return;
     }
 
-    const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(cadastralNumber)}`;
+    const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${cadastralNumber}`;
 
     fetch(url)
         .then(response => response.json())
@@ -2056,67 +2041,13 @@ function fetchData(keepModalOpen = false) {
             const properties = feature.properties;
             const options = properties.options;
             const geometry = feature.geometry;
-            const geomId = feature.id;
-            const categoryName = properties.categoryName;
 
-            if (categoryName === "Земельные участки ЕГРН") {
-                const categoryId = properties.category;
-                const secondApiUrl = `https://nspd.gov.ru/api/geoportal/v1/tab-group-data?tabClass=objectsList&categoryId=${categoryId}&geomId=${geomId}`;
-                
-                console.log("Тип: Земельный участок. Запрашиваю связанные ОКС.");
-                console.log("URL второго запроса:", secondApiUrl);
+            // Обновляем данные участка
+            updatePropertyData(options, properties);
 
-                fetch(secondApiUrl)
-                    .then(response2 => response2.json())
-                    .then(data2 => {
-                        let oknList = null;
-                        if (data2 && data2.object && data2.object.length > 0 && data2.object[0].value) {
-                            oknList = data2.object[0].value;
-                        }
-                        updatePropertyData(options, properties, oknList, null);
-                    })
-                    .catch(error2 => {
-                        console.error('Ошибка при запросе списка ОКС:', error2);
-                        updatePropertyData(options, properties, null, null);
-                    });
-            } else {
-                if (!properties.options || !properties.options.registersId) {
-                    console.error('Не удалось извлечь registersId из ответа. Обновляем данные без связанного ЗУ.');
-                    updatePropertyData(options, properties, null, null);
-                } else {
-                    const registersId = properties.options.registersId;
-                    // --- ИСПРАВЛЕНИЕ ЗДЕСЬ: заменен '®' на '&' ---
-                   const secondApiUrl = `https://nspd.gov.ru/api/geoportal/v1/tab-values-data?tabClass=landLinks&objdocId=${geomId}&registersId=${registersId}`;
-                    // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
-                    
-                    console.log("Тип: ОКС. Запрашиваю связанный ЗУ.");
-                    console.log("Параметры:", { geomId: geomId, registersId: registersId });
-                    console.log("URL второго запроса:", secondApiUrl);
-                    
-                    fetch(secondApiUrl)
-                        .then(response2 => {
-                            if (!response2.ok) {
-                                throw new Error(`HTTP ошибка! Статус: ${response2.status}`);
-                            }
-                            return response2.json();
-                        })
-                        .then(data2 => {
-                            let landParcelList = null;
-                            if (data2 && data2.value && data2.value.length > 0) {
-                                landParcelList = data2.value;
-                            }
-                            updatePropertyData(options, properties, null, landParcelList);
-                        })
-                        .catch(error2 => {
-                            console.error('Ошибка при запросе связанного ЗУ:', error2);
-                            updatePropertyData(options, properties, null, null);
-                        });
-                }
-            }
-
-            // Блок обработки геометрии (без изменений)
+            // Обработка геометрии
             if (geometry.type === "Polygon") {
-                currentCoords = geometry.coordinates;
+                currentCoords = geometry.coordinates; // Сохраняем все кольца полигона
                 document.querySelector('.content-container').style.display = 'grid';
                 setTimeout(() => drawScheme(), 0);
             } else if (geometry.type === "Point") {
@@ -2125,15 +2056,18 @@ function fetchData(keepModalOpen = false) {
                 document.querySelector('.scheme-container').style.display = 'none';
                 document.querySelector('.data-container').style.width = '100%';
                 clearCanvas();
-            } else if (geometry.type === "MultiPolygon") {
-               currentCoords = geometry.coordinates;
+            }
+            else if (geometry.type === "MultiPolygon") {
+               currentCoords = geometry.coordinates; // Сохраняем все полигоны
                 document.querySelector('.content-container').style.display = 'grid';
-                setTimeout(() => drawScheme(), 0);
-            } else if (geometry.type === "MultiLineString") {
+                setTimeout(() => drawScheme(), 0); // Перерисовываем с учетом MultiPolygon
+            }
+              else if (geometry.type === "MultiLineString") {  // Добавляем обработку MultiLineString
                 currentCoords = geometry.coordinates;
                 document.querySelector('.content-container').style.display = 'grid';
                 setTimeout(() => drawScheme(), 0);
-            } else {
+            }
+            else {
                 document.querySelector('.content-container').style.display = 'block';
                 document.querySelector('.scheme-container').style.display = 'none';
                 document.querySelector('.data-container').style.width = '100%';
@@ -2141,7 +2075,10 @@ function fetchData(keepModalOpen = false) {
                 clearCanvas();
             }
 
+            // Отображаем таблицу
             document.getElementById('resultTable').style.display = 'table';
+
+            // Закрываем виртуальную клавиатуру, если она была открыта
             const keyboard = document.getElementById('virtualKeyboard');
             if (keyboard.classList.contains('active')) {
                 toggleVirtualKeyboard();
@@ -2149,9 +2086,13 @@ function fetchData(keepModalOpen = false) {
         })
         .catch(error => {
             console.error('Ошибка:', error);
-            showNotification('Произошла ошибка при выполнении запроса: ' + error.message, 'error');
+            showNotification('Произошла ошибка при выполнении запроса', 'error');
         });
 }
+
+
+
+
 
       // Функция для конвертации координат из EPSG:3857 в WGS84 (EPSG:4326)
         function convertToWGS84(x, y) {
@@ -2323,39 +2264,45 @@ function formatNumberWithSpaces(number) {
 }
 
 // Обновление данных в таблице
-function updatePropertyData(options, properties, oknList = null, landParcelList = null) {
+function updatePropertyData(options, properties) {
     const tableBody = document.querySelector('#resultTable tbody');
     tableBody.innerHTML = '';
 
     const categoryName = properties.categoryName;
     let data = [];
 
+    // 1. Категория (всегда есть)
     data.push({ field: 'Категория', value: categoryName });
 
+    // 2. Тип права (всегда есть, значение по умолчанию '-')
     let displayRightType;
     if (options.right_type) {
         displayRightType = options.right_type;
-        if (options.ownership_type) {
+        if (options.ownership_type) { // Если есть тип права и форма собственности
             displayRightType += ` (${options.ownership_type})`;
         }
-    } else if (options.ownership_type) {
+    } else if (options.ownership_type) { // Если нет типа права, но есть форма собственности
         displayRightType = `Не зарегистрировано (${options.ownership_type})`;
-    } else {
+    } else { // Если нет ни типа права, ни формы собственности
         displayRightType = '-';
     }
     data.push({ field: 'Тип права', value: displayRightType });
+
+    // 3. Форма собственности (всегда есть, значение по умолчанию '-')
     const displayOwnershipType = options.ownership_type || '-';
     data.push({ field: 'Форма собственности', value: displayOwnershipType });
 
+    // Общие поля для всех объектов (будут добавлены ниже в зависимости от категории)
     const commonFields = [
         { field: 'Кадастровый номер', value: options.cad_num || options.cad_number },
         { field: 'Статус', value: options.status || options.common_data_status },
         { field: 'Адрес', value: options.readable_address || options.address_readable_address },
-        {
+        { // Индекс 3: Кадастровая стоимость (логика будет здесь)
             field: 'Кадастровая стоимость',
             value: () => {
                 let costValue = options.cost_value;
                 let area = null;
+
                 if (categoryName === "Земельные участки ЕГРН") {
                     if (options.specified_area) { area = parseFloat(options.specified_area); }
                     else if (options.land_record_area_verified) { area = parseFloat(options.land_record_area_verified); }
@@ -2367,6 +2314,7 @@ function updatePropertyData(options, properties, oknList = null, landParcelList 
                 } else if (categoryName === "Сооружения") {
                     area = options.params_area ? parseFloat(options.params_area) : null;
                 }
+
                 if (costValue && !isNaN(parseFloat(costValue))) {
                     costValue = parseFloat(costValue);
                     let formattedCost = formatNumberWithSpaces(costValue) + " руб.";
@@ -2382,25 +2330,13 @@ function updatePropertyData(options, properties, oknList = null, landParcelList 
         { field: 'Дата определения стоимости', value: formatDate(options.cost_determination_date) },
         { field: 'Дата обновления', value: formatDate(properties.systemInfo?.updated) || 'Нет данных' }
     ];
-    
-    // Функция для генерации HTML с иконками
-    const createCadastralListHtml = (cadList) => {
-        return cadList.map(cn => `
-            <div style="display: flex; align-items: center; margin-bottom: 3px;">
-                <span>${cn}</span>
-                <img src="img/savannah.png" 
-                     onclick="copyAndOpen('${cn}')" 
-                     style="cursor: pointer; width: 16px; height: 16px; margin-left: 8px; vertical-align: middle;" 
-                     title="Скопировать и открыть ${cn}">
-            </div>
-        `).join('');
-    };
 
     if (categoryName === "Земельные участки ЕГРН") {
         const subtype = options.subtype || options.land_record_subtype;
         if (subtype) {
             data.push({ field: 'Вид', value: subtype });
         }
+
         const ezLinkContainer = document.getElementById('ezLinkContainer');
         if (subtype === "Обособленный участок" || subtype === "Единое землепользование" || subtype === "Условный участок") {
             ezLinkContainer.style.display = 'block';
@@ -2423,11 +2359,13 @@ function updatePropertyData(options, properties, oknList = null, landParcelList 
         } else {
             ezLinkContainer.style.display = 'none';
         }
-        data.push(commonFields[0]);
-        data.push(commonFields[1]);
+        
+        data.push(commonFields[0]); // Кад. номер
+        data.push(commonFields[1]); // Статус
         if (options.land_record_reg_date) {
             data.push({ field: 'Дата присвоения', value: formatDate(options.land_record_reg_date) });
         }
+        
         let areaText = '';
         if (options.specified_area) { areaText = `${options.specified_area} м² (уточненная)`; }
         else if (options.land_record_area_verified) { areaText = `${options.land_record_area_verified} м² (уточненная)`; }
@@ -2435,56 +2373,42 @@ function updatePropertyData(options, properties, oknList = null, landParcelList 
         else if (options.land_record_area_declaration) { areaText = `${options.land_record_area_declaration} м² (декларированная)`; }
         else if (options.declared_area) { areaText = `${options.declared_area} м² (декларированная)`; }
         data.push({ field: 'Площадь', value: areaText });
-        data.push(commonFields[2]);
-        data.push(commonFields[3]);
-        data.push(commonFields[4]);
+
+        data.push(commonFields[2]); // Адрес
+        data.push(commonFields[3]); // Кад. стоимость (function)
+        data.push(commonFields[4]); // Дата определения стоимости
         data.push({ field: 'Категория земель', value: options.land_record_category_type });
         data.push({ field: 'Разрешённое использование', value: options.permitted_use_established_by_document });
-        
-        if (oknList && oknList.length > 0) {
-            data.push({ field: 'ОКС на ЗУ', value: createCadastralListHtml(oknList) });
-        }
-
-        data.push(commonFields[5]);
+        data.push(commonFields[5]); // Дата обновления
         data.push({ field: 'Дата внесения', value: formatDate(properties.systemInfo?.inserted) || '' });
 
     } else if (categoryName === "Помещения") {
-        data.push(commonFields[0]);
-        data.push(commonFields[1]);
+        data.push(commonFields[0]); // Кад. номер
+        data.push(commonFields[1]); // Статус
         data.push({ field: 'Площадь', value: options.area ? `${options.area} м²` : '' });
-        data.push(commonFields[2]);
-        data.push(commonFields[3]);
-        data.push(commonFields[4]);
+        data.push(commonFields[2]); // Адрес
+        data.push(commonFields[3]); // Кад. стоимость
+        data.push(commonFields[4]); // Дата определения стоимости
         data.push({ field: 'Назначение', value: options.purpose });
         data.push({ field: 'Тип помещения', value: options.params_type });
         data.push({ field: 'Этаж', value: Array.isArray(options.floor) ? options.floor.join(', ') : options.floor });
         data.push({ field: 'Кадастровый номер здания', value: options.parent_cad_number });
-        
-        if (landParcelList && landParcelList.length > 0) {
-            data.push({ field: 'Расположен на ЗУ', value: createCadastralListHtml(landParcelList) });
-        }
-        
         data.push({ field: 'Общее имущество', value: options.common_property === "false" ? "Нет" : "Да" });
         data.push({ field: 'Имущество общего пользования', value: options.service_common_property });
         data.push({ field: 'Дата регистрации', value: formatDate(options.registration_date) });
         data.push({ field: 'Кадастровый номер объекта', value: options.facility_cad_number });
-        data.push(commonFields[5]);
+        data.push(commonFields[5]); // Дата обновления
         data.push({ field: 'Дата внесения', value: formatDate(properties.systemInfo?.inserted) || '' });
 
     } else if (categoryName === "Сооружения") {
-        data.push(commonFields[0]);
-        data.push(commonFields[1]);
-        data.push(commonFields[2]);
+        data.push(commonFields[0]); // Кад. номер
+        data.push(commonFields[1]); // Статус
+        data.push(commonFields[2]); // Адрес
         data.push({ field: 'Площадь', value: options.params_area ? `${options.params_area} м²` : 'Нет данных' });
-        data.push(commonFields[3]);
-        data.push(commonFields[4]);
+        data.push(commonFields[3]); // Кад. стоимость
+        data.push(commonFields[4]); // Дата определения стоимости
         data.push({ field: 'Наименование', value: options.params_name || 'Нет данных' });
         data.push({ field: 'Назначение', value: options.params_purpose || 'Нет данных' });
-        
-        if (landParcelList && landParcelList.length > 0) {
-            data.push({ field: 'Расположен на ЗУ', value: createCadastralListHtml(landParcelList) });
-        }
-
         data.push({ field: 'Год постройки', value: options.params_year_built || 'Нет данных' });
         data.push({ field: 'Год ввода в эксплуатацию', value: options.params_year_commisioning || 'Нет данных' });
         data.push({ field: 'Дата регистрации', value: formatDate(options.registration_date) || 'Нет данных' });
@@ -2495,23 +2419,18 @@ function updatePropertyData(options, properties, oknList = null, landParcelList 
         data.push({ field: 'Количество этажей', value: options.params_floors || 'Нет данных' });
         data.push({ field: 'Количество подземных этажей', value: options.params_underground_floors || 'Нет данных' });
         data.push({ field: 'Кадастровый номер квартала', value: options.quarter_cad_number || 'Нет данных' });
-        data.push(commonFields[5]);
-        data.push({ field: 'Дата внесения', value: formatDate(properties.systemInfo?.inserted) || '' });
+        data.push(commonFields[5]); // Дата обновления
+        data.push({ field: 'Дата внесения', value: formatDate(properties.systemInfo?.inserted) || 'Нет данных' });
 
     } else if (categoryName === "Здания") {
-        data.push(commonFields[0]);
-        data.push(commonFields[1]);
+        data.push(commonFields[0]); // Кад. номер
+        data.push(commonFields[1]); // Статус
         data.push({ field: 'Площадь', value: options.area ? `${options.area} м²` : '' });
-        data.push(commonFields[2]);
-        data.push(commonFields[3]);
-        data.push(commonFields[4]);
+        data.push(commonFields[2]); // Адрес
+        data.push(commonFields[3]); // Кад. стоимость
+        data.push(commonFields[4]); // Дата определения стоимости
         data.push({ field: 'Назначение', value: options.purpose });
         data.push({ field: 'Наименование', value: options.name || options.building_name });
-
-        if (landParcelList && landParcelList.length > 0) {
-            data.push({ field: 'Расположен на ЗУ', value: createCadastralListHtml(landParcelList) });
-        }
-
         data.push({ field: 'Количество этажей', value: options.floors });
         data.push({ field: 'Год постройки', value: options.year_built });
         data.push({ field: 'Площадь здания', value: options.build_record_area ? `${options.build_record_area} м²` : '' });
@@ -2521,35 +2440,25 @@ function updatePropertyData(options, properties, oknList = null, landParcelList 
         data.push({ field: 'Кадастровый номер квартала', value: options.quarter_cad_number });
         data.push({ field: 'Количество подземных этажей', value: options.underground_floors });
         data.push({ field: 'Объединенные кадастровые номера', value: options.united_cad_numbers });
-        data.push(commonFields[5]);
+        data.push(commonFields[5]); // Дата обновления
         data.push({ field: 'Дата внесения', value: formatDate(properties.systemInfo?.inserted) || '' });
     }
 
+    // Фильтруем данные, чтобы убрать пустые значения
     data = data.filter(item => {
         const value = typeof item.value === 'function' ? item.value() : item.value;
         return value !== null && value !== undefined && value !== '';
     });
 
-    tableBody.innerHTML = '';
+    tableBody.innerHTML = ''; // Clear previous table rows before appending new rows
 
     data.forEach(row => {
         const tr = document.createElement('tr');
         const value = typeof row.value === 'function' ? row.value() : row.value;
-
-        // --- ИЗМЕНЕНИЕ: ВОЗВРАЩАЕМ ЖИРНЫЙ ШРИФТ ---
-        // Проверяем, содержит ли значение HTML-теги
-        const isHtml = /<[a-z][\s\S]*>/i.test(value);
-        
-        // Если это не HTML, оборачиваем в <strong>. Если HTML - вставляем как есть.
-        const valueCellContent = isHtml ? value : `<strong>${value}</strong>`;
-        
-        tr.innerHTML = `<td>${row.field}</td><td>${valueCellContent}</td>`;
-        // --- КОНЕЦ ИЗМЕНЕНИЯ ---
-
+        tr.innerHTML = `<td>${row.field}</td><td><strong>${value}</strong></td>`;
         tableBody.appendChild(tr);
     });
 }
-
 
 function calculateDistance(coord1, coord2) {
     const dx = coord2[0] - coord1[0];
