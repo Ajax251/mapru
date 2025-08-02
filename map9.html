@@ -8805,13 +8805,11 @@ async function fetchSupabaseZip(bucketName, filePathInBucket) {
 
 async function fetchOksOnZuHandler(lat, lon) {
     showLoader("Поиск земельного участка...");
-    // Переменная для хранения кадастрового номера ЗУ, на случай если второй запрос не удастся
-    let zuCadastralNumberForDisplay = "Не удалось определить ЗУ";
 
     try {
         // Шаг 1: Находим ЗУ по координатам клика
         const cadastralInfo = await queryCadastralInfo(lat, lon);
-        if (!cadastralInfo || !cadastralInfo.features || cadastralInfo.features.length === 0) {
+        if (!cadastralInfo || !cadastralInfo.features || !cadastralInfo.features.length === 0) {
             throw new Error('Не удалось определить земельный участок в точке клика.');
         }
 
@@ -8820,10 +8818,8 @@ async function fetchOksOnZuHandler(lat, lon) {
         if (!zuCadastralNumber) {
             throw new Error('Не удалось получить кадастровый номер земельного участка.');
         }
-        // Сохраняем КН для отображения в модальном окне даже в случае ошибки
-        zuCadastralNumberForDisplay = zuCadastralNumber;
 
-        // Отрисовка контура и метки найденного ЗУ
+        // --- НАЧАЛО ИЗМЕНЕНИЙ: Отрисовка контура и метки ЗУ ---
         if (zuFeature.geometry && zuFeature.geometry.coordinates) {
             const coordinates = zuFeature.geometry.coordinates[0].map(coord => {
                 const point = proj4('EPSG:3857', 'EPSG:4326', coord);
@@ -8836,7 +8832,7 @@ async function fetchOksOnZuHandler(lat, lon) {
             ]);
 
             const polygon = new ymaps.Polygon([offsetCoordinates], {}, {
-                strokeColor: polygonStyle.color,
+                strokeColor: polygonStyle.color, // Используем глобальный цвет стиля
                 strokeWidth: polygonStyle.width,
                 strokeOpacity: 0.8,
                 fillColor: '#00000000',
@@ -8854,6 +8850,7 @@ async function fetchOksOnZuHandler(lat, lon) {
                 (bounds[0][1] + bounds[1][1]) / 2
             ];
 
+            // Обновляем отображение адреса
             getAddressByCoords(centerGeo).then(address => {
                 document.getElementById('city-name-display').innerHTML = address;
             });
@@ -8878,34 +8875,29 @@ async function fetchOksOnZuHandler(lat, lon) {
             map.geoObjects.add(cadastralText);
             polygons.push(cadastralText);
         }
+        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         showLoader(`Запрос ОКС для ${zuCadastralNumber}...`);
 
-        // Шаг 2: Получаем ID и категорию ЗУ по его кадастровому номеру
+        // Шаг 2: Получаем ID и категорию ЗУ по его кадастровому номеру (первый API-запрос)
         const firstApiUrl = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?query=${encodeURIComponent(zuCadastralNumber)}&thematicSearchId=1`;
         const response1 = await fetch(firstApiUrl);
         if (!response1.ok) throw new Error(`Ошибка запроса к НСПД (1): ${response1.status}`);
         const data1 = await response1.json();
 
-        // Проверяем, что feature и properties существуют, прежде чем обращаться к ним
-        const feature = data1?.data?.features?.[0];
-        if (!feature) {
-             console.warn(`Объект с КН ${zuCadastralNumber} не найден в НСПД по КН, хотя был найден по координатам.`);
-             displayOksInModal(null, zuCadastralNumber); // Показываем модальное окно с сообщением "не найдено"
-             return; // Завершаем выполнение функции
+        if (!data1.data || !data1.data.features || data1.data.features.length === 0) {
+            throw new Error(`Объект с КН ${zuCadastralNumber} не найден в НСПД.`);
         }
 
+        const feature = data1.data.features[0];
         const geomId = feature.id;
-        // Безопасно получаем categoryId, используя опциональную цепочку (?.)
-        const categoryId = feature.properties?.category;
+        const categoryId = feature.properties.category;
 
         if (!geomId || !categoryId) {
-            console.warn(`Не удалось извлечь ID (${geomId}) или категорию (${categoryId}) для ${zuCadastralNumber}. Поиск ОКС невозможен.`);
-            displayOksInModal(null, zuCadastralNumber); // Показываем модальное окно с сообщением "не найдено"
-            return; // Завершаем выполнение функции
+            throw new Error('Не удалось извлечь ID или категорию из ответа НСПД.');
         }
 
-        // Шаг 3: Получаем список связанных объектов
+        // Шаг 3: Получаем список связанных объектов (второй API-запрос)
         const secondApiUrl = `https://nspd.gov.ru/api/geoportal/v1/tab-group-data?tabClass=objectsList&categoryId=${categoryId}&geomId=${geomId}`;
         const response2 = await fetch(secondApiUrl);
         if (!response2.ok) throw new Error(`Ошибка запроса к НСПД (2): ${response2.status}`);
@@ -8915,13 +8907,8 @@ async function fetchOksOnZuHandler(lat, lon) {
         displayOksInModal(data2, zuCadastralNumber);
 
     } catch (error) {
-        // В случае любой ошибки на любом из шагов
-        console.error("Ошибка в fetchOksOnZuHandler:", error);
-        showNotification('ОКС не найдены или произошла ошибка при запросе', 'error', 'exclamation-circle');
-        // Вызываем модальное окно с сообщением об ошибке
-        displayOksInModal(null, zuCadastralNumberForDisplay);
+        showNotification(error.message, 'error', 'exclamation-circle');
     } finally {
-        // Гарантированно скрываем загрузчик в конце
         hideLoader();
     }
 }
@@ -8952,8 +8939,7 @@ function displayOksInModal(data, zuCadNum) {
     let oksFound = false;
     let oksCadastralNumbers = [];
 
-    // Используем более безопасную проверку с опциональной цепочкой (?.)
-    if (data?.object?.[0]?.value && Array.isArray(data.object[0].value)) {
+    if (data && data.object && Array.isArray(data.object) && data.object.length > 0 && data.object[0].value && Array.isArray(data.object[0].value)) {
         oksCadastralNumbers = data.object[0].value;
 
         if (oksCadastralNumbers.length > 0) {
