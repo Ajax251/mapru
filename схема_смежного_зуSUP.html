@@ -614,9 +614,11 @@ let currentTextareaIdForKNLoad = null;
 let notificationQueue = [];
 let isNotificationActive = false;
 
-const STORAGE_API_URL = 'https://mapruapp.ru/storage'; 
-const BUCKET_NAME = 'kpt';
 
+const SUPABASE_URL = 'https://krbqraivfbowmzvucjxz.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtyYnFyYWl2ZmJvd216dnVjanh6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDU1MDA0MTAsImV4cCI6MjA2MTA3NjQxMH0.Aun2UJDEW_75_Di-2hIcap42gqyZAu2XY9xiZpmShPc';
+const BUCKET_NAME = 'gkn';
+let supabaseClient = null;
 const sevenDigitsRegions = ['24', '50', '63', '66', '77', '78', '91'];
 
 
@@ -1413,13 +1415,21 @@ function isValidCadastralNumberSupabase(text) {
 }
 
 async function loadFromSupabaseByKN(fullCadNumber) {
-  
+    if (!supabaseClient) {
+        try {
+            supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+        } catch (e) {
+            console.error("Failed to create Supabase client:", e);
+            throw new Error("Не удалось инициализировать клиент Supabase. Проверьте подключение к интернету и настройки.");
+        }
+    }
+    if (!supabaseClient) throw new Error("Клиент Supabase не инициализирован.");
 
     const parts = fullCadNumber.split(':');
     if (parts.length < 3) throw new Error("Не удалось извлечь кадастровый квартал из номера.");
     const quarterNumber = parts.slice(0, 3).join(':');
 
-    const { xmlContent, kptFileName } = await fetchAndProcessKPTFromServer(quarterNumber, fullCadNumber);
+    const { xmlContent, kptFileName } = await fetchAndProcessKPTFromSupabase(quarterNumber, fullCadNumber);
     const { parcelContours, parcelData } = await processXMLDataFromSupabase(xmlContent, fullCadNumber, kptFileName);
     
     const parcelDataForCheck = parcelData ? {
@@ -1431,43 +1441,37 @@ async function loadFromSupabaseByKN(fullCadNumber) {
     return { parcelContours, parcelDataForCheck };
 }
 
-async function fetchAndProcessKPTFromServer(quarterNumber, fullCadNumber) {
-    const serverQuarterPrefix = quarterNumber.replace(/:/g, '_');
+async function fetchAndProcessKPTFromSupabase(quarterNumber, fullCadNumber) {
+    const supabaseQuarterPrefix = quarterNumber.replace(/:/g, '_');
 
-    // 1. Получаем список файлов с вашего сервера
-    const responseList = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}?search=${serverQuarterPrefix}`);
-    if (!responseList.ok) {
-        throw new Error(`Ошибка получения списка файлов: ${responseList.statusText}`);
+    const { data: fileList, error: listError } = await supabaseClient.storage
+        .from(BUCKET_NAME)
+        .list(null, { limit: 200, offset: 0, search: supabaseQuarterPrefix });
+
+    if (listError) {
+        console.error("Supabase listError:", listError);
+        throw new Error(`Supabase: Ошибка получения списка файлов: ${listError.message}. Проверьте интернет или доступ к базе.`);
     }
-    const fileList = await responseList.json();
+    if (!fileList || fileList.length === 0) throw new Error(`Supabase: КПТ для квартала ${quarterNumber} не найдены.`);
 
-    if (!fileList || fileList.length === 0) {
-        throw new Error(`КПТ для квартала ${quarterNumber} не найдены на сервере.`);
-    }
-
-    // 2. Находим самый свежий файл
     const matchingFiles = fileList.filter(file =>
-        file.name.startsWith(serverQuarterPrefix) && file.name.toLowerCase().endsWith('.zip')
+        file.name.startsWith(supabaseQuarterPrefix) && file.name.toLowerCase().endsWith('.zip')
     );
-    if (matchingFiles.length === 0) {
-        throw new Error(`ZIP-архивы КПТ для квартала ${quarterNumber} не найдены.`);
-    }
-    const latestFile = findLatestKptFileSupabase(matchingFiles); // Используем существующую функцию поиска
-    if (!latestFile) {
-        throw new Error("Не удалось определить последний файл КПТ.");
-    }
+    if (matchingFiles.length === 0) throw new Error(`Supabase: ZIP-архивы КПТ для ${quarterNumber} не найдены.`);
 
-    // 3. Скачиваем выбранный файл с вашего сервера
-    const responseDownload = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}/${latestFile.name}`);
-    if (!responseDownload.ok) {
-        throw new Error(`Ошибка загрузки файла ${latestFile.name}: ${responseDownload.statusText}`);
-    }
-    const blob = await responseDownload.blob();
-    if (!blob) {
-        throw new Error("Не удалось получить содержимое файла КПТ с сервера.");
-    }
+    const latestFile = findLatestKptFileSupabase(matchingFiles);
+    if (!latestFile) throw new Error("Supabase: Не удалось определить последний файл КПТ.");
 
-    // 4. Распаковываем и обрабатываем XML
+    const { data: blob, error: downloadError } = await supabaseClient.storage
+        .from(BUCKET_NAME)
+        .download(latestFile.name);
+
+    if (downloadError) {
+        console.error("Supabase downloadError:", downloadError);
+        throw new Error(`Supabase: Ошибка загрузки ${latestFile.name}: ${downloadError.message}.`);
+    }
+    if (!blob) throw new Error("Supabase: Не удалось получить содержимое файла КПТ.");
+
     const zip = await JSZip.loadAsync(blob);
     let xmlFileEntry = null;
     for (const fileNameInZip in zip.files) {
@@ -1476,9 +1480,7 @@ async function fetchAndProcessKPTFromServer(quarterNumber, fullCadNumber) {
             break;
         }
     }
-    if (!xmlFileEntry) {
-        throw new Error("XML-файл не найден в архиве КПТ.");
-    }
+    if (!xmlFileEntry) throw new Error("Supabase: XML-файл не найден в архиве КПТ.");
     const xmlContent = await xmlFileEntry.async('string');
     return { xmlContent, kptFileName: latestFile.name };
 }
