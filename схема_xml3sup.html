@@ -2083,8 +2083,51 @@ const selectableObjectsList = document.getElementById('selectableObjectsList');
 const closeSelectionDialogBtn = document.getElementById('closeSelectionDialogBtn');
 const selectionDialogTitle = document.getElementById('selectionDialogTitle');
 
-const STORAGE_API_URL = '/storage'; 
-const BUCKET_NAME = 'kpt';         
+    const SUPABASE_URL = 'https://krbqraivfbowmzvucjxz.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtyYnFyYWl2ZmJvd216dnVjanh6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDU1MDA0MTAsImV4cCI6MjA2MTA3NjQxMH0.Aun2UJDEW_75_Di-2hIcap42gqyZAu2XY9xiZpmShPc';
+    const BUCKET_NAME = 'gkn';
+
+    let supabase = null;
+    let supabaseInitializationPromise = null;
+
+    function initializeSupabase() {
+        if (supabaseInitializationPromise) {
+            return supabaseInitializationPromise;
+        }
+        supabaseInitializationPromise = new Promise((resolve, reject) => {
+            const performInitialization = () => {
+                try {
+                    if (window.supabase && typeof window.supabase.createClient === 'function') {
+                        supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+                        resolve(supabase);
+                    } else {
+                        throw new Error("Supabase library not loaded or createClient is not a function.");
+                    }
+                } catch (error) {
+                    showNotification(`Error initializing DB: ${error.message}`, 'error', 'database');
+                    supabase = null;
+                    reject(error);
+                }
+            };
+            if (typeof window.supabase === 'undefined') {
+                const supabaseScript = document.createElement('script');
+                supabaseScript.src = "https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"; // Ensure src is set
+                supabaseScript.onload = performInitialization;
+                supabaseScript.onerror = (err) => {
+                     reject(new Error("Failed to load Supabase script"));
+                };
+                document.head.appendChild(supabaseScript);
+            } else {
+                performInitialization();
+            }
+        });
+        return supabaseInitializationPromise;
+    }
+
+    initializeSupabase().catch(err => {
+        console.error("Initial Supabase initialization failed:", err);
+    });
+    
     
         // --- Geoeditor Dialog Logic ---
     const geoeditorDialog = document.getElementById('geoeditorDialog');
@@ -3970,31 +4013,20 @@ function initCadastralInput() {
   
    
 
-  async function searchAndShowQuarterFiles(quarterPrefix) {
-    const loaderContainer = document.getElementById('loaderContainer');
-    try {
-        updateLoaderProgress(0, 1, `Поиск КПТ для квартала ${quarterPrefix.replace(/_/g, ':')}...`);
-        if (loaderContainer) loaderContainer.style.display = 'flex';
-
-        const response = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}?search=${quarterPrefix}`);
-        if (!response.ok) {
-            throw new Error(`Ошибка сети: ${response.statusText}`);
-        }
-        const fileList = await response.json();
-        
-        const matchingFiles = fileList ? fileList.filter(file => file.name.startsWith(quarterPrefix)) : [];
-        if (matchingFiles.length === 0) {
-            showNotification(`Не найден КПТ для квартала ${quarterPrefix.replace(/_/g, ':')}. <br>Вы можете загрузить КПТ в базу данных.`, 'warning', 'folder-open');
-            if (loaderContainer) loaderContainer.style.display = 'none';
-        } else {
-            if (loaderContainer) loaderContainer.style.display = 'none';
-            displayQuarterFilesDialog(matchingFiles, quarterPrefix.replace(/_/g, ':'));
-        }
-    } catch (error) {
-        showNotification(`Ошибка поиска файлов: ${error.message}`, 'error', 'exclamation-circle');
-        if (loaderContainer) loaderContainer.style.display = 'none';
+    async function searchAndShowQuarterFiles(quarterPrefix) {
+        const loaderContainer = document.getElementById('loaderContainer');
+        try {
+             if (!supabaseInitializationPromise) initializeSupabase(); await supabaseInitializationPromise;
+            if (!supabase) { showNotification('Ошибка: Клиент базы данных не инициализирован.', 'error', 'database'); if (loaderContainer) loaderContainer.style.display = 'none'; return; }
+            updateLoaderProgress(0, 1, `Поиск КПТ для квартала ${quarterPrefix.replace(/_/g, ':')}...`); if (loaderContainer) loaderContainer.style.display = 'flex';
+            const { data: fileList, error: listError } = await supabase.storage.from(BUCKET_NAME).list(null, { limit: 200, offset: 0, search: quarterPrefix });
+            if (listError) throw new Error(`Не удалось получить список файлов: ${listError.message}`);
+            const matchingFiles = fileList ? fileList.filter(file => file.name.startsWith(quarterPrefix)) : [];
+            if (matchingFiles.length === 0) { showNotification(`Не найден КПТ для квартала ${quarterPrefix.replace(/_/g, ':')}. <br>Вы можете загрузить КПТ в базу данных.`, 'warning', 'folder-open'); if (loaderContainer) loaderContainer.style.display = 'none'; }
+            else { if (loaderContainer) loaderContainer.style.display = 'none'; displayQuarterFilesDialog(matchingFiles, quarterPrefix.replace(/_/g, ':')); }
+        } catch (error) { showNotification(`Ошибка поиска файлов: ${error.message}`, 'error', 'exclamation-circle'); if (loaderContainer) loaderContainer.style.display = 'none'; }
     }
-}
+
       function displayQuarterFilesDialog(files, quarterNumber) {
         const dialog = document.getElementById('quarterSelectDialog'); const overlay = document.getElementById('quarterSelectDialogOverlay'); const fileListDiv = document.getElementById('quarterFileList'); const title = document.getElementById('quarterDialogTitle'); const statusDiv = document.getElementById('quarterDialogStatus');
         title.textContent = `Найденные КПТ для квартала ${quarterNumber}`; fileListDiv.innerHTML = ''; statusDiv.textContent = '';
@@ -4089,33 +4121,38 @@ function initCadastralInput() {
         return sortedFiles[0];
     }
 
-     async function handleOpenKpt(fileName, cadNumberToSelectAfterLoad = null, jsonTypeFilters = null) {
-    const loaderContainer = document.getElementById('loaderContainer');
-    updateLoaderProgress(0, 1, `Загрузка файла ${fileName}...`);
-    loaderContainer.style.display = 'flex';
+       async function handleOpenKpt(fileName, cadNumberToSelectAfterLoad = null, jsonTypeFilters = null) {
+        if (!supabase) {
+            showNotification('Ошибка: Клиент базы данных не инициализирован.', 'error', 'database');
+            return;
+        }
+        closeQuarterDialog(); // Close the selection dialog
 
-    try {
-        const response = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}/${fileName}`);
-        if (!response.ok) {
-            throw new Error(`Не удалось загрузить файл: ${response.statusText}`);
+        const loaderContainer = document.getElementById('loaderContainer');
+        updateLoaderProgress(0, 1, `Загрузка файла ${fileName}...`);
+        loaderContainer.style.display = 'flex';
+
+        try {
+            const { data: blob, error: downloadError } = await supabase.storage.from(BUCKET_NAME).download(fileName);
+            if (downloadError) throw new Error(`Не удалось загрузить файл: ${downloadError.message}`);
+            if (!blob) throw new Error('Не удалось получить содержимое файла от Supabase.');
+
+            const downloadedFileObject = new File([blob], fileName, { type: blob.type || 'application/zip' });
+
+            const fileNameLower = fileName.toLowerCase();
+            if (fileNameLower.endsWith('.json.zip')) {
+                await processJsonZipFromSupabase(downloadedFileObject, blob.size, cadNumberToSelectAfterLoad, jsonTypeFilters); // Pass jsonTypeFilters
+            } else if (fileNameLower.endsWith('.zip')) {
+                await processXmlZipFromSupabase(downloadedFileObject, blob.size, cadNumberToSelectAfterLoad);
+            } else {
+                throw new Error(`Неподдерживаемый тип файла из Supabase: ${fileName}. Ожидался .zip или .json.zip`);
+            }
+
+        } catch (error) {
+            showNotification(`Ошибка открытия файла ${fileName} из базы: ${error.message}`, 'error', 'exclamation-circle');
+            if (loaderContainer) loaderContainer.style.display = 'none'; // Ensure loader hides on error
         }
-        const blob = await response.blob();
-        
-        const downloadedFileObject = new File([blob], fileName, { type: blob.type || 'application/zip' });
-        const fileNameLower = fileName.toLowerCase();
-        
-        if (fileNameLower.endsWith('.json.zip')) {
-            await processJsonZipFromSupabase(downloadedFileObject, blob.size, cadNumberToSelectAfterLoad, jsonTypeFilters);
-        } else if (fileNameLower.endsWith('.zip')) {
-            await processXmlZipFromSupabase(downloadedFileObject, blob.size, cadNumberToSelectAfterLoad);
-        } else {
-            throw new Error(`Неподдерживаемый тип файла из базы: ${fileName}. Ожидался .zip или .json.zip`);
-        }
-    } catch (error) {
-        showNotification(`Ошибка открытия файла ${fileName} из базы: ${error.message}`, 'error', 'exclamation-circle');
-        if (loaderContainer) loaderContainer.style.display = 'none';
     }
-}
     
     
     async function processJsonZipFromSupabase(file, fileSize, cadNumberToSelectAfterLoad = null, jsonTypeFilters = null) {
@@ -7200,140 +7237,42 @@ function findOverlappingParcels() {
     function saveAsFile(content, filename) { const blob = new Blob([content], { type: 'text/csv;charset=utf-8;' }); const link = document.createElement('a'); const url = URL.createObjectURL(blob); link.setAttribute('href', url); link.setAttribute('download', filename); link.style.visibility = 'hidden'; document.body.appendChild(link); link.click(); document.body.removeChild(link); }
 
     const uploadKptBtn = document.getElementById('uploadKptBtn');
-if (uploadKptBtn) {
-    uploadKptBtn.addEventListener('click', function() {
-        const zipFileInput = document.createElement('input');
-        zipFileInput.type = 'file';
-        zipFileInput.accept = '.zip';
-        zipFileInput.style.display = 'none';
-        
-        zipFileInput.onchange = async (event) => {
-            const file = event.target.files[0];
-            if (!file) {
-                if (document.body.contains(zipFileInput)) document.body.removeChild(zipFileInput);
-                return;
-            }
-            
-            const loaderContainer = document.getElementById('loaderContainer');
-            const fileName = file.name;
-            const validNameRegex = /^\d{2}_\d{2}_\d{6,7} \d{4}-\d{2}-\d{2}\.zip$/i;
-            if (!validNameRegex.test(fileName)) {
-                alert(`Неверный формат имени файла: "${fileName}"\nОжидается формат "XX_XX_XXXXXX ГГГГ-ММ-ДД.zip" или "XX_XX_XXXXXXX ГГГГ-ММ-ДД.zip`);
-                if (document.body.contains(zipFileInput)) document.body.removeChild(zipFileInput);
-                return;
-            }
-            
-            const MAX_FILE_SIZE_MB = 10;
-            const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024;
-            if (file.size > MAX_FILE_SIZE_BYTES) {
-                alert(`Ошибка: Размер файла (${formatFileSize(file.size)}) превышает лимит в ${MAX_FILE_SIZE_MB} MB.`);
-                if (document.body.contains(zipFileInput)) document.body.removeChild(zipFileInput);
-                return;
-            }
-            
-            loaderContainer.style.display = 'flex';
-            updateLoaderProgress(0, file.size, `Проверка архива ${fileName}...`);
-            
-            try {
-                const zip = await JSZip.loadAsync(await file.arrayBuffer());
-                let xmlCount = 0, sigCount = 0, otherFileCount = 0, directoryCount = 0;
-                let xmlFileName = null;
-                
-                for (const fileNameInZip in zip.files) {
-                    const fileEntry = zip.files[fileNameInZip];
-                    if (fileEntry.dir) {
-                        directoryCount++;
-                        break;
-                    }
-                    const lowerFileName = fileNameInZip.toLowerCase();
-                    if (lowerFileName.startsWith('__macosx/') || lowerFileName.endsWith('/.ds_store')) continue;
-                    if (lowerFileName.endsWith('.xml')) {
-                        xmlCount++;
-                        xmlFileName = fileNameInZip;
-                    } else if (lowerFileName.endsWith('.sig')) {
-                        sigCount++;
-                    } else {
-                        otherFileCount++;
-                    }
-                }
-                
-                let errorMessage = null;
-                if (directoryCount > 0) errorMessage = `Ошибка: Архив не должен содержать папок.`;
-                else if (xmlCount !== 1) errorMessage = `Ошибка: Архив должен содержать ровно один XML файл (найдено ${xmlCount}).`;
-                else if (sigCount > 1) errorMessage = `Ошибка: Архив может содержать не более одного SIG файла (найдено ${sigCount}).`;
-                else if (otherFileCount > 0) {
-                    let isSigMatchedToXml = false;
-                    if (xmlFileName && sigCount === 0 && otherFileCount === 1) {
-                        const xmlBaseName = xmlFileName.substring(0, xmlFileName.lastIndexOf('.'));
-                        for (const fn in zip.files) {
-                            if (!zip.files[fn].dir && !fn.toLowerCase().endsWith('.xml') && !fn.toLowerCase().startsWith('__macosx/') && !fn.toLowerCase().endsWith('/.ds_store')) {
-                                const otherBaseName = fn.substring(0, fn.lastIndexOf('.'));
-                                if (xmlBaseName.toLowerCase() === otherBaseName.toLowerCase()) {
-                                    isSigMatchedToXml = true;
-                                    otherFileCount = 0;
-                                    sigCount = 1;
-                                    break;
-                                }
-                            }
-                        }
-                    }
-                    if (!isSigMatchedToXml && otherFileCount > 0) errorMessage = `Ошибка: Архив содержит ${otherFileCount} недопустимых файлов (разрешены только .xml и .sig).`;
-                }
-                
-                if (errorMessage) {
-                    loaderContainer.style.display = 'none';
-                    alert(errorMessage);
-                } else {
-                    updateLoaderProgress(file.size, file.size, `Проверка завершена. Загрузка...`);
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                    loaderContainer.style.display = 'none';
-                    await uploadKptToLocalServer(file);
-                }
-            } catch (error) {
-                loaderContainer.style.display = 'none';
-                alert(`Ошибка при проверке архива: ${error.message}`);
-            } finally {
-                if (document.body.contains(zipFileInput)) document.body.removeChild(zipFileInput);
-            }
-        };
-        document.body.appendChild(zipFileInput);
-        zipFileInput.click();
-    });
-}
-
-async function uploadKptToLocalServer(file) {
-    const loaderContainer = document.getElementById('loaderContainer');
-    const originalButton = document.getElementById('uploadKptBtn');
-
-    if (originalButton) originalButton.disabled = true;
-    loaderContainer.style.display = 'flex';
-    updateLoaderProgress(0, file.size, `Загрузка ${file.name} на сервер...`);
-
-    const formData = new FormData();
-    formData.append('file', file, file.name);
-
-    try {
-        const response = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}/upload`, {
-            method: 'POST',
-            body: formData,
+    if (uploadKptBtn) {
+        uploadKptBtn.addEventListener('click', function() {
+            const zipFileInput = document.createElement('input'); zipFileInput.type = 'file'; zipFileInput.accept = '.zip'; zipFileInput.style.display = 'none';
+            zipFileInput.onchange = async (event) => {
+                const file = event.target.files[0]; if (!file) { if (document.body.contains(zipFileInput)) document.body.removeChild(zipFileInput); return; }
+                const loaderContainer = document.getElementById('loaderContainer'); const fileName = file.name;
+                const validNameRegex = /^\d{2}_\d{2}_\d{6,7} \d{4}-\d{2}-\d{2}\.zip$/i; if (!validNameRegex.test(fileName)) { alert(`Неверный формат имени файла: "${fileName}"\nОжидается формат "XX_XX_XXXXXX ГГГГ-ММ-ДД.zip" или "XX_XX_XXXXXXX ГГГГ-ММ-ДД.zip`); if (document.body.contains(zipFileInput)) document.body.removeChild(zipFileInput); return; }
+                const MAX_FILE_SIZE_MB = 10; const MAX_FILE_SIZE_BYTES = MAX_FILE_SIZE_MB * 1024 * 1024; if (file.size > MAX_FILE_SIZE_BYTES) { alert(`Ошибка: Размер файла (${formatFileSize(file.size)}) превышает лимит в ${MAX_FILE_SIZE_MB} MB.`); if (document.body.contains(zipFileInput)) document.body.removeChild(zipFileInput); return; }
+                loaderContainer.style.display = 'flex'; updateLoaderProgress(0, file.size, `Проверка архива ${fileName}...`);
+                try {
+                    const zip = await JSZip.loadAsync(await file.arrayBuffer()); let xmlCount = 0, sigCount = 0, otherFileCount = 0, directoryCount = 0; let xmlFileName = null;
+                    for (const fileNameInZip in zip.files) { const fileEntry = zip.files[fileNameInZip]; if (fileEntry.dir) { directoryCount++; break; } const lowerFileName = fileNameInZip.toLowerCase(); if (lowerFileName.startsWith('__macosx/') || lowerFileName.endsWith('/.ds_store')) continue; if (lowerFileName.endsWith('.xml')) { xmlCount++; xmlFileName = fileNameInZip; } else if (lowerFileName.endsWith('.sig')) sigCount++; else otherFileCount++; }
+                    let errorMessage = null; if (directoryCount > 0) errorMessage = `Ошибка: Архив не должен содержать папок.`; else if (xmlCount !== 1) errorMessage = `Ошибка: Архив должен содержать ровно один XML файл (найдено ${xmlCount}).`; else if (sigCount > 1) errorMessage = `Ошибка: Архив может содержать не более одного SIG файла (найдено ${sigCount}).`; else if (otherFileCount > 0) { let isSigMatchedToXml = false; if (xmlFileName && sigCount === 0 && otherFileCount === 1) { const xmlBaseName = xmlFileName.substring(0, xmlFileName.lastIndexOf('.')); for (const fn in zip.files) { if (!zip.files[fn].dir && !fn.toLowerCase().endsWith('.xml') && !fn.toLowerCase().startsWith('__macosx/') && !fn.toLowerCase().endsWith('/.ds_store')) { const otherBaseName = fn.substring(0, fn.lastIndexOf('.')); if (xmlBaseName.toLowerCase() === otherBaseName.toLowerCase()) { isSigMatchedToXml = true; otherFileCount = 0; sigCount = 1; break; } } } } if (!isSigMatchedToXml && otherFileCount > 0) errorMessage = `Ошибка: Архив содержит ${otherFileCount} недопустимых файлов (разрешены только .xml и .sig).`; }
+                    if (errorMessage) { loaderContainer.style.display = 'none'; alert(errorMessage); }
+                    else { updateLoaderProgress(file.size, file.size, `Проверка завершена. Загрузка...`); await new Promise(resolve => setTimeout(resolve, 500)); loaderContainer.style.display = 'none'; await uploadKptToSupabase(file); }
+                } catch (error) { loaderContainer.style.display = 'none'; alert(`Ошибка при проверке архива: ${error.message}`); }
+                finally { if (document.body.contains(zipFileInput)) document.body.removeChild(zipFileInput); }
+            };
+            document.body.appendChild(zipFileInput); zipFileInput.click();
         });
-        
-        const responseData = await response.json();
-
-        if (!response.ok) {
-            throw new Error(responseData.error || `Ошибка сервера: ${response.statusText}`);
-        }
-        
-        showNotification(`Файл "${file.name}" успешно загружен!`, 'success', 'check-circle');
-
-    } catch (err) {
-        showNotification(`Ошибка загрузки: ${err.message || err}`, 'error', 'exclamation-circle');
-    } finally {
-        loaderContainer.style.display = 'none';
-        if (originalButton) originalButton.disabled = false;
     }
-}
 
+    async function uploadKptToSupabase(file) {
+        const loaderContainer = document.getElementById('loaderContainer'); const originalButton = document.getElementById('uploadKptBtn');
+        try { if (!supabaseInitializationPromise) initializeSupabase(); await supabaseInitializationPromise; if (!supabase) { showNotification('Ошибка: Клиент базы данных не инициализирован.', 'error', 'database'); return; } }
+        catch (initError) { showNotification(`Ошибка инициализации БД: ${initError.message}`, 'error', 'database'); return; }
+        if (originalButton) originalButton.disabled = true; loaderContainer.style.display = 'flex'; updateLoaderProgress(0, file.size, `Подготовка к загрузке ${file.name}...`);
+        try {
+            const originalFileName = file.name; const uploadFileName = originalFileName;
+            updateLoaderProgress(0, file.size, `Загрузка ${uploadFileName}...`);
+            const { data, error } = await supabase.storage.from(BUCKET_NAME).upload(uploadFileName, file, { cacheControl: '3600', upsert: true });
+            if (error) showNotification(`Ошибка загрузки "${uploadFileName}": ${error.message}`, 'error', 'exclamation-circle');
+            else showNotification(`Файл "${uploadFileName}" успешно загружен!`, 'success', 'check-circle');
+        } catch (err) { showNotification(`Непредвиденная ошибка: ${err.message || err}`, 'error', 'exclamation-circle'); }
+        finally { loaderContainer.style.display = 'none'; if (originalButton) originalButton.disabled = false; }
+    }
 
 function repositionNotifications() {
     activeNotifications.forEach((notification, index) => {
