@@ -2705,13 +2705,14 @@ async function uploadNspdDataToLocalServer(features, quarterNumber) {
         return;
     }
     if (!quarterNumber) {
-        console.error("Не указан номер квартала для создания имени файла, выгрузка отменена.");
+        console.error("Не указан номер квартала для создания имени файла.");
         return;
     }
 
     console.log(`Подготовка к выгрузке ${features.length} участков для квартала ${quarterNumber} на mapruapp.ru...`);
 
     try {
+        // 1. Создаем имена файлов
         const quarterName = quarterNumber.replace(/:/g, '_');
         const today = new Date();
         const dateString = today.getFullYear() + '-' +
@@ -2721,39 +2722,35 @@ async function uploadNspdDataToLocalServer(features, quarterNumber) {
         const zipFilename = `${quarterName}.nspd`;
         const internalJsonFilename = `${quarterName} ${dateString}.json`;
 
+    
         const jsonData = JSON.stringify(features, null, 2);
         const zip = new JSZip();
         zip.file(internalJsonFilename, jsonData);
-        
-        const zipBlob = await zip.generateAsync({
-            type: "blob",
-            compression: "DEFLATE",
-            compressionOptions: {
-                level: 9
-            }
-        });
+        const zipBlob = await zip.generateAsync({ type: "blob" });
 
+       
         const formData = new FormData();
+        // Важно: создаем объект File из Blob, чтобы передать имя файла
         formData.append('file', new File([zipBlob], zipFilename, { type: 'application/zip' }));
+
 
         const response = await fetch(`${STORAGE_API_URL}/nspd/upload`, {
             method: 'POST',
             body: formData,
         });
 
-        if (!response.ok) {
-            // Если сервер вернул ошибку, пытаемся прочитать ее и выбросить
-            const errorData = await response.json().catch(() => null); // .catch на случай, если ответ не JSON
-            throw new Error(errorData?.error || `Сервер ответил ошибкой: ${response.statusText}`);
-        }
-        
         const responseData = await response.json();
-        console.log(`Архив ${zipFilename} успешно выгружен на сервер.`, responseData);
-       
+
+        if (!response.ok) {
+            throw new Error(responseData.error || `Ошибка сервера: ${response.statusText}`);
+        }
+
+        console.log(`Архив ${zipFilename} успешно выгружен на сервер.`);
+        showNotification(`Данные квартала ${quarterNumber} сохранены на сервере`, 'success', 'cloud-upload-alt');
 
     } catch (error) {
-       
-        console.error(`ФОНОВАЯ ОШИБКА: Не удалось выгрузить данные NSPD на сервер. Причина:`, error.message);
+        console.error('Ошибка при выгрузке данных NSPD на локальный сервер:', error);
+        showNotification(`Ошибка сохранения данных квартала: ${error.message}`, 'error', 'exclamation-triangle');
     }
 }
 
@@ -4184,6 +4181,7 @@ async function getAllParcelsInQuarter(lat, lon, isSearchMode = false, directQuar
         let quarterFeature = null;
         let quarterNumberToQuery = null;
 
+        // Вспомогательная функция для запроса геометрии квартала с НСПД
         async function fetchNSPDQuarterGeometry(qn) {
             const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=2&query=${encodeURIComponent(qn)}`;
             try {
@@ -4202,9 +4200,11 @@ async function getAllParcelsInQuarter(lat, lon, isSearchMode = false, directQuar
             return null;
         }
 
+        // 1. Определяем номер квартала для запроса
         if (directQuarterNumber) {
             quarterNumberToQuery = directQuarterNumber;
         } else if (lat !== null && lon !== null) {
+            // Вспомогательная функция для определения квартала по точке
             async function tryGetQuarterDataByPoint(latitude, longitude) {
                 const cadastralData = await queryCadastralInfo(latitude, longitude);
                 if (!cadastralData?.features?.length) return null;
@@ -4252,6 +4252,7 @@ async function getAllParcelsInQuarter(lat, lon, isSearchMode = false, directQuar
             return { quarterFeature: null, parcelFeatures: [] };
         }
 
+        // 2. Проверка на "нулевой" квартал
         let isZeroQuarter = false;
         const quarterParts = quarterNumberToQuery.split(':');
         if (quarterParts.length === 3) {
@@ -4283,6 +4284,7 @@ async function getAllParcelsInQuarter(lat, lon, isSearchMode = false, directQuar
                     `;
                     document.body.appendChild(confirmationModal);
                     confirmationModal.style.display = 'block';
+
                     confirmationModal.querySelector('#confirm-zero-quarter').onclick = () => { document.body.removeChild(confirmationModal); resolve(true); };
                     confirmationModal.querySelector('#cancel-zero-quarter').onclick = () => { document.body.removeChild(confirmationModal); resolve(false); };
                 });
@@ -4297,8 +4299,10 @@ async function getAllParcelsInQuarter(lat, lon, isSearchMode = false, directQuar
             }
         }
 
+        console.log(`Целевой квартал для запроса участков: ${quarterNumberToQuery}`);
         currentQuarterNumber = quarterNumberToQuery;
 
+        // 3. Получение и отрисовка геометрии квартала
         if (!quarterFeature && directQuarterNumber) {
             quarterFeature = await fetchNSPDQuarterGeometry(directQuarterNumber);
         }
@@ -4309,6 +4313,7 @@ async function getAllParcelsInQuarter(lat, lon, isSearchMode = false, directQuar
                 const geometryType = quarterFeature.geometry.type;
                 const nspdQuarterCoords = quarterFeature.geometry.coordinates;
                 const yandexPolygons = [];
+
                 const processNspdPolygon = (rings) => {
                     const wgsCoords = rings[0].map(coord => {
                         const p = proj4('EPSG:3857', 'EPSG:4326', coord);
@@ -4316,11 +4321,13 @@ async function getAllParcelsInQuarter(lat, lon, isSearchMode = false, directQuar
                     });
                     return wgsCoords.map(c => [c[0] - mapOffsetY * 0.000008983, c[1] - mapOffsetX * 0.000008983]);
                 };
+
                 if (geometryType === "Polygon") {
                     yandexPolygons.push(processNspdPolygon(nspdQuarterCoords));
                 } else if (geometryType === "MultiPolygon") {
                     nspdQuarterCoords.forEach(polygonRings => yandexPolygons.push(processNspdPolygon(polygonRings)));
                 }
+
                 if (yandexPolygons.length > 0) {
                     const quarterPolygonNSPD = new ymaps.Polygon(yandexPolygons, {}, {
                         strokeColor: '#AAAAAA', strokeWidth: polygonStyle.width > 1 ? polygonStyle.width - 1 : 1,
@@ -4344,6 +4351,7 @@ async function getAllParcelsInQuarter(lat, lon, isSearchMode = false, directQuar
             return { quarterFeature: null, parcelFeatures: [] };
         }
         
+        // 4. Запрос участков внутри границ квартала
         const requestBody = {
             "geom": { "type": "FeatureCollection", "features": [{ "type": "Feature", "geometry": { "crs": { "type": "name", "properties": { "name": "EPSG:3857" } }, "type": quarterFeature.geometry.type, "coordinates": quarterFeature.geometry.coordinates }, "properties": {} }] },
             "categories": [{ "id": 36368 }]
@@ -4359,27 +4367,30 @@ async function getAllParcelsInQuarter(lat, lon, isSearchMode = false, directQuar
             return { quarterFeature: quarterFeature, parcelFeatures: [] };
         }
         
+        // 5. Отрисовка и обработка найденных участков
         parcelFeaturesData = nspdParcelsData.features;
         await processAndDrawParcels(nspdParcelsData.features, 'quarter');
         await populateSidebarWithParcels(nspdParcelsData.features);
         
+        // 6. Сохранение/кеширование данных
+        // Сохраняем геометрию квартала в Supabase
+        if (quarterFeature && quarterFeature.geometry && !isZeroQuarter) {
+             await saveQuarterGeometryToSupabase(quarterNumberToQuery, quarterFeature.geometry);
+        }
+        // Загружаем данные об участках на свой файловый сервер
+        if (!isSearchMode && parcelFeaturesData.length > 0 && !isZeroQuarter) {
+            console.log(`Попытка сохранить данные для ${quarterNumberToQuery} на локальный сервер...`);
+            await uploadNspdDataToLocalServer(parcelFeaturesData, currentQuarterNumber);
+        } else if (isZeroQuarter) {
+            console.log(`Данные для нулевого квартала ${quarterNumberToQuery} не будут сохранены на сервере.`);
+        }
+
+        // 7. Финальная настройка интерфейса
         updatePlacemarksVisibility();
         applyCurrentTheme();
         showNotification(`Загружено участков: ${parcelFeaturesData.length} для ${quarterNumberToQuery}`, 'success');
         hideLoader();
 
-        if (!isSearchMode && parcelFeaturesData.length > 0 && !isZeroQuarter) {
-            console.log(`Запуск фонового сохранения данных для квартала ${quarterNumberToQuery}...`);
-            
-            saveQuarterGeometryToSupabase(quarterNumberToQuery, quarterFeature.geometry)
-                .catch(err => console.error(`Фоновая ошибка сохранения геометрии в Supabase:`, err));
-
-            uploadNspdDataToLocalServer(parcelFeaturesData, currentQuarterNumber)
-                .catch(err => console.error(`Фоновая ошибка выгрузки данных на локальный сервер:`, err));
-        } else if (isZeroQuarter) {
-            console.log(`Данные для нулевого квартала ${quarterNumberToQuery} не будут сохранены на сервере.`);
-        }
-        
         return { quarterFeature: isZeroQuarter ? null : quarterFeature, parcelFeatures: parcelFeaturesData };
 
     } catch (error) {
@@ -4392,7 +4403,63 @@ async function getAllParcelsInQuarter(lat, lon, isSearchMode = false, directQuar
     }
 }
 
- 
+   async function saveQuarterGeometryToSupabase(quarterNumber, geometryGeoJSON) {
+             return; // <--- ОТКЛЮЧЕНО ВРЕМЕННО
+            if (!supabaseClient) {
+                console.error("Supabase client not initialized for saving quarter geometry.");
+                return false;
+            }
+            if (!quarterNumber || !geometryGeoJSON) {
+                console.error("Missing quarterNumber or geometryGeoJSON for saving.");
+                return false;
+            }
+
+            // --- START: Zero Quarter Check (prevent saving geometry for zero quarters) ---
+            const quarterParts = quarterNumber.split(':');
+            if (quarterParts.length === 3) {
+                const regionPart = quarterParts[0];
+                const blockPart = quarterParts[2];
+                const isSevenDigitsRegion = sevenDigitsRegions.includes(regionPart);
+                const expectedZerosLength = isSevenDigitsRegion ? 7 : 6;
+
+                if (/^0+$/.test(blockPart) && blockPart.length === expectedZerosLength) {
+                     console.warn(`Нулевой квартал ${quarterNumber} - геометрия не будет сохранена в БД.`);
+                     return false; // Do not save geometry for zero quarters
+                }
+            }
+            // --- END: Zero Quarter Check ---
+
+
+        //    console.log(`Попытка сохранения геометрии квартала ${quarterNumber} в Supabase...`);
+            try {
+                const { data, error } = await supabaseClient
+                    .from('cadastral_quarters') // Убедитесь, что таблица называется 'cadastral_quarters'
+                    .upsert(
+                        {
+                            quarter_number: quarterNumber,
+                            geometry: geometryGeoJSON,
+                            // raw_nspd_response: null // или передайте полный ответ, если он есть
+                        },
+                        {
+                            onConflict: 'quarter_number' // Обновляем, если квартал уже существует
+                        }
+                    )
+                    .select();
+
+                if (error) {
+                    console.error(`Ошибка Supabase при сохранении геометрии квартала ${quarterNumber}:`, error);
+                    showNotification(`Ошибка сохранения геометрии квартала ${quarterNumber} в БД`, 'error');
+                    return false;
+                }
+                console.log(`Геометрия квартала ${quarterNumber} успешно сохранена/обновлена.`);
+               // showNotification(`Геометрия квартала ${quarterNumber} сохранена в БД`, 'success');
+                return true;
+            } catch (dbError) {
+                console.error(`Исключение при сохранении геометрии квартала ${quarterNumber}:`, dbError);
+                showNotification(`Исключение при сохранении геометрии квартала ${quarterNumber} в БД`, 'error');
+                return false;
+            }
+        }
 
    async function saveQuarterGeometryToSupabase(quarterNumber, geometryGeoJSON) {
     if (!supabaseClient) {
@@ -12162,7 +12229,27 @@ async function fetchUluRelations(parcelCNs) {
     }
 }
 
+async function fetchUluRelations(parcelCNs) {
+    if (!parcelCNs || parcelCNs.length === 0) {
+        return [];
+    }
+    try {
+        const { data, error } = await supabaseClient
+            .from('EZ')
+            .select('EZ, ZU')
+            .in('ZU', parcelCNs);
 
+        if (error) {
+            console.error('Supabase error fetching ULU relations:', error);
+            throw error;
+        }
+        return data;
+    } catch (e) {
+        console.error('Exception fetching ULU relations:', e);
+        showNotification('Ошибка получения данных о ЕЗП из БД', 'error');
+        return [];
+    }
+}
 
 async function applyUluTheme() {
     if (!parcelFeaturesData || parcelFeaturesData.length === 0) {
