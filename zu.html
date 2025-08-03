@@ -6,7 +6,6 @@
     <title>ЗУ из XML и ЕГРН</title>
     <link rel="stylesheet" href="webfonts/all.min.css">
     <script src="webfonts/jszip.min.js"></script>
-    <script src="webfonts/supabase-js@2.js"></script>
     <script src="webfonts/proj4.js"></script>
     <link rel="icon" href="https://i.ibb.co/xST7XFmq/zu.png" type="image/png">
     <style>
@@ -453,11 +452,7 @@
     </div>
 
   <script>
-        const SUPABASE_URL = 'https://krbqraivfbowmzvucjxz.supabase.co';
-        const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtyYnFyYWl2ZmJvd216dnVjanh6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDU1MDA0MTAsImV4cCI6MjA2MTA3NjQxMH0.Aun2UJDEW_75_Di-2hIcap42gqyZAu2XY9xiZpmShPc';
-        const BUCKET_NAME = 'gkn';
-
-        let supabase = null;
+    
         let currentParcelDataXML = null;
         let currentParcelContoursXML = null;
         let kptDate = '';
@@ -473,6 +468,9 @@
         let egrnTotalPointCount = null;
         let xmlIsDeclared = false;
         let egrnIsDeclared = false;
+        
+        const STORAGE_API_URL = 'https://mapruapp.ru/storage'; 
+const BUCKET_NAME = 'kpt'; 
 
         const cadastralInput = document.getElementById('cadastralInput');
         const loadParcelBtn = document.getElementById('loadParcelBtn');
@@ -515,16 +513,7 @@
             showError("Ошибка загрузки библиотеки Proj4. Функционал карты ЕГРН может быть ограничен.", 'egrn');
         }
 
-        try {
-            if (window.supabase && typeof window.supabase.createClient === 'function') {
-                supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-            } else {
-                throw new Error("Supabase client library not loaded.");
-            }
-        } catch (error) {
-            console.error("Supabase initialization error:", error);
-            showError("Ошибка инициализации базы данных. Функционал будет ограничен.", 'xml');
-        }
+ 
 
         loadParcelBtn.addEventListener('click', handleLoadParcel);
         cadastralInput.addEventListener('input', () => {
@@ -791,43 +780,63 @@
             }
         }
 
-        async function fetchAndProcessKPT(quarterNumber, fullCadNumber) {
-            if (!supabase) throw new Error("Клиент Supabase не инициализирован.");
-            const supabaseQuarterPrefix = quarterNumber.replace(/:/g, '_');
-            showLoaderXML(true, null, 10);
-            const { data: fileList, error: listError } = await supabase.storage
-                .from(BUCKET_NAME)
-                .list(null, { limit: 200, offset: 0, search: supabaseQuarterPrefix });
-            if (listError) throw new Error(`Ошибка получения списка файлов: ${listError.message}`);
-            if (!fileList || fileList.length === 0) throw new Error(`КПТ для квартала ${quarterNumber} не найдены в базе.`);
-            showLoaderXML(true, null, 25);
-            const matchingFiles = fileList.filter(file =>
-                file.name.startsWith(supabaseQuarterPrefix) && file.name.toLowerCase().endsWith('.zip')
-            );
-            if (matchingFiles.length === 0) throw new Error(`ZIP-архивы КПТ для квартала ${quarterNumber} не найдены.`);
-            const latestFile = findLatestKptFile(matchingFiles);
-            if (!latestFile) throw new Error("Не удалось определить последний файл КПТ.");
-            showLoaderXML(true, null, 40);
-            const { data: blob, error: downloadError } = await supabase.storage
-                .from(BUCKET_NAME)
-                .download(latestFile.name);
-            if (downloadError) throw new Error(`Ошибка загрузки файла ${latestFile.name}: ${downloadError.message}`);
-            if (!blob) throw new Error("Не удалось получить содержимое файла КПТ от Supabase.");
-            showLoaderXML(true, null, 65);
-            const zip = await JSZip.loadAsync(blob);
-            let xmlFileEntry = null;
-            for (const fileNameInZip in zip.files) {
-                if (fileNameInZip.toLowerCase().endsWith('.xml') && !zip.files[fileNameInZip].dir) {
-                    xmlFileEntry = zip.files[fileNameInZip];
-                    break;
-                }
-            }
-            if (!xmlFileEntry) throw new Error("XML-файл не найден в архиве КПТ.");
-            showLoaderXML(true, null, 85);
-            const xmlContent = await xmlFileEntry.async('string');
-            return { xmlContent, kptFileName: latestFile.name };
-        }
+async function fetchAndProcessKPT(quarterNumber, fullCadNumber) {
+    const serverQuarterPrefix = quarterNumber.replace(/:/g, '_');
+    showLoaderXML(true, null, 10);
 
+    // 1. Получаем список файлов с вашего сервера
+    const responseList = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}?search=${serverQuarterPrefix}`);
+    if (!responseList.ok) {
+        throw new Error(`Ошибка получения списка файлов: ${responseList.statusText}`);
+    }
+    const fileList = await responseList.json();
+
+    if (!fileList || fileList.length === 0) {
+        throw new Error(`КПТ для квартала ${quarterNumber} не найдены на сервере.`);
+    }
+    showLoaderXML(true, null, 25);
+
+    // 2. Находим самый свежий файл (логика остается прежней)
+    const matchingFiles = fileList.filter(file =>
+        file.name.startsWith(serverQuarterPrefix) && file.name.toLowerCase().endsWith('.zip')
+    );
+    if (matchingFiles.length === 0) {
+        throw new Error(`ZIP-архивы КПТ для квартала ${quarterNumber} не найдены.`);
+    }
+    const latestFile = findLatestKptFile(matchingFiles);
+    if (!latestFile) {
+        throw new Error("Не удалось определить последний файл КПТ.");
+    }
+    showLoaderXML(true, null, 40);
+
+    // 3. Скачиваем выбранный файл с вашего сервера
+    const responseDownload = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}/${latestFile.name}`);
+    if (!responseDownload.ok) {
+        throw new Error(`Ошибка загрузки файла ${latestFile.name}: ${responseDownload.statusText}`);
+    }
+    const blob = await responseDownload.blob();
+    if (!blob) {
+        throw new Error("Не удалось получить содержимое файла КПТ с сервера.");
+    }
+    showLoaderXML(true, null, 65);
+
+    // 4. Распаковываем и обрабатываем XML (логика остается прежней)
+    const zip = await JSZip.loadAsync(blob);
+    let xmlFileEntry = null;
+    for (const fileNameInZip in zip.files) {
+        if (fileNameInZip.toLowerCase().endsWith('.xml') && !zip.files[fileNameInZip].dir) {
+            xmlFileEntry = zip.files[fileNameInZip];
+            break;
+        }
+    }
+    if (!xmlFileEntry) {
+        throw new Error("XML-файл не найден в архиве КПТ.");
+    }
+    showLoaderXML(true, null, 85);
+    const xmlContent = await xmlFileEntry.async('string');
+
+    return { xmlContent, kptFileName: latestFile.name };
+}
         async function processXMLData(xmlContent, fullCadNumber, kptFileName) {
             const parser = new DOMParser();
             const xmlDoc = parser.parseFromString(xmlContent, "text/xml");
