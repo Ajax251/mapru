@@ -2632,7 +2632,6 @@ function showPersistentMessageDialog(title, message, type = 'info') {
 }
 
 
-// ЗАМЕНИТЕ СУЩЕСТВУЮЩУЮ ФУНКЦИЮ 'loadKptForQuarterAndProcess' НА ЭТУ
 async function loadKptForQuarterAndProcess(quarterToLoad, coordinatesTextToProcess, cadastralToSelectAfterKptLoad) {
     const formattedQuarterForSupabase = quarterToLoad.replace(/:/g, '_');
     const loaderContainer = document.getElementById('loaderContainer');
@@ -2642,29 +2641,43 @@ async function loadKptForQuarterAndProcess(quarterToLoad, coordinatesTextToProce
     let kptFileToLoad = null;
 
     try {
-        const response = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}?search=${formattedQuarterForSupabase}`);
-        if (!response.ok) {
-            throw new Error(`Ошибка сети при поиске файлов: ${response.statusText}`);
+        if (!supabaseInitializationPromise) initializeSupabase();
+        await supabaseInitializationPromise;
+        if (!supabase) {
+            // Using showPersistentMessageDialog for critical init errors too
+            showPersistentMessageDialog(
+                'Ошибка инициализации',
+                'Клиент базы данных не инициализирован. Невозможно выполнить операции с базой данных.',
+                'error'
+            );
+            if (loaderContainer) loaderContainer.style.display = 'none';
+            return false;
         }
-        const fileList = await response.json();
+
+        const { data: fileList, error: listError } = await supabase.storage
+            .from(BUCKET_NAME)
+            .list(null, { limit: 200, offset: 0, search: formattedQuarterForSupabase });
+
+        if (listError) throw new Error(`Не удалось получить список файлов для квартала ${quarterToLoad}: ${listError.message}`);
 
         const matchingFiles = fileList ? fileList.filter(file => file.name.startsWith(formattedQuarterForSupabase)) : [];
 
         if (matchingFiles.length > 0) {
             kptFileToLoad = findLatestKptFile(matchingFiles);
         } else {
+            // *** MODIFIED HERE: Use persistent dialog instead of showNotification ***
             showPersistentMessageDialog(
                 'КПТ не найден',
                 `Кадастровый план территории для квартала <strong>${quarterToLoad}</strong> не найден. Координаты из буфера обмена будут добавлены на пустую схему. Вы можете загрузить КПТ в базу данных.`,
                 'warning'
             );
             if (loaderContainer) loaderContainer.style.display = 'none';
-            return false; // КПТ не найден, возвращаем false
+            return false; // KPT not found
         }
     } catch (error) {
-        showPersistentMessageDialog(
+        showPersistentMessageDialog( // Also use persistent for search errors
             'Ошибка поиска КПТ',
-            `При поиске КПТ для квартала ${quarterToLoad} произошла ошибка: <br><small>${error.message}</small>`,
+            `При поиске КПТ для квартала ${quarterToLoad} в базе данных произошла ошибка: <br><small>${error.message}</small>`,
             'error'
         );
         if (loaderContainer) loaderContainer.style.display = 'none';
@@ -2673,15 +2686,62 @@ async function loadKptForQuarterAndProcess(quarterToLoad, coordinatesTextToProce
 
     if (kptFileToLoad) {
         try {
-            // Вызываем стандартизированную функцию открытия файла
-            await handleOpenKpt(kptFileToLoad.name, cadastralToSelectAfterKptLoad);
-            // После успешной загрузки КПТ, добавляем координаты из буфера
-            processImportedCoordinates(coordinatesTextToProcess);
-            showNotification('Координаты из буфера обмена успешно добавлены на схему.', 'success', 'paste');
+            updateLoaderProgress(0, 1, `Загрузка КПТ ${kptFileToLoad.name}...`);
+            const { data: blob, error: downloadError } = await supabase.storage.from(BUCKET_NAME).download(kptFileToLoad.name);
+            if (downloadError) throw new Error(`Не удалось загрузить файл КПТ ${kptFileToLoad.name}: ${downloadError.message}`);
+            if (!blob) throw new Error('Не удалось получить содержимое файла КПТ от Supabase.');
+
+            const zipFileObject = new File([blob], kptFileToLoad.name, { type: 'application/zip' });
+
+            await new Promise(async (resolveProcessZip, rejectProcessZip) => {
+                const reader = new FileReader();
+                reader.onprogress = function(e) { if (e.lengthComputable) updateLoaderProgress(e.loaded, blob.size, 'Чтение ZIP-архива'); };
+                reader.onload = function(e) {
+                    const zipContent = e.target.result;
+                    updateLoaderProgress(blob.size, blob.size, 'Обработка содержимого архива');
+                    try {
+                        JSZip.loadAsync(zipContent).then(zip => {
+                            let xmlFile = Object.values(zip.files).find(fileEntry => fileEntry.name.toLowerCase().endsWith('.xml') && !fileEntry.dir);
+                            if (xmlFile) {
+                                updateLoaderProgress(blob.size, blob.size, 'Извлечение XML из архива');
+                                return xmlFile.async('string').then(xmlContent => ({ content: xmlContent, fileName: xmlFile.name, size: new Blob([xmlContent]).size }));
+                            } else {
+                                throw new Error('XML-файл не найден в архиве ZIP.');
+                            }
+                        })
+                        .then(async result => {
+                            if (result && result.content) {
+                                const xmlSize = result.size;
+                                updateLoaderProgress(xmlSize, xmlSize, 'Анализ XML...');
+                                try {
+                                    await processXMLContent(result.content, result.fileName, cadastralToSelectAfterKptLoad);
+                                    showNotification(`КПТ ${result.fileName} успешно загружен.`, 'success', 'check-circle');
+                                    processImportedCoordinates(coordinatesTextToProcess);
+                                    showNotification('Координаты из буфера обмена добавлены.', 'success', 'paste');
+                                    resolveProcessZip(true);
+                                } catch (xmlError) {
+                                    rejectProcessZip(new Error('Ошибка при обработке XML из архива: ' + xmlError.message));
+                                }
+                            } else {
+                                rejectProcessZip(new Error('Не удалось извлечь XML из ZIP-архива.'));
+                            }
+                        })
+                        .catch(zipProcessError => {
+                            rejectProcessZip(new Error('Ошибка при обработке ZIP-файла: ' + zipProcessError.message));
+                        });
+                    } catch (zipReadError) {
+                        rejectProcessZip(new Error('Ошибка при распаковке ZIP-файла: ' + zipReadError.message));
+                    }
+                };
+                reader.onerror = function() {
+                    rejectProcessZip(new Error('Ошибка при чтении ZIP-файла'));
+                };
+                reader.readAsArrayBuffer(zipFileObject);
+            });
             if (loaderContainer) loaderContainer.style.display = 'none';
             return true;
         } catch (error) {
-            showPersistentMessageDialog(
+             showPersistentMessageDialog( // Use persistent for KPT open errors
                 'Ошибка открытия КПТ',
                 `При открытии файла КПТ ${kptFileToLoad.name} произошла ошибка: <br><small>${error.message}</small>`,
                 'error'
@@ -2690,10 +2750,7 @@ async function loadKptForQuarterAndProcess(quarterToLoad, coordinatesTextToProce
             return false;
         }
     }
-
-    // Этот код не должен выполниться, если логика верна, но на всякий случай
-    if (loaderContainer) loaderContainer.style.display = 'none';
-    return false;
+    return false; // Should ideally not be reached if kptFileToLoad was null
 }
 
 
@@ -3794,90 +3851,81 @@ function initCadastralInput() {
     });
     cadastralInput.addEventListener('input', function() { formatCadastralNumber(this); });
 
-  // ЗАМЕНИТЕ СУЩЕСТВУЮЩИЙ ОБРАБОТЧИК 'keydown' НА ЭТОТ
-cadastralInput.addEventListener('keydown', async function(e) {
-    if (isDialogActionInProgress) {
-        return;
+  cadastralInput.addEventListener('keydown', async function(e) {
+       if (isDialogActionInProgress) { 
+        return; 
     }
-    if (e.key === 'Enter') {
-        e.preventDefault();
-        const value = this.value.trim();
-        let currentSelection = selectedCadastralNumber || selectedBuildingNumber;
-        if (selectedImportedObjectIndex !== -1) {
-            currentSelection = `Объект #${selectedImportedObjectIndex + 1}`;
-        }
-
-        if (value === '') return;
-
-        if (isQuarterOrBlockFormat(value)) {
-            let quarterToSearch = value;
-            if (quarterToSearch.endsWith(':')) {
-                quarterToSearch = quarterToSearch.slice(0, -1);
+        if (e.key === 'Enter') {
+            e.preventDefault(); const value = this.value.trim();
+            let currentSelection = selectedCadastralNumber || selectedBuildingNumber; // Не учитываем selectedZoneOrTerritoryRegNumber
+            if (selectedImportedObjectIndex !== -1) { // Если выбран импортированный, считаем "текущим" его
+                currentSelection = `Объект #${selectedImportedObjectIndex + 1}`;
             }
-            const formattedQuarter = quarterToSearch.replace(/:/g, '_');
-            await searchAndShowQuarterFiles(formattedQuarter);
-        } else if (isValidCadastralNumber(value)) {
-            const enteredQuarterParts = value.split(':');
-            const isStandardCadastral = !isUnifiedLandUseFormat(value);
-            const enteredQuarter = isStandardCadastral && enteredQuarterParts.length >= 3 ? enteredQuarterParts.slice(0, 3).join(':') : null;
 
-            const currentLoadedQuarter = cadastralBlockNumber ? cadastralBlockNumber.slice(0, -1) : null;
-            const noKptDataLoaded = allContours.length === 0 && buildingsContours.length === 0 && zonesAndTerritoriesContours.length === 0;
 
-            if (isStandardCadastral && (noKptDataLoaded || (enteredQuarter && currentLoadedQuarter && enteredQuarter !== currentLoadedQuarter))) {
-                if (enteredQuarterParts.length >= 3) {
-                    const quarterToSearchForKPT = enteredQuarterParts.slice(0, 3).join(':');
-                    const formattedQuarterForKPT = quarterToSearchForKPT.replace(/:/g, '_');
-                    const loaderContainer = document.getElementById('loaderContainer');
-                    updateLoaderProgress(0, 1, `Поиск КПТ для квартала ${quarterToSearchForKPT}...`);
-                    if (loaderContainer) loaderContainer.style.display = 'flex';
-                    
-                    try {
-                        const response = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}?search=${formattedQuarterForKPT}`);
-                         if (!response.ok) {
-                            throw new Error(`Ошибка сети при поиске файла: ${response.statusText}`);
-                        }
-                        const fileList = await response.json();
+            if (value === '') return;
 
-                        const matchingFiles = fileList ? fileList.filter(file => file.name.startsWith(formattedQuarterForKPT)) : [];
+            if (isQuarterOrBlockFormat(value)) { 
+                let quarterToSearch = value;
+                if (quarterToSearch.endsWith(':')) {
+                    quarterToSearch = quarterToSearch.slice(0, -1);
+                }
+                const formattedQuarter = quarterToSearch.replace(/:/g, '_');
+                await searchAndShowQuarterFiles(formattedQuarter);
+            } else if (isValidCadastralNumber(value)) { 
+                const enteredQuarterParts = value.split(':');
+                const isStandardCadastral = !isUnifiedLandUseFormat(value);
+                const enteredQuarter = isStandardCadastral && enteredQuarterParts.length >=3 ? enteredQuarterParts.slice(0, 3).join(':') : null;
 
-                        if (matchingFiles.length > 0) {
-                            const latestFile = findLatestKptFile(matchingFiles);
-                            if (latestFile) {
-                                // Успешно нашли файл, вызываем handleOpenKpt, который загрузит и обработает его
-                                await handleOpenKpt(latestFile.name, value); // Передаем value для автовыбора
+                const currentLoadedQuarter = cadastralBlockNumber ? cadastralBlockNumber.slice(0, -1) : null;
+                const noKptDataLoaded = allContours.length === 0 && buildingsContours.length === 0; 
+
+                if (isStandardCadastral && (noKptDataLoaded || (enteredQuarter && currentLoadedQuarter && enteredQuarter !== currentLoadedQuarter))) {
+                    if (enteredQuarterParts.length >= 3) {
+                        const quarterToSearchForKPT = enteredQuarterParts.slice(0, 3).join(':');
+                        const formattedQuarterForKPT = quarterToSearchForKPT.replace(/:/g, '_');
+                        const loaderContainer = document.getElementById('loaderContainer');
+                        updateLoaderProgress(0, 1, `Поиск КПТ для квартала ${quarterToSearchForKPT}...`);
+                        if (loaderContainer) loaderContainer.style.display = 'flex';
+                        try {
+                            if (!supabaseInitializationPromise) initializeSupabase(); await supabaseInitializationPromise;
+                            if (!supabase) { showNotification('Ошибка: Клиент базы данных не инициализирован.', 'error', 'database'); if (loaderContainer) loaderContainer.style.display = 'none'; return; }
+
+                            const { data: fileList, error: listError } = await supabase.storage.from(BUCKET_NAME).list(null, { limit: 200, offset: 0, search: formattedQuarterForKPT });
+                            if (listError) throw new Error(`Не удалось получить список файлов: ${listError.message}`);
+                            const matchingFiles = fileList ? fileList.filter(file => file.name.startsWith(formattedQuarterForKPT)) : [];
+
+                            if (matchingFiles.length > 0) {
+                                const latestFile = findLatestKptFile(matchingFiles);
+                                if (latestFile) {
+                                    await handleOpenKpt(latestFile.name, value);
+                                } else {
+                                    if (loaderContainer) loaderContainer.style.display = 'none';
+                                    showNotification(`Не удалось определить последний КПТ для квартала ${quarterToSearchForKPT}.`, 'warning', 'exclamation-triangle');
+                                }
                             } else {
                                 if (loaderContainer) loaderContainer.style.display = 'none';
-                                showNotification(`Не удалось определить последний КПТ для квартала ${quarterToSearchForKPT}.`, 'warning', 'exclamation-triangle');
+                                showNotification(`КПТ для квартала ${quarterToSearchForKPT} не найдены в базе.`, 'warning', 'folder-open');
+                                 if (value !== currentSelection) findAndSelectByCadastralNumber(value);
                             }
-                        } else {
-                            // КПТ не найден, но нужно попытаться найти объект, если он уже загружен
+                        } catch (error) {
                             if (loaderContainer) loaderContainer.style.display = 'none';
-                            showNotification(`КПТ для квартала ${quarterToSearchForKPT} не найден в базе.`, 'warning', 'folder-open');
+                            showNotification(`Ошибка автозагрузки КПТ: ${error.message}`, 'error', 'exclamation-circle');
                             if (value !== currentSelection) findAndSelectByCadastralNumber(value);
                         }
-                    } catch (error) {
-                        if (loaderContainer) loaderContainer.style.display = 'none';
-                        showNotification(`Ошибка автозагрузки КПТ: ${error.message}`, 'error', 'exclamation-circle');
-                        // Даже если загрузка не удалась, пытаемся найти объект на случай, если он уже был
-                        if (value !== currentSelection) findAndSelectByCadastralNumber(value);
+                    } else {
+                         if (value !== currentSelection) findAndSelectByCadastralNumber(value);
                     }
                 } else {
-                    // Недостаточно данных для определения квартала
-                    if (value !== currentSelection) findAndSelectByCadastralNumber(value);
+                    if (value !== currentSelection) {
+                        findAndSelectByCadastralNumber(value);
+                    }
                 }
             } else {
-                // Квартал тот же или нет нужды в загрузке, просто ищем объект
-                if (value !== currentSelection) {
-                    findAndSelectByCadastralNumber(value);
-                }
+                showNotification('Некорректный формат кадастрового номера или квартала/блока', 'warning', 'exclamation-triangle');
             }
-        } else {
-            showNotification('Некорректный формат кадастрового номера или квартала/блока', 'warning', 'exclamation-triangle');
         }
-    }
-});
-
+    });
     cadastralInput.addEventListener('blur', function() {
         const value = this.value.trim();
         let currentSelection = selectedCadastralNumber || selectedBuildingNumber; 
