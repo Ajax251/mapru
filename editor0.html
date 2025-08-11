@@ -7,6 +7,7 @@
     <link rel="stylesheet" href="webfonts/all.min.css">
     <link rel="icon" href="https://img.icons8.com/?size=100&id=HskCGIilF9IM&format=png&color=000000" type="image/png">
     <script src="webfonts/jszip.min.js"></script>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 
     <style>
         body {
@@ -802,9 +803,10 @@
     const GRAB_POINT_RADIUS_SCREEN = 7;
     window.lastPointMoveEndTime = 0;
 
-const STORAGE_API_URL = 'https://mapruapp.ru/storage';
-const BUCKET_NAME = 'kpt';
-
+    const SUPABASE_URL = 'https://krbqraivfbowmzvucjxz.supabase.co';
+    const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6ImtyYnFyYWl2ZmJvd216dnVjanh6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDU1MDA0MTAsImV4cCI6MjA2MTA3NjQxMH0.Aun2UJDEW_75_Di-2hIcap42gqyZAu2XY9xiZpmShPc';
+    const BUCKET_NAME = 'gkn';
+    let supabase = null;
     const sevenDigitsRegions = ['24', '50', '63', '66', '77', '78', '91'];
 
 
@@ -989,11 +991,22 @@ const BUCKET_NAME = 'kpt';
         userObjects.forEach(obj => updateObjectMetrics(obj));
     }
 
-async function initializeApp() { // Сделана асинхронной
-       canvas.width = canvas.offsetWidth;
-       canvas.height = canvas.offsetHeight;
+ async function initializeApp() { // Сделана асинхронной
+        try {
+            if (window.supabase && typeof window.supabase.createClient === 'function') {
+                supabase = window.supabase.createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
+                console.log("Supabase client initialized.");
+            } else {
+                throw new Error("Supabase client library not loaded.");
+            }
+        } catch (error) {
+            console.error("Supabase initialization error:", error);
+            showNotification("Ошибка инициализации базы данных. Загрузка по КН не будет работать.", "error", "database");
+        }
+        canvas.width = canvas.offsetWidth;
+        canvas.height = canvas.offsetHeight;
 
-       loadState();
+        loadState(); // 1. Загрузка сохраненного состояния
 
         // 2. Проверка буфера обмена. Если успешно и пользователь согласен, userObjects будут очищены и заполнены заново.
         const clipboardImported = await checkClipboardForObjects();
@@ -3260,97 +3273,115 @@ async function checkClipboardForObjects() {
     }
 
 
-async function fetchParcelCoordinatesFromStorage(cadNumber) {
-    console.log(`[StorageAPI] Запрос для КН: ${cadNumber}`);
-    const parts = cadNumber.split(':');
-    if (parts.length < 3) {
-        const errorMsg = `Неверный формат КН для извлечения квартала: ${cadNumber}`;
-        showNotification(errorMsg, "error", "hashtag");
-        console.error(`[StorageAPI] ${errorMsg}`);
-        return null;
-    }
-    const quarterNumber = parts.slice(0, 3).join(':');
-    const serverQuarterPrefix = quarterNumber.replace(/:/g, '_');
-    console.log(`[StorageAPI] Поиск файлов для квартала: ${serverQuarterPrefix}`);
-
-    try {
-        const responseList = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}?search=${serverQuarterPrefix}`);
-        if (!responseList.ok) {
-            throw new Error(`Ошибка получения списка файлов: ${responseList.statusText}`);
+    async function fetchParcelCoordinatesFromSupabase(cadNumber) {
+        if (!supabase) {
+            showNotification("Клиент Supabase не инициализирован.", "error", "database");
+            console.error("Supabase client not initialized for fetchParcelCoordinatesFromSupabase");
+            return null;
         }
-        const fileList = await responseList.json();
-
-        if (!fileList || fileList.length === 0) {
-            throw new Error(`КПТ для квартала ${quarterNumber} не найдены на сервере.`);
+       console.log(`[Supabase] Запрос для КН: ${cadNumber}`);
+        const parts = cadNumber.split(':');
+        if (parts.length < 3) {
+            const errorMsg = `Неверный формат КН для извлечения квартала: ${cadNumber}`;
+            showNotification(errorMsg, "error", "hashtag");
+            console.error(`[Supabase] ${errorMsg}`);
+            return null;
         }
-         console.log(`[StorageAPI] Найдено файлов для квартала ${quarterNumber}: ${fileList.length}`);
+        const quarterNumber = parts.slice(0, 3).join(':');
+        const supabaseQuarterPrefix = quarterNumber.replace(/:/g, '_');
+        console.log(`[Supabase] Поиск файлов для квартала: ${supabaseQuarterPrefix}`);
 
-        const matchingFiles = fileList.filter(file =>
-            file.name.startsWith(serverQuarterPrefix) && file.name.toLowerCase().endsWith('.zip')
-        );
-        if (matchingFiles.length === 0) {
-            throw new Error(`ZIP-архивы КПТ для квартала ${quarterNumber} не найдены.`);
-        }
+        try {
+            const { data: fileList, error: listError } = await supabase.storage
+                .from(BUCKET_NAME)
+                .list(null, { limit: 200, offset: 0, search: supabaseQuarterPrefix });
 
-        const dateRegex = /(\d{4}-\d{2}-\d{2})/;
-        const latestFile = matchingFiles
-            .map(file => ({ name: file.name, date: (file.name.match(dateRegex) ? new Date(file.name.match(dateRegex)[1]) : new Date(0)) }))
-            .sort((a, b) => b.date - a.date)[0];
-
-        if (!latestFile) {
-            throw new Error("Не удалось определить последний файл КПТ.");
-        }
-        console.log(`[StorageAPI] Выбран файл КПТ: ${latestFile.name}`);
-
-        const responseDownload = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}/${latestFile.name}`);
-        if (!responseDownload.ok) {
-            throw new Error(`Ошибка загрузки файла ${latestFile.name}: ${responseDownload.statusText}`);
-        }
-        const blob = await responseDownload.blob();
-        if (!blob) {
-            throw new Error("Не удалось получить содержимое файла КПТ с сервера.");
-        }
-        console.log(`[StorageAPI] Файл ${latestFile.name} загружен, размер: ${blob.size} байт.`);
-
-        const zip = await JSZip.loadAsync(blob);
-        let xmlFileEntry = null;
-        for (const fileNameInZip in zip.files) {
-            if (fileNameInZip.toLowerCase().endsWith('.xml') && !zip.files[fileNameInZip].dir) {
-                xmlFileEntry = zip.files[fileNameInZip];
-                break;
+            if (listError) {
+                console.error(`[Supabase] Ошибка получения списка файлов для ${supabaseQuarterPrefix}:`, listError);
+                throw new Error(`Ошибка получения списка файлов: ${listError.message}`);
             }
-        }
-        if (!xmlFileEntry) {
-            throw new Error("XML-файл не найден в архиве КПТ.");
-        }
-
-        const xmlContent = await xmlFileEntry.async('string');
-        const parser = new DOMParser();
-        const xmlDoc = parser.parseFromString(xmlContent, "text/xml");
-        const landRecords = xmlDoc.querySelectorAll('land_record');
-        let foundLandRecord = null;
-        landRecords.forEach(record => {
-            const cnElem = record.querySelector('object > common_data > cad_number');
-            if (cnElem && cnElem.textContent.trim() === cadNumber) {
-                foundLandRecord = record;
+            if (!fileList || fileList.length === 0) {
+                console.warn(`[Supabase] КПТ для квартала ${quarterNumber} не найдены.`);
+                throw new Error(`КПТ для квартала ${quarterNumber} не найдены.`);
             }
-        });
+             console.log(`[Supabase] Найдено файлов для квартала ${quarterNumber}: ${fileList.length}`);
 
-        if (!foundLandRecord) {
-            throw new Error(`Участок ${cadNumber} не найден в XML файле ${latestFile.name}.`);
+            const matchingFiles = fileList.filter(file => file.name.startsWith(supabaseQuarterPrefix) && file.name.toLowerCase().endsWith('.zip'));
+            if (matchingFiles.length === 0) {
+                console.warn(`[Supabase] ZIP-архивы КПТ для ${quarterNumber} не найдены среди ${fileList.length} файлов.`);
+                throw new Error(`ZIP-архивы КПТ для ${quarterNumber} не найдены.`);
+            }
+
+            const dateRegex = /(\d{4}-\d{2}-\d{2})/;
+            const latestFile = matchingFiles
+                .map(file => ({ name: file.name, date: (file.name.match(dateRegex) ? new Date(file.name.match(dateRegex)[1]) : new Date(0)) }))
+                .sort((a, b) => b.date - a.date)[0];
+
+            if (!latestFile) {
+                console.error("[Supabase] Не удалось определить последний файл КПТ.");
+                throw new Error("Не удалось определить последний файл КПТ.");
+            }
+            console.log(`[Supabase] Выбран файл КПТ: ${latestFile.name}`);
+
+            const { data: blob, error: downloadError } = await supabase.storage
+                .from(BUCKET_NAME)
+                .download(latestFile.name);
+
+            if (downloadError) {
+                console.error(`[Supabase] Ошибка загрузки ${latestFile.name}:`, downloadError);
+                throw new Error(`Ошибка загрузки ${latestFile.name}: ${downloadError.message}`);
+            }
+            if (!blob) {
+                 console.error("[Supabase] Пустой файл КПТ от Supabase.");
+                throw new Error("Пустой файл КПТ от Supabase.");
+            }
+            console.log(`[Supabase] Файл ${latestFile.name} загружен, размер: ${blob.size} байт.`);
+
+            const zip = await JSZip.loadAsync(blob);
+            console.log("[Supabase] ZIP архив успешно загружен JSZip.");
+            let xmlFileEntry = null;
+            for (const fileNameInZip in zip.files) {
+                if (fileNameInZip.toLowerCase().endsWith('.xml') && !zip.files[fileNameInZip].dir) {
+                    xmlFileEntry = zip.files[fileNameInZip];
+                    console.log(`[Supabase] Найден XML файл в архиве: ${fileNameInZip}`);
+                    break;
+                }
+            }
+            if (!xmlFileEntry) {
+                console.error("[Supabase] XML-файл не найден в архиве КПТ.");
+                throw new Error("XML-файл не найден в архиве КПТ.");
+            }
+
+            const xmlContent = await xmlFileEntry.async('string');
+            console.log(`[Supabase] XML контент извлечен, длина: ${xmlContent.length}`);
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(xmlContent, "text/xml");
+            const landRecords = xmlDoc.querySelectorAll('land_record');
+            console.log(`[Supabase] Найдено ${landRecords.length} land_record в XML.`);
+            let foundLandRecord = null;
+            landRecords.forEach(record => {
+                const cnElem = record.querySelector('object > common_data > cad_number');
+                if (cnElem && cnElem.textContent.trim() === cadNumber) {
+                    foundLandRecord = record;
+                }
+            });
+
+            if (!foundLandRecord) {
+                console.warn(`[Supabase] Участок ${cadNumber} не найден в XML ${latestFile.name}.`);
+                throw new Error(`Участок ${cadNumber} не найден в XML ${latestFile.name}.`);
+            }
+            console.log(`[Supabase] Участок ${cadNumber} найден в XML.`);
+            const extractedContours = extractCoordinatesFromXMLNode(foundLandRecord); // Returns array of contours
+            console.log(`[Supabase] Извлечено контуров для ${cadNumber}: ${extractedContours.length}`);
+            extractedContours.forEach((c,i) => console.log(`  Контур ${i+1}: ${c.length} точек`));
+            return extractedContours; // Return array of contours
+
+        } catch (error) {
+            console.error(`[Supabase] Общая ошибка для КН ${cadNumber}:`, error);
+            showNotification(`Ошибка для ${cadNumber}: ${error.message}`, "error", "times-circle");
+            return null;
         }
-        
-        const extractedContours = extractCoordinatesFromXMLNode(foundLandRecord);
-        console.log(`[StorageAPI] Извлечено контуров для ${cadNumber}: ${extractedContours.length}`);
-        return extractedContours;
-
-    } catch (error) {
-        console.error(`[StorageAPI] Общая ошибка для КН ${cadNumber}:`, error);
-        showNotification(`Ошибка для ${cadNumber}: ${error.message}`, "error", "times-circle");
-        return null;
     }
-}
-
 
     function showLoader(show, text = "Загрузка...") {
         if (show) {
@@ -3362,10 +3393,10 @@ async function fetchParcelCoordinatesFromStorage(cadNumber) {
     }
 
     async function handleImportFromCadNumbers(cadNumbers) {
-       if (!STORAGE_API_URL) {
-    showNotification("URL хранилища не задан. Невозможно загрузить по КН.", "error", "server");
-    return;
-}
+        if (!supabase) {
+            showNotification("Supabase не инициализирован. Невозможно загрузить по КН.", "error", "database");
+            return;
+        }
         closeCoordsDialog();
 
         let addedObjects = [];
@@ -3381,7 +3412,7 @@ async function fetchParcelCoordinatesFromStorage(cadNumber) {
             console.log(`[BatchImport] Начинаем обработку ${cn} (${currentProcessed}/${totalCadNumbers})`);
             showLoader(true, `Загрузка ${currentProcessed}/${totalCadNumbers}: ${cn}`);
 
-           const contoursData = await fetchParcelCoordinatesFromStorage(cn);
+            const contoursData = await fetchParcelCoordinatesFromSupabase(cn); // Expects array of contours
 
             showLoader(false);
 
