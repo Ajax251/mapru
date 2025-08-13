@@ -8,6 +8,7 @@
     <link rel="stylesheet" href="webfonts/all.min.css">
      <script src="webfonts/proj4.js"></script>
 <script src="webfonts/jspdf.umd.min.js"></script>
+<script src="webfonts/jszip.min.js"></script>
 <script src="webfonts/html2canvas.min.js"></script>
 <script src="webfonts/xlsx.full.min.js"></script>
 
@@ -1259,7 +1260,7 @@ input[type='checkbox'].toggle:checked:after {
     <div class="input-container">
         <input type="text" id="cadastralNumber" placeholder="Кадастровый номер">
         <!-- Иконка внутри поля ввода -->
-        <div class="icon-container" onclick="openSite()">
+        <div class="icon-container" onclick="fetchDataFromArchive()">
             <img src="https://img.icons8.com/?size=100&id=107436&format=png&color=000000" alt="Open Site" class="site-icon">
         </div>
     </div>
@@ -1308,6 +1309,12 @@ input[type='checkbox'].toggle:checked:after {
 </div>
 <div class="content-container">
     <div class="data-container">
+        
+    <div id="archiveInfo" style="display: none; text-align: center; margin-bottom: 15px; padding: 8px; border-radius: 5px; background-color: #ffebee;">
+    <!-- Сюда будет вставляться иконка и текст с датой -->
+</div>
+
+    
         <table id="resultTable" style="display:none;">
             <tbody></tbody>
         </table>
@@ -2296,6 +2303,7 @@ async function exportToExcel() {
 
 // Основная функция запроса данных (финальная версия)
 function fetchData(keepModalOpen = false) {
+       document.getElementById('archiveInfo').style.display = 'none';
     const cadastralNumber = document.getElementById('cadastralNumber').value;
 
     if (!cadastralNumber.trim()) {
@@ -3935,6 +3943,179 @@ document.getElementById('schemeCanvas').addEventListener('dblclick', function(ev
         });
     }
 });
+
+
+
+//=======================================================================//
+//========== НАЧАЛО БЛОКА ИЗМЕНЕНИЙ ДЛЯ ЗАГРУЗКИ ИЗ АРХИВА ==============//
+//=======================================================================//
+
+// Добавьте эту константу в начало вашего скрипта
+const STORAGE_API_URL = 'https://mapruapp.ru/storage';
+
+/**
+ * Главная функция, запускающая процесс загрузки данных из архива КПТ.
+ */
+async function fetchDataFromArchive() {
+    const cadastralNumberInput = document.getElementById('cadastralNumber');
+    const targetCadastralNumber = cadastralNumberInput.value.trim();
+    const archiveInfoDiv = document.getElementById('archiveInfo');
+
+    // Скрываем информацию о предыдущем архивном запросе
+    if (archiveInfoDiv) {
+        archiveInfoDiv.style.display = 'none';
+        archiveInfoDiv.innerHTML = ''; // Очищаем содержимое
+    }
+
+    if (!isValidCadastralNumber(targetCadastralNumber)) {
+        showNotification('Введите корректный кадастровый номер участка', 'error');
+        return;
+    }
+
+    showNotification(`Поиск ${targetCadastralNumber} в архиве КПТ...`, 'info');
+
+    try {
+        const quarterNumber = targetCadastralNumber.split(':').slice(0, 3).join(':');
+        const filename = quarterNumber.replace(/:/g, '_') + '.nspd';
+
+        const zipBlob = await fetchZipFromLocalServer('nspd', filename);
+        if (!zipBlob) {
+            showNotification(`Архив для квартала ${quarterNumber} не найден. Попробуйте обычный поиск.`, 'warning');
+            return;
+        }
+
+        const { features, date: archiveDate } = await loadAndParseZipBlob(zipBlob);
+
+        const targetFeature = features.find(f => f.properties && f.properties.descr === targetCadastralNumber);
+
+        if (!targetFeature) {
+            showNotification(`Участок ${targetCadastralNumber} не найден в архиве квартала.`, 'error');
+            return;
+        }
+
+        console.log("Найден участок в архиве:", targetFeature);
+
+        const properties = targetFeature.properties;
+        const options = targetFeature.properties ? targetFeature.properties.options : {};
+        const geometry = targetFeature.geometry;
+        
+        document.title = `${targetCadastralNumber}`;
+        updatePropertyData(options, properties, null, null);
+
+        if (geometry && geometry.coordinates && geometry.type !== "Point") {
+            currentCoords = geometry.coordinates;
+            document.querySelector('.content-container').style.display = 'grid';
+            document.querySelector('.scheme-container').style.display = 'block';
+            drawScheme();
+        } else {
+            document.querySelector('.content-container').style.display = 'block';
+            document.querySelector('.scheme-container').style.display = 'none';
+            clearCanvas();
+            const warningMsg = (geometry && geometry.type === "Point") 
+                ? 'Участок найден, но не имеет координат для отрисовки (геометрия-точка).'
+                : 'Участок найден, но не имеет координат для отрисовки.';
+            showNotification(warningMsg, 'warning');
+        }
+        
+        // --- ОБНОВЛЕННЫЙ БЛОК ДЛЯ ФОРМАТИРОВАНИЯ И ОТОБРАЖЕНИЯ ДАТЫ ---
+        let formattedDate = '';
+        if (archiveDate) {
+            const [year, month, day] = archiveDate.split('-');
+            formattedDate = `${day}.${month}.${year}`;
+        }
+
+        // Показываем подпись над таблицей с новыми стилями и иконкой
+        if (archiveInfoDiv && formattedDate) {
+            archiveInfoDiv.innerHTML = `
+                <i class="fas fa-exclamation-triangle" style="margin-right: 8px; color: #c62828;"></i>
+                <span style="font-size: 16px; font-weight: 500; color: #c62828;">
+                    Данные из архива (актуальность: ${formattedDate})
+                </span>
+            `;
+            archiveInfoDiv.style.display = 'block';
+        }
+        
+        // Показываем уведомление (без изменений)
+        const notificationMessage = formattedDate
+            ? `Данные из архива КПТ загружены (на ${formattedDate})`
+            : 'Данные из архива КПТ успешно загружены!';
+        showNotification(notificationMessage, 'success');
+        
+        document.getElementById('resultTable').style.display = 'table';
+
+    } catch (error) {
+        console.error("Ошибка при работе с архивом:", error);
+        showNotification(`Ошибка: ${error.message}`, 'error');
+    }
+}
+
+/**
+ * Загружает ZIP-файл с вашего сервера.
+ * @param {string} bucketName - Имя "папки" на сервере ('nspd').
+ * @param {string} filePathInBucket - Имя файла (например, '16_56_010130.nspd').
+ * @returns {Promise<Blob|null>} - Blob-объект файла или null в случае ошибки.
+ */
+async function fetchZipFromLocalServer(bucketName, filePathInBucket) {
+    try {
+        const response = await fetch(`${STORAGE_API_URL}/${bucketName}/${filePathInBucket}`);
+        if (!response.ok) {
+            if (response.status === 404) {
+                console.log(`Файл "${filePathInBucket}" не найден.`);
+            } else {
+                console.error(`Ошибка сервера ${response.status} для файла "${filePathInBucket}".`);
+            }
+            return null;
+        }
+        return await response.blob();
+    } catch (error) {
+        console.error(`Ошибка сети при запросе файла "${filePathInBucket}":`, error);
+        return null;
+    }
+}
+
+/**
+ * Распаковывает ZIP-архив и парсит JSON-файл внутри него.
+ * @param {Blob} zipBlob - Blob-объект ZIP-архива.
+ * @returns {Promise<{features: any[], date: string|null, quarter: string|null}>} - Объект с данными.
+ */
+async function loadAndParseZipBlob(zipBlob) {
+    if (!zipBlob) throw new Error("ZIP-файл для загрузки не предоставлен.");
+
+    const zip = await JSZip.loadAsync(zipBlob);
+
+    let jsonFile = null;
+    let loadedDate = null;
+    let inferredQuarter = null;
+    const jsonFilenamePattern = /^(\d{2}_\d{2}_\d{6,7}(?:_\d+)?)\s(\d{4}-\d{2}-\d{2})\.json$/;
+
+    for (const filename in zip.files) {
+        const match = filename.match(jsonFilenamePattern);
+        if (match) {
+            jsonFile = zip.files[filename];
+            inferredQuarter = match[1].replace(/_/g, ':');
+            loadedDate = match[2];
+            break;
+        }
+    }
+
+    if (!jsonFile) {
+        throw new Error("Файл данных (*.json) не найден в архиве.");
+    }
+
+    const jsonText = await jsonFile.async("text");
+    const loadedFeatures = JSON.parse(jsonText);
+
+    if (!Array.isArray(loadedFeatures)) {
+        throw new Error("Файл содержит некорректные данные.");
+    }
+
+    return { features: loadedFeatures, date: loadedDate, quarter: inferredQuarter };
+}
+
+//=======================================================================//
+//=========== КОНЕЦ БЛОКА ИЗМЕНЕНИЙ ДЛЯ ЗАГРУЗКИ ИЗ АРХИВА ==============//
+//=======================================================================//
+
 
 
 // Инициализация при загрузке страницы
