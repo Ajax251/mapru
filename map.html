@@ -8219,24 +8219,25 @@ function formatCadastralNumber(input) {
         }
 
         // Проверка, является ли ввод номером кадастрового квартала
-          if (isCadastralQuarter(inputText)) {
-                        await drawCadastralQuarter(inputText);
-                        addToHistory(inputText);
-                        return;
-                    }
+         if (isValidCadastralNumber(inputText)) {
+    try {
+        document.getElementById('loaderContainer').style.display = 'flex';
+        document.querySelector('.loading-text').textContent = `Запрос данных для ${inputText}...`;
 
-                    if (isValidCadastralNumber(inputText)) {
-                        try {
-                            document.getElementById('loaderContainer').style.display = 'flex';
-                            document.querySelector('.loading-text').textContent = `Запрос данных для ${inputText}...`;
+        const feature = await fetchCadastralData(inputText);
 
-                            const feature = await fetchCadastralData(inputText);
-
-                            if (!feature || !feature.geometry) {
-                                showNotification('Кадастровый номер не найден или не имеет геометрии', 'error', 'exclamation-circle');
-                                document.getElementById('loaderContainer').style.display = 'none';
-                                return;
-                            }
+        // --- НАЧАЛО БЛОКА ИЗМЕНЕНИЙ ---
+        if (!feature || !feature.geometry) {
+            // Если НСПД ничего не нашел, пытаемся найти в архиве
+            showNotification('Объект не найден в ЕГРН. Поиск в архиве КПТ...', 'warning');
+            
+            // Вызываем новую функцию для поиска в архиве
+            await findParcelInArchive(inputText); 
+            
+            // Важно! Скрываем загрузчик здесь, так как findParcelInArchive сам управляет им
+            document.getElementById('loaderContainer').style.display = 'none';
+            return; // Завершаем выполнение, так как дальнейшая обработка не нужна
+        }
 
                             const cnParts = inputText.split(':');
                             // Check for 6 or 7 zeros in the third part of the CN (block/quarter part)
@@ -10647,6 +10648,82 @@ function createSquareAroundPoint(x, y, radiusMeters) {
         [x + halfSize, y - halfSize], // Нижний правый
         [x - halfSize, y - halfSize]  // Замыкаем
     ];
+}
+
+
+async function findParcelInArchive(targetCadastralNumber) {
+    const loaderText = document.querySelector('.loading-text');
+    
+    try {
+        const quarterNumber = targetCadastralNumber.split(':').slice(0, 3).join(':');
+        const filename = quarterNumber.replace(/:/g, '_') + '.nspd';
+
+        if (loaderText) loaderText.textContent = `Загрузка архива ${quarterNumber}...`;
+
+        const zipBlob = await fetchZipFromLocalServer('nspd', filename);
+        if (!zipBlob) {
+            showNotification(`Архив для квартала ${quarterNumber} не найден.`, 'error');
+            return;
+        }
+
+        if (loaderText) loaderText.textContent = `Распаковка данных...`;
+        
+        const { features, date: archiveDate } = await loadAndParseZipBlob(zipBlob);
+        const targetFeature = features.find(f => f.properties && f.properties.descr === targetCadastralNumber);
+
+        if (!targetFeature) {
+            showNotification(`Участок ${targetCadastralNumber} не найден в архиве.`, 'error');
+            return;
+        }
+
+        clearMapAndResetTheme();
+        
+        // --- НАЧАЛО БЛОКА ИЗМЕНЕНИЙ ---
+        // 1. Отрисовываем участок и получаем ссылку на созданные объекты Я.Карт
+        const drawnObjects = await processAndDrawParcels([targetFeature], 'quarter');
+        
+        // 2. Ищем среди отрисованных объектов именно полигон
+        const targetPolygon = drawnObjects.find(obj => obj instanceof ymaps.Polygon);
+        
+        // 3. Если полигон найден, устанавливаем границы карты по нему
+        if (targetPolygon) {
+            const bounds = targetPolygon.geometry.getBounds();
+            
+            // Проверяем, что границы корректны
+            if (bounds && bounds[0] && bounds[1]) {
+                // Добавляем небольшой отступ (padding) для лучшего вида
+                const latPadding = (bounds[1][0] - bounds[0][0]) * 0.15 || 0.0005;
+                const lonPadding = (bounds[1][1] - bounds[0][1]) * 0.15 || 0.0005;
+
+                const paddedBounds = [
+                    [bounds[0][0] - latPadding, bounds[0][1] - lonPadding],
+                    [bounds[1][0] + latPadding, bounds[1][1] + lonPadding]
+                ];
+                
+                map.setBounds(paddedBounds, {
+                    checkZoomRange: true, // Убедимся, что зум не выходит за пределы min/max
+                    duration: 500 // Плавная анимация приближения
+                });
+            }
+        }
+        // --- КОНЕЦ БЛОКА ИЗМЕНЕНИЙ ---
+        
+        let formattedDate = '';
+        if (archiveDate) {
+            const [year, month, day] = archiveDate.split('-');
+            formattedDate = `${day}.${month}.${year}`;
+        }
+        
+        document.getElementById('city-name-display').innerHTML = `Архив (${formattedDate}):<br>${targetCadastralNumber}`;
+        
+        showNotification(`Основной сервис недоступен. Участок ${targetCadastralNumber} найден в архиве от ${formattedDate}`, 'success');
+        
+        addToHistory(targetCadastralNumber);
+
+    } catch (error) {
+        console.error("Ошибка при поиске в архиве:", error);
+        showNotification(`Ошибка при работе с архивом: ${error.message}`, 'error');
+    }
 }
 
 // Функция для получения участков в радиусе и их отрисовки
