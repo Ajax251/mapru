@@ -388,6 +388,7 @@ class DocumentEditor {
             detailSelector: document.getElementById('detail-selector'),
             notification: document.querySelector('.notification'),
             settingsBtn: document.getElementById('settings-btn'),
+            // --- ДОБАВЛЕН ЭЛЕМЕНТ ---
             redoLastQueryBtn: document.getElementById('redo-last-query-btn'),
             settingsModal: document.getElementById('settings-modal-overlay'),
             themeToggleBtn: document.getElementById('theme-toggle-btn'),
@@ -410,8 +411,6 @@ class DocumentEditor {
         this.config = {
             VERCEL_PROXY_BASE_URL: "https://ver-olive-delta.vercel.app",
             MAPRUAPP_PROXY_BASE_URL: "https://mapruapp.ru",
-            MAX_COMPLETION_TOKENS: 8192, // Увеличенный лимит токенов
-            HISTORY_LENGTH: 4, // Храним 2 пары "вопрос-ответ" (user, assistant, user, assistant)
             MODELS: [
                 { id: "gemini-2.5-flash-lite-preview-06-17", uiName: "Gemini 2.5 Flash Lite", apiType: "gemini" },
                 { id: "gemini-2.5-flash", uiName: "Gemini 2.5 Flash", apiType: "gemini" },
@@ -462,14 +461,6 @@ class DocumentEditor {
         this.state.currentApiMode = localStorage.getItem('docgen_apimode') || 'mapruapp';
         this.state.geminiApiKey = localStorage.getItem('docgen_gemini_key');
         this.state.mistralApiKey = localStorage.getItem('docgen_mistral_key');
-        const savedHistory = localStorage.getItem('docgen_chathistory');
-        if (savedHistory) {
-            this.state.chatHistory = JSON.parse(savedHistory);
-        }
-    }
-
-    saveHistoryToStorage() {
-        localStorage.setItem('docgen_chathistory', JSON.stringify(this.state.chatHistory));
     }
 
     bindEvents() {
@@ -486,7 +477,7 @@ class DocumentEditor {
             button.classList.add('active');
         });
 
-        // --- ИЗМЕНЕНО: Добавлена логика сброса истории ---
+        // --- ДОБАВЛЕНО СОБЫТИЕ ---
         this.elements.redoLastQueryBtn.addEventListener('click', () => this.redoLastQuery());
         this.elements.settingsBtn.addEventListener('click', () => this.elements.settingsModal.style.display = 'flex');
         this.elements.settingsModal.addEventListener('click', e => { if (e.target === this.elements.settingsModal) this.elements.settingsModal.style.display = 'none'; });
@@ -506,36 +497,28 @@ class DocumentEditor {
         this.elements.saveApiKeyBtn.addEventListener('click', () => this.saveApiKey());
         this.elements.apiKeyModal.addEventListener('click', e => { if (e.target === this.elements.apiKeyModal) this.hideApiKeyModal(); });
 
+        // Drag & Resize Events
         this.elements.toolbarHeader.addEventListener('mousedown', e => this.startDrag(e));
         document.addEventListener('mousemove', e => { this.doDrag(e); this.doResize(e); });
         document.addEventListener('mouseup', () => { this.stopDrag(); this.stopResize(); });
         this.elements.editor.addEventListener('mousedown', e => this.handleImageResizeStart(e));
     }
     
-    // --- ИЗМЕНЕНО: Теперь сбрасывает историю диалога ---
+    // --- НОВЫЙ МЕТОД: Повтор последнего запроса ---
     redoLastQuery() {
         // Ищем в истории последний элемент с ролью 'user'
         const lastUserMessage = [...this.state.chatHistory].reverse().find(m => m.role === 'user');
         if (lastUserMessage) {
             this.elements.chatInput.value = lastUserMessage.content;
-            
-            // Сбрасываем историю диалога, так как это начало новой "ветки" беседы
-            this.state.chatHistory = []; 
-            this.saveHistoryToStorage(); // Очищаем и в localStorage
-            
             this.elements.chatInput.focus();
             this.autoResizeChatInput();
-            
-            // Обновляем уведомление, чтобы сообщить о сбросе
-            this.showNotification('Последний запрос восстановлен. История диалога сброшена.');
-            
+            this.showNotification('Последний запрос восстановлен.');
         } else {
             this.showNotification('Нет запросов в истории для повтора.', true);
         }
     }
 
     initToolbar() {
-        // ... (код без изменений)
         const toolbar = this.elements.formattingToolbar;
         toolbar.querySelector('#btn-bold').addEventListener('click', () => document.execCommand('bold'));
         toolbar.querySelector('#btn-italic').addEventListener('click', () => document.execCommand('italic'));
@@ -552,38 +535,260 @@ class DocumentEditor {
         document.addEventListener('selectionchange', () => this.updateToolbarStates());
     }
 
-    // --- ОБНОВЛЕНО: Используем ограниченную историю для диалога ---
+    updateToolbarStates() {
+        const commands = [
+            { id: '#btn-bold', command: 'bold' }, { id: '#btn-italic', command: 'italic' },
+            { id: '#btn-underline', command: 'underline' }, { id: '#btn-center', class: 'text-centered' }
+        ];
+        commands.forEach(({ id, command, class: className }) => {
+            const button = document.querySelector(id);
+            if (button) {
+                let isActive = command ? document.queryCommandState(command) : this.elements.editor.classList.contains(className);
+                button.classList.toggle('active', isActive);
+            }
+        });
+    }
+
+    applyFontSize(size) {
+        document.execCommand('fontSize', false, '7');
+        const fontElements = this.elements.editor.getElementsByTagName('font');
+        const selection = window.getSelection();
+        if (!selection.rangeCount) return;
+        Array.from(fontElements).forEach(fontElement => {
+             if (fontElement.size === "7" && selection.containsNode(fontElement, true)) {
+                fontElement.removeAttribute('size'); fontElement.style.fontSize = `${size}px`;
+            }
+        });
+    }
+
+    toggleTextCenter() {
+        document.execCommand('justifyCenter'); this.updateToolbarStates();
+    }
+    
+    setupImageResize(img) {
+        if (img.parentElement.classList.contains('resizable-image')) return;
+        const figure = document.createElement('figure');
+        figure.className = 'resizable-image';
+        figure.setAttribute('contenteditable', 'false');
+        ['nw', 'ne', 'sw', 'se'].forEach(pos => {
+            const handle = document.createElement('div');
+            handle.className = `resize-handle ${pos}`;
+            figure.appendChild(handle);
+        });
+        img.parentNode.insertBefore(figure, img);
+        figure.appendChild(img);
+    }
+    
+    handleImageResizeStart(e) {
+        const handle = e.target.closest('.resize-handle');
+        if (!handle) return;
+        e.preventDefault(); e.stopPropagation();
+        this.state.isResizing = true; this.state.currentResizeHandle = handle;
+        this.state.startX = e.clientX; this.state.startY = e.clientY;
+        const figure = handle.parentElement;
+        const img = figure.querySelector('img');
+        this.state.startWidth = img.offsetWidth; this.state.startHeight = img.offsetHeight;
+        this.state.aspectRatio = this.state.startWidth / this.state.startHeight;
+        figure.classList.add('resizing');
+        document.body.style.cursor = handle.style.cursor;
+        document.body.style.userSelect = 'none';
+    }
+
+    doResize(e) {
+        if (!this.state.isResizing) return;
+        e.preventDefault();
+        const figure = this.state.currentResizeHandle.parentElement;
+        const img = figure.querySelector('img');
+        const pos = this.state.currentResizeHandle.classList.contains('se') || this.state.currentResizeHandle.classList.contains('ne') ? 1 : -1;
+        let newWidth = this.state.startWidth + (e.clientX - this.state.startX) * pos * (this.state.currentResizeHandle.classList.contains('sw') || this.state.currentResizeHandle.classList.contains('ne') ? 1 : 1);
+        const minWidth = 50; const maxWidth = this.elements.editor.offsetWidth * 0.95;
+        newWidth = Math.max(minWidth, Math.min(maxWidth, newWidth));
+        img.style.width = `${newWidth}px`; img.style.height = `${newWidth / this.state.aspectRatio}px`;
+    }
+
+    stopResize() {
+        if (!this.state.isResizing) return;
+        this.state.isResizing = false;
+        document.body.style.cursor = ''; document.body.style.userSelect = '';
+        const resizingFigure = this.elements.editor.querySelector('.resizable-image.resizing');
+        if (resizingFigure) resizingFigure.classList.remove('resizing');
+    }
+
+    handlePaste(event) {
+        const items = (event.clipboardData || window.clipboardData).items;
+        for (let i = 0; i < items.length; i++) {
+            if (items[i].type.indexOf('image') !== -1) {
+                event.preventDefault();
+                const file = items[i].getAsFile();
+                const reader = new FileReader();
+                reader.onload = (e) => {
+                    const img = document.createElement('img');
+                    img.src = e.target.result;
+                    img.onload = () => this.wrapAndInsertImage(img);
+                };
+                reader.readAsDataURL(file);
+                return;
+            }
+        }
+    }
+
+    wrapAndInsertImage(img) {
+        this.insertNodeAtCursor(img);
+        this.setupImageResize(img);
+        const p = document.createElement('p'); p.innerHTML = '<br>';
+        img.parentElement.insertAdjacentElement('afterend', p);
+        const selection = window.getSelection(); const range = document.createRange();
+        range.setStart(p, 0); range.collapse(true);
+        selection.removeAllRanges(); selection.addRange(range);
+    }
+    
+    insertNodeAtCursor(node) {
+        const selection = window.getSelection();
+        if (!selection.rangeCount) return;
+        let range = selection.getRangeAt(0);
+        // --- ИСПРАВЛЕНО: Проверка на пустой редактор вместо плейсхолдера ---
+        if(this.elements.editor.innerHTML.trim() === '') { 
+            this.elements.editor.innerHTML = ''; 
+            range = document.createRange(); 
+            range.selectNodeContents(this.elements.editor); 
+            range.collapse(false); 
+        }
+        range.deleteContents(); range.insertNode(node);
+        range.setStartAfter(node); range.collapse(true);
+        selection.removeAllRanges(); selection.addRange(range);
+    }
+
+    updateTheme() { document.body.classList.toggle('dark-theme', this.state.isDarkTheme); }
+    autoResizeChatInput() { const el = this.elements.chatInput; el.style.height = 'auto'; el.style.height = (el.scrollHeight) + 'px'; }
+    
+    setLoadingState(isGenerating) {
+        this.state.isGenerating = isGenerating;
+        this.elements.sendBtn.disabled = isGenerating;
+        this.elements.sendBtn.innerHTML = isGenerating ? '<div class="spinner"></div>' : '<i class="fas fa-paper-plane"></i>';
+        if(isGenerating) {
+            this.elements.editor.contentEditable = false;
+            this.elements.editor.classList.add('loading');
+            this.elements.editor.innerHTML = `<div class="spinner" style="margin: 2rem auto; width: 40px; height: 40px; border-width: 4px; border-top-color: #667eea;"></div>`;
+        } else {
+             this.elements.editor.contentEditable = true;
+             this.elements.editor.classList.remove('loading');
+        }
+    }
+    
+    showNotification(message, isError = false) {
+        this.elements.notification.textContent = message;
+        this.elements.notification.className = `notification ${isError ? 'error' : ''}`;
+        this.elements.notification.classList.add('show');
+        setTimeout(() => this.elements.notification.classList.remove('show'), 4000);
+    }
+    
+    startDrag(e) {
+        if (e.target.closest('.toolbar-btn, .toolbar-select, .toolbar-color-input')) return;
+        this.state.isDragging = true;
+        const rect = this.elements.formattingToolbar.getBoundingClientRect();
+        this.state.dragOffsetX = e.clientX - rect.left; this.state.dragOffsetY = e.clientY - rect.top;
+        this.elements.formattingToolbar.style.cursor = 'grabbing'; e.preventDefault();
+    }
+    
+    doDrag(e) {
+        if (!this.state.isDragging) return; e.preventDefault();
+        let newX = e.clientX - this.state.dragOffsetX; let newY = e.clientY - this.state.dragOffsetY;
+        const toolbarRect = this.elements.formattingToolbar.getBoundingClientRect();
+        newX = Math.max(0, Math.min(window.innerWidth - toolbarRect.width, newX));
+        newY = Math.max(0, Math.min(window.innerHeight - toolbarRect.height, newY));
+        this.elements.formattingToolbar.style.left = `${newX}px`; this.elements.formattingToolbar.style.top = `${newY}px`;
+    }
+    
+    stopDrag() { this.state.isDragging = false; this.elements.formattingToolbar.style.cursor = 'default'; }
+
+    populateModelOptions() {
+        this.elements.modelOptionsList.innerHTML = '';
+        this.config.MODELS.forEach(model => {
+            const li = document.createElement('li');
+            li.className = 'selector-option'; li.dataset.modelId = model.id;
+            li.innerHTML = `<i class="fas fa-atom"></i> <span>${model.uiName}</span>`;
+            li.addEventListener('click', () => { this.state.currentModelId = model.id; localStorage.setItem('docgen_model', model.id); this.updateModelUI(); this.elements.modelOptionsList.classList.remove('show'); });
+            this.elements.modelOptionsList.appendChild(li);
+        });
+    }
+    
+    populateApiModeOptions() {
+        this.elements.apiModeOptionsList.innerHTML = '';
+        Object.entries(this.config.API_MODES).forEach(([modeId, modeConfig]) => {
+            const li = document.createElement('li');
+            li.className = 'selector-option'; li.dataset.apiMode = modeId;
+            li.innerHTML = `${modeConfig.icon} <span>${modeConfig.uiName}</span>`;
+            li.addEventListener('click', () => { this.state.currentApiMode = modeId; localStorage.setItem('docgen_apimode', modeId); this.updateApiModeUI(); this.elements.apiModeOptionsList.classList.remove('show'); if (modeId.startsWith('direct_') && !this.getApiKeyForCurrentMode()) { this.showApiKeyModal(); } });
+            this.elements.apiModeOptionsList.appendChild(li);
+        });
+    }
+    
+    updateModelUI() {
+        const model = this.config.MODELS.find(m => m.id === this.state.currentModelId) || this.config.MODELS[0];
+        this.elements.modelSelectorButton.innerHTML = `<i class="fas fa-atom"></i> <span>${model.uiName}</span><i class="fas fa-chevron-down fa-xs"></i>`;
+        this.elements.modelOptionsList.querySelectorAll('.selector-option').forEach(opt => opt.classList.toggle('selected', opt.dataset.modelId === this.state.currentModelId));
+    }
+    
+    updateApiModeUI() {
+        const modeConfig = this.config.API_MODES[this.state.currentApiMode] || this.config.API_MODES['mapruapp'];
+        this.elements.apiModeSelectorButton.innerHTML = `${modeConfig.icon} <span>${modeConfig.uiName}</span><i class="fas fa-chevron-down fa-xs"></i>`;
+        this.elements.apiModeOptionsList.querySelectorAll('.selector-option').forEach(opt => opt.classList.toggle('selected', opt.dataset.apiMode === this.state.currentApiMode));
+    }
+    
+    showApiKeyModal() {
+        this.elements.settingsModal.style.display = 'none';
+        const isMistral = this.state.currentApiMode === 'direct_mistral';
+        this.elements.apiKeyModalTitle.innerHTML = `<i class="fas fa-key"></i> API Ключ ${isMistral ? 'Mistral' : 'Gemini'}`;
+        this.elements.apiKeyModalText.textContent = `Для прямого режима нужен ваш API ключ. Он будет сохранен локально в браузере.`;
+        this.elements.apiKeyModalLink.href = isMistral ? 'https://console.mistral.ai/api-keys/' : 'https://aistudio.google.com/app/apikey';
+        this.elements.apiKeyInput.value = isMistral ? (this.state.mistralApiKey || '') : (this.state.geminiApiKey || '');
+        this.elements.apiKeyModal.style.display = 'flex'; this.elements.apiKeyInput.focus();
+    }
+    
+    hideApiKeyModal() { this.elements.apiKeyModal.style.display = 'none'; }
+    
+    saveApiKey() {
+        const key = this.elements.apiKeyInput.value.trim();
+        const isMistral = this.state.currentApiMode === 'direct_mistral';
+        if (isMistral) { this.state.mistralApiKey = key; localStorage.setItem('docgen_mistral_key', key); }
+        else { this.state.geminiApiKey = key; localStorage.setItem('docgen_gemini_key', key); }
+        this.showNotification('API ключ сохранен.'); this.hideApiKeyModal();
+    }
+    
+    getApiKeyForCurrentMode() {
+        if (this.state.currentApiMode === 'direct_gemini') return this.state.geminiApiKey;
+        if (this.state.currentApiMode === 'direct_mistral') return this.state.mistralApiKey;
+        return null;
+    }
+
+    resetConversation() {
+        this.state.chatHistory = [];
+        // --- ИСПРАВЛЕНО: Просто очищаем редактор, CSS покажет плейсхолдер ---
+        this.elements.editor.innerHTML = '';
+        this.elements.editor.classList.remove('text-centered');
+        this.updateToolbarStates();
+        this.showNotification('Новый документ создан.');
+    }
+
     buildPrompt(newUserMessage) {
         let currentDocumentState = this.elements.editor.innerHTML;
-        if (this.elements.editor.innerHTML.trim() === '') {
-            currentDocumentState = "Документ пока пуст.";
+        // --- ИСПРАВЛЕНО: Проверка на пустой редактор вместо плейсхолдера ---
+        if(this.elements.editor.innerHTML.trim() === '') { 
+            currentDocumentState = "Документ пока пуст."; 
         }
-
-        const recentHistory = this.state.chatHistory.slice(-this.config.HISTORY_LENGTH);
-
         const messages = [
-            { 
-                role: 'system', 
-                content: this.config.PROMPTS.SYSTEM_PROMPT 
-            },
-            ...recentHistory,
-            { 
-                role: 'user', 
-                content: `Вот текущее состояние документа:\n\n<document>${currentDocumentState}</document>\n\nПримени к нему следующую инструкцию с уровнем детализации "${this.state.selectedDetail}": "${newUserMessage}"` 
-            }
+            { role: 'system', content: this.config.PROMPTS.SYSTEM_PROMPT },
+            ...this.state.chatHistory,
+            { role: 'user', content: `Вот текущее состояние документа:\n\n<document>${currentDocumentState}</document>\n\nПримени к нему следующую инструкцию с уровнем детализации "${this.state.selectedDetail}": "${newUserMessage}"` }
         ];
-        
         return messages;
     }
 
-    // --- ОБНОВЛЕНО: Проверяем finish_reason ---
     async sendMessage() {
         const userQuery = this.elements.chatInput.value.trim();
         if (!userQuery) return;
         if (this.state.currentApiMode.startsWith('direct_') && !this.getApiKeyForCurrentMode()) {
-            this.showNotification('Пожалуйста, введите API ключ.', true);
-            this.showApiKeyModal();
-            return;
+            this.showNotification('Пожалуйста, введите API ключ.', true); this.showApiKeyModal(); return;
         }
 
         this.setLoadingState(true);
@@ -591,124 +796,68 @@ class DocumentEditor {
         this.state.chatHistory.push({ role: 'user', content: userQuery });
 
         try {
-            const { responseHtml, finishReason } = await this.callApi(messages); // Получаем оба значения
+            const responseHtml = await this.callApi(messages);
             this.elements.editor.innerHTML = responseHtml;
             this.elements.editor.querySelectorAll('img').forEach(img => this.setupImageResize(img));
             this.state.chatHistory.push({ role: 'assistant', content: responseHtml });
-            this.saveHistoryToStorage(); // Сохраняем историю после успешного ответа
-
-            // Показываем уведомление, если ответ был обрезан
-            if (finishReason === 'length') {
-                this.showNotification("Ответ ИИ может быть неполным из-за ограничения длины.", true);
-            }
-
         } catch (error) {
             this.elements.editor.innerHTML = `<p class="placeholder" style="color: var(--accent-red);"><b>Ошибка генерации:</b><br>${error.message}</p>`;
             this.showNotification(`Ошибка: ${error.message}`, true);
-            this.state.chatHistory.pop(); // Удаляем последний (неудачный) запрос пользователя из истории
+            this.state.chatHistory.pop();
         } finally {
-            this.elements.chatInput.value = '';
-            this.autoResizeChatInput();
-            this.setLoadingState(false);
+            this.elements.chatInput.value = ''; this.autoResizeChatInput(); this.setLoadingState(false);
         }
     }
 
-    // --- ОБНОВЛЕНО: Возвращаем объект с HTML и finish_reason ---
     async callApi(messages) {
         const modelConfig = this.config.MODELS.find(m => m.id === this.state.currentModelId) || this.config.MODELS[0];
         let url, body, headers = { 'Content-Type': 'application/json' };
-        
-        const maxTokens = this.config.MAX_COMPLETION_TOKENS;
-
-        switch (this.state.currentApiMode) {
+        switch(this.state.currentApiMode) {
             case 'mapruapp':
-                url = `${this.config.MAPRUAPP_PROXY_BASE_URL}/ai/api/v1/chat/completions`;
-                body = { model: modelConfig.id, messages, max_tokens: maxTokens };
-                break;
+                url = `${this.config.MAPRUAPP_PROXY_BASE_URL}/ai/api/v1/chat/completions`; body = { model: modelConfig.id, messages, max_tokens: 4096 }; break;
             case 'vercel':
-                url = `${this.config.VERCEL_PROXY_BASE_URL}/proxy/mistral/chat/completions`;
-                body = { model: modelConfig.id, messages, max_tokens: maxTokens };
-                break;
+                url = `${this.config.VERCEL_PROXY_BASE_URL}/proxy/mistral/chat/completions`; body = { model: modelConfig.id, messages, max_tokens: 4096 }; break;
             case 'direct_gemini':
                 url = `https://generativelanguage.googleapis.com/v1beta/models/${modelConfig.id}:generateContent?key=${this.state.geminiApiKey}`;
                 const geminiMessages = messages.map(m => `${m.role}: ${m.content}`).join('\n\n---\n\n');
-                body = { 
-                    contents: [{ role: 'user', parts: [{ text: geminiMessages }] }],
-                    generationConfig: { maxOutputTokens: maxTokens } 
-                };
-                break;
+                body = { contents: [{ role: 'user', parts: [{text: geminiMessages }] }] }; break;
             case 'direct_mistral':
-                url = `https://api.mistral.ai/v1/chat/completions`;
-                headers['Authorization'] = `Bearer ${this.state.mistralApiKey}`;
-                body = { model: modelConfig.id, messages, max_tokens: maxTokens };
-                break;
-            default:
-                throw new Error("Неизвестный режим API");
+                url = `https://api.mistral.ai/v1/chat/completions`; headers['Authorization'] = `Bearer ${this.state.mistralApiKey}`;
+                body = { model: modelConfig.id, messages, max_tokens: 4096 }; break;
+            default: throw new Error("Неизвестный режим API");
         }
-
         const response = await fetch(url, { method: 'POST', headers, body: JSON.stringify(body) });
         const data = await response.json();
-
-        if (!response.ok) {
-            const errorMsg = data?.error?.message || data?.error?.error?.message || `HTTP ${response.status}: ${response.statusText}`;
-            throw new Error(errorMsg);
-        }
-
-        let rawResponse, finishReason;
-        if (this.state.currentApiMode === 'direct_gemini') {
-            rawResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || '';
-            finishReason = data.candidates?.[0]?.finishReason.toLowerCase(); // Gemini использует 'MAX_TOKENS', приводим к 'length'
-            if (finishReason === 'max_tokens') finishReason = 'length';
-        } else {
-            rawResponse = data.choices?.[0]?.message?.content || '';
-            finishReason = data.choices?.[0]?.finish_reason || 'stop';
-        }
-        
+        if (!response.ok) { const errorMsg = data?.error?.message || data?.error?.error?.message || `HTTP ${response.status}: ${response.statusText}`; throw new Error(errorMsg); }
+        let rawResponse;
+        if (this.state.currentApiMode === 'direct_gemini') { rawResponse = data.candidates?.[0]?.content?.parts?.[0]?.text || ''; } 
+        else { rawResponse = data.choices?.[0]?.message?.content || ''; }
         const start = rawResponse.indexOf("<");
         const end = rawResponse.lastIndexOf(">") + 1;
-        const responseHtml = (start !== -1 && end > start)
-            ? rawResponse.substring(start, end)
-            : `<p>${rawResponse.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p>`;
-
-        return { responseHtml, finishReason };
+        if (start !== -1 && end > start) { return rawResponse.substring(start, end); }
+        return `<p>${rawResponse.replace(/</g, "&lt;").replace(/>/g, "&gt;")}</p>`;
     }
+    
+    saveAsHtml() {
+        // --- ИСПРАВЛЕНО: Проверка на пустой редактор вместо плейсхолдера ---
+        if (this.elements.editor.innerHTML.trim() === '') {
+            this.showNotification("Документ пуст, нечего сохранять.", true); return;
+        }
 
-    resetConversation() {
-        this.state.chatHistory = [];
-        this.saveHistoryToStorage(); // Очищаем и в localStorage
-        this.elements.editor.innerHTML = '';
-        this.elements.editor.classList.remove('text-centered');
-        this.updateToolbarStates();
-        this.showNotification('Новый документ создан.');
-    }
+        const editorClone = this.elements.editor.cloneNode(true);
+        editorClone.querySelectorAll('.resize-handle').forEach(handle => handle.remove());
+        editorClone.querySelectorAll('.resizable-image').forEach(fig => {
+            fig.removeAttribute('contenteditable');
+            fig.style.border = 'none';
+            fig.style.boxShadow = 'none';
+        });
 
-    // Остальные методы (updateToolbarStates, applyFontSize, setupImageResize, и т.д.) остаются без изменений
-    updateToolbarStates() { const commands = [ { id: '#btn-bold', command: 'bold' }, { id: '#btn-italic', command: 'italic' }, { id: '#btn-underline', command: 'underline' }, { id: '#btn-center', class: 'text-centered' } ]; commands.forEach(({ id, command, class: className }) => { const button = document.querySelector(id); if (button) { let isActive = command ? document.queryCommandState(command) : this.elements.editor.classList.contains(className); button.classList.toggle('active', isActive); } }); }
-    applyFontSize(size) { document.execCommand('fontSize', false, '7'); const fontElements = this.elements.editor.getElementsByTagName('font'); const selection = window.getSelection(); if (!selection.rangeCount) return; Array.from(fontElements).forEach(fontElement => { if (fontElement.size === "7" && selection.containsNode(fontElement, true)) { fontElement.removeAttribute('size'); fontElement.style.fontSize = `${size}px`; } }); }
-    toggleTextCenter() { document.execCommand('justifyCenter'); this.updateToolbarStates(); }
-    setupImageResize(img) { if (img.parentElement.classList.contains('resizable-image')) return; const figure = document.createElement('figure'); figure.className = 'resizable-image'; figure.setAttribute('contenteditable', 'false'); ['nw', 'ne', 'sw', 'se'].forEach(pos => { const handle = document.createElement('div'); handle.className = `resize-handle ${pos}`; figure.appendChild(handle); }); img.parentNode.insertBefore(figure, img); figure.appendChild(img); }
-    handleImageResizeStart(e) { const handle = e.target.closest('.resize-handle'); if (!handle) return; e.preventDefault(); e.stopPropagation(); this.state.isResizing = true; this.state.currentResizeHandle = handle; this.state.startX = e.clientX; this.state.startY = e.clientY; const figure = handle.parentElement; const img = figure.querySelector('img'); this.state.startWidth = img.offsetWidth; this.state.startHeight = img.offsetHeight; this.state.aspectRatio = this.state.startWidth / this.state.startHeight; figure.classList.add('resizing'); document.body.style.cursor = handle.style.cursor; document.body.style.userSelect = 'none'; }
-    doResize(e) { if (!this.state.isResizing) return; e.preventDefault(); const figure = this.state.currentResizeHandle.parentElement; const img = figure.querySelector('img'); const pos = this.state.currentResizeHandle.classList.contains('se') || this.state.currentResizeHandle.classList.contains('ne') ? 1 : -1; let newWidth = this.state.startWidth + (e.clientX - this.state.startX) * pos * (this.state.currentResizeHandle.classList.contains('sw') || this.state.currentResizeHandle.classList.contains('ne') ? 1 : 1); const minWidth = 50; const maxWidth = this.elements.editor.offsetWidth * 0.95; newWidth = Math.max(minWidth, Math.min(maxWidth, newWidth)); img.style.width = `${newWidth}px`; img.style.height = `${newWidth / this.state.aspectRatio}px`; }
-    stopResize() { if (!this.state.isResizing) return; this.state.isResizing = false; document.body.style.cursor = ''; document.body.style.userSelect = ''; const resizingFigure = this.elements.editor.querySelector('.resizable-image.resizing'); if (resizingFigure) resizingFigure.classList.remove('resizing'); }
-    handlePaste(event) { const items = (event.clipboardData || window.clipboardData).items; for (let i = 0; i < items.length; i++) { if (items[i].type.indexOf('image') !== -1) { event.preventDefault(); const file = items[i].getAsFile(); const reader = new FileReader(); reader.onload = (e) => { const img = document.createElement('img'); img.src = e.target.result; img.onload = () => this.wrapAndInsertImage(img); }; reader.readAsDataURL(file); return; } } }
-    wrapAndInsertImage(img) { this.insertNodeAtCursor(img); this.setupImageResize(img); const p = document.createElement('p'); p.innerHTML = '<br>'; img.parentElement.insertAdjacentElement('afterend', p); const selection = window.getSelection(); const range = document.createRange(); range.setStart(p, 0); range.collapse(true); selection.removeAllRanges(); selection.addRange(range); }
-    insertNodeAtCursor(node) { const selection = window.getSelection(); if (!selection.rangeCount) return; let range = selection.getRangeAt(0); if(this.elements.editor.innerHTML.trim() === '') { this.elements.editor.innerHTML = ''; range = document.createRange(); range.selectNodeContents(this.elements.editor); range.collapse(false); } range.deleteContents(); range.insertNode(node); range.setStartAfter(node); range.collapse(true); selection.removeAllRanges(); selection.addRange(range); }
-    updateTheme() { document.body.classList.toggle('dark-theme', this.state.isDarkTheme); }
-    autoResizeChatInput() { const el = this.elements.chatInput; el.style.height = 'auto'; el.style.height = (el.scrollHeight) + 'px'; }
-    setLoadingState(isGenerating) { this.state.isGenerating = isGenerating; this.elements.sendBtn.disabled = isGenerating; this.elements.sendBtn.innerHTML = isGenerating ? '<div class="spinner"></div>' : '<i class="fas fa-paper-plane"></i>'; if(isGenerating) { this.elements.editor.contentEditable = false; this.elements.editor.classList.add('loading'); this.elements.editor.innerHTML = `<div class="spinner" style="margin: 2rem auto; width: 40px; height: 40px; border-width: 4px; border-top-color: #667eea;"></div>`; } else { this.elements.editor.contentEditable = true; this.elements.editor.classList.remove('loading'); } }
-    showNotification(message, isError = false) { this.elements.notification.textContent = message; this.elements.notification.className = `notification ${isError ? 'error' : ''}`; this.elements.notification.classList.add('show'); setTimeout(() => this.elements.notification.classList.remove('show'), 4000); }
-    startDrag(e) { if (e.target.closest('.toolbar-btn, .toolbar-select, .toolbar-color-input')) return; this.state.isDragging = true; const rect = this.elements.formattingToolbar.getBoundingClientRect(); this.state.dragOffsetX = e.clientX - rect.left; this.state.dragOffsetY = e.clientY - rect.top; this.elements.formattingToolbar.style.cursor = 'grabbing'; e.preventDefault(); }
-    doDrag(e) { if (!this.state.isDragging) return; e.preventDefault(); let newX = e.clientX - this.state.dragOffsetX; let newY = e.clientY - this.state.dragOffsetY; const toolbarRect = this.elements.formattingToolbar.getBoundingClientRect(); newX = Math.max(0, Math.min(window.innerWidth - toolbarRect.width, newX)); newY = Math.max(0, Math.min(window.innerHeight - toolbarRect.height, newY)); this.elements.formattingToolbar.style.left = `${newX}px`; this.elements.formattingToolbar.style.top = `${newY}px`; }
-    stopDrag() { this.state.isDragging = false; this.elements.formattingToolbar.style.cursor = 'default'; }
-    populateModelOptions() { this.elements.modelOptionsList.innerHTML = ''; this.config.MODELS.forEach(model => { const li = document.createElement('li'); li.className = 'selector-option'; li.dataset.modelId = model.id; li.innerHTML = `<i class="fas fa-atom"></i> <span>${model.uiName}</span>`; li.addEventListener('click', () => { this.state.currentModelId = model.id; localStorage.setItem('docgen_model', model.id); this.updateModelUI(); this.elements.modelOptionsList.classList.remove('show'); }); this.elements.modelOptionsList.appendChild(li); }); }
-    populateApiModeOptions() { this.elements.apiModeOptionsList.innerHTML = ''; Object.entries(this.config.API_MODES).forEach(([modeId, modeConfig]) => { const li = document.createElement('li'); li.className = 'selector-option'; li.dataset.apiMode = modeId; li.innerHTML = `${modeConfig.icon} <span>${modeConfig.uiName}</span>`; li.addEventListener('click', () => { this.state.currentApiMode = modeId; localStorage.setItem('docgen_apimode', modeId); this.updateApiModeUI(); this.elements.apiModeOptionsList.classList.remove('show'); if (modeId.startsWith('direct_') && !this.getApiKeyForCurrentMode()) { this.showApiKeyModal(); } }); this.elements.apiModeOptionsList.appendChild(li); }); }
-    updateModelUI() { const model = this.config.MODELS.find(m => m.id === this.state.currentModelId) || this.config.MODELS[0]; this.elements.modelSelectorButton.innerHTML = `<i class="fas fa-atom"></i> <span>${model.uiName}</span><i class="fas fa-chevron-down fa-xs"></i>`; this.elements.modelOptionsList.querySelectorAll('.selector-option').forEach(opt => opt.classList.toggle('selected', opt.dataset.modelId === this.state.currentModelId)); }
-    updateApiModeUI() { const modeConfig = this.config.API_MODES[this.state.currentApiMode] || this.config.API_MODES['mapruapp']; this.elements.apiModeSelectorButton.innerHTML = `${modeConfig.icon} <span>${modeConfig.uiName}</span><i class="fas fa-chevron-down fa-xs"></i>`; this.elements.apiModeOptionsList.querySelectorAll('.selector-option').forEach(opt => opt.classList.toggle('selected', opt.dataset.apiMode === this.state.currentApiMode)); }
-    showApiKeyModal() { this.elements.settingsModal.style.display = 'none'; const isMistral = this.state.currentApiMode === 'direct_mistral'; this.elements.apiKeyModalTitle.innerHTML = `<i class="fas fa-key"></i> API Ключ ${isMistral ? 'Mistral' : 'Gemini'}`; this.elements.apiKeyModalText.textContent = `Для прямого режима нужен ваш API ключ. Он будет сохранен локально в браузере.`; this.elements.apiKeyModalLink.href = isMistral ? 'https://console.mistral.ai/api-keys/' : 'https://aistudio.google.com/app/apikey'; this.elements.apiKeyInput.value = isMistral ? (this.state.mistralApiKey || '') : (this.state.geminiApiKey || ''); this.elements.apiKeyModal.style.display = 'flex'; this.elements.apiKeyInput.focus(); }
-    hideApiKeyModal() { this.elements.apiKeyModal.style.display = 'none'; }
-    saveApiKey() { const key = this.elements.apiKeyInput.value.trim(); const isMistral = this.state.currentApiMode === 'direct_mistral'; if (isMistral) { this.state.mistralApiKey = key; localStorage.setItem('docgen_mistral_key', key); } else { this.state.geminiApiKey = key; localStorage.setItem('docgen_gemini_key', key); } this.showNotification('API ключ сохранен.'); this.hideApiKeyModal(); }
-    getApiKeyForCurrentMode() { if (this.state.currentApiMode === 'direct_gemini') return this.state.geminiApiKey; if (this.state.currentApiMode === 'direct_mistral') return this.state.mistralApiKey; return null; }
-    saveAsHtml() { if (this.elements.editor.innerHTML.trim() === '') { this.showNotification("Документ пуст, нечего сохранять.", true); return; } const editorClone = this.elements.editor.cloneNode(true); editorClone.querySelectorAll('.resize-handle').forEach(handle => handle.remove()); editorClone.querySelectorAll('.resizable-image').forEach(fig => { fig.removeAttribute('contenteditable'); fig.style.border = 'none'; fig.style.boxShadow = 'none'; }); const content = editorClone.innerHTML; const titleElement = this.elements.editor.querySelector('h1, h2, h3'); const title = titleElement ? titleElement.textContent.trim() : 'document'; const cleanTitle = title.replace(/[^a-z0-9а-яё]/gi, '_').toLowerCase(); const htmlTemplate = `
+        const content = editorClone.innerHTML;
+        const titleElement = this.elements.editor.querySelector('h1, h2, h3');
+        const title = titleElement ? titleElement.textContent.trim() : 'document';
+        const cleanTitle = title.replace(/[^a-z0-9а-яё]/gi, '_').toLowerCase();
+
+        const htmlTemplate = `
             <!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>${title}</title>
             <style>
                 body { font-family: 'Inter', sans-serif; line-height: 1.6; max-width: 850px; margin: 2rem auto; padding: 2rem; }
@@ -716,8 +865,16 @@ class DocumentEditor {
                 figure.resizable-image { display: inline-block; max-width: 100%; margin: 1em 0; }
                 figure.resizable-image img { display: block; max-width: 100%; }
             </style>
-            </head><body>${content}</body></html>`; const blob = new Blob([htmlTemplate], { type: 'text/html' }); const url = URL.createObjectURL(blob); const a = document.createElement('a'); a.href = url; a.download = `${cleanTitle}.html`; document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url); this.showNotification("HTML-файл начал скачиваться."); }
+            </head><body>${content}</body></html>`;
 
+        const blob = new Blob([htmlTemplate], { type: 'text/html' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url; a.download = `${cleanTitle}.html`;
+        document.body.appendChild(a); a.click();
+        document.body.removeChild(a); URL.revokeObjectURL(url);
+        this.showNotification("HTML-файл начал скачиваться.");
+    }
 }
 
 document.addEventListener('DOMContentLoaded', () => { new DocumentEditor(); });
