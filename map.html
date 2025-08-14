@@ -2779,12 +2779,11 @@ function updatePolygonStyle() {
             if (polygon instanceof ymaps.Polygon) {
                 if (polygon.properties.get('isParcelInQuarter') || polygon.properties.get('isFoundInArea')) { // Check both flags
                     // --- Determine stroke color based on declaration status ---
-                     const featureData = polygon.properties.get('featureData'); // Get stored feature data
+                            const featureData = polygon.properties.get('featureData'); // Get stored feature data
                      const parcelOptions = featureData?.properties?.options || {};
-                     const isDeclared = !parcelOptions.specified_area &&
-                                         !parcelOptions.land_record_area_verified &&
-                                         !parcelOptions.land_record_area &&
-                                         (parcelOptions.land_record_area_declaration || parcelOptions.declared_area);
+                     const isVerified = parcelOptions.specified_area || parcelOptions.land_record_area_verified;
+                     const hasDeclaredField = parcelOptions.declared_area || parcelOptions.land_record_area_declaration || parcelOptions.land_record_area;
+                     const isDeclared = !isVerified && hasDeclaredField;
                      const strokeColor = isDeclared ? polygonStyle.declaredParcelsColor : polygonStyle.parcelsColor;
                     // --- End stroke color determination ---
 
@@ -6908,7 +6907,11 @@ async function processAndDrawParcels(features, source) {
                const ownershipType = parcelOptions.ownership_type || '-';
                  const rightType = parcelOptions.right_type || '-';
 
-                 const isDeclared = !parcelOptions.specified_area && !parcelOptions.land_record_area_verified && !parcelOptions.land_record_area && (parcelOptions.land_record_area_declaration || parcelOptions.declared_area);
+                    const isVerified = parcelOptions.specified_area || parcelOptions.land_record_area_verified;
+                 const hasDeclaredField = parcelOptions.declared_area || parcelOptions.land_record_area_declaration || parcelOptions.land_record_area;
+                 const isDeclared = !isVerified && hasDeclaredField;
+                 // --- КОНЕЦ ИСПРАВЛЕНИЙ ---
+
                  // Use specific colors based on source or theme? For now, keep it based on declaration.
                  const strokeColor = isQuarterSource ? (isDeclared ? polygonStyle.declaredParcelsColor : polygonStyle.parcelsColor) : '#FF4500'; // Orange for area search results? Or let theme handle it? Let's use areaSearch flag for stroke color.
                  const finalStrokeColor = isAreaSearchSource ? '#FF4500' : (isDeclared ? polygonStyle.declaredParcelsColor : polygonStyle.parcelsColor);
@@ -7196,17 +7199,42 @@ function populateSidebarWithParcels(features, loadDate = null) {
 }
 
 
+       function getAreaInfo(options) {
+            if (!options) return { value: null, type: 'Не указан' };
+
+            // 1. Уточненная площадь (высший приоритет)
+            if (options.specified_area) {
+                return { value: parseFloat(options.specified_area), type: 'Уточненная' };
+            }
+            if (options.land_record_area_verified) {
+                return { value: parseFloat(options.land_record_area_verified), type: 'Уточненная' };
+            }
+
+            // 2. Декларированная площадь (низший приоритет)
+            if (options.declared_area) {
+                return { value: parseFloat(options.declared_area), type: 'Декларированная' };
+            }
+            if (options.land_record_area_declaration) {
+                return { value: parseFloat(options.land_record_area_declaration), type: 'Декларированная' };
+            }
+            if (options.land_record_area) {
+                return { value: parseFloat(options.land_record_area), type: 'Декларированная' };
+            }
+
+            // 3. Площадь не найдена
+            return { value: null, type: 'Не указан' };
+        }
+
 // Add this function to determine area text correctly
-function getAreaText(options) {
-    if (!options) return 'не указана';
-    // Prefer verified > specified > land_record > declaration > declared
-    if (options.land_record_area_verified) return `${options.land_record_area_verified} м² (уточнённая)`;
-    if (options.specified_area) return `${options.specified_area} м² (уточнённая)`;
-    if (options.land_record_area) return `${options.land_record_area} м² (уточнённая)`;
-    if (options.land_record_area_declaration) return `${options.land_record_area_declaration} м² (декларированная)`;
-    if (options.declared_area) return `${options.declared_area} м² (декларированная)`;
-    return 'не указана';
-}
+      function getAreaText(options) {
+            const areaInfo = getAreaInfo(options);
+            if (areaInfo.value === null || isNaN(areaInfo.value)) {
+                return 'не указана';
+            }
+            // Форматируем число с разделителями тысяч
+            const formattedValue = areaInfo.value.toLocaleString('ru-RU');
+            return `${formattedValue} м² (${areaInfo.type.toLowerCase()})`;
+        }
 
 async function handleEgrnRelatedAction(lat, lon, targetUrl) {
     try {
@@ -13421,149 +13449,85 @@ async function findOverlappingParcels(geoCoordGroups) {
     return foundParcels;
 }
 
-function exportParcelDataToExcel() {
-    if (!parcelFeaturesData || parcelFeaturesData.length === 0) {
-        showNotification('Нет данных участков для экспорта. Пожалуйста, сначала загрузите земельные участки в квартале', 'warning', 'exclamation-triangle');
-        return;
-    }
+ function exportParcelDataToExcel() {
+            if (!parcelFeaturesData || parcelFeaturesData.length === 0) {
+                showNotification('Нет данных участков для экспорта. Пожалуйста, сначала загрузите земельные участки в квартале', 'warning', 'exclamation-triangle');
+                return;
+            }
 
-    showLoader('Подготовка данных для экспорта...');
+            showLoader('Подготовка данных для экспорта...');
 
-    try {
-        const dataForSheet = [];
+            try {
+                const dataForSheet = [];
+                const headers = [
+                    "Кадастровый номер", "Адрес", "Площадь (м²)", "Тип площади",
+                    "Стоимость (руб./м²)", "Стоимость (полная)", "Вид разрешенного использования",
+                    "Категория земель", "Статус", "Дата внесения", "Форма собственности", "Тип права"
+                ];
+                dataForSheet.push(headers);
 
-        // --- Добавлен новый заголовок "Тип площади" ---
-        const headers = [
-            "Кадастровый номер",
-            "Адрес",
-            "Площадь (м²)",
-            "Тип площади", // <-- NEW HEADER HERE
-            "Стоимость (руб./м²)",
-            "Стоимость (полная)",
-            "Вид разрешенного использования",
-            "Категория земель",
-            "Статус",
-            "Дата внесения",
-            "Форма собственности",
-            "Тип права"
-        ];
-        dataForSheet.push(headers);
+                parcelFeaturesData.forEach(feature => {
+                    const properties = feature.properties || {};
+                    const options = properties.options || {};
 
-        parcelFeaturesData.forEach(feature => {
-            const properties = feature.properties || {};
-            const options = properties.options || {};
+                    // --- ИЗМЕНЕННАЯ ЛОГИКА ОПРЕДЕЛЕНИЯ ПЛОЩАДИ ---
+                    const areaInfo = getAreaInfo(options); // Используем новую функцию
+                    const areaValue = (areaInfo.value !== null && !isNaN(areaInfo.value)) ? areaInfo.value : 'Не указана';
+                    const areaType = areaInfo.type;
+                    // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-            const cadastralNumber = properties.descr || 'Не указан';
-            const address = options.readable_address || 'Не указан';
+                    const cadastralNumber = properties.descr || 'Не указан';
+                    const address = options.readable_address || 'Не указан';
+                    let costIndex = 'Не указана';
+                    if (options.cost_index !== undefined && options.cost_index !== null && isFinite(parseFloat(options.cost_index))) {
+                        costIndex = Math.round(parseFloat(options.cost_index));
+                    }
+                    const fullCost = options.cost_value !== undefined && options.cost_value !== null && isFinite(parseFloat(options.cost_value))
+                        ? parseFloat(options.cost_value)
+                        : 'Не указана';
+                    const vri = options.permitted_use_established_by_document || 'Не указан';
+                    const category = options.land_record_category_type || 'Не указана';
+                    const status = options.status || 'Не указан';
+                    const registrationDate = options.land_record_reg_date || 'Не указана';
+                    const ownership = options.ownership_type || 'Не указана';
+                    const rightType = options.right_type || 'Не указана';
 
-            let areaValue = 'Не указана';
-            const areaRaw = getAreaText(options); // Assuming getAreaText exists and works
-            const areaMatch = areaRaw.match(/~?\s*([\d\s,\.]+) м²/);
-            if (areaMatch && areaMatch[1]) {
-                // Attempt to parse the number, clean commas/spaces first
-                areaValue = parseFloat(areaMatch[1].replace(/[\s,]/g, '').replace('.', '.'));
-                if (isNaN(areaValue)) {
-                     // Fallback if parsing fails, keep the raw formatted text
-                     areaValue = areaRaw.split(' (')[0].trim(); // Take part before '('
+                    const row = [
+                        cadastralNumber, address, areaValue, areaType, costIndex, fullCost,
+                        vri, category, status, registrationDate, ownership, rightType
+                    ];
+                    dataForSheet.push(row);
+                });
+
+                if (dataForSheet.length <= 1) {
+                    showNotification('Нет данных участков для экспорта.', 'warning', 'exclamation-triangle');
+                    hideLoader();
+                    return;
                 }
-            } else {
-                areaValue = areaRaw.split(' (')[0].trim(); // Take part before '('
+
+                const wb = XLSX.utils.book_new();
+                const ws = XLSX.utils.aoa_to_sheet(dataForSheet);
+
+                const wscols = [
+                    { wch: 20 }, { wch: 50 }, { wch: 15 }, { wch: 18 }, { wch: 15 },
+                    { wch: 18 }, { wch: 30 }, { wch: 30 }, { wch: 20 }, { wch: 20 },
+                    { wch: 20 }, { wch: 20 }
+                ];
+                ws['!cols'] = wscols;
+
+                XLSX.utils.book_append_sheet(wb, ws, "Участки");
+                XLSX.writeFile(wb, "Найденные_участки.xlsx");
+
+                showNotification('Данные успешно экспортированы в Excel', 'success', 'check-circle');
+                window.open('table.html', '_blank');
+
+            } catch (error) {
+                console.error('Ошибка при экспорте данных:', error);
+                showNotification('Ошибка при экспорте данных в Excel', 'error', 'exclamation-circle');
+            } finally {
+                hideLoader();
             }
-
-            // --- НАЧАЛО ИЗМЕНЕНИЙ: Определение типа площади ---
-            let areaType = 'Не указан';
-             if (options.specified_area !== undefined && options.specified_area !== null ||
-                 options.land_record_area_verified !== undefined && options.land_record_area_verified !== null ||
-                 options.land_record_area !== undefined && options.land_record_area !== null) {
-                 areaType = 'Уточненная';
-             } else if (options.land_record_area_declaration !== undefined && options.land_record_area_declaration !== null ||
-                        options.declared_area !== undefined && options.declared_area !== null) {
-                 areaType = 'Декларированная';
-             }
-            // --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-
-            let costIndex = 'Не указана';
-            const rawCostIndex = options.cost_index;
-            if (rawCostIndex !== undefined && rawCostIndex !== null && isFinite(parseFloat(rawCostIndex))) {
-                costIndex = Math.round(parseFloat(rawCostIndex)); // Округляем до целого
-            }
-
-            const fullCost = options.cost_value !== undefined && options.cost_value !== null && isFinite(parseFloat(options.cost_value))
-                                ? parseFloat(options.cost_value)
-                                : 'Не указана';
-
-            const vri = options.permitted_use_established_by_document || 'Не указан';
-            const category = options.land_record_category_type || 'Не указана';
-            const status = options.status || 'Не указан';
-            const registrationDate = options.land_record_reg_date || 'Не указана';
-
-            // --- НАЧАЛО ИЗМЕНЕНИЙ: Определение ownership и rightType внутри цикла ---
-            const ownership = options.ownership_type || 'Не указана';
-            const rightType = options.right_type || 'Не указана';
-            // --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-            const row = [
-                cadastralNumber,
-                address,
-                areaValue,
-                areaType, // <-- ADD NEW VALUE HERE
-                costIndex,
-                fullCost,
-                vri,
-                category,
-                status,
-                registrationDate,
-                ownership, // Используем переменную ownership, определенную выше
-                rightType // Используем переменную rightType, определенную выше
-            ];
-            dataForSheet.push(row);
-        });
-
-        if (dataForSheet.length <= 1) {
-            showNotification('Нет данных участков для экспорта.', 'warning', 'exclamation-triangle');
-            hideLoader();
-            return;
         }
-
-        const wb = XLSX.utils.book_new();
-        const ws = XLSX.utils.aoa_to_sheet(dataForSheet);
-
-        // --- Добавлен width для новой колонки "Тип площади" ---
-        const wscols = [
-            {wch: 20}, // Кадастровый номер
-            {wch: 50}, // Адрес
-            {wch: 15}, // Площадь
-            {wch: 18}, // Тип площади <-- NEW WIDTH HERE
-            {wch: 15}, // Стоимость (руб./м²)
-            {wch: 18}, // Стоимость (полная)
-            {wch: 30}, // ВРИ
-            {wch: 30}, // Категория земель
-            {wch: 20}, // Статус
-            {wch: 20}, // Дата внесения
-            {wch: 20}, // Форма собственности
-            {wch: 20}  // Тип права
-        ];
-        ws['!cols'] = wscols;
-        // --- Конец добавления width ---
-
-
-        XLSX.utils.book_append_sheet(wb, ws, "Участки");
-        XLSX.writeFile(wb, "Найденные_участки.xlsx");
-
-        showNotification('Данные успешно экспортированы в Excel', 'success', 'check-circle');
-
-        // --- Добавлено автоматическое открытие страницы при успешном экспорте ---
-        window.open('table.html', '_blank');
-        // --- Конец добавления автоматического открытия страницы ---
-
-    } catch (error) {
-        console.error('Ошибка при экспорте данных:', error);
-        showNotification('Ошибка при экспорте данных в Excel', 'error', 'exclamation-circle');
-    } finally {
-        hideLoader();
-    }
-}
 
 // Draw found parcels on the map
 async function drawFoundParcels(parcels, markAsFoundInArea = false) {
