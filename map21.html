@@ -9586,34 +9586,45 @@ async function drawSelectedZouits(features, selectedIndex, map, polygons, polygo
 
     const featuresToDraw = selectedIndex === -1 ? features : [features[selectedIndex]];
 
+    const vlStrokeColor = '#FF0000';
+    const gasStrokeColor = '#FFA500';
+    const defaultStrokeColor = '#0077be';
+    const vlLabelPreset = 'islands#redStretchyIcon';
+    const gasLabelPreset = 'islands#yellowStretchyIcon';
+    const defaultLabelPreset = 'islands#blueStretchyIcon';
+
     let combinedBounds = null;
     let firstFeatureCenterGeo = null;
+    let featuresDrawnCount = 0;
 
-    for (const feature of featuresToDraw) {
+    for (let i = 0; i < featuresToDraw.length; i++) {
+        const feature = featuresToDraw[i];
+
         if (!feature.geometry || !feature.geometry.coordinates) {
             continue;
         }
-        
+
+        let currentStrokeColor = defaultStrokeColor;
+        let currentLabelPreset = defaultLabelPreset;
         const nameByDocRaw = feature.properties.options?.name_by_doc || '';
-        
-        // --- ИЗМЕНЕНИЕ: Используем единую логику цвета и пресетов ---
-        const currentStrokeColor = getZouitColor(nameByDocRaw);
-        let currentLabelPreset;
-        if (currentStrokeColor === '#FF0000') {
-            currentLabelPreset = 'islands#redStretchyIcon';
-        } else if (currentStrokeColor === '#FFA500') {
-            currentLabelPreset = 'islands#yellowStretchyIcon'; // Для оранжевого подходит желтый пресет
-        } else {
-            currentLabelPreset = 'islands#violetStretchyIcon'; // Фиолетовый для соответствия цвету по умолчанию
+        const nameByDocClean = nameByDocRaw.toLowerCase().trim();
+
+        if (nameByDocClean.includes('вл') || nameByDocClean.includes('вкл')) {
+            currentStrokeColor = vlStrokeColor;
+            currentLabelPreset = vlLabelPreset;
+        } else if (nameByDocClean.includes('газ')) {
+            currentStrokeColor = gasStrokeColor;
+            currentLabelPreset = gasLabelPreset;
         }
-        // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
+        const isMultiPolygon = feature.geometry.type === 'MultiPolygon';
+        const polygonsCoords = isMultiPolygon ? feature.geometry.coordinates : [feature.geometry.coordinates];
 
         const regNumbBorder = feature.properties.options?.reg_numb_border || 'Не указан';
         const registrationDate = feature.properties.options?.registration_date || 'Не указана';
         const fullLabelText = `${regNumbBorder} - ${nameByDocRaw || 'Без названия'} (${registrationDate})`;
 
-        const isMultiPolygon = feature.geometry.type === 'MultiPolygon';
-        const polygonsCoords = isMultiPolygon ? feature.geometry.coordinates : [feature.geometry.coordinates];
+        let featurePartDrawn = false;
 
         for (const polygonCoords of polygonsCoords) {
             for (const contour of polygonCoords) {
@@ -9622,9 +9633,10 @@ async function drawSelectedZouits(features, selectedIndex, map, polygons, polygo
                  const coords = [];
                  let conversionOk = true;
                  for (const coord of contour) {
-                    if (!Array.isArray(coord) || coord.length !== 2 || typeof coord[0] !== 'number' || typeof coord[1] !== 'number') { conversionOk = false; break; }
+                    if (!Array.isArray(coord) || coord.length !== 2 || typeof coord[0] !== 'number' || typeof coord[1] !== 'number' || !Number.isFinite(coord[0]) || !Number.isFinite(coord[1])) { conversionOk = false; break; }
                     try {
                         const point = proj4('EPSG:3857', 'EPSG:4326', coord);
+                        if (!Number.isFinite(point[0]) || !Number.isFinite(point[1])) { conversionOk = false; break; }
                         coords.push([point[1], point[0]]);
                     } catch (e) { conversionOk = false; break; }
                  }
@@ -9633,16 +9645,22 @@ async function drawSelectedZouits(features, selectedIndex, map, polygons, polygo
                  const offsetCoords = coords.map(c => [c[0] - mapOffsetY * 0.000008983, c[1] - mapOffsetX * 0.000008983]);
 
                  try {
-                    const polygonObj = new ymaps.Polygon([offsetCoords], { /*...*/ }, {
-                        strokeColor: currentStrokeColor, // Применяем цвет
+                    const polygonObj = new ymaps.Polygon([offsetCoords], {
+                         zouitInfo: { regNumbBorder, nameByDoc: nameByDocRaw || '', registrationDate, labelContent: fullLabelText }
+                    }, {
+                        strokeColor: currentStrokeColor,
                         fillColor: '#00000000',
                         strokeWidth: polygonStyle.width,
                         strokeOpacity: 0.9,
+                        hintEnabled: true,
                         hintContent: fullLabelText,
+                        hasBalloon: false,
+                        interactivityModel: 'default#geoObject'
                     });
 
                     map.geoObjects.add(polygonObj);
                     polygons.push(polygonObj);
+                    featurePartDrawn = true;
 
                     const bounds = polygonObj.geometry.getBounds();
                     if (bounds) {
@@ -9650,27 +9668,36 @@ async function drawSelectedZouits(features, selectedIndex, map, polygons, polygo
                         else combinedBounds = [ [Math.min(combinedBounds[0][0], bounds[0][0]), Math.min(combinedBounds[0][1], bounds[0][1])], [Math.max(combinedBounds[1][0], bounds[1][0]), Math.max(combinedBounds[1][1], bounds[1][1])] ];
                         if (!firstFeatureCenterGeo) firstFeatureCenterGeo = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
                     }
-
-                    const turfContour = turf.polygon([coords.map(c => [c[1], c[0]])]);
-                    const centroidFeature = turf.centroid(turfContour);
-                    const labelPosition = [centroidFeature.geometry.coordinates[1] - mapOffsetY * 0.000008983, centroidFeature.geometry.coordinates[0] - mapOffsetX * 0.000008983];
-
-                    const zouitText = new ymaps.Placemark(labelPosition, {
-                         iconContent: fullLabelText,
-                         hintContent: fullLabelText
-                    }, {
-                         preset: currentLabelPreset, // Применяем пресет
-                         draggable: true
-                    });
-                    map.geoObjects.add(zouitText);
-                    polygons.push(zouitText);
                  } catch (ymapsError) {
                       console.error(`Ошибка Yandex Maps Polygon:`, ymapsError);
+                      continue;
+                 }
+
+                  try {
+                     const turfContour = turf.polygon([coords.map(c => [c[1], c[0]])]);
+                     const centroidFeature = turf.centroid(turfContour);
+                     const centroidCoordsGeo = centroidFeature.geometry.coordinates;
+                     const labelPosition = [centroidCoordsGeo[1] - mapOffsetY * 0.000008983, centroidCoordsGeo[0] - mapOffsetX * 0.000008983];
+
+                     const zouitText = new ymaps.Placemark(labelPosition, {
+                         iconContent: fullLabelText,
+                         hintContent: fullLabelText
+                     }, {
+                         preset: currentLabelPreset,
+                         draggable: true
+                     });
+                     map.geoObjects.add(zouitText);
+                     polygons.push(zouitText);
+                 } catch (centroidError) {
+                    console.error("Ошибка центроида:", centroidError);
                  }
             }
         }
-    }
 
+        if (featurePartDrawn) {
+            featuresDrawnCount++;
+        }
+    }
 
     if (combinedBounds) {
          const latMargin = (combinedBounds[1][0] - combinedBounds[0][0]) * 0.1 || 0.001;
@@ -10340,28 +10367,6 @@ async function getAllZouitsInQuarter(lat, lon) {
 }
 
 
-function getZouitColor(zouitName) {
-    // Если имя отсутствует, возвращаем фиолетовый по умолчанию
-    if (!zouitName) {
-        return '#9400D3'; 
-    }
-    
-    const nameLowerCase = zouitName.toLowerCase();
-    
-    // 1. Приоритет: Энергетика (красный)
-    if (nameLowerCase.includes('вл') || nameLowerCase.includes('вкл') || nameLowerCase.includes('электро')) {
-        return '#FF0000'; // Красный
-    }
-    
-    // 2. Газопроводы (оранжево-желтый)
-    if (nameLowerCase.includes('газ')) {
-        return '#FFA500'; // Оранжевый
-    }
-
-    // 3. Цвет по умолчанию для всех остальных ЗОУИТ
-    return '#9400D3'; // Темно-фиолетовый
-}
-
 /**
  * 2. ПОЛНАЯ ФУНКЦИЯ ДЛЯ ОТРИСОВКИ ЗОУИТ
  */
@@ -10376,8 +10381,23 @@ async function processAndDrawZouits(features) {
             const nameRaw = options.name_by_doc || 'Без названия';
             const restrictions = options.content_restrict_encumbrances || 'Ограничения не указаны';
 
-            // --- ИЗМЕНЕНИЕ: Используем единую функцию для получения цвета ---
-            const strokeColor = getZouitColor(nameRaw);
+            // --- НАЧАЛО НОВОЙ ЛОГИКИ ОПРЕДЕЛЕНИЯ ЦВЕТА ---
+            const nameLowerCase = nameRaw.toLowerCase();
+            let strokeColor;
+
+            // Проверяем на ключевые слова для энергетики (ВЛ - воздушная линия)
+            if (nameLowerCase.includes('вл') || nameLowerCase.includes('вкл') || nameLowerCase.includes('электро')) {
+                strokeColor = '#FF0000'; // Красный
+            } 
+            // Проверяем на ключевые слова для газа
+            else if (nameLowerCase.includes('газ')) {
+                strokeColor = '#FFA500'; // Оранжево-желтый (более заметный, чем чистый желтый)
+            } 
+            // Цвет по умолчанию для всех остальных ЗОУИТ
+            else {
+                strokeColor = '#9400D3'; // Темно-фиолетовый
+            }
+            // --- КОНЕЦ НОВОЙ ЛОГИКИ ОПРЕДЕЛЕНИЯ ЦВЕТА ---
 
             const hintContent = {
                 cadastralNumber: regNumber,
@@ -10410,7 +10430,7 @@ async function processAndDrawZouits(features) {
                         isZouit: true
                     }, 
                     {
-                        strokeColor: strokeColor, // <-- Применяем полученный цвет
+                        strokeColor: strokeColor, // <-- ИСПОЛЬЗУЕМ ЗДЕСЬ НАШУ ПЕРЕМЕННУЮ С ЦВЕТОМ
                         strokeWidth: polygonStyle.width - 1,
                         strokeOpacity: 0.8,
                         fillColor: '#00000000',
