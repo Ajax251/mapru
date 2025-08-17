@@ -2207,7 +2207,6 @@ flex-direction: column;
         const sevenDigitsRegions = ['24','63', '66', '77','78','91'];
 
         let isMobile = window.innerWidth <= 768;
-        let isSearching = false;
 
         let currentCity = '';
         let map;
@@ -8452,303 +8451,387 @@ function formatCadastralNumber(input) {
     }
 }
 
-// Новая вспомогательная функция для отрисовки объекта, полученного от НСПД
-async function drawFeatureFromNspd(feature) {
-    if (!map || !feature || !feature.geometry) return;
 
-    // Очищаем карту перед отрисовкой нового объекта
-    clearMapAndResetTheme();
-
-    const inputText = feature.properties.descr;
-    let centerCoords = null;
-    let allFeatureBounds = [];
-    let labelContentText = inputText;
-    const isEgrnPointWithNoGeometry = feature.geometry.type === "Point" && feature.properties && feature.properties.categoryName === "Земельные участки ЕГРН";
-
-    const processContour = (contour) => {
-        return contour.map(coord => {
-            const point = proj4('EPSG:3857', 'EPSG:4326', coord);
-            return [point[1], point[0]]; // [lat, lon]
-        });
-    };
-
-    if (isEgrnPointWithNoGeometry) {
-        labelContentText += " - объект без определенных границ, указан центр квартала";
-        const geoCoordinates = proj4('EPSG:3857', 'EPSG:4326', feature.geometry.coordinates);
-        centerCoords = feature.geometry.coordinates;
-        allFeatureBounds.push([[geoCoordinates[1], geoCoordinates[0]], [geoCoordinates[1], geoCoordinates[0]]]);
-        showNotification('Объект ЕГРН без координат границ найден', 'warning', 'exclamation-triangle');
-    } else if (feature.geometry.type === "Polygon") {
-        const bbox = calculateBBox(feature.geometry.coordinates);
-        centerCoords = [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2];
-        const geoCoords = processContour(feature.geometry.coordinates[0]);
-        
-        const offsetCoordinates = geoCoords.map(coord => [
-            coord[0] - mapOffsetY * 0.000008983,
-            coord[1] - mapOffsetX * 0.000008983
-        ]);
-
-        const polygon = new ymaps.Polygon([offsetCoordinates], {}, {
-            strokeColor: polygonStyle.color,
-            strokeWidth: polygonStyle.width,
-            strokeOpacity: 0.8,
-            fillColor: '#00000000'
-        });
-        map.geoObjects.add(polygon);
-        polygons.push(polygon);
-        
-        const lats = geoCoords.map(c => c[0]);
-        const lons = geoCoords.map(c => c[1]);
-        allFeatureBounds.push([[Math.min(...lats), Math.min(...lons)], [Math.max(...lats), Math.max(...lons)]]);
-
-    } else if (feature.geometry.type === "MultiPolygon") {
-        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-        feature.geometry.coordinates.forEach(polygonCoordinates => {
-            const bbox = calculateBBox(polygonCoordinates);
-            minX = Math.min(minX, bbox[0]); minY = Math.min(minY, bbox[1]);
-            maxX = Math.max(maxX, bbox[2]); maxY = Math.max(maxY, bbox[3]);
-            
-            const geoCoords = processContour(polygonCoordinates[0]);
-            
-            const offsetCoordinates = geoCoords.map(coord => [
-                coord[0] - mapOffsetY * 0.000008983,
-                coord[1] - mapOffsetX * 0.000008983
-            ]);
-            
-            const polygon = new ymaps.Polygon([offsetCoordinates], {}, {
-                strokeColor: polygonStyle.color,
-                strokeWidth: polygonStyle.width,
-                strokeOpacity: 0.8,
-                fillColor: '#00000000'
+            // Добавляем обработчик события input для поля city-input
+            document.getElementById('city-input').addEventListener('input', function (e) {
+                formatCadastralNumber(this);
             });
-            map.geoObjects.add(polygon);
-            polygons.push(polygon);
+
+            document.getElementById('city-input').addEventListener('keydown', async function (event) {
+    if (event.key === 'Enter') {
+        const inputText = this.value.trim();
+
+        // Проверка на географические координаты (2 числа через пробел/запятую/табуляцию)
+        const coordRegex = /^(-?\d+\.?\d*)\s*[,\s]\s*(-?\d+\.?\d*)$/;
+        const coordMatch = inputText.match(coordRegex);
+
+        if (coordMatch) {
+            // Это координаты - извлекаем числа
+            const firstNum = parseFloat(coordMatch[1]);
+            const secondNum = parseFloat(coordMatch[2]);
+
+            // Проверяем, может ли это быть "широта долгота"
+            if (Math.abs(firstNum) <= 90 && Math.abs(secondNum) <= 180) {
+                console.log(`Обрабатываются координаты (широта, долгота): ${firstNum}, ${secondNum}`);
+
+                const coords = [firstNum, secondNum];
+
+                // Центрируем карту на этих координатах
+                map.setCenter(coords, 17);
+
+                // Добавляем метку
+                const placemark = new ymaps.Placemark(coords, {
+                    hintContent: `${firstNum}, ${secondNum}`
+                }, {
+                    preset: 'islands#redDotIcon'
+                });
+
+                map.geoObjects.add(placemark);
+                polygons.push(placemark); // Добавляем в массив отслеживания
+
+                // Получаем адрес для этих координат
+                getAddressByCoords(coords).then(address => {
+                    document.getElementById('city-name-display').innerHTML = address;
+                });
+
+                addToHistory(inputText);
+                return;
+            }
+        }
+
+        // Проверка, является ли ввод номером кадастрового квартала
+         if (isValidCadastralNumber(inputText)) {
+    try {
+        document.getElementById('loaderContainer').style.display = 'flex';
+        document.querySelector('.loading-text').textContent = `Запрос данных для ${inputText}...`;
+
+        const feature = await fetchCadastralData(inputText);
+
+        // --- НАЧАЛО БЛОКА ИЗМЕНЕНИЙ ---
+        if (!feature || !feature.geometry) {
+            // Если НСПД ничего не нашел, пытаемся найти в архиве
+            showNotification('Объект не найден в ЕГРН. Поиск в архиве КПТ...', 'warning');
             
-            const lats = geoCoords.map(c => c[0]);
-            const lons = geoCoords.map(c => c[1]);
-            allFeatureBounds.push([[Math.min(...lats), Math.min(...lons)], [Math.max(...lats), Math.max(...lons)]]);
-        });
-        if (minX !== Infinity) {
-            centerCoords = [(minX + maxX) / 2, (minY + maxY) / 2];
+            // Вызываем новую функцию для поиска в архиве
+            await findParcelInArchive(inputText); 
+            
+            // Важно! Скрываем загрузчик здесь, так как findParcelInArchive сам управляет им
+            document.getElementById('loaderContainer').style.display = 'none';
+            return; // Завершаем выполнение, так как дальнейшая обработка не нужна
         }
-    } else if (feature.geometry.type === "Point") {
-        const geoCoordinates = proj4('EPSG:3857', 'EPSG:4326', feature.geometry.coordinates);
-        centerCoords = feature.geometry.coordinates;
-        allFeatureBounds.push([[geoCoordinates[1], geoCoordinates[0]], [geoCoordinates[1], geoCoordinates[0]]]);
-        labelContentText = `${inputText} (Точка)`;
+
+                            const cnParts = inputText.split(':');
+                            // Check for 6 or 7 zeros in the third part of the CN (block/quarter part)
+                            const isSixOrSevenZerosCN = cnParts.length >=3 && cnParts.length <=4 && /^0{6,7}$/.test(cnParts[2]);
+                            const isNspdPointResult = feature.geometry.type === "Point" && feature.properties && feature.properties.categoryName === "Земельные участки ЕГРН";
+
+                            if (isSixOrSevenZerosCN && isNspdPointResult) {
+                                // This is the new "6/7-zeros CN and NSPD point" scenario, attempt to load from 'ezfiles'
+                                console.log(`Обработка ЕЗП для ${inputText}, так как НСПД вернул точку.`);
+                                document.querySelector('.loading-text').textContent = `Загрузка данных ЕЗП ${inputText}...`;
+                                let ezDataLoadedSuccessfully = false;
+                                let drawnEzObjects = []; // To store objects drawn from EZP
+                                let loadedFromAlternate = false; // Flag for alternate file
+
+                                try {
+                                    clearMapAndResetTheme(); // Clear map for EZ data
+
+                                    const baseEzFilename = inputText.replace(/:/g, '_');
+                                    const primaryEzFilename = baseEzFilename + '.nspd';
+                                    const alternateEzFilename = baseEzFilename + '@.nspd';
+                                    
+                                 let zipBlob = await fetchZipFromLocalServer('ez', primaryEzFilename); // <-- папка 'ez', а не 'ezfiles'
+if (!zipBlob) {
+    console.log(`Основной файл ЕЗП ${primaryEzFilename} не найден, попытка загрузить ${alternateEzFilename}`);
+    zipBlob = await fetchZipFromLocalServer('ez', alternateEzFilename); // <-- папка 'ez'
+    if (zipBlob) {
+        loadedFromAlternate = true;
+        console.log(`Данные ЕЗП загружены из альтернативного файла: ${alternateEzFilename}`);
     }
-
-    // Добавляем метку и адрес
-    let labelPlacemark = null;
-    if (centerCoords) {
-        const geoCenter = proj4('EPSG:3857', 'EPSG:4326', centerCoords);
-        getAddressByCoords([geoCenter[1], geoCenter[0]]).then(address => {
-            document.getElementById('city-name-display').innerHTML = address;
-        });
-        const offsetCenter = [
-            geoCenter[1] - mapOffsetY * 0.000008983,
-            geoCenter[0] - mapOffsetX * 0.000008983
-        ];
-        const placemarkPreset = isEgrnPointWithNoGeometry ? 'islands#redStretchyIcon' : 'islands#blueStretchyIcon';
-
-        labelPlacemark = new ymaps.Placemark(offsetCenter, {
-            iconContent: labelContentText,
-            hintContent: inputText
-        }, {
-            preset: placemarkPreset,
-            draggable: true
-        });
-        map.geoObjects.add(labelPlacemark);
-        polygons.push(labelPlacemark);
-    }
-
-    // Устанавливаем границы карты
-    if (allFeatureBounds.length > 0) {
-        let minLat = Infinity, minLng = Infinity, maxLat = -Infinity, maxLng = -Infinity;
-        allFeatureBounds.forEach(bounds => {
-            minLat = Math.min(minLat, bounds[0][0]); minLng = Math.min(minLng, bounds[0][1]);
-            maxLat = Math.max(maxLat, bounds[1][0]); maxLng = Math.max(maxLng, bounds[1][1]);
-        });
-        if (isFinite(minLat)) {
-            const latMargin = (maxLat - minLat) * 0.1 || 0.001;
-            const lonMargin = (maxLng - minLng) * 0.1 || 0.001;
-            map.setBounds([
-                [minLat - latMargin, minLng - lonMargin],
-                [maxLat + latMargin, maxLng + lonMargin]
-            ], { checkZoomRange: true, duration: 200 });
-        }
-    } else if (labelPlacemark) {
-        map.setCenter(labelPlacemark.geometry.getCoordinates(), 17);
-    }
-
-    addToHistory(inputText);
 }
 
+                                    if (zipBlob) {
+                                        const { features: ezFeatures, date: ezLoadDate, quarter: ezInferredCn } = await loadAndParseZipBlob(zipBlob);
+                                        if (ezFeatures && ezFeatures.length > 0) {
+                                            parcelFeaturesData = ezFeatures; // Update global data source
+                                            currentQuarterNumber = ezInferredCn || inputText; // Set context
+                                            cityInput.value = currentQuarterNumber; // Update input field
 
-// Добавляем обработчик события input для поля city-input
-document.getElementById('city-input').addEventListener('input', function (e) {
-    formatCadastralNumber(this);
-});
+                                            // Call processAndDrawParcels and store the returned objects
+                                            drawnEzObjects = await processAndDrawParcels(ezFeatures, 'quarter');
 
+                                            populateSidebarWithParcels(ezFeatures, ezLoadDate);
+                                            applyCurrentTheme(); // Apply any active theme
+                                            updatePlacemarksVisibility(); // Update label visibility
 
-// ЗАМЕНИТЬ СТАРЫЙ ОБРАБОТЧИК KEYDOWN НА ЭТОТ
-document.getElementById('city-input').addEventListener('keydown', async function (event) {
-    if (event.key === 'Enter') {
-        // 1. Проверяем флаг, чтобы остановить повторные вызовы
-        if (isSearching) {
-            console.log("Поиск уже выполняется. Новый запрос проигнорирован.");
-            return;
-        }
+                                            document.getElementById('city-name-display').innerHTML = `ЕЗП (на 2016г.): ${currentQuarterNumber}`;
+                                            
+                                            if (loadedFromAlternate) {
+                                                showNotification(`Данные для данного единого землепользования ${currentQuarterNumber} загружены частично`, 'warning');
+                                            } else {
+                                                showNotification(`Данные ЕЗП ${currentQuarterNumber} (${ezLoadDate || 'дата не указана'}) загружены: ${ezFeatures.length} ЗУ (с границами)`, 'success');
+                                            }
+                                            ezDataLoadedSuccessfully = true;
 
-        const inputText = this.value.trim();
-        if (!inputText) return;
+                                            // --- START MODIFICATION: Zoom to drawn EZP objects ---
+                                            if (drawnEzObjects.length > 0) {
+                                                let combinedEzpBounds = null;
+                                                drawnEzObjects.forEach(obj => {
+                                                    // Ensure we only consider polygons for bounds calculation,
+                                                    // as drawnEzObjects might also contain Placemarks (labels).
+                                                    if (obj instanceof ymaps.Polygon) {
+                                                        const bounds = obj.geometry.getBounds();
+                                                        if (bounds && bounds[0] && bounds[1] && isFinite(bounds[0][0])) {
+                                                            if (!combinedEzpBounds) {
+                                                                combinedEzpBounds = [
+                                                                    [bounds[0][0], bounds[0][1]],
+                                                                    [bounds[1][0], bounds[1][1]]
+                                                                ];
+                                                            } else {
+                                                                combinedEzpBounds[0][0] = Math.min(combinedEzpBounds[0][0], bounds[0][0]);
+                                                                combinedEzpBounds[0][1] = Math.min(combinedEzpBounds[0][1], bounds[0][1]);
+                                                                combinedEzpBounds[1][0] = Math.max(combinedEzpBounds[1][0], bounds[1][0]);
+                                                                combinedEzpBounds[1][1] = Math.max(combinedEzpBounds[1][1], bounds[1][1]);
+                                                            }
+                                                        }
+                                                    }
+                                                });
 
-        // 2. Устанавливаем флаг и начинаем поиск
-        isSearching = true;
-        console.log(`Начат поиск для: "${inputText}"`);
-
-        try {
-            // Проверка на географические координаты (2 числа)
-            const coordRegex = /^(-?\d+\.?\d*)\s*[,\s]\s*(-?\d+\.?\d*)$/;
-            const coordMatch = inputText.match(coordRegex);
-
-            if (coordMatch) {
-                const firstNum = parseFloat(coordMatch[1]);
-                const secondNum = parseFloat(coordMatch[2]);
-                if (Math.abs(firstNum) <= 90 && Math.abs(secondNum) <= 180) {
-                    const coords = [firstNum, secondNum];
-                    map.setCenter(coords, 17);
-                    const placemark = new ymaps.Placemark(coords, { hintContent: `${firstNum}, ${secondNum}` }, { preset: 'islands#redDotIcon' });
-                    map.geoObjects.add(placemark);
-                    polygons.push(placemark);
-                    await getAddressByCoords(coords).then(address => { document.getElementById('city-name-display').innerHTML = address; });
-                    addToHistory(inputText);
-                    return; // Завершаем, так как это не кадастровый номер
-                }
-            }
-
-            // =========================================================
-            // НОВАЯ ЛОГИКА: Сначала проверяем, является ли это кварталом
-            // =========================================================
-            if (isCadastralQuarter(inputText)) {
-                console.log(`Обнаружен кадастровый квартал: ${inputText}. Запуск поиска границ...`);
-                showLoader(`Поиск границ квартала ${inputText}...`);
-                await drawCadastralQuarter(inputText); // Используем существующую функцию для отрисовки квартала
-                addToHistory(inputText);
-                return; // Завершаем после отрисовки квартала
-            }
-            
-            // Основная логика для кадастровых номеров УЧАСТКОВ
-            if (isValidCadastralNumber(inputText)) {
-                showLoader(`Запрос данных для ${inputText}...`);
-                const feature = await fetchCadastralData(inputText);
-
-                if (!feature || !feature.geometry) {
-                    console.log(`Объект ${inputText} не найден в НСПД. Поиск в архиве...`);
-                    showNotification('Объект не найден в ЕГРН. Поиск в архиве КПТ...', 'warning');
-                    await findParcelInArchive(inputText);
-                    return; // Завершаем
-                }
-
-                // Логика для ЕЗП (остается без изменений, она корректна)
-                const cnParts = inputText.split(':');
-                const isSixOrSevenZerosCN = cnParts.length >= 3 && cnParts.length <= 4 && /^0{6,7}$/.test(cnParts[2]);
-                const isNspdPointResult = feature.geometry.type === "Point" && feature.properties?.categoryName === "Земельные участки ЕГРН";
-
-                if (isSixOrSevenZerosCN && isNspdPointResult) {
-                    console.log(`Обнаружено ЕЗП: ${inputText}. Запуск специальной логики...`);
-                    // ... (здесь остается ВАША существующая большая логика для обработки ЕЗП, она самодостаточна)
-                    // Копируем её из предыдущей версии кода. Я для краткости опущу её здесь, но ВЫ ДОЛЖНЫ ЕЁ СЮДА ВСТАВИТЬ
-                    // ... НАЧАЛО БЛОКА ЕЗП (скопировать из старого кода)
-                    document.querySelector('.loading-text').textContent = `Загрузка данных ЕЗП ${inputText}...`;
-                    let ezDataLoadedSuccessfully = false;
-                    try {
-                        clearMapAndResetTheme();
-                        const baseEzFilename = inputText.replace(/:/g, '_');
-                        const primaryEzFilename = baseEzFilename + '.nspd';
-                        const alternateEzFilename = baseEzFilename + '@.nspd';
-                        let zipBlob = await fetchZipFromLocalServer('ez', primaryEzFilename);
-                        let loadedFromAlternate = false;
-                        if (!zipBlob) {
-                            zipBlob = await fetchZipFromLocalServer('ez', alternateEzFilename);
-                            if (zipBlob) loadedFromAlternate = true;
-                        }
-                        if (zipBlob) {
-                            const { features: ezFeatures, date: ezLoadDate, quarter: ezInferredCn } = await loadAndParseZipBlob(zipBlob);
-                            if (ezFeatures && ezFeatures.length > 0) {
-                                parcelFeaturesData = ezFeatures;
-                                currentQuarterNumber = ezInferredCn || inputText;
-                                cityInput.value = currentQuarterNumber;
-                                const drawnEzObjects = await processAndDrawParcels(ezFeatures, 'quarter');
-                                populateSidebarWithParcels(ezFeatures, ezLoadDate);
-                                applyCurrentTheme();
-                                updatePlacemarksVisibility();
-                                document.getElementById('city-name-display').innerHTML = `ЕЗП (на 2016г.): ${currentQuarterNumber}`;
-                                if (loadedFromAlternate) {
-                                    showNotification(`Данные для данного единого землепользования ${currentQuarterNumber} загружены частично`, 'warning');
-                                } else {
-                                    showNotification(`Данные ЕЗП ${currentQuarterNumber} (${ezLoadDate || 'дата не указана'}) загружены: ${ezFeatures.length} ЗУ (с границами)`, 'success');
-                                }
-                                ezDataLoadedSuccessfully = true;
-                                if (drawnEzObjects.length > 0) {
-                                    let combinedEzpBounds = null;
-                                    drawnEzObjects.forEach(obj => {
-                                        if (obj instanceof ymaps.Polygon) {
-                                            const bounds = obj.geometry.getBounds();
-                                            if (bounds && bounds[0] && isFinite(bounds[0][0])) {
-                                                if (!combinedEzpBounds) { combinedEzpBounds = [[bounds[0][0], bounds[0][1]],[bounds[1][0], bounds[1][1]]]; } 
-                                                else {
-                                                    combinedEzpBounds[0][0] = Math.min(combinedEzpBounds[0][0], bounds[0][0]);
-                                                    combinedEzpBounds[0][1] = Math.min(combinedEzpBounds[0][1], bounds[0][1]);
-                                                    combinedEzpBounds[1][0] = Math.max(combinedEzpBounds[1][0], bounds[1][0]);
-                                                    combinedEzpBounds[1][1] = Math.max(combinedEzpBounds[1][1], bounds[1][1]);
+                                                if (combinedEzpBounds) {
+                                                    const latMargin = (combinedEzpBounds[1][0] - combinedEzpBounds[0][0]) * 0.15 || 0.0005;
+                                                    const lonMargin = (combinedEzpBounds[1][1] - combinedEzpBounds[0][1]) * 0.15 || 0.0005;
+                                                    const viewBounds = [
+                                                        [combinedEzpBounds[0][0] - latMargin, combinedEzpBounds[0][1] - lonMargin],
+                                                        [combinedEzpBounds[1][0] + latMargin, combinedEzpBounds[1][1] + lonMargin]
+                                                    ];
+                                                    try {
+                                                        map.setBounds(viewBounds, {
+                                                            checkZoomRange: true,
+                                                            duration: 300
+                                                        });
+                                                        console.log("Map bounds set for loaded EZP polygons.");
+                                                    } catch (setBoundsError) {
+                                                        console.error("Ошибка установки границ для ЕЗП:", setBoundsError, viewBounds);
+                                                    }
                                                 }
                                             }
+                                            // --- END MODIFICATION ---
+
+                                        } else {
+                                            showNotification(`Архив ЕЗП ${inputText} не содержит участков.`, 'warning');
                                         }
+                                    } else {
+                                        showNotification(`Архив для ЕЗП ${inputText} (включая альтернативный вариант с символом '@') не найден в хранилище 'ezfiles'.`, 'info');
+                                    }
+                                } catch (error) {
+                                    console.error(`Ошибка при загрузке/обработке ЕЗП ${inputText}:`, error);
+                                    showNotification(`Ошибка загрузки данных ЕЗП: ${error.message}`, 'error');
+                                }
+
+                                if (!ezDataLoadedSuccessfully) {
+                                    // Fallback: If EZ load failed or no data, draw the NSPD point
+                                    console.log(`Отрисовка точки НСПД для ${inputText} после неудачной/отсутствующей загрузки ЕЗП.`);
+                                    // The map was cleared at the start of the try block.
+                                    // Now draw the NSPD point.
+                                    const geoCoordinatesNspdPoint = proj4('EPSG:3857', 'EPSG:4326', feature.geometry.coordinates);
+                                    const centerCoordsNspdPoint = feature.geometry.coordinates; // EPSG:3857
+                                    // Create a small bounding box around the point for setBounds
+                                    const allFeatureBoundsNspdPoint = [[[geoCoordinatesNspdPoint[1], geoCoordinatesNspdPoint[0]], [geoCoordinatesNspdPoint[1], geoCoordinatesNspdPoint[0]]]];
+
+                                    const geoCenterNspdPoint = proj4('EPSG:3857', 'EPSG:4326', centerCoordsNspdPoint);
+                                    getAddressByCoords([geoCenterNspdPoint[1], geoCenterNspdPoint[0]]).then(address => {
+                                        document.getElementById('city-name-display').innerHTML = address || `Точка для ${inputText}`;
                                     });
-                                    if (combinedEzpBounds) {
-                                        const latMargin = (combinedEzpBounds[1][0] - combinedEzpBounds[0][0]) * 0.15 || 0.0005;
-                                        const lonMargin = (combinedEzpBounds[1][1] - combinedEzpBounds[0][1]) * 0.15 || 0.0005;
-                                        map.setBounds([[combinedEzpBounds[0][0] - latMargin, combinedEzpBounds[0][1] - lonMargin],[combinedEzpBounds[1][0] + latMargin, combinedEzpBounds[1][1] + lonMargin]], { checkZoomRange: true, duration: 300 });
+                                    const offsetCenterNspdPoint = [
+                                        geoCenterNspdPoint[1] - mapOffsetY * 0.000008983,
+                                        geoCenterNspdPoint[0] - mapOffsetX * 0.000008983
+                                    ];
+                                    const labelPlacemarkNspdPoint = new ymaps.Placemark(offsetCenterNspdPoint, {
+                                        iconContent: `${inputText} - объект без определенных границ, указан центр квартала`,
+                                        hintContent: inputText
+                                    }, {
+                                        preset: 'islands#redStretchyIcon',
+                                        draggable: true
+                                    });
+                                    map.geoObjects.add(labelPlacemarkNspdPoint);
+                                    polygons.push(labelPlacemarkNspdPoint); // Track the point label
+
+                                    // Zoom to the single NSPD point
+                                    if (allFeatureBoundsNspdPoint.length > 0 && isFinite(allFeatureBoundsNspdPoint[0][0][0])) {
+                                        const pointLat = allFeatureBoundsNspdPoint[0][0][0];
+                                        const pointLon = allFeatureBoundsNspdPoint[0][0][1];
+                                        const latMarginPoint = 0.001; // Small margin for a point
+                                        const lonMarginPoint = 0.001;
+                                        map.setBounds([
+                                            [pointLat - latMarginPoint, pointLon - lonMarginPoint],
+                                            [pointLat + latMarginPoint, pointLon + lonMarginPoint]
+                                        ], { checkZoomRange: true, duration: 200 });
                                     }
                                 }
+                                addToHistory(inputText);
+                                document.getElementById('loaderContainer').style.display = 'none';
+                                return; // Exit after handling this special EZ case
                             }
-                        } else { showNotification(`Архив для ЕЗП ${inputText} (включая вариант с '@') не найден.`, 'info'); }
-                    } catch (error) { showNotification(`Ошибка загрузки данных ЕЗП: ${error.message}`, 'error'); }
-                    if (!ezDataLoadedSuccessfully) { await drawFeatureFromNspd(feature); }
-                    // ... КОНЕЦ БЛОКА ЕЗП
-                    addToHistory(inputText);
-                    return; // Важно завершить здесь, чтобы не перейти к стандартной отрисовке
-                }
 
-                // Стандартная отрисовка для всех остальных кадастровых номеров
-                console.log(`Найден стандартный объект ${inputText}. Отрисовка...`);
-                await drawFeatureFromNspd(feature);
+                            // --- Original logic for non-EZ cases or if EZ fails and falls through (if no return above) ---
+                            // This part handles Polygon, MultiPolygon, and other Point types from NSPD
+                            // The isEgrnPointWithNoGeometry check is still relevant for points that are NOT 6-zeros CNs
+                            let coordsInputValue = "";
+                            let centerCoords = null;
+                            let allFeatureBounds = [];
+                            let labelContentText = inputText;
+                            const isEgrnPointWithNoGeometryOriginal = feature.geometry.type === "Point" && feature.properties && feature.properties.categoryName === "Земельные участки ЕГРН";
 
-            } else {
-                // Логика для поиска по адресу
-                console.log(`"${inputText}" не является КН или кварталом. Поиск по адресу...`);
-                ymaps.geocode(inputText, { results: 1 }).then(function (result) {
-                    if (!result.geoObjects.get(0)) {
-                        showNotification('Адрес не найден', 'error', 'exclamation-circle');
-                        return;
+                            if (isEgrnPointWithNoGeometryOriginal) { // This will now only catch points that weren't handled by EZ logic
+                                 labelContentText += " - объект без определенных границ, указан центр квартала";
+                                const geoCoordinates = proj4('EPSG:3857', 'EPSG:4326', feature.geometry.coordinates);
+                                centerCoords = feature.geometry.coordinates;
+                                allFeatureBounds.push([[geoCoordinates[1], geoCoordinates[0]], [geoCoordinates[1], geoCoordinates[0]]]);
+                                coordsInput.value = "";
+                                showNotification('Объект ЕГРН без координат границ найден', 'warning', 'exclamation-triangle');
+                            } else if (feature.geometry.type === "Polygon") {
+                                // ... (rest of existing Polygon logic)
+                                const bbox = calculateBBox(feature.geometry.coordinates);
+                                centerCoords = [(bbox[0] + bbox[2]) / 2, (bbox[1] + bbox[3]) / 2];
+                                feature.geometry.coordinates.forEach((contour, index) => {
+                                    const contourCoordsText = contour
+                                        .map(coord => `${coord[0].toFixed(8)}\t${coord[1].toFixed(8)}`)
+                                        .join('\n');
+                                    coordsInputValue += contourCoordsText;
+                                    if (index < feature.geometry.coordinates.length - 1) {
+                                        coordsInputValue += '\n\n';
+                                    }
+                                });
+                                const geoCoords = feature.geometry.coordinates[0].map(coord => proj4('EPSG:3857', 'EPSG:4326', coord));
+                                const lats = geoCoords.map(c => c[1]);
+                                const lons = geoCoords.map(c => c[0]);
+                                allFeatureBounds.push([[Math.min(...lats), Math.min(...lons)], [Math.max(...lats), Math.max(...lons)]]);
+                            } else if (feature.geometry.type === "MultiPolygon") {
+                                // ... (rest of existing MultiPolygon logic)
+                                let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+                                feature.geometry.coordinates.forEach((polygonCoordinates, polygonIndex) => {
+                                    const bbox = calculateBBox(polygonCoordinates);
+                                    minX = Math.min(minX, bbox[0]); minY = Math.min(minY, bbox[1]);
+                                    maxX = Math.max(maxX, bbox[2]); maxY = Math.max(maxY, bbox[3]);
+                                    const geoCoords = polygonCoordinates[0].map(coord => proj4('EPSG:3857', 'EPSG:4326', coord));
+                                    const lats = geoCoords.map(c => c[1]);
+                                    const lons = geoCoords.map(c => c[0]);
+                                    allFeatureBounds.push([[Math.min(...lats), Math.min(...lons)], [Math.max(...lats), Math.max(...lons)]]);
+                                    polygonCoordinates.forEach((contour, contourIndex) => {
+                                        const contourCoordsText = contour
+                                            .map(coord => `${coord[0].toFixed(8)}\t${coord[1].toFixed(8)}`)
+                                            .join('\n');
+                                        coordsInputValue += contourCoordsText;
+                                        const isLastContour = polygonIndex === feature.geometry.coordinates.length - 1 &&
+                                            contourIndex === polygonCoordinates.length - 1;
+                                        if (!isLastContour) {
+                                            coordsInputValue += '\n\n';
+                                        }
+                                    });
+                                });
+                                if (minX !== Infinity) {
+                                    centerCoords = [(minX + maxX) / 2, (minY + maxY) / 2];
+                                }
+                            } else if (feature.geometry.type === "Point") { // Other point types
+                                 const coordinates = feature.geometry.coordinates;
+                                 const geoCoordinates = proj4('EPSG:3857', 'EPSG:4326', coordinates);
+                                 centerCoords = feature.geometry.coordinates;
+                                 allFeatureBounds.push([[geoCoordinates[1], geoCoordinates[0]], [geoCoordinates[1], geoCoordinates[0]]]);
+                                 labelContentText = `${inputText} (Точка)`; // Indicate it's a point
+                            }
+
+
+                            let labelPlacemark = null;
+                            if (centerCoords) {
+                                const geoCenter = proj4('EPSG:3857', 'EPSG:4326', centerCoords);
+                                getAddressByCoords([geoCenter[1], geoCenter[0]]).then(address => {
+                                    document.getElementById('city-name-display').innerHTML = address;
+                                });
+                                const offsetCenter = [
+                                    geoCenter[1] - mapOffsetY * 0.000008983,
+                                    geoCenter[0] - mapOffsetX * 0.000008983
+                                ];
+                                const placemarkPreset = (isEgrnPointWithNoGeometryOriginal || feature.geometry.type === "Point")
+                                    ? 'islands#redStretchyIcon'
+                                    : 'islands#blueStretchyIcon';
+
+                                labelPlacemark = new ymaps.Placemark(offsetCenter, {
+                                    iconContent: labelContentText,
+                                    hintContent: inputText
+                                }, {
+                                    preset: placemarkPreset,
+                                    draggable: true
+                                });
+                                map.geoObjects.add(labelPlacemark);
+                                polygons.push(labelPlacemark);
+                            }
+
+                            if (coordsInputValue) {
+                                coordsInput.value = coordsInputValue;
+                                findAndConvert();
+                            }
+
+                            if (allFeatureBounds.length > 0) {
+                                let minLat = Infinity, minLng = Infinity, maxLat = -Infinity, maxLng = -Infinity;
+                                allFeatureBounds.forEach(bounds => {
+                                    minLat = Math.min(minLat, bounds[0][0]); minLng = Math.min(minLng, bounds[0][1]);
+                                    maxLat = Math.max(maxLat, bounds[1][0]); maxLng = Math.max(maxLng, bounds[1][1]);
+                                });
+                                if (isFinite(minLat)) {
+                                    const latMargin = (maxLat - minLat) * 0.1 || 0.001;
+                                    const lonMargin = (maxLng - minLng) * 0.1 || 0.001;
+                                    map.setBounds([
+                                        [minLat - latMargin, minLng - lonMargin],
+                                        [maxLat + latMargin, maxLng + lonMargin]
+                                    ], { checkZoomRange: true, duration: 200 });
+                                }
+                            } else if (labelPlacemark) {
+                                map.setCenter(labelPlacemark.geometry.getCoordinates(), 17);
+                            }
+
+                            addToHistory(inputText);
+                            document.getElementById('loaderContainer').style.display = 'none';
+
+                        } catch (error) {
+                            console.error("Ошибка при обработке кадастрового номера (основная ветка):", error);
+                            showNotification('Ошибка при обработке данных', 'error', 'exclamation-circle');
+                            document.getElementById('loaderContainer').style.display = 'none';
+                        }
+                    } else {
+                        // ... (existing address geocoding logic if not a valid CN) ...
+                        const spaceSeparated = inputText.split(/\s+/);
+                        if (spaceSeparated.length === 2) {
+                            const lat = parseFloat(spaceSeparated[0]);
+                            const lon = parseFloat(spaceSeparated[1]);
+                            if (!isNaN(lat) && !isNaN(lon) && Math.abs(lat) <= 90 && Math.abs(lon) <= 180) {
+                                console.log(`Обрабатываются координаты (форма 2): ${lat}, ${lon}`);
+                                map.setCenter([lat, lon], 17);
+                                const placemark = new ymaps.Placemark([lat, lon], {
+                                    hintContent: `${lat}, ${lon}`
+                                }, { preset: 'islands#redDotIcon' });
+                                map.geoObjects.add(placemark);
+                                polygons.push(placemark);
+                                getAddressByCoords([lat, lon]).then(address => {
+                                    document.getElementById('city-name-display').innerHTML = address;
+                                });
+                                addToHistory(inputText);
+                                return;
+                            }
+                        }
+
+                        ymaps.geocode(inputText, {
+                            results: 1
+                        }).then(function (result) {
+                            if (!result.geoObjects.get(0)) {
+                                showNotification('Адрес не найден', 'error', 'exclamation-circle');
+                                return;
+                            }
+                            addToHistory(inputText);
+                            updateCity(inputText);
+                        });
                     }
-                    addToHistory(inputText);
-                    updateCity(inputText);
-                });
-            }
-        } catch (error) {
-            console.error("Критическая ошибка в обработчике поиска:", error);
-            showNotification('Произошла ошибка при поиске', 'error');
-        } finally {
-            // 3. Сбрасываем флаг в любом случае, когда поиск завершен
-            isSearching = false;
-            hideLoader();
-            console.log("Поиск завершен. Флаг isSearching сброшен.");
-        }
-    }
-});
-
+                }
+            });
 
 // Вспомогательная функция для расчета ограничивающего прямоугольника полигона
 function calculateBBox(coordinates) {
@@ -9951,11 +10034,12 @@ async function querySettlementsInfo(latitude, longitude) {
 }
 
 
+// Новая функция для проверки, является ли ввод номером кадастрового квартала
 function isCadastralQuarter(text) {
     if (!text) return false;
-    // Паттерн: 2 цифры, двоеточие, 2 цифры, двоеточие, 6 или 7 цифр. И больше ничего.
-    const pattern = /^\d{2}:\d{2}:\d{6,7}$/;
-    return pattern.test(text.trim());
+    const colonCount = (text.match(/:/g) || []).length;
+    const onlyDigits = /^\d+:\d+:\d+$/.test(text); // Только цифры и ровно два двоеточия
+    return colonCount === 2 && onlyDigits;
 }
 
 // Новая функция для отрисовки кадастрового квартала
