@@ -1445,13 +1445,12 @@ input[type='checkbox'].toggle:checked:after {
 let currentCoords = [];
 let showDistanceLabels = false; // Добавляем флаг для состояния "глаза"
 let schemeParams = {};
-let useVercelProxyMode = false;
 // Список регионов с 7 знаками после второго двоеточия
 //const sevenDigitsRegions = ['24','63', '66', '77', '78','91'];
 
 // Список регионов с 6 знаками после второго двоеточия (только "16")
 const sixDigitsRegions = ['16'];
-let isNspdDirectDown = false;
+
 
 // Проверка корректности кадастрового номера
 function isValidCadastralNumber(text) {
@@ -2335,156 +2334,156 @@ async function exportToExcel() {
 }
 
 
-function buildApiUrl(path) {
-    if (isNspdDirectDown) {
-        // Если прямой доступ упал, заворачиваем путь в параметр 'target' для нашего прокси
-        return `https://nsp-two.vercel.app/?target=${encodeURIComponent(path)}`;
-    } else {
-        // Иначе идем напрямую
-        return `https://nspd.gov.ru${path}`;
-    }
-}
-
-
-async function fetchWithFallback(path, options = {}) {
-    const vercelProxyUrl = `https://nsp-two.vercel.app/?target=${encodeURIComponent(path)}`;
-
-   
-    if (useVercelProxyMode) {
-        return fetch(vercelProxyUrl, options);
-    }
-
-   
-    const directUrl = `https://nspd.gov.ru${path}`;
-    try {
-        const response = await fetch(directUrl, options);
-  
-        if (!response.ok) {
-            throw new Error(`Direct request failed with status: ${response.status}`);
-        }
-        return response; // Успех
-    } catch (error) {
-     
-        useVercelProxyMode = true;
-     
-        return fetch(vercelProxyUrl, options);
-    }
-}
-
-
-
-function handleSuccessfulResponse(data) {
-    if (!data.data || data.data.features.length === 0) {
-        throw new Error('Данные не найдены в источнике.');
-    }
-
-    const feature = data.data.features[0];
-    const properties = feature.properties;
-    const options = properties.options;
-    const geometry = feature.geometry;
-    const geomId = feature.id;
-    const categoryName = properties.categoryName;
-
-    let secondaryPath = ''; // Переменная для хранения пути вторичного запроса
-    if (categoryName === "Земельные участки ЕГРН") {
-        const categoryId = properties.category;
-        secondaryPath = `/api/geoportal/v1/tab-group-data?tabClass=objectsList&categoryId=${categoryId}&geomId=${geomId}`;
-    } else {
-        const categoryId = properties.category;
-        if (categoryName === "Сооружения") {
-            secondaryPath = `/api/geoportal/v1/tab-values-data?tabClass=landLinks&categoryId=${categoryId}&geomId=${geomId}`;
-        } else if (properties.options?.registersId) {
-            const registersId = properties.options.registersId;
-            secondaryPath = `/api/geoportal/v1/tab-values-data?tabClass=landLinks&objdocId=${geomId}&registersId=${registersId}`;
-        }
-    }
-
-    if (secondaryPath) {
-        fetchWithFallback(secondaryPath)
-            .then(response => response.ok ? response.json() : Promise.reject('Secondary request failed'))
-            .then(data2 => {
-                if (categoryName === "Земельные участки ЕГРН") {
-                    const oknList = (data2?.object?.[0]?.value) || null;
-                    updatePropertyData(options, properties, oknList, null);
-                } else {
-                    const landParcelList = (data2 && !data2.message && data2.value?.length > 0) ? data2.value : null;
-                    updatePropertyData(options, properties, null, landParcelList);
-                }
-            })
-            .catch(error => {
-                // Если даже вторичный запрос не удался, просто обновляем данные без него
-                updatePropertyData(options, properties, null, null);
-            });
-    } else {
-        updatePropertyData(options, properties, null, null);
-    }
-
-    if (geometry && geometry.type) {
-        switch (geometry.type) {
-            case "Polygon": case "MultiPolygon": case "MultiLineString":
-                currentCoords = geometry.coordinates;
-                document.querySelector('.content-container').style.display = 'grid';
-                setTimeout(() => drawScheme(), 0);
-                break;
-            case "Point":
-                currentCoords = [geometry.coordinates];
-                document.querySelector('.content-container').style.display = 'block';
-                document.querySelector('.scheme-container').style.display = 'none';
-                clearCanvas();
-                break;
-            default:
-                document.querySelector('.content-container').style.display = 'block';
-                document.querySelector('.scheme-container').style.display = 'none';
-                showNotification('Тип геометрии не поддерживается: ' + geometry.type, 'error');
-                clearCanvas();
-        }
-    } else {
-        document.querySelector('.content-container').style.display = 'block';
-        document.querySelector('.scheme-container').style.display = 'none';
-        clearCanvas();
-    }
-
-    document.getElementById('resultTable').style.display = 'table';
-    if (document.getElementById('virtualKeyboard').classList.contains('active')) {
-        toggleVirtualKeyboard();
-    }
-}
-
-async function fetchData() {
+// Основная функция запроса данных (финальная версия)
+async function fetchData(keepModalOpen = false) {
+    // Скрываем информацию о предыдущем архивном запросе при каждом новом поиске
     document.getElementById('archiveInfo').style.display = 'none';
         
     const cadastralNumber = document.getElementById('cadastralNumber').value;
+
     if (!cadastralNumber.trim()) {
         openSite();
         return;
     }
+
     document.title = `${cadastralNumber}`;
+
     if (!isValidCadastralNumber(cadastralNumber)) {
         showNotification('Пожалуйста, введите корректный кадастровый номер', 'error');
         return;
     }
 
-    const initialPath = `/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(cadastralNumber)}`;
+    const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(cadastralNumber)}`;
 
     try {
-        // Просто вызываем нашу умную функцию. Она сама разберется, куда идти.
-        const response = await fetchWithFallback(initialPath);
-        
-        // Если ответ неудачный даже после всех попыток, вызываем ошибку
+        // --- НАЧАЛО БЛОКА ИЗМЕНЕНИЙ ---
+        const response = await fetch(url);
+
+        // Проверяем, что ответ не является ошибкой сети
         if (!response.ok) {
-            const errorData = await response.json().catch(() => ({})); // Пытаемся получить детали ошибки
-            throw new Error(errorData.error || `Final request failed with status ${response.status}`);
+            // Создаем ошибку, чтобы перейти в блок catch
+            throw new Error(`HTTP error! status: ${response.status}`);
         }
         
         const data = await response.json();
-        handleSuccessfulResponse(data);
+        // --- КОНЕЦ БЛОКА ИЗМЕНЕНИЙ ---
 
-    } catch (finalError) {
-        // Этот блок сработает, только если И прямой доступ, И Vercel не сработали.
-        showNotification('Основные сервисы недоступны. Попытка загрузить из архива...', 'warning');
-        fetchDataFromArchive();
+        if (data.data.features.length === 0) {
+            showNotification('Данные не найдены', 'error');
+            return;
+        }
+
+        // ... (далее идет вся существующая логика обработки успешного ответа, она остается без изменений) ...
+        const feature = data.data.features[0];
+        const properties = feature.properties;
+        const options = properties.options;
+        const geometry = feature.geometry;
+        const geomId = feature.id;
+        const categoryName = properties.categoryName;
+
+        if (categoryName === "Земельные участки ЕГРН") {
+            const categoryId = properties.category;
+            const secondApiUrl = `https://nspd.gov.ru/api/geoportal/v1/tab-group-data?tabClass=objectsList&categoryId=${categoryId}&geomId=${geomId}`;
+            
+            console.log("Тип: Земельный участок. Запрашиваю связанные ОКС.");
+            console.log("URL второго запроса:", secondApiUrl);
+
+            fetch(secondApiUrl)
+                .then(response2 => response2.json())
+                .then(data2 => {
+                    let oknList = null;
+                    if (data2 && data2.object && data2.object.length > 0 && data2.object[0].value) {
+                        oknList = data2.object[0].value;
+                    }
+                    updatePropertyData(options, properties, oknList, null);
+                })
+                .catch(error2 => {
+                    console.error('Ошибка при запросе списка ОКС:', error2);
+                    updatePropertyData(options, properties, null, null);
+                });
+        } else {
+            const categoryId = properties.category;
+            let secondApiUrl = '';
+            if (categoryName === "Сооружения") {
+                secondApiUrl = `https://nspd.gov.ru/api/geoportal/v1/tab-values-data?tabClass=landLinks&categoryId=${categoryId}&geomId=${geomId}`;
+            } else {
+                if (properties.options && properties.options.registersId) {
+                    const registersId = properties.options.registersId;
+                    secondApiUrl = `https://nspd.gov.ru/api/geoportal/v1/tab-values-data?tabClass=landLinks&objdocId=${geomId}&registersId=${registersId}`;
+                }
+            }
+            if (secondApiUrl) {
+                fetch(secondApiUrl)
+                    .then(response2 => {
+                        if (!response2.ok) throw new Error(`HTTP ошибка! Статус: ${response2.status}`);
+                        return response2.json();
+                    })
+                    .then(data2 => {
+                        let landParcelList = (data2 && !data2.message && data2.value && data2.value.length > 0) ? data2.value : null;
+                        updatePropertyData(options, properties, null, landParcelList);
+                    })
+                    .catch(error2 => {
+                        console.error('Ошибка при запросе связанного ЗУ:', error2);
+                        updatePropertyData(options, properties, null, null);
+                    });
+            } else {
+                 updatePropertyData(options, properties, null, null);
+            }
+        }
+
+        if (geometry && geometry.type) {
+            switch (geometry.type) {
+                case "Polygon":
+                case "MultiPolygon":
+                case "MultiLineString":
+                    currentCoords = geometry.coordinates;
+                    document.querySelector('.content-container').style.display = 'grid';
+                    setTimeout(() => drawScheme(), 0);
+                    break;
+                case "Point":
+                    currentCoords = [geometry.coordinates];
+                    document.querySelector('.content-container').style.display = 'block';
+                    document.querySelector('.scheme-container').style.display = 'none';
+                    document.querySelector('.data-container').style.width = '100%';
+                    clearCanvas();
+                    break;
+                default:
+                    document.querySelector('.content-container').style.display = 'block';
+                    document.querySelector('.scheme-container').style.display = 'none';
+                    document.querySelector('.data-container').style.width = '100%';
+                    showNotification('Тип геометрии не поддерживается: ' + geometry.type, 'error');
+                    clearCanvas();
+                    break;
+            }
+        } else {
+             document.querySelector('.content-container').style.display = 'block';
+             document.querySelector('.scheme-container').style.display = 'none';
+             document.querySelector('.data-container').style.width = '100%';
+             clearCanvas();
+        }
+
+        document.getElementById('resultTable').style.display = 'table';
+        const keyboard = document.getElementById('virtualKeyboard');
+        if (keyboard.classList.contains('active')) {
+            toggleVirtualKeyboard();
+        }
+    } catch (error) {
+        console.error('Ошибка основного запроса:', error);
+        
+        // --- НАЧАЛО БЛОКА ИЗМЕНЕНИЙ (обработка ошибки) ---
+        // Проверяем, является ли ошибка ошибкой сети (например, CORS или нет интернета)
+        if (error instanceof TypeError && error.message === 'Failed to fetch') {
+            showNotification('Основной сервис недоступен. Попытка загрузить из архива КПТ...', 'warning');
+            // Если основной запрос не удался, вызываем функцию загрузки из архива
+            fetchDataFromArchive();
+        } else {
+            // Для всех других ошибок (например, 404, 500) показываем стандартное сообщение
+            showNotification('Произошла ошибка при выполнении запроса: ' + error.message, 'error');
+        }
+        // --- КОНЕЦ БЛОКА ИЗМЕНЕНИЙ (обработка ошибки) ---
     }
 }
+
 
       // Функция для конвертации координат из EPSG:3857 в WGS84 (EPSG:4326)
         function convertToWGS84(x, y) {
