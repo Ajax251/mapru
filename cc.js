@@ -1,3 +1,4 @@
+
 (function() {
       const geoApiUrl = 'https://ip-api.com/json/?fields=countryCode';
     fetch(geoApiUrl)
