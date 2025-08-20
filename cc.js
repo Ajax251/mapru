@@ -1,5 +1,3 @@
-
-
 (function() {
 
     const geoApiUrl = 'https://ipinfo.io/json';
