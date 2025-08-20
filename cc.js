@@ -1,5 +1,5 @@
 (function() {
-      const geoApiUrl = 'http://ip-api.com/json/?fields=countryCode';
+      const geoApiUrl = 'https://ip-api.com/json/?fields=countryCode';
     fetch(geoApiUrl)
         .then(response => {
                     if (!response.ok) {
