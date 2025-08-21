@@ -2,15 +2,15 @@
 // Этот файл хранит список систем координат и их определения в формате Proj4 для динамической загрузки в HTML.
 
 const COORDINATE_SYSTEMS = [
-    {
+     {
         value: "EPSG:4326",
-        text: "WGS 84 широта/долгота"
-        // Встроенная СК, определение не требуется
+        text: "WGS 84 широта/долгота",
+        def: "+proj=longlat +datum=WGS84 +no_defs"
     },
     {
         value: "EPSG:3857",
-        text: "Web Mercator - EPSG:3857 - НСПД"
-        // Встроенная СК, определение не требуется
+        text: "Web Mercator - EPSG:3857 - НСПД",
+        def: "+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=@null +wktext +no_defs" 
     },
     {
         value: "custom",
@@ -63,7 +63,7 @@ const COORDINATE_SYSTEMS = [
     { value: "EPSG:6361409", text: "МСК 14-9 (6 градусная) Республика Саха (Якутия)", def: "+proj=tmerc +lat_0=0 +lon_0=93 +k=1 +x_0=9250000 +y_0=-7206307.9 +ellps=krass +towgs84=23.92,-141.27,-80.9,-0,0.35,0.82,-0.12 +units=m +no_defs" },
     { value: "EPSG:6331501", text: "МСК 15-1 Северная Осетия - Алания", def: "+proj=tmerc +lat_0=0 +lon_0=44.183333333333 +k=1 +x_0=1300000 +y_0=-4822730.9 +ellps=krass +towgs84=23.92,-141.27,-80.9,-0,0.35,0.82,-0.12 +units=m +no_defs" },
     { value: "EPSG:6331601", text: "МСК 16-1 Республика Татарстан", def: "+proj=tmerc +lat_0=0 +lon_0=49.033333333333 +k=1 +x_0=1300000 +y_0=-5709414.7 +ellps=krass +towgs84=23.92,-141.27,-80.9,-0,0.35,0.82,-0.12 +units=m +no_defs" },
-    { value: "EPSG:6331602", text: "МСК 16-2 Республика Татарстан", def: "+proj=tmerc +lat_0=0 +lon_0=52.033333333333 +k=1 +x_0=2300000 +y_0=-5709414.7 +ellps=krass +towgs84=23.92,-141.27,-80.9,-0,0.35,0.82,-0.12 +units=m +no_defs" },
+    { value: "EPSG:6331602", text: "МСК 16-2 Республика Татарстан", def: "+proj=tmerc +lat_0=0 +lon_0=52.033333333333 +k=1 +x_0=2300000 +y_0=-5709414.7 +ellps=krass +towgs84=23.92,-141.27,-80.9,-0,0.35,0.82,-0.12 +units=m +no_defs", offsetX: 0.01, offsetY: 0 },
     { value: "EPSG:6331603", text: "МСК 16-3 Республика Татарстан", def: "+proj=tmerc +lat_0=0 +lon_0=55.033333333333 +k=1 +x_0=3300000 +y_0=-5709414.7 +ellps=krass +towgs84=23.92,-141.27,-80.9,-0,0.35,0.82,-0.12 +units=m +no_defs" },
     { value: "EPSG:6331801", text: "МСК 18-1 Удмуртская Республика", def: "+proj=tmerc +lat_0=0 +lon_0=52.683333333333 +k=1 +x_0=1300000 +y_0=-6416995.8 +ellps=krass +towgs84=23.92,-141.27,-80.9,-0,0.35,0.82,-0.12 +units=m +no_defs" },
     { value: "EPSG:6331802", text: "МСК 18-2 Удмуртская Республика", def: "+proj=tmerc +lat_0=0 +lon_0=52.883333333333 +k=1 +x_0=2300000 +y_0=-6416995.8 +ellps=krass +towgs84=23.92,-141.27,-80.9,-0,0.35,0.82,-0.12 +units=m +no_defs" },
