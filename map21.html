@@ -5263,15 +5263,6 @@ numberedPointSize = parseInt(localStorage.getItem('numberedPointSize'), 10) || 1
                 <div class="custom-context-menu-item" id="egrn-xml-menu-item"> <!-- Подпункт "XML схема" -->
                     <i class="fas fa-file-code"></i>XML
                 </div>
-                
-                   <div class="custom-context-menu-item" id="coords-msk-menu-item">
-                <i class="fas fa-ruler-combined"></i>Координаты в МСК
-            </div>
-            
-                <div class="custom-context-menu-item" id="quarter-msk-xml-menu-item">
-                <i class="fas fa-file-archive"></i>Квартал в МСК
-            </div>
-            
             </div>
         </div>
  
@@ -5806,31 +5797,6 @@ if (event.target.id === 'find-on-map-menu-item') {
             await handleEgrnRelatedAction(lat, lon, 'схема_xml.html');
             contextMenu.style.display = 'none';
         }
-        
-        
-        if (event.target.id === 'coords-msk-menu-item') {
-    const lat = parseFloat(contextMenu.dataset.lat);
-    const lon = parseFloat(contextMenu.dataset.lon);
-    
-    // 1. Находим полигон под точкой клика
-    const targetPolygon = findPolygonAtPoint(lat, lon);
-
-    if (!targetPolygon) {
-        showNotification('Объект для конвертации не найден', 'warning', 'exclamation-triangle');
-        contextMenu.style.display = 'none';
-        return;
-    }
-
-    // 2. Вызываем новую функцию для конвертации и копирования
-    await convertAndCopyMskCoords(targetPolygon);
-    contextMenu.style.display = 'none';
-}
-
-if (event.target.id === 'quarter-msk-xml-menu-item') {
-    // Вызываем новую основную функцию-обработчик
-    handleGenerateQuarterMskXml();
-    contextMenu.style.display = 'none';
-}
 
         if (event.target.id === 'quarter-menu-item') {
             const lat = parseFloat(contextMenu.dataset.lat);
@@ -7014,141 +6980,6 @@ function copyPolygonWithMap(originalPolygon, strokeColor, opacityHex) {
       
 
 
-async function handleGenerateQuarterMskXml() {
-    // 1. Проверяем, загружены ли данные квартала
-    if (!currentQuarterNumber || !parcelFeaturesData || parcelFeaturesData.length === 0) {
-        showNotification('Сначала загрузите данные кадастрового квартала', 'warning', 'exclamation-triangle');
-        return;
-    }
-
-    showLoader('Подготовка XML...');
-
-    try {
-        // 2. Собираем все необходимые параметры
-        const nspdData = { features: parcelFeaturesData };
-        const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
-        const offsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
-        const offsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
-        // Используем значения по умолчанию, как в xml_kpt.html
-        const swapCoords = true;
-        const reverseDirection = true;
-
-        // 3. Конвертируем данные в XML-строку
-        const { xmlContent, filenameBase } = convertJsonToXml(
-            nspdData, 
-            currentQuarterNumber,
-            destSc,
-            offsetX,
-            offsetY,
-            swapCoords,
-            reverseDirection
-        );
-
-        // 4. Создаем и скачиваем ZIP-архив
-        await createAndDownloadZip(xmlContent, filenameBase);
-
-        // 5. Копируем XML в буфер обмена
-        await navigator.clipboard.writeText(xmlContent);
-        showNotification('XML скопирован в буфер обмена', 'success', 'check-circle');
-
-        // 6. Открываем схема_xml.html
-        window.open('схема_xml.html', '_blank');
-        
-    } catch (error) {
-        console.error("Ошибка при генерации XML квартала:", error);
-        showNotification(`Ошибка: ${error.message}`, 'error', 'exclamation-circle');
-    } finally {
-        hideLoader();
-    }
-}
-
-
-function convertJsonToXml(nspdData, quarterNumber, targetCS_value, offsetX, offsetY, swapXmlCoords, reverseDirection) {
-    if (typeof COORDINATE_SYSTEMS === 'undefined') { 
-        throw new Error("Список систем координат (sk.js) не загружен."); 
-    }
-
-    const targetSystem = COORDINATE_SYSTEMS.find(s => s.value === targetCS_value);
-    const sourceSystem = COORDINATE_SYSTEMS.find(s => s.value === 'EPSG:3857');
-
-    if (!targetSystem || !sourceSystem) {
-        throw new Error(`Определение для ${targetCS_value} или EPSG:3857 не найдено.`);
-    }
-    
-    proj4.defs(targetSystem.value, targetSystem.def); 
-    proj4.defs(sourceSystem.value, sourceSystem.def);
-    
-    const today = new Date();
-    const dateString = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-    const quarterSafe = quarterNumber.replace(/:/g, '_');
-    const filenameBase = `${quarterSafe} ${dateString} NSPD`;
-
-    const escapeXml = (unsafe) => unsafe ? String(unsafe).replace(/[<>&'"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','\'':'&apos;','"':'&quot;'}[c])) : '-';
-
-    const landRecordsXml = nspdData.features.map(feature => {
-        const props = feature.properties.options || {};
-        const geometry = feature.geometry;
-        const finalSkId = targetSystem.text.split('(')[0].trim();
-
-        const contoursXml = (geometry && geometry.coordinates) ? (geometry.type === 'MultiPolygon' ? geometry.coordinates : [geometry.coordinates]).map((ring) => {
-            let points = geometry.type === 'MultiPolygon' ? ring[0] : ring[0];
-            if (reverseDirection) { points = [...points].reverse(); }
-            
-            const ordinatesXml = points.map((point, i) => {
-                const convertedPoint = proj4(sourceSystem.value, targetSystem.value, point);
-                const decimalPlaces = targetCS_value === 'EPSG:4326' ? 8 : 2;
-                
-                // Proj4 для МСК возвращает [Y (Northing), X (Easting)]
-                const y_proj = convertedPoint[0];
-                const x_proj = convertedPoint[1];
-
-                const finalX = (x_proj + offsetX).toFixed(decimalPlaces);
-                const finalY = (y_proj + offsetY).toFixed(decimalPlaces);
-
-                // --- КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ ---
-                // Собираем XML с правильным соответствием: <x> -> X, <y> -> Y
-                return `<ordinate><x>${finalX}</x><y>${finalY}</y><ord_nmb>${i + 1}</ord_nmb><num_geopoint>${i + 1}</num_geopoint><delta_geopoint>0.0</delta_geopoint></ordinate>`;
-                // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
-
-            }).join('');
-            return `<contour><entity_spatial><sk_id>${escapeXml(finalSkId)}</sk_id><spatials_elements><spatial_element><ordinates>${ordinatesXml}</ordinates></spatial_element></spatials_elements></entity_spatial></contour>`;
-        }).join('') : '';
-        
-        const isAreaSpecified = props.specified_area || props.land_record_area_verified;
-        const areaValue = isAreaSpecified || props.declared_area || props.land_record_area_declaration || props.land_record_area;
-        const areaXmlBlock = isAreaSpecified ?
-            `<area><value>${escapeXml(areaValue)}</value><inaccuracy>0</inaccuracy></area>` :
-            `<area><value>${escapeXml(areaValue)}</value></area>`;
-
-        return `<land_record><object><common_data><type><code>002001001000</code><value>${escapeXml(props.land_record_type||'Земельный участок')}</value></type><cad_number>${escapeXml(props.cad_num)}</cad_number></common_data></object><params><category><type><code>003002000000</code><value>${escapeXml(props.land_record_category_type)}</value></type></category><permitted_use><permitted_use_established><by_document>${escapeXml(props.permitted_use_established_by_document)}</by_document></permitted_use_established></permitted_use>${areaXmlBlock}</params><address_location><address><readable_address>${escapeXml(props.readable_address)}</readable_address></address></address_location><cost><value>${escapeXml(props.cost_value)}</value></cost><contours_location><contours>${contoursXml}</contours></contours_location></land_record>`;
-    }).join('');
-    
-    const fullXml = `<?xml version="1.0" encoding="UTF-8"?><extract_cadastral_plan_territory><details_statement><group_top_requisites><organ_registr_rights>Филиал ППК "Роскадастр" (данные из НСПД)</organ_registr_rights><date_formation>${dateString}</date_formation><registration_number>НСПД-КОНВЕРТЕР</registration_number></group_top_requisites></details_statement><cadastral_blocks><cadastral_block><cadastral_number>${escapeXml(quarterNumber)}</cadastral_number><record_data><base_data><land_records>${landRecordsXml}</land_records></base_data></record_data></cadastral_block></cadastral_blocks></extract_cadastral_plan_territory>`;
-    
-    return { xmlContent: fullXml, filenameBase };
-}
-
-
-
-async function createAndDownloadZip(xmlContent, filenameBase) {
-    const zip = new JSZip();
-    zip.file(`${filenameBase}.xml`, xmlContent);
-    const blob = await zip.generateAsync({
-        type: "blob",
-        compression: "DEFLATE",
-        compressionOptions: { level: 9 }
-    });
-    const link = document.createElement('a');
-    link.href = URL.createObjectURL(blob);
-    link.download = `${filenameBase}.zip`;
-    document.body.appendChild(link);
-    link.click();
-    document.body.removeChild(link);
-    URL.revokeObjectURL(link.href);
-}
-
-
-
 function isCoordinates(text) {
     if (!text || text.trim() === "") {
         return false;
@@ -7540,119 +7371,6 @@ function populateSidebarWithParcels(features, loadDate = null) {
             const formattedValue = areaInfo.value.toLocaleString('ru-RU');
             return `${formattedValue} м² (${areaInfo.type.toLowerCase()})`;
         }
-        
-        function findPolygonAtPoint(lat, lon) {
-    const candidatePolygons = [];
-    const allDrawableObjects = [...polygons, ...areaObjects]; // Ищем во всех полигонах
-
-    for (const obj of allDrawableObjects) {
-        if (obj instanceof ymaps.Polygon) {
-            try {
-                // Используем Turf.js для надежной проверки вхождения точки
-                const coords = obj.geometry.getCoordinates()[0];
-                const turfPolygon = turf.polygon([coords.map(coord => [coord[1], coord[0]])]);
-                const point = turf.point([lon, lat]);
-                if (turf.booleanPointInPolygon(point, turfPolygon)) {
-                    candidatePolygons.push(obj);
-                }
-            } catch (turfError) {
-                // Fallback на метод Яндекса, если Turf.js выдал ошибку
-                if (obj.geometry.contains([lat, lon])) {
-                    candidatePolygons.push(obj);
-                }
-            }
-        }
-    }
-
-    if (candidatePolygons.length === 0) {
-        return null;
-    }
-
-    // Если найдено несколько полигонов, выбираем тот, у которого наименьшая площадь
-    let targetPolygon = candidatePolygons[0];
-    if (candidatePolygons.length > 1) {
-        let minArea = Infinity;
-        candidatePolygons.forEach(polygon => {
-            try {
-                const coords = polygon.geometry.getCoordinates()[0];
-                if (coords.length < 3) return;
-                const turfPolygon = turf.polygon([coords.map(coord => [coord[1], coord[0]])]);
-                const area = turf.area(turfPolygon);
-                if (isFinite(area) && area < minArea) {
-                    minArea = area;
-                    targetPolygon = polygon;
-                }
-            } catch (e) {
-                console.error("Ошибка при расчете площади для выбора полигона:", e);
-            }
-        });
-    }
-    
-    return targetPolygon;
-}
-
-
-async function convertAndCopyMskCoords(targetPolygon) {
-    try {
-        // 1. Получаем целевую СК и смещения
-        const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
-        const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destSc);
-        if (!destSystem || !destSystem.def) {
-            throw new Error(`Определение для ${destSc} не найдено в sk.js`);
-        }
-        
-        const offsetXRaw = (localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.');
-        const offsetYRaw = (localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.');
-        const offsetX = parseFloat(offsetXRaw) || 0;
-        const offsetY = parseFloat(offsetYRaw) || 0;
-
-        // 2. Получаем "чистые" WGS-84 координаты
-        const yandexCoords = targetPolygon.geometry.getCoordinates()[0];
-
-        // --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ: РАЗВОРАЧИВАЕМ ПОРЯДОК ТОЧЕК ---
-        // Создаем копию массива и разворачиваем ее, чтобы изменить направление обхода
-        // с "против часовой" на "по часовой стрелке".
-        const reversedYandexCoords = [...yandexCoords].reverse();
-        // --- КОНЕЦ КЛЮЧЕВОГО ИЗМЕНЕНИЯ ---
-
-        const wgs84Coords = reversedYandexCoords.map(coord => { // Используем новый развернутый массив
-            const trueLat = coord[0] + (mapOffsetY * 0.000008983);
-            const trueLon = coord[1] + (mapOffsetX * 0.000008983);
-            return [trueLon, trueLat]; // Proj4 ожидает [lon, lat]
-        });
-
-        // 3. Конвертируем все точки
-        proj4.defs(destSc, destSystem.def);
-        const mskCoordsText = wgs84Coords.map(coord => {
-            const mskPoint = proj4("EPSG:4326", destSc, coord); // Proj4 для МСК возвращает [Y, X]
-            
-            const y_from_proj = mskPoint[0];
-            const x_from_proj = mskPoint[1];
-            
-            const final_Y_for_output = y_from_proj + offsetY;
-            const final_X_for_output = x_from_proj + offsetX;
-
-            // Форматируем результат в виде X Y
-            return `${final_X_for_output.toFixed(2)}\t${final_Y_for_output.toFixed(2)}`;
-
-        }).join('\n');
-
-        // 4. Копируем и открываем
-        await navigator.clipboard.writeText(mskCoordsText);
-        
-        let notificationMessage = `Координаты в ${destSystem.text} скопированы`;
-        if (offsetX !== 0 || offsetY !== 0) {
-            notificationMessage += ` (со смещением X: ${offsetX.toFixed(2)}, Y: ${offsetY.toFixed(2)})`;
-        }
-        showNotification(notificationMessage, 'success', 'check-circle');
-
-        window.open('схема.html', '_blank');
-
-    } catch (error) {
-        console.error("Ошибка при конвертации в МСК:", error);
-        showNotification(`Ошибка конвертации: ${error.message}`, 'error', 'exclamation-circle');
-    }
-}
 
 async function handleEgrnRelatedAction(lat, lon, targetUrl) {
     try {
@@ -14505,14 +14223,15 @@ function openMskConverterModal() {
 
     const modalContent = document.createElement('div');
     modalContent.className = 'converter-modal-content';
+    // Используем обновленный HTML из Шага 1.2
     modalContent.innerHTML = `
         <button class="close-btn" title="Закрыть">&times;</button>
-        <h3>Ввод и конвертация координат</h3>
+        <h3>Настройка МСК</h3>
         <div class="converter-mode-switch">
             <label>Режим:</label>
             <label class="switch"><input type="checkbox" id="mskConversionModeSwitch"><span class="slider"></span></label>
         </div>
-        <textarea id="msk-coords-input" placeholder="Вставьте координаты X Y...\n(Принято Y X, поэтому они будут поменяны местами для Proj4)"></textarea>
+        <textarea id="msk-coords-input" placeholder="Вставьте координаты X Y..."></textarea>
         <div class="converter-offset-inputs">
             <div><label for="mskOffsetX">Смещение X (м):</label><input type="number" id="mskOffsetX" value="0.00" step="0.01"></div>
             <div><label for="mskOffsetY">Смещение Y (м):</label><input type="number" id="mskOffsetY" value="0.00" step="0.01"></div>
@@ -14532,42 +14251,29 @@ function openMskConverterModal() {
     modal.appendChild(modalContent);
     document.body.appendChild(modal);
     
+    // --- ПОЛНОСТЬЮ НОВАЯ ЛОГИКА ИНИЦИАЛИЗАЦИИ ОКНА ---
+    
     const select = document.getElementById('msk-select');
     const modeSwitch = document.getElementById('mskConversionModeSwitch');
     const autoLoadSwitch = document.getElementById('autoLoadOffsetSwitch');
     const offsetXInput = document.getElementById('mskOffsetX');
     const offsetYInput = document.getElementById('mskOffsetY');
 
+    // Функция для загрузки смещений из sk.js
     const loadOffsetsForMskSystem = () => {
-        if (!autoLoadSwitch.checked) {
-            const currentX = (localStorage.getItem('savedMskOffsetX') || '0.00').replace(',', '.');
-            const currentY = (localStorage.getItem('savedMskOffsetY') || '0.00').replace(',', '.');
-            offsetXInput.value = parseFloat(currentX).toFixed(2).replace(',', '.'); // <-- ИСПРАВЛЕНО
-            offsetYInput.value = parseFloat(currentY).toFixed(2).replace(',', '.'); // <-- ИСПРАВЛЕНО
-            return;
-        }
-        
-        if (typeof COORDINATE_SYSTEMS === 'undefined') return;
+        if (!autoLoadSwitch.checked || typeof COORDINATE_SYSTEMS === 'undefined') return;
         
         const selectedSystem = COORDINATE_SYSTEMS.find(s => s.value === select.value);
-        let newOffsetX = 0.00;
-        let newOffsetY = 0.00;
-
         if (selectedSystem && (selectedSystem.hasOwnProperty('offsetX') || selectedSystem.hasOwnProperty('offsetY'))) {
-            newOffsetX = selectedSystem.offsetX || 0;
-            newOffsetY = selectedSystem.offsetY || 0;
+            offsetXInput.value = (selectedSystem.offsetX || 0).toFixed(2);
+            offsetYInput.value = (selectedSystem.offsetY || 0).toFixed(2);
+        } else {
+            offsetXInput.value = "0.00";
+            offsetYInput.value = "0.00";
         }
-        
-        const formattedOffsetX = newOffsetX.toFixed(2).replace(',', '.'); // <-- ИСПРАВЛЕНО
-        const formattedOffsetY = newOffsetY.toFixed(2).replace(',', '.'); // <-- ИСПРАВЛЕНО
-
-        offsetXInput.value = formattedOffsetX;
-        offsetYInput.value = formattedOffsetY;
-        
-        localStorage.setItem('savedMskOffsetX', formattedOffsetX);
-        localStorage.setItem('savedMskOffsetY', formattedOffsetY);
     };
 
+    // 1. Заполняем select и устанавливаем сохраненное значение
     if (typeof COORDINATE_SYSTEMS !== 'undefined') {
         COORDINATE_SYSTEMS.forEach(sys => {
             const option = document.createElement('option');
@@ -14575,43 +14281,27 @@ function openMskConverterModal() {
             option.textContent = sys.text;
             select.appendChild(option);
         });
-        select.value = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
+       select.value = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
     }
 
-    modeSwitch.checked = (localStorage.getItem('mskConverterMode') !== 'api');
-    autoLoadSwitch.checked = (localStorage.getItem('autoLoadMskOffset') !== 'false');
+    // 2. Устанавливаем состояния переключателей из localStorage
+    modeSwitch.checked = (localStorage.getItem('mskConverterMode') !== 'api'); // По умолчанию Proj (checked)
+    autoLoadSwitch.checked = (localStorage.getItem('autoLoadMskOffset') !== 'false'); // По умолчанию автозагрузка включена (checked)
 
-    // Загружаем значения и сразу форматируем их с точкой
-    offsetXInput.value = (parseFloat( (localStorage.getItem('savedMskOffsetX') || '0.00').replace(',', '.') ).toFixed(2)).replace(',', '.'); // <-- ИСПРАВЛЕНО
-    offsetYInput.value = (parseFloat( (localStorage.getItem('savedMskOffsetY') || '0.00').replace(',', '.') ).toFixed(2)).replace(',', '.'); // <-- ИСПРАВЛЕНО
+    // 3. Загружаем смещения для выбранной СК при открытии
     loadOffsetsForMskSystem();
 
+    // 4. Добавляем все обработчики событий
     modeSwitch.addEventListener('change', () => localStorage.setItem('mskConverterMode', modeSwitch.checked ? 'proj' : 'api'));
-    
     autoLoadSwitch.addEventListener('change', () => {
         localStorage.setItem('autoLoadMskOffset', autoLoadSwitch.checked);
-        loadOffsetsForMskSystem();
+        loadOffsetsForMskSystem(); // Сразу применяем/сбрасываем смещение
     });
-
-    select.addEventListener('change', () => {
-        localStorage.setItem('savedDefaultMskSystem', select.value);
-        loadOffsetsForMskSystem();
-    });
-
-    // При ручном изменении тоже гарантируем точку
-    offsetXInput.addEventListener('change', () => {
-        const correctedValue = offsetXInput.value.replace(',', '.');
-        const formattedValue = parseFloat(correctedValue).toFixed(2).replace(',', '.'); // <-- ИСПРАВЛЕНО
-        offsetXInput.value = formattedValue;
-        localStorage.setItem('savedMskOffsetX', formattedValue);
-    });
-
-    offsetYInput.addEventListener('change', () => {
-        const correctedValue = offsetYInput.value.replace(',', '.');
-        const formattedValue = parseFloat(correctedValue).toFixed(2).replace(',', '.'); // <-- ИСПРАВЛЕНО
-        offsetYInput.value = formattedValue;
-        localStorage.setItem('savedMskOffsetY', formattedValue);
-    });
+    
+select.addEventListener('change', () => {
+    localStorage.setItem('savedDefaultMskSystem', select.value); // Сохраняем как дефолт
+    loadOffsetsForMskSystem();
+});
 
     document.getElementById('execute-msk-conversion').addEventListener('click', executeMskConversion);
 
@@ -14635,12 +14325,8 @@ async function executeMskConversion() {
     const sourceText = document.getElementById('msk-coords-input').value.trim();
     const sourceSc = document.getElementById('msk-select').value;
     const mode = document.getElementById('mskConversionModeSwitch').checked ? 'proj' : 'api';
-   const offsetXRaw = document.getElementById('mskOffsetX').value.replace(',', '.');
-const offsetYRaw = document.getElementById('mskOffsetY').value.replace(',', '.');
-const offsetX = parseFloat(offsetXRaw) || 0;
-const offsetY = parseFloat(offsetYRaw) || 0;
-
-console.log(`[executeMskConversion] Смещения для конвертации: X=${offsetX}, Y=${offsetY} (исходные: "${document.getElementById('mskOffsetX').value}", "${document.getElementById('mskOffsetY').value}")`);
+    const offsetX = parseFloat(document.getElementById('mskOffsetX').value) || 0;
+    const offsetY = parseFloat(document.getElementById('mskOffsetY').value) || 0;
 
     if (!sourceText) {
         showNotification('Введите координаты для конвертации', 'warning');
