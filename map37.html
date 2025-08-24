@@ -5337,15 +5337,7 @@ numberedPointSize = parseInt(localStorage.getItem('numberedPointSize'), 10) || 1
             <i class="fas fa-copy"></i>Копировать
         </div>
         <div class="custom-context-menu-item" id="copy-coords-menu-item">
-              <i class="far fa-copy"></i>Координаты
-            <div class="custom-context-submenu">
-                <div class="custom-context-menu-item" id="copy-coords-menu-item">
-                    <i class="fas fa-map-marker-alt"></i>Точка в WGS84
-                </div>
-                <div class="custom-context-menu-item" id="copy-all-epsg3857-menu-item"> <!-- НОВЫЙ ПУНКТ МЕНЮ -->
-                    <i class="fas fa-ruler-combined"></i>Все в EPSG:3857
-                </div>
-            </div>
+            <i class="far fa-copy"></i>Координаты
         </div>
         <div class="custom-context-menu-item" id="change-color-menu-item">
             <i class="fas fa-edit"></i>Изменить
@@ -5964,13 +5956,6 @@ if (ownershipLegendList) {
     contextMenu.style.display = 'none';
 }
 
-
-if (event.target.id === 'copy-all-epsg3857-menu-item') {
-        await copyAllObjectsToEPSG3857();
-        contextMenu.style.display = 'none';
-    }
-    
-    
         if (event.target.id === 'copy-coords-menu-item') {
             const lat = parseFloat(contextMenu.dataset.lat);
             const lon = parseFloat(contextMenu.dataset.lon);
@@ -7567,72 +7552,7 @@ function populateSidebarWithParcels(features, loadDate = null) {
             return { value: null, type: 'Не указан' };
         }
 
-
-
-async function copyAllObjectsToEPSG3857() {
-    if (!map) {
-        showNotification('Карта не инициализирована', 'error');
-        return;
-    }
-
-    const allCoordsBlocks = [];
-    // Собираем уникальные объекты из обоих массивов (polygons и areaObjects)
-    const allDrawableObjects = new Set([...polygons, ...areaObjects]);
-
-    allDrawableObjects.forEach(obj => {
-        // Проверяем, является ли объект полигоном или полилинией
-        if (obj instanceof ymaps.Polygon || obj instanceof ymaps.Polyline) {
-            let yandexCoords;
-
-            // Получаем координаты в зависимости от типа объекта
-            if (obj instanceof ymaps.Polygon) {
-                // Для полигона берем внешний контур
-                yandexCoords = obj.geometry.getCoordinates()[0];
-            } else { // Polyline
-                yandexCoords = obj.geometry.getCoordinates();
-            }
-            
-            if (!yandexCoords || yandexCoords.length === 0) {
-                return; // Пропускаем пустые объекты
-            }
-
-            // Конвертируем координаты и форматируем их
-            const epsg3857Coords = yandexCoords.map(coord => {
-                // 1. Возвращаем координату к "истинному" WGS84, убирая смещение карты
-                const trueLat = coord[0] + (mapOffsetY * 0.000008983);
-                const trueLon = coord[1] + (mapOffsetX * 0.000008983);
-                
-                // 2. Конвертируем WGS84 в EPSG:3857
-                // proj4 ожидает на вход [долгота, широта] и возвращает [X, Y]
-                const point3857 = proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
-                
-                // --- ИЗМЕНЕНИЕ ЗДЕСЬ: Меняем местами X и Y для формата "Y [tab] X" ---
-                // 3. Форматируем результат в "Y    X" с 4 знаками после запятой
-                return `${point3857[1].toFixed(4)}\t${point3857[0].toFixed(4)}`;
-            }).join('\n');
-            
-            allCoordsBlocks.push(epsg3857Coords);
-        }
-    });
-
-    if (allCoordsBlocks.length === 0) {
-        showNotification('На карте нет площадных или линейных объектов для копирования', 'warning', 'exclamation-triangle');
-        return;
-    }
-
-    // Объединяем блоки координат пустой строкой
-    const finalString = allCoordsBlocks.join('\n\n');
-
-    try {
-        await navigator.clipboard.writeText(finalString);
-        showNotification(`Скопированы координаты ${allCoordsBlocks.length} объектов в EPSG:3857 (Y X)`, 'success', 'check-circle');
-    } catch (err) {
-        console.error('Ошибка копирования в буфер обмена:', err);
-        showNotification('Не удалось скопировать координаты', 'error', 'exclamation-circle');
-    }
-}
-
-
+// Add this function to determine area text correctly
       function getAreaText(options) {
             const areaInfo = getAreaInfo(options);
             if (areaInfo.value === null || isNaN(areaInfo.value)) {
@@ -11762,11 +11682,12 @@ WGS84 (широта, долгота)
 
 
 
-async function findOnMap(coordinatesText) {
-    try {
+async function findOnMap(coordinatesText) { // Renamed from findOnMapAtPoint
+     try {
         document.getElementById('loaderContainer').style.display = 'flex';
         document.querySelector('.loading-text').textContent = 'Анализ координат...';
 
+        // Parse coordinates
         const coordGroups = parseCoordinates(coordinatesText);
         if (coordGroups.length === 0) {
             showNotification('Некорректный формат координат', 'error', 'exclamation-circle');
@@ -11774,63 +11695,16 @@ async function findOnMap(coordinatesText) {
             return;
         }
 
+        // Convert coordinates to WGS84 [lat, lon]
         document.querySelector('.loading-text').textContent = 'Преобразование координат...';
-        
-        // --- НАЧАЛО КЛЮЧЕВЫХ ИЗМЕНЕНИЙ ---
-        
-        let geoCoordGroups;
-        const firstCoord = coordGroups[0][0];
-        const looksLikeMsk = Math.abs(firstCoord[0]) > 100000 || Math.abs(firstCoord[1]) > 100000;
-
-        if (looksLikeMsk) {
-            // Если координаты похожи на МСК, используем настройки пользователя, а не "угадывание".
-            console.log("Обнаружены координаты, похожие на МСК. Используются сохраненные настройки.");
-            
-            // 1. Загружаем сохраненные пользователем настройки
-            const sourceSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
-            const offsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
-            const offsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
-            
-            console.log(`Загружены настройки: Система=${sourceSc}, Смещение X=${offsetX}, Смещение Y=${offsetY}`);
-
-            const sourceDef = COORDINATE_SYSTEMS.find(s => s.value === sourceSc)?.def;
-            if (!sourceDef) throw new Error(`Определение для ${sourceSc} не найдено в sk.js`);
-            proj4.defs(sourceSc, sourceDef);
-
-            // 2. Конвертируем координаты с учетом настроек
-            geoCoordGroups = coordGroups.map(group => {
-                return group.map(coord => {
-                    const y_input = coord[0]; // Первая колонка - Y
-                    const x_input = coord[1]; // Вторая колонка - X
-                    
-                    // Proj4 ожидает [X, Y], а в выписках часто Y, X. Меняем их местами для конвертации.
-                    const point3857 = proj4(sourceSc, 'EPSG:3857', [x_input, y_input]);
-                    
-                    // Применяем пользовательское смещение в метрах (в системе EPSG:3857)
-                    const finalX3857 = point3857[0] + offsetX;
-                    const finalY3857 = point3857[1] + offsetY;
-
-                    // Конвертируем итоговую точку в WGS84 для отрисовки
-                    const finalWgs84 = proj4('EPSG:3857', 'EPSG:4326', [finalX3857, finalY3857]);
-                    
-                    return [finalWgs84[1], finalWgs84[0]]; // Возвращаем [lat, lon]
-                });
-            });
-
-        } else {
-            // Если координаты не похожи на МСК, используем старую логику для WGS84 и EPSG:3857
-            console.log("Координаты не похожи на МСК. Используется стандартное определение.");
-            geoCoordGroups = determineCoordinateSystemAndConvert(coordGroups);
-        }
-
-        // --- КОНЕЦ КЛЮЧЕВЫХ ИЗМЕНЕНИЙ ---
-
+        const geoCoordGroups = determineCoordinateSystemAndConvert(coordGroups);
         if (geoCoordGroups.length === 0) {
             showNotification('Ошибка преобразования координат', 'error', 'exclamation-circle');
             document.getElementById('loaderContainer').style.display = 'none';
             return;
         }
 
+        // --- Draw the search object (red) ---
         const searchShapes = drawSearchObject(geoCoordGroups);
         if (searchShapes.length === 0) {
              showNotification('Не удалось отрисовать объект поиска', 'error', 'exclamation-circle');
@@ -11838,6 +11712,7 @@ async function findOnMap(coordinatesText) {
              return;
         }
 
+        // --- Calculate bounding box + buffer for API query ---
         document.querySelector('.loading-text').textContent = 'Подготовка области поиска...';
         let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
         geoCoordGroups.forEach(group => {
@@ -11849,7 +11724,7 @@ async function findOnMap(coordinatesText) {
             });
         });
 
-        const bufferDegrees = 0.00005; 
+        const bufferDegrees = 0.00005; // Increased buffer slightly (~5 meters)
         minLat -= bufferDegrees;
         maxLat += bufferDegrees;
         minLon -= bufferDegrees;
@@ -11859,21 +11734,27 @@ async function findOnMap(coordinatesText) {
             [minLon, minLat], [maxLon, minLat], [maxLon, maxLat], [minLon, maxLat], [minLon, minLat]
         ].map(coord => proj4("EPSG:4326", "EPSG:3857", coord));
 
+        // --- Query NSPD for parcels within the buffered area ---
         document.querySelector('.loading-text').textContent = 'Поиск участков ...';
         const foundFeatures = await searchParcelsByArea(searchPolygonCoordsEPSG3857);
 
+        // --- Draw found parcels (blue/green) ---
         document.querySelector('.loading-text').textContent = 'Отрисовка найденных участков...';
+        // Passing 'true' to mark these as found specifically by area/point search
         await drawFoundParcels(foundFeatures, true);
 
-        document.querySelector('.loading-text').textContent = 'Анализ пересечений...';
+        // --- Find actual intersections using frontend logic ---
+        document.querySelector('.loading-text').textContent = 'Поиск в квартале...';
         const intersectingParcels = findIntersectingParcelsFrontend(searchShapes);
 
+        // --- Highlight and show results ---
         if (intersectingParcels.length > 0) {
             highlightIntersectingParcels(intersectingParcels);
             showParcelResults(intersectingParcels);
             showNotification(`Найдено пересечений: ${intersectingParcels.length}`, 'success', 'check-circle');
         } else {
             showNotification('Объект не пересекается с найденными участками', 'warning', 'exclamation-triangle');
+             // Center on the search object if no intersections
             let allBounds = null;
             searchShapes.forEach(shape => {
                 const bounds = shape.geometry.getBounds();
@@ -11893,8 +11774,8 @@ async function findOnMap(coordinatesText) {
         document.getElementById('loaderContainer').style.display = 'none';
 
     } catch (error) {
-        console.error('Ошибка при поиске на карте:', error);
-        showNotification('Ошибка при обработке запроса "Найти"', 'error', 'exclamation-circle');
+        console.error('Ошибка при поиске на карте:', error); // Changed error message source
+        showNotification('Ошибка при обработке запроса "Найти"', 'error', 'exclamation-circle'); // Changed error message source
         document.getElementById('loaderContainer').style.display = 'none';
     }
 }
