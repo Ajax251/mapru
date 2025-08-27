@@ -3441,102 +3441,77 @@ function findAndConvert() {
         const coordGroups = parseCoordinates(coordsText);
         if (coordGroups.length === 0) return;
 
-        // --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        const firstCoord = coordGroups[0][0];
+        const x = firstCoord[0];
+        const y = firstCoord[1];
         
-        // ШАГ 1: Пытаемся определить СК по шаблонам ПЕРЕД всеми другими проверками.
-        const detectedMskSystem = findMskSystemByTemplate(coordsText);
         let geoGroups = []; // Итоговые географические координаты [lat, lon]
 
-        if (detectedMskSystem) {
-            // Если система найдена по шаблону, используем её для конвертации
-            const sourceSc = detectedMskSystem;
-            console.log(`Применяется СК, найденная по шаблону: ${sourceSc}`);
+        // ПРАВИЛО 1: EPSG:3857 (большие числа, >3 знаков после точки)
+        const hasLongDecimal = (num) => num.toString().includes('.') && num.toString().split('.')[1].length > 3;
+        if (Math.abs(x) > 100 && Math.abs(y) > 100 && (hasLongDecimal(x) || hasLongDecimal(y))) {
+            console.log("Определена система: EPSG:3857 (по формату)");
             
+            coordGroups.forEach(group => {
+                const geoGroup = group.map(coord => {
+                    const wgs84 = proj4("EPSG:3857", "EPSG:4326", [coord[0], coord[1]]);
+                    return [wgs84[1], wgs84[0]]; // [lat, lon]
+                });
+                geoGroups.push(geoGroup);
+            });
+        }
+        // ПРАВИЛО 2: Географические координаты (числа < 180)
+        else if ((Math.abs(x) <= 90 && Math.abs(y) <= 180) || (Math.abs(x) <= 180 && Math.abs(y) <= 90)) {
+            console.log("Определена система: WGS84 (географические)");
+            const needsSwap = Math.abs(x) > 90;
+            
+            coordGroups.forEach(group => {
+                const geoGroup = group.map(coord => {
+                    const lon = needsSwap ? coord[0] : coord[1];
+                    const lat = needsSwap ? coord[1] : coord[0];
+                    return [lat, lon];
+                });
+                geoGroups.push(geoGroup);
+            });
+        }
+        // ПРАВИЛО 3: Все остальное - это МСК (используем сохраненную по умолчанию систему)
+        else {
+            // --- КЛЮЧЕВОЕ ИЗМЕНЕНИЕ ---
+            const sourceSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
+            console.log(`Определена система: МСК (по умолчанию из localStorage), используется ${sourceSc}`);
+            // --- КОНЕЦ КЛЮЧЕВОГО ИЗМЕНЕНИЯ ---
+
             const sourceDef = COORDINATE_SYSTEMS.find(s => s.value === sourceSc)?.def;
             if (!sourceDef) throw new Error(`Определение для ${sourceSc} не найдено в sk.js`);
             proj4.defs(sourceSc, sourceDef);
 
-            // Загружаем смещения, связанные с этой системой
             const selectedSystem = COORDINATE_SYSTEMS.find(s => s.value === sourceSc);
             const offsetX = selectedSystem?.offsetX || 0;
             const offsetY = selectedSystem?.offsetY || 0;
+            
+            if (offsetX !== 0 || offsetY !== 0) {
+                 showNotification(`Применено смещение для ${selectedSystem.text}: X=${offsetX}, Y=${offsetY}`, 'info', 'arrows-alt-h');
+            }
 
             coordGroups.forEach(group => {
                 const geoGroup = group.map(coord => {
-                    const inputForProj4 = [coord[1], coord[0]]; // Y, X -> X, Y для Proj4
+                    // Proj4 ожидает [X, Y]. В выписках часто Y, X. Меняем их местами.
+                    const inputForProj4 = [coord[1], coord[0]]; 
+                    
+                    // Конвертируем в EPSG:3857, чтобы применить метровые смещения
                     const point3857 = proj4(sourceSc, "EPSG:3857", inputForProj4);
+                    
                     point3857[0] += offsetX;
                     point3857[1] += offsetY;
+                    
+                    // Конвертируем итоговую точку в WGS84 для отрисовки
                     const finalWgs84 = proj4("EPSG:3857", "EPSG:4326", point3857);
+                    
                     return [finalWgs84[1], finalWgs84[0]]; // [lat, lon]
                 });
                 geoGroups.push(geoGroup);
             });
-        
-        } else {
-            // ШАГ 2: Если шаблоны не сработали, используем старую логику угадывания
-            console.log("Шаблоны не сработали, используется стандартное определение СК.");
-            const firstCoord = coordGroups[0][0];
-            const x = firstCoord[0];
-            const y = firstCoord[1];
-            
-            // ПРАВИЛО 1: EPSG:3857 (большие числа, >3 знаков после точки)
-            const hasLongDecimal = (num) => num.toString().includes('.') && num.toString().split('.')[1].length > 3;
-            if (Math.abs(x) > 100 && Math.abs(y) > 100 && (hasLongDecimal(x) || hasLongDecimal(y))) {
-                console.log("Определена система: EPSG:3857 (по формату)");
-                coordGroups.forEach(group => {
-                    const geoGroup = group.map(coord => {
-                        const wgs84 = proj4("EPSG:3857", "EPSG:4326", [coord[0], coord[1]]);
-                        return [wgs84[1], wgs84[0]]; // [lat, lon]
-                    });
-                    geoGroups.push(geoGroup);
-                });
-            }
-            // ПРАВИЛО 2: Географические координаты (числа < 180)
-            else if ((Math.abs(x) <= 90 && Math.abs(y) <= 180) || (Math.abs(x) <= 180 && Math.abs(y) <= 90)) {
-                console.log("Определена система: WGS84 (географические)");
-                const needsSwap = Math.abs(x) > 90;
-                coordGroups.forEach(group => {
-                    const geoGroup = group.map(coord => {
-                        const lon = needsSwap ? coord[0] : coord[1];
-                        const lat = needsSwap ? coord[1] : coord[0];
-                        return [lat, lon];
-                    });
-                    geoGroups.push(geoGroup);
-                });
-            }
-            // ПРАВИЛО 3: Все остальное - это МСК (используем сохраненную по умолчанию систему)
-            else {
-                const sourceSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
-                console.log(`Определена система: МСК (по умолчанию из localStorage), используется ${sourceSc}`);
-
-                const sourceDef = COORDINATE_SYSTEMS.find(s => s.value === sourceSc)?.def;
-                if (!sourceDef) throw new Error(`Определение для ${sourceSc} не найдено в sk.js`);
-                proj4.defs(sourceSc, sourceDef);
-
-                const selectedSystem = COORDINATE_SYSTEMS.find(s => s.value === sourceSc);
-                const offsetX = selectedSystem?.offsetX || 0;
-                const offsetY = selectedSystem?.offsetY || 0;
-                
-                if (offsetX !== 0 || offsetY !== 0) {
-                     showNotification(`Применено смещение для ${selectedSystem.text}: X=${offsetX}, Y=${offsetY}`, 'info', 'arrows-alt-h');
-                }
-
-                coordGroups.forEach(group => {
-                    const geoGroup = group.map(coord => {
-                        const inputForProj4 = [coord[1], coord[0]]; 
-                        const point3857 = proj4(sourceSc, "EPSG:3857", inputForProj4);
-                        point3857[0] += offsetX;
-                        point3857[1] += offsetY;
-                        const finalWgs84 = proj4("EPSG:3857", "EPSG:4326", point3857);
-                        return [finalWgs84[1], finalWgs84[0]]; // [lat, lon]
-                    });
-                    geoGroups.push(geoGroup);
-                });
-            }
         }
-        
-        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         // Заполняем остальные поля и отрисовываем результат
         fillAuxiliaryTextareas(coordGroups, geoGroups);
@@ -14786,8 +14761,7 @@ function openMskConverterModal() {
 
     const modalContent = document.createElement('div');
     modalContent.className = 'converter-modal-content';
-    // --- НАЧАЛО ИЗМЕНЕНИЙ В HTML ---
-    modalContent.innerHTML = `
+modalContent.innerHTML = `
         <button class="close-btn" title="Закрыть">&times;</button>
         <h3>Настройка МСК</h3>
         <div class="converter-mode-switch" style="display: none;">
@@ -14806,15 +14780,7 @@ function openMskConverterModal() {
              <select id="msk-select"></select>
              <button id="execute-msk-conversion" class="action-btn" title="Отобразить на карте"><img src="img/play.png" alt=">"></button>
         </div>
-        
-        <!-- НОВЫЙ ЭЛЕМЕНТ TEXTAREA ДЛЯ ШАБЛОНОВ -->
-        <textarea id="msk-templates-input" 
-                  placeholder="текст_поиска;префикс_Y;префикс_X \nнапример: 16-2;3;22" 
-                  title="Автоопреление по шаблону: текст для поиска в названии СК;префикс Y;префикс X (каждый с новой строки)"
-                  style="width: 100%; min-height: 60px; margin-top: 15px; padding: 10px; border-radius: 12px; border: 1px solid rgba(0,0,0,0.1); font-family: monospace; resize: vertical; box-sizing: border-box; background: rgba(255, 255, 255, 0.7);"
-        ></textarea>
     `;
-    // --- КОНЕЦ ИЗМЕНЕНИЙ В HTML ---
 
     modalContent.style.background = modalGradients[Math.floor(Math.random() * modalGradients.length)];
     modalContent.querySelector('.action-btn').style.background = buttonGradients[Math.floor(Math.random() * buttonGradients.length)];
@@ -14822,28 +14788,11 @@ function openMskConverterModal() {
     modal.appendChild(modalContent);
     document.body.appendChild(modal);
     
-    // --- НАЧАЛО ИЗМЕНЕНИЙ В JAVASCRIPT ---
     const select = document.getElementById('msk-select');
     const modeSwitch = document.getElementById('mskConversionModeSwitch');
     const autoLoadSwitch = document.getElementById('autoLoadOffsetSwitch');
     const offsetXInput = document.getElementById('mskOffsetX');
     const offsetYInput = document.getElementById('mskOffsetY');
-    
-    // Получаем ссылки на новые и измененные элементы
-    const templatesInput = document.getElementById('msk-templates-input');
-    const coordsInput = document.getElementById('msk-coords-input');
-
-    // Загрузка сохраненных шаблонов из localStorage
-    templatesInput.value = localStorage.getItem('mskCoordinateTemplates') || '';
-
-    // Сохранение шаблонов в localStorage при изменении
-    templatesInput.addEventListener('input', () => {
-        localStorage.setItem('mskCoordinateTemplates', templatesInput.value);
-    });
-
-    // Привязка обработчика для автоматического выбора СК
-    coordsInput.addEventListener('input', autoSelectMskSystemByTemplate);
-     // --- КОНЕЦ ИЗМЕНЕНИЙ В JAVASCRIPT ---
 
     const loadOffsetsForMskSystem = () => {
         if (!autoLoadSwitch.checked) {
@@ -14904,11 +14853,14 @@ function openMskConverterModal() {
         loadOffsetsForMskSystem();
     });
 
+    // --- НАЧАЛО ИЗМЕНЕНИЙ ---
     offsetXInput.addEventListener('change', () => {
+        // Заменяем запятую на точку, чтобы parseFloat работал правильно
         const correctedValue = offsetXInput.value.replace(',', '.');
+        // Форматируем до 2 знаков и снова заменяем запятую (если toFixed ее вернет)
         const formattedValue = parseFloat(correctedValue).toFixed(2).replace(',', '.');
-        offsetXInput.value = formattedValue;
-        localStorage.setItem('savedMskOffsetX', formattedValue);
+        offsetXInput.value = formattedValue; // Обновляем значение в поле
+        localStorage.setItem('savedMskOffsetX', formattedValue); // Сохраняем правильное значение
     });
 
     offsetYInput.addEventListener('change', () => {
@@ -14917,6 +14869,7 @@ function openMskConverterModal() {
         offsetYInput.value = formattedValue;
         localStorage.setItem('savedMskOffsetY', formattedValue);
     });
+    // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     document.getElementById('execute-msk-conversion').addEventListener('click', executeMskConversion);
 
@@ -14931,110 +14884,10 @@ function openMskConverterModal() {
     navigator.clipboard.readText().then(text => {
         if (text && text.trim()) {
             document.getElementById('msk-coords-input').value = text;
-            // После вставки из буфера обмена также вызываем автовыбор
-            autoSelectMskSystemByTemplate();
         }
     }).catch(err => console.log('Не удалось прочитать буфер обмена для конвертера.'));
 }
 
-function autoSelectMskSystemByTemplate() {
-    // Получаем ссылки на все необходимые элементы
-    const coordsInput = document.getElementById('msk-coords-input');
-    const templatesInput = document.getElementById('msk-templates-input');
-    const mskSelect = document.getElementById('msk-select');
-
-    // Проверяем, что все элементы существуют
-    if (!coordsInput || !templatesInput || !mskSelect) return;
-
-    // Получаем текст из полей
-    const coordsText = coordsInput.value.trim();
-    const templatesText = templatesInput.value.trim();
-
-    // Если нет координат или шаблонов, выходим
-    if (!coordsText || !templatesText) return;
-    
-    // Проверяем, что список систем координат загружен
-    if (typeof COORDINATE_SYSTEMS === 'undefined') return;
-
-    // Анализируем первую строку координат
-    const firstLine = coordsText.split('\n')[0].trim();
-    const parts = firstLine.split(/\s+/);
-
-    if (parts.length < 2) return; // Строка должна содержать минимум 2 числа
-
-    // В России принято Y X, поэтому первая часть - Y, вторая - X
-    const yCoord = parts[0].replace(',', '.');
-    const xCoord = parts[1].replace(',', '.');
-
-    // Разбираем шаблоны
-    const templates = templatesText.split('\n');
-    for (const template of templates) {
-        // Разделяем шаблон по ';' и убираем пробелы
-        const [searchText, prefixX, prefixY] = template.split(';').map(s => s.trim());
-
-        // Пропускаем некорректно заполненные шаблоны
-        if (!searchText || !prefixX || !prefixY) continue;
-
-        // Сравниваем начала строк координат с префиксами из шаблона
-        if (xCoord.startsWith(prefixX) && yCoord.startsWith(prefixY)) {
-            
-            // Если префиксы совпали, ищем систему координат по тексту
-            const systemToFind = COORDINATE_SYSTEMS.find(sys => sys.text.toLowerCase().includes(searchText.toLowerCase()));
-
-            if (systemToFind) {
-                // Если система найдена, устанавливаем ее в выпадающем списке
-                mskSelect.value = systemToFind.value;
-                console.log(`Шаблон '${template}' сработал. Найдена СК: ${systemToFind.text}`);
-
-                // ВАЖНО: Имитируем событие 'change', чтобы сработала остальная логика (например, автозагрузка смещения)
-                mskSelect.dispatchEvent(new Event('change'));
-
-                return; // Прекращаем поиск, так как нашли подходящий шаблон
-            }
-        }
-    }
-}
-
-function findMskSystemByTemplate(coordsText) {
-    // Получаем шаблоны из localStorage. Модального окна может не быть на странице.
-    const templatesText = localStorage.getItem('mskCoordinateTemplates');
-
-    // Проверяем, есть ли все необходимое для работы
-    if (!coordsText || !templatesText || typeof COORDINATE_SYSTEMS === 'undefined') {
-        return null;
-    }
-
-    // Анализируем первую строку координат
-    const firstLine = coordsText.split('\n')[0].trim();
-    const parts = firstLine.split(/\s+/);
-
-    if (parts.length < 2) return null; // Нужно минимум 2 числа
-
-    // В России принято Y X, поэтому первая часть - Y, вторая - X
-    const yCoord = parts[0].replace(',', '.');
-    const xCoord = parts[1].replace(',', '.');
-
-    // Разбираем шаблоны
-    const templates = templatesText.trim().split('\n');
-    for (const template of templates) {
-        const [searchText, prefixX, prefixY] = template.split(';').map(s => s.trim());
-
-        if (!searchText || !prefixX || !prefixY) continue;
-
-        // Сравниваем начала строк координат с префиксами
-        if (xCoord.startsWith(prefixX) && yCoord.startsWith(prefixY)) {
-            // Ищем систему координат по тексту
-            const systemToFind = COORDINATE_SYSTEMS.find(sys => sys.text.toLowerCase().includes(searchText.toLowerCase()));
-
-            if (systemToFind) {
-                console.log(`Автоопределение по шаблону '${template}': Найдена СК - ${systemToFind.text}`);
-                return systemToFind.value; // Возвращаем ID системы, например "EPSG:6331602"
-            }
-        }
-    }
-
-    return null; // Ни один шаблон не подошел
-}
 
 async function executeMskConversion() {
     const sourceText = document.getElementById('msk-coords-input').value.trim();
