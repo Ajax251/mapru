@@ -1037,7 +1037,7 @@ function handleApiModeSelection(event) {
         return cleanedText.trim();
     }
 
-    async function sendMessage() {
+async function sendMessage() {
     let message = messageInput.value.trim();
     let fileData = null;
     let fileUrlForDisplay = null;
@@ -1067,7 +1067,6 @@ function handleApiModeSelection(event) {
         return;
     }
     
-    // Проверки ключей выполняются до обработки файлов
     const activeModeForCheck = temporaryApiMode || currentApiMode;
     if (selectedModel.apiType === 'gemini' && activeModeForCheck === 'direct' && !apiKey) {
         showNotification("Пожалуйста, введите API ключ для Gemini.", true);
@@ -1146,22 +1145,34 @@ function handleApiModeSelection(event) {
     let hasRetried = false;
 
     try {
-        while (true) { // Этот цикл выполнится максимум дважды (основная попытка + одна повторная)
+        while (true) { 
             const activeMode = temporaryApiMode || currentApiMode;
             
-            let systemInstruction = "(Your primary response language is Russian...)"; // Сокращено для краткости
-            if (wasCorrected) { systemInstruction = `(Дополнительная инструкция: запрос пользователя "${originalMessage}"...)`; }
+            let systemInstruction = "(Your primary response language is Russian. Always reply in Russian if the user's prompt is in Russian. You may switch to English only if the user writes entirely in English or explicitly asks you to. Use other languages only upon explicit request.)";
+            if (wasCorrected) {
+                systemInstruction = `(Дополнительная инструкция: запрос пользователя "${originalMessage}" был автоматически распознан как "${correctedMessage}" из-за неверной раскладки клавиатуры. Дай ответ на распознанный запрос и в конце вежливо упомяни, что исходный текст был скорректирован.)`;
+            }
 
             let apiUrl, requestBody, fetchOptions = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
             
             try {
-                // Блок построения запроса, который может быть выполнен повторно
                 const apiModeConfig = API_MODES[activeMode];
                 const isMapruappProxy = activeMode === 'mapruapp';
+
                 if (isMapruappProxy) {
-                    // ... (логика для mapruapp proxy)
+                    const openRouterMessages = [];
+                    openRouterMessages.push({ role: 'system', content: systemInstruction });
+                    chatHistory.forEach(msg => {
+                        let content = [];
+                        if (msg.text) content.push({ type: 'text', text: msg.text });
+                        if (msg.sender === 'user' && msg.file) { content.push({ type: 'image_url', image_url: { url: msg.file.data } }); }
+                        const role = msg.sender === 'bot' ? 'assistant' : 'user';
+                        openRouterMessages.push({ role: role, content: content.length === 1 && content[0].type === 'text' ? content[0].text : content });
+                    });
+                    apiUrl = apiModeConfig.geminiUrl();
+                    requestBody = { model: selectedModel.id, messages: openRouterMessages, max_tokens: 4096 };
                 } else {
-                     if (activeMode === 'direct_mistral') {
+                    if (activeMode === 'direct_mistral') {
                         apiUrl = 'https://api.mistral.ai/v1/chat/completions';
                         fetchOptions.headers['Authorization'] = `Bearer ${mistralApiKey}`;
                         const mistralMessages = [];
@@ -1196,29 +1207,75 @@ function handleApiModeSelection(event) {
                             return { role: msg.sender === 'user' ? 'user' : 'assistant', content: content };
                         });
                         requestBody = { model: selectedModel.id, messages: claudeMessages, max_tokens: 4096, system: systemInstruction };
-                    } // ... и другие типы моделей
+                    } else if (selectedModel.apiType === 'mistral') {
+                        apiUrl = `${VERCEL_PROXY_BASE_URL}/proxy/mistral/chat/completions`;
+                        const mistralMessages = [];
+                        mistralMessages.push({ role: 'system', content: systemInstruction });
+                        chatHistory.forEach(msg => {
+                            let content = [];
+                            if (msg.text) content.push({ type: 'text', text: msg.text });
+                            if (msg.sender === 'user' && msg.file) { content.push({ type: 'image_url', image_url: { url: msg.file.data } }); }
+                            const role = msg.sender === 'bot' ? 'assistant' : 'user';
+                            mistralMessages.push({ role: role, content: content.length === 1 && content[0].type === 'text' ? content[0].text : content });
+                        });
+                        requestBody = { model: selectedModel.id, messages: mistralMessages, max_tokens: 4096 };
+                    } else if (selectedModel.apiType === 'openrouter' || selectedModel.apiType === 'zhipu') {
+                        if (selectedModel.apiType === 'openrouter') {
+                            apiUrl = `${VERCEL_PROXY_BASE_URL}/proxy/openrouter/chat/completions`;
+                            requestBody = { model: selectedModel.id, max_tokens: 4096 };
+                        } else { // apiType === 'zhipu'
+                            apiUrl = `${VERCEL_PROXY_BASE_URL}/proxy/zhipu/chat/completions`;
+                            requestBody = { model: selectedModel.id, max_tokens: 4096 };
+                        }
+
+                        const messages = [];
+                        messages.push({ role: 'system', content: systemInstruction });
+                        chatHistory.forEach(msg => {
+                            let content = [];
+                            if (msg.text) content.push({ type: 'text', text: msg.text });
+                            if (msg.sender === 'user' && msg.file) { content.push({ type: 'image_url', image_url: { url: msg.file.data } }); }
+                            const role = msg.sender === 'bot' ? 'assistant' : 'user';
+                            messages.push({ role: role, content: content.length === 1 && content[0].type === 'text' ? content[0].text : content });
+                        });
+                        requestBody.messages = messages;
+                    }
                 }
 
+                if (!apiUrl) {
+                    throw new Error(`Не удалось определить URL API для модели типа "${selectedModel.apiType}" в режиме "${activeMode}".`);
+                }
+                
                 fetchOptions.body = JSON.stringify(requestBody);
                 const response = await fetch(apiUrl, fetchOptions);
                 const botResponseTimestamp = performance.now();
                 const duration = lastUserMessageTimestamp ? ((botResponseTimestamp - lastUserMessageTimestamp) / 1000).toFixed(2) : null;
-                const data = await response.json();
-
+                
                 if (!response.ok) {
-                    let errorDetail = data?.error?.message || JSON.stringify(data) || `Статус ${response.status}`;
+                    // Попытаемся прочитать ответ как текст, так как это может быть HTML (ошибка 405 и т.д.)
+                    const errorText = await response.text();
+                    let errorDetail;
+                    try {
+                        // Если это все же JSON, парсим его для деталей
+                        const errorJson = JSON.parse(errorText);
+                        errorDetail = errorJson?.error?.message || JSON.stringify(errorJson) || `Статус ${response.status}`;
+                    } catch (e) {
+                        // Если не JSON, значит это HTML или простой текст
+                        errorDetail = errorText.substring(0, 200) || `Статус ${response.status}`;
+                    }
                     throw new Error(`Ошибка API: ${errorDetail}`);
                 }
+
+                const data = await response.json();
                 
-                removeTypingIndicator(); // Убираем индикатор только после успешного ответа
+                removeTypingIndicator();
                 
                 let botReplyText = null;
-                if (activeMode === 'mapruapp' || activeMode === 'direct_mistral') {
+                if (isMapruappProxy || activeMode === 'direct_mistral') {
                     botReplyText = data.choices?.[0]?.message?.content;
                 } else {
                     if (selectedModel.apiType === 'gemini') botReplyText = data.candidates?.[0]?.content?.parts.map(p => p.text || '').join('');
                     else if (selectedModel.apiType === 'anthropic') botReplyText = data.content?.map(b => b.type === "text" ? b.text : "").join("");
-                    else if (selectedModel.apiType === 'mistral' || selectedModel.apiType === 'openrouter') botReplyText = data.choices?.[0]?.message?.content;
+                    else if (selectedModel.apiType === 'mistral' || selectedModel.apiType === 'openrouter' || selectedModel.apiType === 'zhipu') botReplyText = data.choices?.[0]?.message?.content;
                 }
                 
                 if (botReplyText) {
@@ -1229,7 +1286,7 @@ function handleApiModeSelection(event) {
                     displayMessage('bot', "[Пустой или некорректный ответ от API]", null, null, false, duration);
                 }
                 
-                break; // Успех, выходим из цикла while
+                break; 
 
             } catch (innerError) {
                 const isRetryableError = (innerError.message.includes('ConnectionResetError') || innerError.message.includes('10054'));
@@ -1239,10 +1296,9 @@ function handleApiModeSelection(event) {
                     temporaryApiMode = 'vercel';
                     showNotification('Сбой подключения. Временно переключаюсь на Vercel и повторяю запрос...', false, 4000);
                     updateApiModeUI();
-                    await new Promise(r => setTimeout(r, 200)); // Небольшая задержка для UX
-                    continue; // Переходим на следующую итерацию цикла с новым режимом
+                    await new Promise(r => setTimeout(r, 200)); 
+                    continue; 
                 }
-                // Если ошибка не та, или мы уже пробовали, пробрасываем ее выше
                 throw innerError;
             }
         }
@@ -1255,6 +1311,7 @@ function handleApiModeSelection(event) {
         updateHeaderSizeDisplay();
     }
 }
+
 
     document.addEventListener('DOMContentLoaded', initializeApp);
 </script>
