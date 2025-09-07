@@ -7852,51 +7852,54 @@ async function copyAllObjectsToEPSG3857() {
 
 async function convertAndCopyMskCoords(targetPolygon) {
     try {
-        // 1. Получаем целевую СК и смещения, которые были использованы для коррекции
+        // 1. Получаем целевую СК и смещения
         const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
         const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destSc);
         if (!destSystem || !destSystem.def) {
             throw new Error(`Определение для ${destSc} не найдено в sk.js`);
         }
         
+        // --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        // Принудительно заменяем запятую на точку при чтении из localStorage
         const offsetXRaw = (localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.');
         const offsetYRaw = (localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.');
         const offsetX = parseFloat(offsetXRaw) || 0;
         const offsetY = parseFloat(offsetYRaw) || 0;
+        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-        // 2. Получаем "чистые" WGS-84 координаты с карты (убирая смещение самой карты)
+        // 2. Получаем "чистые" WGS-84 координаты
         const yandexCoords = targetPolygon.geometry.getCoordinates()[0];
-        
-        // --- ИСПРАВЛЕНИЕ 1: Убираем .reverse() ---
-        const originalOrderYandexCoords = yandexCoords;
-
-        const wgs84Coords = originalOrderYandexCoords.map(coord => {
+        const reversedYandexCoords = [...yandexCoords].reverse();
+        const wgs84Coords = reversedYandexCoords.map(coord => {
             const trueLat = coord[0] + (mapOffsetY * 0.000008983);
             const trueLon = coord[1] + (mapOffsetX * 0.000008983);
             return [trueLon, trueLat]; // Proj4 ожидает [lon, lat]
         });
 
-        // 3. Конвертируем WGS84 в целевую МСК. Получаем СКОРРЕКТИРОВАННЫЕ МСК.
+        // 3. Конвертируем все точки и ПРИМЕНЯЕМ СМЕЩЕНИЕ
         proj4.defs(destSc, destSystem.def);
         const mskCoordsText = wgs84Coords.map(coord => {
             const mskPoint = proj4("EPSG:4326", destSc, coord); // Proj4 для МСК возвращает [Y, X]
             
-            const corrected_y_msk = mskPoint[0];
-            const corrected_x_msk = mskPoint[1];
+            const y_from_proj = mskPoint[0];
+            const x_from_proj = mskPoint[1];
             
-            // --- ИСПРАВЛЕНИЕ 2: Применяем ОБРАТНОЕ смещение, чтобы получить ИСХОДНЫЕ координаты ---
-            const initial_y_output = corrected_y_msk - offsetY;
-            const initial_x_output = corrected_x_msk - offsetX;
+            // Добавляем ранее полученные смещения к результату конвертации
+            const final_Y_for_output = y_from_proj + offsetY;
+            const final_X_for_output = x_from_proj + offsetX;
 
             // Форматируем результат в виде X Y
-            return `${initial_x_output.toFixed(2)}\t${initial_y_output.toFixed(2)}`;
+            return `${final_X_for_output.toFixed(2)}\t${final_Y_for_output.toFixed(2)}`;
 
         }).join('\n');
 
         // 4. Копируем и открываем
         await navigator.clipboard.writeText(mskCoordsText);
         
-        let notificationMessage = `Исходные координаты в ${destSystem.text} скопированы`;
+        let notificationMessage = `Координаты в ${destSystem.text} скопированы`;
+        if (offsetX !== 0 || offsetY !== 0) {
+            notificationMessage += ` (со смещением X: ${offsetX.toFixed(2)}, Y: ${offsetY.toFixed(2)})`;
+        }
         showNotification(notificationMessage, 'success', 'check-circle');
 
         window.open('схема.html', '_blank');
@@ -12013,33 +12016,28 @@ async function findOnMap(coordinatesText) {
             if (!sourceDef) throw new Error(`Определение для ${sourceSc} не найдено в sk.js`);
             proj4.defs(sourceSc, sourceDef);
 
-           geoCoordGroups = coordGroups.map(group => {
-                return group.map(coordPair => { // 'coordPair' - это массив [Y, X]
-                    if (!Array.isArray(coordPair) || coordPair.length < 2) return null;
+            geoCoordGroups = coordGroups.map(group => {
+                return group.map(coord => {
+                    const y_input = coord[0]; // Первая колонка - Y
+                    const x_input = coord[1]; // Вторая колонка - X
+                    
+                    // --- НАЧАЛО ИСПРАВЛЕНИЯ ---
+                    // Proj4 для МСК -> EPSG:3857 возвращает результат в стандартном порядке: [X, Y].
+                    const convertedPoint = proj4(sourceSc, 'EPSG:3857', [x_input, y_input]);
+                    
+                    // Правильно применяем смещения: X к X, Y к Y.
+                  const finalX3857 = convertedPoint[0] + offsetY;
+                const finalY3857 = convertedPoint[1] + offsetX;
+                    // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
-                    const y_input = coordPair[0]; // Первая координата из массива
-                    const x_input = coordPair[1]; // Вторая координата из массива
-
-                    // --- ИСПРАВЛЕНИЕ: СНАЧАЛА применяем смещение к исходным МСК-координатам ---
-                    const corrected_x_msk = x_input + offsetX;
-                    const corrected_y_msk = y_input + offsetY;
-
-                    // --- ТЕПЕРЬ конвертируем уже скорректированные МСК в EPSG:3857 ---
-                    // Proj4 ожидает [X, Y], а у нас в файле Y, X. Меняем местами для proj4.
-                    const convertedPoint = proj4(sourceSc, 'EPSG:3857', [corrected_x_msk, corrected_y_msk]);
-
-                    const finalX3857 = convertedPoint[0];
-                    const finalY3857 = convertedPoint[1];
-
-                    // Конвертируем в WGS84 для отображения на карте
+                    // Конвертируем итоговую точку в WGS84 для отрисовки.
+                    // Эта функция ожидает на вход [X, Y].
                     const finalWgs84 = proj4('EPSG:3857', 'EPSG:4326', [finalX3857, finalY3857]);
                     
-                    // Возвращаем в формате [lat, lon]
+                    // Возвращаем [lat, lon]
                     return [finalWgs84[1], finalWgs84[0]]; 
-                }).filter(c => c !== null); // Убираем null, если были плохие строки
+                });
             });
-            
-            
 
         } else {
             console.log("Координаты не похожи на МСК. Используется стандартное определение.");

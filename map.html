@@ -2383,63 +2383,66 @@ let selectedVriFromLegend = null; // Tracks the VRI selected in the legend, null
         
         
        let useVercelProxy = false;
+       let isVercelProxyBlocked = false;
+       let lastVercelBlockTime = 0;
+
 const vercelProxyUrl = 'https://nsp-two.vercel.app/';
 
 
 async function fetchNspd(url, options = {}) {
+    if (isVercelProxyBlocked) {
+        return new Response(JSON.stringify({ error: "Vercel proxy is blocked" }), {
+            status: 403,
+            statusText: "Forbidden (Proxy Blocked)",
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+
     const isPostRequest = options.method && options.method.toUpperCase() === 'POST';
 
     const fetchDirectly = async () => {
         try {
             const response = await fetch(url, options);
-          
-            if (!response.ok) {
-   //             console.warn(`Прямой запрос к НСПД вернул статус: ${response.status}`);
-            }
             return response;
         } catch (error) {
-       
-     //       console.warn(`Прямое соединение с НСПД не удалось: ${error.message}. Переключение на Vercel-прокси.`);
             useVercelProxy = true; 
-           // showNotification('Связь с НСПД нарушена. Переключение на резервный канал...', 'warning', 'exclamation-triangle');
-        
             return await fetchViaVercel();
         }
     };
 
     const fetchViaVercel = async () => {
-        console.log(`Запрос через Vercel: ${url}`);
         const urlObject = new URL(url);
-   
         const targetPath = `${urlObject.pathname}${urlObject.search}`;
         const proxyRequestUrl = `${vercelProxyUrl}?target=${encodeURIComponent(targetPath)}`;
-        console.log(`URL прокси: ${proxyRequestUrl}`);
         
-      
-        const proxyOptions = { ...options };
+        const newHeaders = new Headers(options.headers);
+        newHeaders.append('Referer', 'https://nspd.gov.ru/');
 
+        const proxyOptions = {
+            ...options,
+            headers: newHeaders
+        };
        
-        const response = await fetch(proxyRequestUrl, proxyOptions);
+        const response = await fetch(proxyRequestUrl, proxyOptions); 
 
-  
+        if (!response.ok && response.status === 403) {
+            isVercelProxyBlocked = true;
+            const currentTime = Date.now();
+            if (currentTime - lastVercelBlockTime > 30000) {
+                showNotification('Доступ через прокси-сервер заблокирован. Проверьте настройки ALLOWED_IPS на Vercel.', 'error', 'exclamation-triangle', 7000);
+                lastVercelBlockTime = currentTime;
+            }
+        }
+
         if (response.ok) {
             const clonedResponse = response.clone(); 
             try {
                 const data = await clonedResponse.json();
                 if (data && data.error) {
-                 
-                    console.error("Vercel-прокси вернул ошибку в теле ответа:", data.error);
-              
                     throw new Error(data.error); 
                 }
             } catch (e) {
-            
-                if (!e.message.includes("Vercel-прокси вернул ошибку")) {
-                     console.warn("Не удалось прочитать ответ от Vercel как JSON, но запрос прошел. Ответ может быть неполным.");
-                } else {
-                 
-                    throw e;
-                }
+                // Non-JSON responses are still valid in some cases
             }
         }
         return response; 
@@ -3433,6 +3436,8 @@ function escapeXml(unsafe) {
 }
 
 
+// ЗАМЕНИТЕ ЭТУ ФУНКЦИЮ ЦЕЛИКОМ
+// ЗАМЕНИТЕ ЭТУ ФУНКЦИЮ ЦЕЛИКОМ
 function findAndConvert() {
     if (!map) {
         console.error('Карта не инициализирована');
@@ -3447,58 +3452,51 @@ function findAndConvert() {
         const coordGroups = parseCoordinates(coordsText);
         if (coordGroups.length === 0) return;
 
-        // --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        
-        // ШАГ 1: Пытаемся определить СК по шаблонам ПЕРЕД всеми другими проверками.
+        let geoGroups = []; // <- Объявляем переменную для финальных WGS-84 координат
         const detectedMskSystem = findMskSystemByTemplate(coordsText);
-        let geoGroups = []; // Итоговые географические координаты [lat, lon]
 
         if (detectedMskSystem) {
-            // Если система найдена по шаблону, используем её для конвертации
+            // Эта часть кода для автоопределения по шаблону, она уже работает с учетом смещений,
+            // поэтому оставляем ее как есть.
             const sourceSc = detectedMskSystem;
             console.log(`Применяется СК, найденная по шаблону: ${sourceSc}`);
-            
             const sourceDef = COORDINATE_SYSTEMS.find(s => s.value === sourceSc)?.def;
             if (!sourceDef) throw new Error(`Определение для ${sourceSc} не найдено в sk.js`);
             proj4.defs(sourceSc, sourceDef);
-
-            // Загружаем смещения, связанные с этой системой
             const selectedSystem = COORDINATE_SYSTEMS.find(s => s.value === sourceSc);
             const offsetX = selectedSystem?.offsetX || 0;
             const offsetY = selectedSystem?.offsetY || 0;
-
             coordGroups.forEach(group => {
                 const geoGroup = group.map(coord => {
-                    const inputForProj4 = [coord[1], coord[0]]; // Y, X -> X, Y для Proj4
+                    const inputForProj4 = [coord[1], coord[0]];
                     const point3857 = proj4(sourceSc, "EPSG:3857", inputForProj4);
                     point3857[0] += offsetX;
                     point3857[1] += offsetY;
                     const finalWgs84 = proj4("EPSG:3857", "EPSG:4326", point3857);
-                    return [finalWgs84[1], finalWgs84[0]]; // [lat, lon]
+                    return [finalWgs84[1], finalWgs84[0]];
                 });
                 geoGroups.push(geoGroup);
             });
         
         } else {
-            // ШАГ 2: Если шаблоны не сработали, используем старую логику угадывания
+            // --- ОСНОВНАЯ ЛОГИКА И ИСПРАВЛЕНИЯ ЗДЕСЬ ---
             console.log("Шаблоны не сработали, используется стандартное определение СК.");
             const firstCoord = coordGroups[0][0];
             const x = firstCoord[0];
             const y = firstCoord[1];
             
-            // ПРАВИЛО 1: EPSG:3857 (большие числа, >3 знаков после точки)
             const hasLongDecimal = (num) => num.toString().includes('.') && num.toString().split('.')[1].length > 3;
+
             if (Math.abs(x) > 100 && Math.abs(y) > 100 && (hasLongDecimal(x) || hasLongDecimal(y))) {
                 console.log("Определена система: EPSG:3857 (по формату)");
                 coordGroups.forEach(group => {
                     const geoGroup = group.map(coord => {
                         const wgs84 = proj4("EPSG:3857", "EPSG:4326", [coord[0], coord[1]]);
-                        return [wgs84[1], wgs84[0]]; // [lat, lon]
+                        return [wgs84[1], wgs84[0]];
                     });
                     geoGroups.push(geoGroup);
                 });
             }
-            // ПРАВИЛО 2: Географические координаты (числа < 180)
             else if ((Math.abs(x) <= 90 && Math.abs(y) <= 180) || (Math.abs(x) <= 180 && Math.abs(y) <= 90)) {
                 console.log("Определена система: WGS84 (географические)");
                 const needsSwap = Math.abs(x) > 90;
@@ -3511,40 +3509,43 @@ function findAndConvert() {
                     geoGroups.push(geoGroup);
                 });
             }
-            // ПРАВИЛО 3: Все остальное - это МСК (используем сохраненную по умолчанию систему)
             else {
+                // --- БЛОК ОБРАБОТКИ МСК ---
                 const sourceSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
                 console.log(`Определена система: МСК (по умолчанию из localStorage), используется ${sourceSc}`);
+
+                // Загружаем смещения.
+                const mskOffsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
+                const mskOffsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
 
                 const sourceDef = COORDINATE_SYSTEMS.find(s => s.value === sourceSc)?.def;
                 if (!sourceDef) throw new Error(`Определение для ${sourceSc} не найдено в sk.js`);
                 proj4.defs(sourceSc, sourceDef);
 
-                const selectedSystem = COORDINATE_SYSTEMS.find(s => s.value === sourceSc);
-                const offsetX = selectedSystem?.offsetX || 0;
-                const offsetY = selectedSystem?.offsetY || 0;
-                
-                if (offsetX !== 0 || offsetY !== 0) {
-                     showNotification(`Применено смещение для ${selectedSystem.text}: X=${offsetX}, Y=${offsetY}`, 'info', 'arrows-alt-h');
-                }
+                // --- ИСПРАВЛЕНИЕ ОШИБКИ С ПЕРЕМЕННОЙ ---
+                // Результат .map присваиваем в правильную переменную `geoGroups`
+                geoGroups = coordGroups.map(group => {
+                    return group.map(coord => {
+                        // В вашем коде первая колонка X (Northing), вторая Y (Easting).
+                        const x_input_msk = coord[0]; 
+                        const y_input_msk = coord[1];
 
-                coordGroups.forEach(group => {
-                    const geoGroup = group.map(coord => {
-                        const inputForProj4 = [coord[1], coord[0]]; 
-                        const point3857 = proj4(sourceSc, "EPSG:3857", inputForProj4);
-                        point3857[0] += offsetX;
-                        point3857[1] += offsetY;
+                        // --- ГЛАВНОЕ ИСПРАВЛЕНИЕ: ПРИМЕНЯЕМ ПРАВИЛЬНУЮ КАЛИБРОВКУ ---
+                        // Анализ логов показал, что смещение mskOffsetX нужно вычитать только из X.
+                        const corrected_x_msk = x_input_msk - mskOffsetX;
+                        const corrected_y_msk = y_input_msk; // Y оставляем без изменений
+
+                        // Proj4 с определением "+axis=enu" ожидает координаты в порядке [Y (Easting), X (Northing)]
+                        const point3857 = proj4(sourceSc, "EPSG:3857", [corrected_y_msk, corrected_x_msk]);
+                        
                         const finalWgs84 = proj4("EPSG:3857", "EPSG:4326", point3857);
+                        
                         return [finalWgs84[1], finalWgs84[0]]; // [lat, lon]
                     });
-                    geoGroups.push(geoGroup);
                 });
             }
         }
         
-        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-        // Заполняем остальные поля и отрисовываем результат
         fillAuxiliaryTextareas(coordGroups, geoGroups);
         drawFeatures(geoGroups);
 
@@ -12004,13 +12005,13 @@ async function findOnMap(coordinatesText) {
         const looksLikeMsk = Math.abs(firstCoord[0]) > 100000 || Math.abs(firstCoord[1]) > 100000;
 
         if (looksLikeMsk) {
-            console.log("Обнаружены координаты, похожие на МСК. Используются сохраненные настройки.");
+            console.log("[Наложения] Обнаружены координаты, похожие на МСК. Применяется калибровка...");
             
             const sourceSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
             const offsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
             const offsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
             
-            console.log(`Загружены настройки: Система=${sourceSc}, Смещение X=${offsetX}, Смещение Y=${offsetY}`);
+            console.log(`[Наложения] Загружены настройки: Система=${sourceSc}, Смещение для X = ${offsetX}, Смещение для Y = ${offsetY}`);
 
             const sourceDef = COORDINATE_SYSTEMS.find(s => s.value === sourceSc)?.def;
             if (!sourceDef) throw new Error(`Определение для ${sourceSc} не найдено в sk.js`);
@@ -12018,21 +12019,23 @@ async function findOnMap(coordinatesText) {
 
             geoCoordGroups = coordGroups.map(group => {
                 return group.map(coord => {
-                    const y_input = coord[0]; // Первая колонка - Y
-                    const x_input = coord[1]; // Вторая колонка - X
+                    const x_input_msk = coord[0]; // Northing
+                    const y_input_msk = coord[1]; // Easting
                     
-                    // --- НАЧАЛО ИСПРАВЛЕНИЯ ---
-                    // Proj4 для МСК -> EPSG:3857 возвращает результат в стандартном порядке: [X, Y].
-                    const convertedPoint = proj4(sourceSc, 'EPSG:3857', [x_input, y_input]);
+                    console.log(`--- [findOnMap] Конвертация точки для поиска ---`);
+                    console.log(`Шаг 1: Исходные МСК: X=${x_input_msk.toFixed(4)}, Y=${y_input_msk.toFixed(4)}`);
                     
-                    // Правильно применяем смещения: X к X, Y к Y.
-                  const finalX3857 = convertedPoint[0] + offsetY;
-                const finalY3857 = convertedPoint[1] + offsetX;
-                    // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+                    // --- ПРИМЕНЯЕМ ТУ ЖЕ САМУЮ ПРОВЕРЕННУЮ ЛОГИКУ, ЧТО И В findAndConvert ---
+                    const corrected_x_msk = x_input_msk - offsetX;
+                    const corrected_y_msk = y_input_msk; // Y не меняем
+                    
+                    console.log(`Шаг 2: Скорректированные МСК (X - offsetX): X=${corrected_x_msk.toFixed(4)}, Y=${corrected_y_msk.toFixed(4)}`);
 
-                    // Конвертируем итоговую точку в WGS84 для отрисовки.
-                    // Эта функция ожидает на вход [X, Y].
-                    const finalWgs84 = proj4('EPSG:3857', 'EPSG:4326', [finalX3857, finalY3857]);
+                    // Proj4 с определением "+axis=enu" ожидает координаты в порядке [Y (Easting), X (Northing)]
+                    const point3857 = proj4(sourceSc, 'EPSG:3857', [corrected_y_msk, corrected_x_msk]);
+                    console.log(`Шаг 3: Результат в EPSG:3857: X=${point3857[0].toFixed(4)}, Y=${point3857[1].toFixed(4)}`);
+                    
+                    const finalWgs84 = proj4('EPSG:3857', 'EPSG:4326', point3857);
                     
                     // Возвращаем [lat, lon]
                     return [finalWgs84[1], finalWgs84[0]]; 
@@ -12040,7 +12043,7 @@ async function findOnMap(coordinatesText) {
             });
 
         } else {
-            console.log("Координаты не похожи на МСК. Используется стандартное определение.");
+            console.log("[Наложения] Координаты не похожи на МСК. Используется стандартное определение.");
             geoCoordGroups = determineCoordinateSystemAndConvert(coordGroups);
         }
 
@@ -12224,7 +12227,15 @@ function findIntersectingParcelsFrontend(searchShapes) {
                 } else if (searchShape instanceof ymaps.Polygon) {
                     const searchPolygonCoords = searchShape.geometry.getCoordinates()[0];
                     // Use Turf.js for robust polygon intersection check
-                     const searchTurfPoly = turf.polygon([searchPolygonCoords.map(c => [c[1], c[0]])]); // lon, lat
+                    let searchTurfPoly = turf.polygon([searchPolygonCoords.map(c => [c[1], c[0]])]); // lon, lat
+// Создаем отрицательный буфер размером в 1 сантиметр (0.01 метра)
+// Это немного "сожмет" поисковый полигон
+const bufferedSearchPoly = turf.buffer(searchTurfPoly, -0.01, { units: 'meters' });
+// Если буферизация прошла успешно, используем сжатый полигон для проверки
+if (bufferedSearchPoly) {
+    searchTurfPoly = bufferedSearchPoly;
+}
+
                      const targetTurfPoly = turf.polygon([targetPolygonCoords.map(c => [c[1], c[0]])]); // lon, lat
                      isIntersecting = turf.booleanIntersects(searchTurfPoly, targetTurfPoly);
 
