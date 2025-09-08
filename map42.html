@@ -7240,7 +7240,7 @@ function convertJsonToXml(nspdData, quarterNumber, targetCS_value, offsetX, offs
 
 async function convertAllObjectsToMskAndCopy() {
     try {
-        // 1. Собираем все объекты для конвертации
+        // 1. Собираем все уникальные полигоны и полилинии с карты
         const allDrawableObjects = new Set([...polygons, ...areaObjects]);
         const objectsToConvert = Array.from(allDrawableObjects).filter(obj => 
             obj instanceof ymaps.Polygon || obj instanceof ymaps.Polyline
@@ -7253,18 +7253,21 @@ async function convertAllObjectsToMskAndCopy() {
         
         showLoader(`Конвертация ${objectsToConvert.length} объектов...`);
 
-        // 2. Получаем настройки конвертации
+        // 2. Получаем настройки конвертации (аналогично функции для одного объекта)
         const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
         const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destSc);
         if (!destSystem || !destSystem.def) {
             throw new Error(`Определение для ${destSc} не найдено в sk.js`);
         }
+        
         const offsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
         const offsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
+
+        proj4.defs(destSc, destSystem.def);
         
         const allMskBlocks = [];
 
-        // 3. Проходим по каждому объекту, получаем WGS-84 и используем общую функцию
+        // 3. Проходим по каждому объекту и конвертируем его
         for (const targetObject of objectsToConvert) {
             let yandexCoords;
 
@@ -7274,6 +7277,7 @@ async function convertAllObjectsToMskAndCopy() {
                 yandexCoords = targetObject.geometry.getCoordinates();
             }
 
+            // Используем ту же логику конвертации, что и для одного объекта
             const reversedYandexCoords = [...yandexCoords].reverse();
             const wgs84Coords = reversedYandexCoords.map(coord => {
                 const trueLat = coord[0] + (mapOffsetY * 0.000008983);
@@ -7281,14 +7285,23 @@ async function convertAllObjectsToMskAndCopy() {
                 return [trueLon, trueLat]; // Proj4 ожидает [lon, lat]
             });
 
-            // Используем новую общую функцию
-            const mskCoordsText = convertWgs84ToMskWithOffset(wgs84Coords, destSc, destSystem.def, offsetX, offsetY);
+            const mskCoordsText = wgs84Coords.map(coord => {
+                const mskPoint = proj4("EPSG:4326", destSc, coord); // Proj4 для МСК возвращает [Y, X]
+                
+                const y_from_proj = mskPoint[0];
+                const x_from_proj = mskPoint[1];
+                
+                const final_Y_for_output = y_from_proj + offsetY;
+                const final_X_for_output = x_from_proj + offsetX;
+
+                return `${final_X_for_output.toFixed(2)}\t${final_Y_for_output.toFixed(2)}`;
+            }).join('\n');
             
             allMskBlocks.push(mskCoordsText);
         }
 
-        // 4. Объединяем результаты, копируем и открываем новую вкладку
-        const finalStringToCopy = allMskBlocks.join('\n\n');
+        // 4. Объединяем результаты и копируем в буфер обмена
+        const finalStringToCopy = allMskBlocks.join('\n\n'); // Разделяем объекты пустой строкой
         await navigator.clipboard.writeText(finalStringToCopy);
         
         let notificationMessage = `Координаты ${objectsToConvert.length} объектов скопированы в ${destSystem.text}`;
@@ -7296,7 +7309,7 @@ async function convertAllObjectsToMskAndCopy() {
             notificationMessage += ` (со смещением)`;
         }
         showNotification(notificationMessage, 'success', 'check-circle');
-        window.open('схема.html', '_blank');
+         window.open('схема.html', '_blank');
 
     } catch (error) {
         console.error("Ошибка при конвертации всех объектов в МСК:", error);
@@ -7834,42 +7847,24 @@ async function copyAllObjectsToEPSG3857() {
 }
 
 
-function convertWgs84ToMskWithOffset(wgs84Coords, destSc, destSystemDef, offsetX, offsetY) {
-    proj4.defs(destSc, destSystemDef);
-    
-    return wgs84Coords.map(coord => {
-        // coord должен быть в формате [lon, lat] для Proj4
-        const mskPoint = proj4("EPSG:4326", destSc, coord); // Proj4 для МСК возвращает [Y, X]
-        
-        const y_from_proj = mskPoint[0];
-        const x_from_proj = mskPoint[1];
-        
-        // Применяем загруженные смещения
-        const final_Y_for_output = y_from_proj + offsetY;
-        const final_X_for_output = x_from_proj + offsetX;
-
-        // Форматируем результат как "X [tab] Y"
-        return `${final_X_for_output.toFixed(2)}\t${final_Y_for_output.toFixed(2)}`;
-    }).join('\n');
-}
-
-
-
 async function convertAndCopyMskCoords(targetPolygon) {
     try {
-        // 1. Получаем настройки конвертации
+        // 1. Получаем целевую СК и смещения
         const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
         const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destSc);
         if (!destSystem || !destSystem.def) {
             throw new Error(`Определение для ${destSc} не найдено в sk.js`);
         }
         
+        // --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        // Принудительно заменяем запятую на точку при чтении из localStorage
         const offsetXRaw = (localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.');
         const offsetYRaw = (localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.');
         const offsetX = parseFloat(offsetXRaw) || 0;
         const offsetY = parseFloat(offsetYRaw) || 0;
+        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-        // 2. Получаем "чистые" WGS-84 координаты из объекта на карте
+        // 2. Получаем "чистые" WGS-84 координаты
         const yandexCoords = targetPolygon.geometry.getCoordinates()[0];
         const reversedYandexCoords = [...yandexCoords].reverse();
         const wgs84Coords = reversedYandexCoords.map(coord => {
@@ -7878,10 +7873,24 @@ async function convertAndCopyMskCoords(targetPolygon) {
             return [trueLon, trueLat]; // Proj4 ожидает [lon, lat]
         });
 
-        // 3. Используем новую общую функцию для конвертации
-        const mskCoordsText = convertWgs84ToMskWithOffset(wgs84Coords, destSc, destSystem.def, offsetX, offsetY);
+        // 3. Конвертируем все точки и ПРИМЕНЯЕМ СМЕЩЕНИЕ
+        proj4.defs(destSc, destSystem.def);
+        const mskCoordsText = wgs84Coords.map(coord => {
+            const mskPoint = proj4("EPSG:4326", destSc, coord); // Proj4 для МСК возвращает [Y, X]
+            
+            const y_from_proj = mskPoint[0];
+            const x_from_proj = mskPoint[1];
+            
+            // Добавляем ранее полученные смещения к результату конвертации
+            const final_Y_for_output = y_from_proj + offsetY;
+            const final_X_for_output = x_from_proj + offsetX;
 
-        // 4. Копируем результат и открываем новую вкладку
+            // Форматируем результат в виде X Y
+            return `${final_X_for_output.toFixed(2)}\t${final_Y_for_output.toFixed(2)}`;
+
+        }).join('\n');
+
+        // 4. Копируем и открываем
         await navigator.clipboard.writeText(mskCoordsText);
         
         let notificationMessage = `Координаты в ${destSystem.text} скопированы`;
@@ -7897,8 +7906,6 @@ async function convertAndCopyMskCoords(targetPolygon) {
         showNotification(`Ошибка конвертации: ${error.message}`, 'error', 'exclamation-circle');
     }
 }
-
-
 
 async function handleEgrnRelatedAction(lat, lon, targetUrl) {
     try {
