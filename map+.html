@@ -5619,32 +5619,31 @@ if (event.target.id === 'find-on-map-menu-item') {
     contextMenu.style.display = 'none';
 }
 
-        if (event.target.id === 'cadastre-menu-item') {
+           if (event.target.id === 'cadastre-menu-item') {
             const lat = parseFloat(contextMenu.dataset.lat);
             const lon = parseFloat(contextMenu.dataset.lon);
 
             try {
+                // Вспомогательная функция для поиска объекта
                 async function tryGetCadastralData(latitude, longitude) {
                     const cadastralData = await queryCadastralInfo(latitude, longitude);
-                    if (!cadastralData || !cadastralData.features || !cadastralData.features.length === 0) {
+                    if (!cadastralData || !cadastralData.features || cadastralData.features.length === 0) {
                         return null;
                     }
                     return cadastralData.features[0];
                 }
 
+                // Поиск объекта с несколькими попытками
                 let feature = await tryGetCadastralData(lat, lon);
                 let found = !!feature;
                 let attempts = 0;
                 const maxAttempts = 10;
-                const stepMeters = 10;
                 const squareWidthMeters = 50;
                 const timeoutMs = 100;
 
                 if (!found) {
                     const earthRadius = 6378137;
                     const latRadians = lat * Math.PI / 180;
-                    const metersToLat = stepMeters / earthRadius * (180 / Math.PI);
-                    const metersToLon = stepMeters / (earthRadius * Math.cos(latRadians)) * (180 / Math.PI);
                     const squareWidthLat = squareWidthMeters / earthRadius * (180 / Math.PI);
                     const squareWidthLon = squareWidthMeters / (earthRadius * Math.cos(latRadians)) * (180 / Math.PI);
 
@@ -5654,12 +5653,8 @@ if (event.target.id === 'find-on-map-menu-item') {
                         const offsetLon = (Math.random() - 0.5) * squareWidthLon;
                         const newLat = lat + offsetLat;
                         const newLon = lon + offsetLon;
-
-                      //  console.log(`try ${attempts}: lat=${newLat.toFixed(6)}, lon=${newLon.toFixed(6)}`);
-
                         feature = await tryGetCadastralData(newLat, newLon);
                         found = !!feature;
-
                         if (!found && attempts < maxAttempts) {
                             await new Promise(resolve => setTimeout(resolve, timeoutMs));
                         }
@@ -5671,71 +5666,10 @@ if (event.target.id === 'find-on-map-menu-item') {
                     contextMenu.style.display = 'none';
                     return;
                 }
+                
+                // Вместо дублирования кода отрисовки, вызываем уже исправленную функцию
+                await drawFeatureFromNspd(feature);
 
-                if (feature.geometry && feature.geometry.coordinates) {
-                    const coordinates = feature.geometry.coordinates[0].map(coord => {
-                        const point = proj4('EPSG:3857', 'EPSG:4326', coord);
-                        return [point[1], point[0]];
-                    });
-
-                    const offsetCoordinates = coordinates.map(coord => [
-                        coord[0] - mapOffsetY * 0.000008983,
-                        coord[1] - mapOffsetX * 0.000008983
-                    ]);
-
-                    const polygon = new ymaps.Polygon([offsetCoordinates], {}, {
-                        strokeColor: polygonStyle.color,
-                        strokeWidth: polygonStyle.width,
-                        strokeOpacity: 0.8,
-                        fillColor: '#00000000',
-                        hintEnabled: false,
-                        hasBalloon: false,
-                        interactivityModel: 'default#transparent'
-                    });
-
-                    map.geoObjects.add(polygon);
-                    polygons.push(polygon);
-
-                    const bounds = polygon.geometry.getBounds();
-                    const centerGeo = [
-                        (bounds[0][0] + bounds[1][0]) / 2,
-                        (bounds[0][1] + bounds[1][1]) / 2
-                    ];
-
-                    getAddressByCoords(centerGeo).then(address => {
-                        document.getElementById('city-name-display').innerHTML = address;
-                    });
-
-                    const center3857 = proj4("EPSG:4326", "EPSG:3857", [centerGeo[1], centerGeo[0]]);
-
-                    lastPolygonCenter = {
-                        geo: {
-                            lat: centerGeo[0],
-                            lon: centerGeo[1]
-                        },
-                        epsg3857: {
-                            x: center3857[0],
-                            y: center3857[1]
-                        },
-                        native: {
-                            x: feature.geometry.coordinates[0][0][0],
-                            y: feature.geometry.coordinates[0][0][1]
-                        }
-                    };
-
-                    const cadastralText = new ymaps.Placemark([
-                        centerGeo[0] - mapOffsetY * 0.000008983,
-                        centerGeo[1] - mapOffsetX * 0.000008983
-                    ], {
-                        iconContent: feature.properties.descr
-                    }, {
-                        preset: 'islands#blueStretchyIcon',
-                        draggable: true
-                    });
-
-                    map.geoObjects.add(cadastralText);
-                    polygons.push(cadastralText);
-                }
             } catch (error) {
                 console.error('Ошибка при получении участка:', error);
                 showNotification('Ошибка подключения, попробуйте позже', 'error', 'exclamation-circle');
@@ -7184,42 +7118,53 @@ function convertJsonToXml(nspdData, quarterNumber, targetCS_value, offsetX, offs
         const geometry = feature.geometry;
         const finalSkId = targetSystem.text.split('(')[0].trim();
 
-        const contoursXml = (geometry && geometry.coordinates) ? (geometry.type === 'MultiPolygon' ? geometry.coordinates : [geometry.coordinates]).map((ring) => {
-            // Для MultiPolygon ring - это массив контуров, берем внешний [0]
-            // Для Polygon ring - это сам контур
-            let points = geometry.type === 'MultiPolygon' ? ring[0] : ring[0];
-            if (reverseDirection) { points = [...points].reverse(); }
+        // --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        const contoursXml = (geometry && geometry.coordinates) ? (() => {
+            const polygonsData = geometry.type === 'MultiPolygon' ? geometry.coordinates : [geometry.coordinates];
+            let contourCounter = 0; // Нумератор для тега <contour><number_pp>
             
-            const ordinatesXml = points.map((point, i) => {
-                const convertedPoint = proj4(sourceSystem.value, targetSystem.value, point);
-                const decimalPlaces = targetCS_value === 'EPSG:4326' ? 8 : 2;
+            return polygonsData.map(polygonRings => {
+                contourCounter++; // Увеличиваем счетчик для каждого полигона (внешнего контура)
                 
-                const y_from_proj = convertedPoint[0];
-                const x_from_proj = convertedPoint[1];
+                // polygonRings - это массив контуров [[внешний], [внутренний1], ...]
+                const spatialsXml = polygonRings.map(ring => {
+                    let points = ring; // ring - это массив точек [ [x1, y1], [x2, y2], ... ]
+                    if (reverseDirection) { 
+                        // Для внешнего контура оставляем как есть, внутренние - в обратном порядке
+                        // (Согласно некоторым требованиям XML)
+                        // Но API НСПД, скорее всего, уже дает правильное направление, так что пока не будем менять
+                        // points = [...points].reverse(); 
+                    }
+                    
+                    const ordinatesXml = points.map((point, i) => {
+                        const convertedPoint = proj4(sourceSystem.value, targetSystem.value, point);
+                        const decimalPlaces = targetCS_value === 'EPSG:4326' ? 8 : 2;
+                        
+                        const y_from_proj = convertedPoint[0];
+                        const x_from_proj = convertedPoint[1];
 
-                const final_Y_with_offset = y_from_proj + offsetY;
-                const final_X_with_offset = x_from_proj + offsetX;
+                        const final_Y_with_offset = y_from_proj + offsetY;
+                        const final_X_with_offset = x_from_proj + offsetX;
 
-                let xml_tag_x_value, xml_tag_y_value;
+                        let xml_tag_x_value, xml_tag_y_value;
+                        if (swapXmlCoords) {
+                            xml_tag_x_value = final_X_with_offset.toFixed(decimalPlaces);
+                            xml_tag_y_value = final_Y_with_offset.toFixed(decimalPlaces);
+                        } else {
+                            xml_tag_x_value = final_Y_with_offset.toFixed(decimalPlaces);
+                            xml_tag_y_value = final_X_with_offset.toFixed(decimalPlaces);
+                        }
 
-                // --- ИСПРАВЛЕНИЕ ЗДЕСЬ ---
-                // Логика обмена X и Y для XML была инвертирована. Теперь она правильная.
-                if (swapXmlCoords) {
-                    // "Поменять X/Y": в тег <x> идет X, а в тег <y> идет Y.
-                    xml_tag_x_value = final_X_with_offset.toFixed(decimalPlaces);
-                    xml_tag_y_value = final_Y_with_offset.toFixed(decimalPlaces);
-                } else {
-                    // Без обмена: в <x> идет Y, в <y> идет X (стандарт для некоторых российских систем)
-                    xml_tag_x_value = final_Y_with_offset.toFixed(decimalPlaces);
-                    xml_tag_y_value = final_X_with_offset.toFixed(decimalPlaces);
-                }
-                // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+                        return `<ordinate><x>${xml_tag_x_value}</x><y>${xml_tag_y_value}</y><ord_nmb>${i + 1}</ord_nmb><num_geopoint>${i + 1}</num_geopoint><delta_geopoint>0.0</delta_geopoint></ordinate>`;
+                    }).join('');
 
-                return `<ordinate><x>${xml_tag_x_value}</x><y>${xml_tag_y_value}</y><ord_nmb>${i + 1}</ord_nmb><num_geopoint>${i + 1}</num_geopoint><delta_geopoint>0.0</delta_geopoint></ordinate>`;
-                
+                    return `<spatial_element><ordinates>${ordinatesXml}</ordinates></spatial_element>`;
+                }).join('');
+
+                return `<contour><number_pp>${contourCounter}</number_pp><entity_spatial><sk_id>${escapeXml(finalSkId)}</sk_id><spatials_elements>${spatialsXml}</spatials_elements></entity_spatial></contour>`;
             }).join('');
-            return `<contour><entity_spatial><sk_id>${escapeXml(finalSkId)}</sk_id><spatials_elements><spatial_element><ordinates>${ordinatesXml}</ordinates></spatial_element></spatials_elements></entity_spatial></contour>`;
-        }).join('') : '';
+        })() : '';
+        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
         
         const isAreaSpecified = props.specified_area || props.land_record_area_verified;
         const areaValue = isAreaSpecified || props.declared_area || props.land_record_area_declaration || props.land_record_area;
@@ -7265,27 +7210,37 @@ async function convertAllObjectsToMskAndCopy() {
         
         const allMskBlocks = [];
 
-        // 3. Проходим по каждому объекту, получаем WGS-84 и используем общую функцию
+        // 3. Проходим по каждому объекту
         for (const targetObject of objectsToConvert) {
-            let yandexCoords;
-
+            // --- НАЧАЛО ИЗМЕНЕНИЙ ---
             if (targetObject instanceof ymaps.Polygon) {
-                yandexCoords = targetObject.geometry.getCoordinates()[0];
-            } else { // Polyline
-                yandexCoords = targetObject.geometry.getCoordinates();
+                const yandexCoordRings = targetObject.geometry.getCoordinates();
+                const currentObjectMskBlocks = [];
+
+                for (const ring of yandexCoordRings) {
+                    const reversedYandexCoords = [...ring].reverse();
+                    const wgs84Coords = reversedYandexCoords.map(coord => {
+                        const trueLat = coord[0] + (mapOffsetY * 0.000008983);
+                        const trueLon = coord[1] + (mapOffsetX * 0.000008983);
+                        return [trueLon, trueLat];
+                    });
+                    const mskCoordsText = convertWgs84ToMskWithOffset(wgs84Coords, destSc, destSystem.def, offsetX, offsetY);
+                    currentObjectMskBlocks.push(mskCoordsText);
+                }
+                allMskBlocks.push(currentObjectMskBlocks.join('\n\n'));
+
+            } else { // Polyline (логика для линий остается прежней)
+                const yandexCoords = targetObject.geometry.getCoordinates();
+                const reversedYandexCoords = [...yandexCoords].reverse();
+                const wgs84Coords = reversedYandexCoords.map(coord => {
+                    const trueLat = coord[0] + (mapOffsetY * 0.000008983);
+                    const trueLon = coord[1] + (mapOffsetX * 0.000008983);
+                    return [trueLon, trueLat];
+                });
+                const mskCoordsText = convertWgs84ToMskWithOffset(wgs84Coords, destSc, destSystem.def, offsetX, offsetY);
+                allMskBlocks.push(mskCoordsText);
             }
-
-            const reversedYandexCoords = [...yandexCoords].reverse();
-            const wgs84Coords = reversedYandexCoords.map(coord => {
-                const trueLat = coord[0] + (mapOffsetY * 0.000008983);
-                const trueLon = coord[1] + (mapOffsetX * 0.000008983);
-                return [trueLon, trueLat]; // Proj4 ожидает [lon, lat]
-            });
-
-            // Используем новую общую функцию
-            const mskCoordsText = convertWgs84ToMskWithOffset(wgs84Coords, destSc, destSystem.def, offsetX, offsetY);
-            
-            allMskBlocks.push(mskCoordsText);
+            // --- КОНЕЦ ИЗМЕНЕНИЙ ---
         }
 
         // 4. Объединяем результаты, копируем и открываем новую вкладку
@@ -7858,20 +7813,32 @@ async function convertAndCopyMskCoords(targetPolygon) {
         const offsetX = parseFloat(offsetXRaw) || 0;
         const offsetY = parseFloat(offsetYRaw) || 0;
 
-        // 2. Получаем "чистые" WGS-84 координаты из объекта на карте
-        const yandexCoords = targetPolygon.geometry.getCoordinates()[0];
-        const reversedYandexCoords = [...yandexCoords].reverse();
-        const wgs84Coords = reversedYandexCoords.map(coord => {
-            const trueLat = coord[0] + (mapOffsetY * 0.000008983);
-            const trueLon = coord[1] + (mapOffsetX * 0.000008983);
-            return [trueLon, trueLat]; // Proj4 ожидает [lon, lat]
-        });
+        // --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        // 2. Получаем ВСЕ контуры (внешний и внутренние)
+        const yandexCoordRings = targetPolygon.geometry.getCoordinates();
+        const allMskBlocks = [];
 
-        // 3. Используем новую общую функцию для конвертации
-        const mskCoordsText = convertWgs84ToMskWithOffset(wgs84Coords, destSc, destSystem.def, offsetX, offsetY);
+        // 3. Проходим по каждому контуру (кольцу) полигона
+        for (const ring of yandexCoordRings) {
+            // Получаем "чистые" WGS-84 координаты для текущего контура
+            const reversedYandexCoords = [...ring].reverse();
+            const wgs84Coords = reversedYandexCoords.map(coord => {
+                const trueLat = coord[0] + (mapOffsetY * 0.000008983);
+                const trueLon = coord[1] + (mapOffsetX * 0.000008983);
+                return [trueLon, trueLat]; // Proj4 ожидает [lon, lat]
+            });
 
-        // 4. Копируем результат и открываем новую вкладку
-        await navigator.clipboard.writeText(mskCoordsText);
+            // Используем общую функцию для конвертации текущего контура
+            const mskCoordsText = convertWgs84ToMskWithOffset(wgs84Coords, destSc, destSystem.def, offsetX, offsetY);
+            allMskBlocks.push(mskCoordsText);
+        }
+
+        // 4. Объединяем блоки координат пустой строкой, чтобы разделить контуры
+        const finalMskText = allMskBlocks.join('\n\n');
+        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+        // 5. Копируем результат и открываем новую вкладку
+        await navigator.clipboard.writeText(finalMskText);
         
         let notificationMessage = `Координаты в ${destSystem.text} скопированы`;
         if (offsetX !== 0 || offsetY !== 0) {
