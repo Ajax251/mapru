@@ -1728,7 +1728,7 @@
             <h2 id="infoModalTitle"></h2>
             <div id="infoModalBody"></div>
             <div class="modal-footer">
-                <button id="infoModalClose">Понятно</button>
+                <button id="infoModalClose">ОК</button>
             </div>
         </div>
     </div>
@@ -1745,6 +1745,9 @@
         const infoModalTitle = document.getElementById('infoModalTitle');
         const infoModalBody = document.getElementById('infoModalBody');
         const infoModalClose = document.getElementById('infoModalClose');
+        
+        let clipboardPermissionRequested = false;
+
 
         function showInfoModal(title, contentHtml) {
             infoModalTitle.textContent = title;
@@ -1762,6 +1765,8 @@
                 hideInfoModal();
             }
         });
+        
+
 
         // NEW: Function to get browser-specific instructions
         function getClipboardInstructions() {
@@ -1774,7 +1779,7 @@
                             <li>Нажмите на значок <strong>🔒 (замок)</strong> в адресной строке.</li>
                             <li>Внизу появившегося меню выберите <strong>"Настройки сайтов"</strong>.</li>
                             <li>В открывшейся вкладке найдите пункт <strong>"Буфер обмена"</strong> и выберите "Спрашивать".</li>
-                            <li>Или просто перейдите по специальной ссылке: <a href="browser://settings/content/clipboard" target="_blank" rel="noopener noreferrer">Открыть настройки буфера обмена</a>.</li>
+                            <li>Или просто перейдите по  адресу: browser://settings/content/clipboard</li>
                         </ol>
                     </div>`;
             } else if (ua.includes("Firefox")) {
@@ -2084,6 +2089,61 @@ async function copyToClipboard(text, onSuccessCallback) {
         const pattern = new RegExp(`^\\d{2}:\\d{2}:\\d{${digitsAfterSecondColon}}:\\d+$`);
         return pattern.test(text);
     }
+    
+    
+    
+let clipboardCheckedOnFocus = false;
+
+async function pasteFromClipboardOnFocus() {
+    if (clipboardCheckedOnFocus || searchInput.value.length > 0 || !navigator.clipboard) {
+        return;
+    }
+    clipboardCheckedOnFocus = true;
+
+    try {
+        // Просто пытаемся читать. Если разрешение есть, сработает. Если нет, будет ошибка, которую мы игнорируем.
+        const clipboardText = await navigator.clipboard.readText();
+        if (isValidCadastralNumber(clipboardText)) {
+            searchInput.value = clipboardText;
+            searchInput.style.transition = 'background-color 0.3s ease';
+            searchInput.style.backgroundColor = '#e6ffed';
+            setTimeout(() => {
+                searchInput.style.backgroundColor = '';
+            }, 1000);
+        }
+    } catch (err) {
+        // Мы ожидаем ошибку, если пользователь не дал разрешение. Молча ее игнорируем.
+        console.log('Чтение из буфера обмена не удалось (вероятно, нет разрешения).');
+    }
+}
+
+
+
+async function requestClipboardReadPermission() {
+    // Если уже запрашивали или браузер не поддерживает API, выходим.
+    if (clipboardPermissionRequested || !navigator.permissions || !navigator.clipboard) {
+        return;
+    }
+    
+    // Отмечаем, что запрос был.
+    clipboardPermissionRequested = true;
+    
+    try {
+        // Мы не будем ничего читать. Нам важно просто "спросить".
+        // Лучший способ это сделать — запросить статус разрешения.
+        // Браузер сам покажет окно, если статус 'prompt'.
+        const permissionStatus = await navigator.permissions.query({ name: 'clipboard-read', allowWithoutGesture: false });
+
+        // Нам не нужно обрабатывать результат. Главное, что запрос был инициирован.
+        // Если пользователь разрешит, 'granted' сохранится для всего сайта.
+        // Если запретит, 'denied' сохранится, и мы больше не будем его беспокоить.
+        console.log('Статус разрешения на чтение из буфера обмена:', permissionStatus.state);
+
+    } catch (err) {
+        console.error('Не удалось запросить разрешение на чтение из буфера обмена:', err);
+    }
+}
+
 
     async function checkClipboardForCadastralNumber() {
         try {
@@ -2479,7 +2539,7 @@ async function copyToClipboard(text, onSuccessCallback) {
     });
 
     window.onload = function() {
-         checkClipboardForCadastralNumber();
+       
         changeBackgroundImage();
         toggleMobileVersion();
         loadF9Mode();
@@ -3041,33 +3101,49 @@ async function copyToClipboard(text, onSuccessCallback) {
         }
     });
     
-    async function checkAndShowClipboardInstructions() {
-    if (!navigator.permissions) {
+async function checkAndShowClipboardInstructions() {
+    if (!navigator.permissions || !navigator.clipboard) {
         showInfoModal('Проверка невозможна', '<p>Ваш браузер не поддерживает API для проверки разрешений.</p>');
         return;
     }
+
+    let readStatusHtml = '';
+    let writeStatusHtml = '';
+
+    // --- Проверка разрешения на ЧТЕНИЕ (clipboard-read) ---
     try {
-        const permissionStatus = await navigator.permissions.query({ name: 'clipboard-write', allowWithoutGesture: false });
-        
-        if (permissionStatus.state === 'denied') {
-            const instructions = getClipboardInstructions();
-            showInfoModal(
-                'Доступ заблокирован',
-                `<p>Доступ к буферу обмена сейчас заблокирован.</p>
-                 <p>Чтобы разрешить эту функцию, пожалуйста, следуйте инструкции для вашего браузера:</p>
-                 ${instructions}
-                 <p>После изменения настроек может потребоваться перезагрузить страницу.</p>`
-            );
-        } else if (permissionStatus.state === 'granted') {
-            showInfoModal('Доступ разрешен', '<p>Все в порядке! Сайт имеет разрешение на запись в буфер обмена.</p>');
-        } else { // prompt
-            showInfoModal('Требуется разрешение', '<p>Доступ к буферу обмена будет запрошен при первой попытке копирования.</p>');
+        const readPermission = await navigator.permissions.query({ name: 'clipboard-read', allowWithoutGesture: false });
+        let statusText = '';
+        switch (readPermission.state) {
+            case 'granted': statusText = '<strong style="color: green;">РАЗРЕШЕНО</strong>'; break;
+            case 'denied': statusText = '<strong style="color: red;">ЗАБЛОКИРОВАНО</strong>'; break;
+            case 'prompt': statusText = '<strong style="color: orange;">БУДЕТ ЗАПРОШЕНО</strong>'; break;
         }
-    } catch (err) {
-        console.error('Ошибка при проверке разрешений:', err);
-        showInfoModal('Ошибка', '<p>Не удалось проверить статус разрешения для буфера обмена.</p>');
+        readStatusHtml = `<p><strong>Чтение из буфера обмена:</strong> ${statusText}</p>`;
+    } catch (e) {
+        readStatusHtml = `<p><strong>Чтение из буфера обмена:</strong> <span style="color: red;">Ошибка проверки</span></p>`;
     }
+
+    // --- Проверка разрешения на ЗАПИСЬ (clipboard-write) ---
+    try {
+        // Используем метод тестовой записи, т.к. permissions.query для write ненадежен в Chrome
+        await navigator.clipboard.writeText(' ');
+        writeStatusHtml = `<p><strong>Запись в буфер обмена:</strong> <strong style="color: green;">РАЗРЕШЕНО</strong></p>`;
+    } catch (err) {
+        writeStatusHtml = `<p><strong>Запись в буфер обмена:</strong> <strong style="color: red;">ЗАБЛОКИРОВАНО</strong></p>`;
+    }
+
+    // --- Отображение результата ---
+    const instructions = getClipboardInstructions();
+    showInfoModal(
+        'Статус доступа к буферу обмена',
+        `<div>${readStatusHtml}${writeStatusHtml}</div>
+         <hr style="margin: 15px 0;">
+         <p>Если доступ заблокирован, используйте инструкцию ниже, чтобы его сбросить:</p>
+         ${instructions}`
+    );
 }
+
 
 document.addEventListener('keydown', function(e) {
     if (e.key === 'F6') {
@@ -3075,6 +3151,12 @@ document.addEventListener('keydown', function(e) {
         checkAndShowClipboardInstructions();
     }
 });
+
+searchInput.addEventListener('focus', pasteFromClipboardOnFocus);
+
+document.body.addEventListener('click', requestClipboardReadPermission, { once: true });
+document.body.addEventListener('keydown', requestClipboardReadPermission, { once: true });
+
 
     document.getElementById('addressKadastrmapButton').addEventListener('mouseleave', function(e) {
         this.style.backgroundColor = '';
@@ -3112,6 +3194,8 @@ document.addEventListener('keydown', function(e) {
             copyToClipboard('mapruapp@gmail.com', showSuccessAnimation);
         });
     }
+    
+    
 
     </script>
 </body>
