@@ -7,7 +7,7 @@
     <link rel="stylesheet" href="webfonts/all.min.css">
     <link rel="icon" href="img/ed.png" type="image/png">
     <script src="webfonts/jszip.min.js"></script>
-    <script src="sk.js"></script>
+ 
 
     <style>
         body {
@@ -769,6 +769,8 @@
         </button>
     </div>
 </div>
+  <script src="webfonts/proj4.js"></script>
+<script src="sk.js"></script>
 
 <script>
 
@@ -1707,28 +1709,20 @@ async function checkClipboardForObjects() {
         }
     }
 
-    // --- НОВАЯ ФУНКЦИЯ для запроса с НСПД и конвертации в МСК ---
-    async function handleImportFromNspdAndConvertToMsk(cadNumbers, destScId) {
+async function handleImportFromNspdAndConvertToMsk(cadNumbers, destScId) {
         closeCoordsDialog();
         if (cadNumbers.length > 100) {
             showNotification("Превышен лимит в 100 кадастровых номеров.", "error");
             return;
         }
 
-        isConversionInProgress = true;
-        convertBtn.disabled = true;
-        progressBarContainer.style.display = 'block';
-
         const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destScId);
         if (!destSystem || !destSystem.def) {
             showNotification(`Не найдено определение для целевой СК: ${destScId}`, "error");
-            isConversionInProgress = false;
-            convertBtn.disabled = false;
-            progressBarContainer.style.display = 'none';
             return;
         }
         
-        // Регистрируем нужные СК в Proj4 для конвертации
+        // Регистрируем СК в Proj4 для конвертации
         proj4.defs(destSystem.value, destSystem.def);
         if (typeof proj4.defs['EPSG:3857'] === 'undefined') {
              proj4.defs("EPSG:3857", COORDINATE_SYSTEMS.find(s => s.value === "EPSG:3857").def);
@@ -1737,17 +1731,17 @@ async function checkClipboardForObjects() {
              proj4.defs("EPSG:4326", COORDINATE_SYSTEMS.find(s => s.value === "EPSG:4326").def);
         }
 
-        const allResults = [];
-        const decimalPlaces = 2; // МСК обычно имеют 2 знака после запятой
+        let addedObjects = [];
+        let errors = 0;
+        
+        showLoader(true, `Подготовка к загрузке ${cadNumbers.length} участков...`);
 
         for (let i = 0; i < cadNumbers.length; i++) {
             const kn = cadNumbers[i];
-            const progress = ((i + 1) / cadNumbers.length) * 100;
-            progressBarFill.style.width = `${progress}%`;
-            progressBarLabel.textContent = `Запрос НСПД: ${i + 1}/${cadNumbers.length} (${kn})`;
+            showLoader(true, `Загрузка ${i + 1}/${cadNumbers.length}: ${kn}`);
 
             try {
-                const feature = await fetchCadastralData(kn); // Используем уже существующую функцию
+                const feature = await fetchCadastralData(kn);
                 if (!feature.geometry || !feature.geometry.coordinates) {
                     throw new Error('У объекта нет координат в ЕГРН.');
                 }
@@ -1758,39 +1752,50 @@ async function checkClipboardForObjects() {
                 const objectMskContours = [];
                 polygonsData.forEach(polygonRings => {
                     polygonRings.forEach(ring => {
-                        const mskCoords = ring.map(coord_3857 => {
-                            // Конвертация: 3857 (НСПД) -> 4326 (WGS84) -> Целевая МСК
+                        const mskPoints = ring.map(coord_3857 => {
                             const wgs84 = proj4('EPSG:3857', 'EPSG:4326', coord_3857);
                             const msk = proj4('EPSG:4326', destSystem.value, wgs84);
-                            const finalX = msk[1]; // +axis=enu в определениях sk.js возвращает [Y, X]
-                            const finalY = msk[0];
-                            return `${finalX.toFixed(decimalPlaces)}\t${finalY.toFixed(decimalPlaces)}`;
+                            
+                            // --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+                            // Применяем смещение, если оно определено для данной СК
+                            const finalX = msk[1] + (destSystem.offsetX || 0);
+                            const finalY = msk[0] + (destSystem.offsetY || 0);
+                            // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
+                            return { x: roundCoord(finalX), y: roundCoord(finalY) };
                         });
-                        objectMskContours.push(mskCoords.join('\n'));
+                        objectMskContours.push(mskPoints);
                     });
                 });
-                allResults.push(objectMskContours.join('\n\n'));
+
+                if (objectMskContours.length > 0) {
+                    const newObj = addObjectInternal(objectMskContours, kn, "polygon", true);
+                    if (newObj) {
+                        addedObjects.push(newObj);
+                    }
+                } else {
+                    throw new Error('Не удалось извлечь контуры.');
+                }
 
             } catch (error) {
                 console.error(`Ошибка для КН ${kn}:`, error);
-                allResults.push(`--- Ошибка для ${kn}: ${error.message} ---`);
+                showNotification(`Ошибка для ${kn}: ${error.message}`, "error");
+                errors++;
             }
 
+            // Небольшая задержка между запросами
             if (i < cadNumbers.length - 1) {
-                await new Promise(resolve => setTimeout(resolve, 1000)); // Пауза 1 секунда
+                await new Promise(resolve => setTimeout(resolve, 500));
             }
         }
 
-        // Вставляем результат в основное поле для координат
-        coordsInput.value = allResults.join('\n\n');
-        
-        isConversionInProgress = false;
-        convertBtn.disabled = false;
-        progressBarContainer.style.display = 'none';
-        showNotification(`Координаты для ${cadNumbers.length} КН загружены в поле ввода!`, "success", "check-circle");
-        
-        // Открываем диалог снова, чтобы пользователь мог нажать "Загрузить и Добавить"
-        openCoordsDialog();
+        showLoader(false);
+        if (addedObjects.length > 0) {
+            finalizeBatchAdd(addedObjects);
+            showNotification(`Загружено ${addedObjects.length} участков. ${errors > 0 ? errors + ' с ошибками.' : ''}`, "success", "check-circle");
+        } else if (errors > 0) {
+            showNotification(`Не удалось загрузить участки. Ошибок: ${errors}.`, "error", "exclamation-triangle");
+        }
     }
 
 async function handleUniversalImport() {
@@ -3341,6 +3346,47 @@ async function handleUniversalImport() {
         const currentName = userObjects[index].name || `Объект ${userObjects[index].id}`;
         const newName = await showNamePrompt(`Переименовать объект:`, currentName);
         if (newName !== null) await renameObject(index, newName);
+    }
+
+async function fetchNspd(url) {
+        // Заголовки, которые мы будем использовать, включая обязательный Referer
+        const requestHeaders = {
+            'Referer': 'https://nspd.gov.ru/'
+        };
+
+        // Попытка прямого запроса
+        try {
+            const directResponse = await fetch(url, { headers: requestHeaders });
+            if (!directResponse.ok) {
+                throw new Error(`Прямой запрос не удался: ${directResponse.status}`);
+            }
+            return await directResponse.json();
+        } catch (error) {
+            console.warn(`Прямой запрос не удался: ${error.message}. Переключаюсь на прокси.`);
+            
+            // Запасной вариант: запрос через прокси
+            const vercelProxyUrl = 'https://nsp-two.vercel.app/';
+            const urlObject = new URL(url);
+            const targetPath = `${urlObject.pathname}${urlObject.search}`;
+            const proxyRequestUrl = `${vercelProxyUrl}?target=${encodeURIComponent(targetPath)}`;
+
+            const proxyResponse = await fetch(proxyRequestUrl, { headers: requestHeaders });
+            if (!proxyResponse.ok) {
+                const errorText = await proxyResponse.text();
+                throw new Error(`Запрос через прокси также не удался: ${proxyResponse.statusText}. Ответ: ${errorText}`);
+            }
+            return await proxyResponse.json();
+        }
+    }
+
+    async function fetchCadastralData(cadastralNumber) {
+        const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${cadastralNumber}`;
+        const data = await fetchNspd(url);
+
+        if (!data.data || !data.data.features || data.data.features.length === 0) {
+            throw new Error(`Объект с КН ${cadastralNumber} не найден в ЕГРН.`);
+        }
+        return data.data.features[0];
     }
 
     // --- Supabase specific functions ---
