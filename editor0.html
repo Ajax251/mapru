@@ -7,7 +7,6 @@
     <link rel="stylesheet" href="webfonts/all.min.css">
     <link rel="icon" href="img/ed.png" type="image/png">
     <script src="webfonts/jszip.min.js"></script>
-    <script src="sk.js"></script>
 
     <style>
         body {
@@ -728,12 +727,6 @@
 <div id="dialogOverlay"></div>
 <div id="coordsDialog">
     <h3>Добавить объект</h3>
-       <div style="margin-bottom: 15px; text-align: left;">
-        <label for="importModeSelect" style="text-align: left; margin-bottom: 5px; font-size: 14px;">Режим загрузки для кадастровых номеров:</label>
-        <select id="importModeSelect" style="width: 100%; padding: 8px; border-radius: 4px; border: 1px solid #ccc;">
-            <!-- Опции будут добавлены через JavaScript -->
-        </select>
-    </div>
     <textarea id="coordsInput" placeholder="Вставьте координаты (X Y или Y X на каждой строке, разделенные пробелом/табуляцией) ИЛИ список кадастровых номеров (каждый на новой строке)."></textarea>
     <div class="dialog-buttons">
         <button id="importCoordsBtn">
@@ -1001,7 +994,6 @@ async function initializeApp() { // Сделана асинхронной
        canvas.height = canvas.offsetHeight;
         setupEventListeners();
        loadState();
-        populateImportModeSelect(); 
 
         // 2. Проверка буфера обмена. Если успешно и пользователь согласен, userObjects будут очищены и заполнены заново.
         const clipboardImported = await checkClipboardForObjects();
@@ -1685,115 +1677,8 @@ async function checkClipboardForObjects() {
             return null;
         }
     }
-    
-        // --- НОВАЯ ФУНКЦИЯ для заполнения нового селектора в модальном окне ---
-    function populateImportModeSelect() {
-        const select = document.getElementById('importModeSelect');
-        if (!select) return;
 
-        // Добавляем опцию по умолчанию для загрузки из XML-архива
-        select.innerHTML = '<option value="xml">Из архива КПТ (XML файл)</option>';
-
-        // Проверяем, что список систем координат доступен
-        if (typeof COORDINATE_SYSTEMS !== 'undefined') {
-            const mskSystems = COORDINATE_SYSTEMS.filter(sys => sys.value.startsWith('EPSG:') && sys.value !== 'EPSG:4326' && sys.value !== 'EPSG:3857');
-            mskSystems.forEach(sys => {
-                const option = document.createElement('option');
-                option.value = sys.value;
-                // Уточняем текст, чтобы было понятно, что происходит
-                option.textContent = `НСПД -> ${sys.text}`;
-                select.appendChild(option);
-            });
-        }
-    }
-
-    // --- НОВАЯ ФУНКЦИЯ для запроса с НСПД и конвертации в МСК ---
-    async function handleImportFromNspdAndConvertToMsk(cadNumbers, destScId) {
-        closeCoordsDialog();
-        if (cadNumbers.length > 100) {
-            showNotification("Превышен лимит в 100 кадастровых номеров.", "error");
-            return;
-        }
-
-        isConversionInProgress = true;
-        convertBtn.disabled = true;
-        progressBarContainer.style.display = 'block';
-
-        const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destScId);
-        if (!destSystem || !destSystem.def) {
-            showNotification(`Не найдено определение для целевой СК: ${destScId}`, "error");
-            isConversionInProgress = false;
-            convertBtn.disabled = false;
-            progressBarContainer.style.display = 'none';
-            return;
-        }
-        
-        // Регистрируем нужные СК в Proj4 для конвертации
-        proj4.defs(destSystem.value, destSystem.def);
-        if (typeof proj4.defs['EPSG:3857'] === 'undefined') {
-             proj4.defs("EPSG:3857", COORDINATE_SYSTEMS.find(s => s.value === "EPSG:3857").def);
-        }
-        if (typeof proj4.defs['EPSG:4326'] === 'undefined') {
-             proj4.defs("EPSG:4326", COORDINATE_SYSTEMS.find(s => s.value === "EPSG:4326").def);
-        }
-
-        const allResults = [];
-        const decimalPlaces = 2; // МСК обычно имеют 2 знака после запятой
-
-        for (let i = 0; i < cadNumbers.length; i++) {
-            const kn = cadNumbers[i];
-            const progress = ((i + 1) / cadNumbers.length) * 100;
-            progressBarFill.style.width = `${progress}%`;
-            progressBarLabel.textContent = `Запрос НСПД: ${i + 1}/${cadNumbers.length} (${kn})`;
-
-            try {
-                const feature = await fetchCadastralData(kn); // Используем уже существующую функцию
-                if (!feature.geometry || !feature.geometry.coordinates) {
-                    throw new Error('У объекта нет координат в ЕГРН.');
-                }
-                
-                const geometryType = feature.geometry.type;
-                const polygonsData = geometryType === 'MultiPolygon' ? feature.geometry.coordinates : [feature.geometry.coordinates];
-                
-                const objectMskContours = [];
-                polygonsData.forEach(polygonRings => {
-                    polygonRings.forEach(ring => {
-                        const mskCoords = ring.map(coord_3857 => {
-                            // Конвертация: 3857 (НСПД) -> 4326 (WGS84) -> Целевая МСК
-                            const wgs84 = proj4('EPSG:3857', 'EPSG:4326', coord_3857);
-                            const msk = proj4('EPSG:4326', destSystem.value, wgs84);
-                            const finalX = msk[1]; // +axis=enu в определениях sk.js возвращает [Y, X]
-                            const finalY = msk[0];
-                            return `${finalX.toFixed(decimalPlaces)}\t${finalY.toFixed(decimalPlaces)}`;
-                        });
-                        objectMskContours.push(mskCoords.join('\n'));
-                    });
-                });
-                allResults.push(objectMskContours.join('\n\n'));
-
-            } catch (error) {
-                console.error(`Ошибка для КН ${kn}:`, error);
-                allResults.push(`--- Ошибка для ${kn}: ${error.message} ---`);
-            }
-
-            if (i < cadNumbers.length - 1) {
-                await new Promise(resolve => setTimeout(resolve, 1000)); // Пауза 1 секунда
-            }
-        }
-
-        // Вставляем результат в основное поле для координат
-        coordsInput.value = allResults.join('\n\n');
-        
-        isConversionInProgress = false;
-        convertBtn.disabled = false;
-        progressBarContainer.style.display = 'none';
-        showNotification(`Координаты для ${cadNumbers.length} КН загружены в поле ввода!`, "success", "check-circle");
-        
-        // Открываем диалог снова, чтобы пользователь мог нажать "Загрузить и Добавить"
-        openCoordsDialog();
-    }
-
-async function handleUniversalImport() {
+    async function handleUniversalImport() {
         const inputText = coordsInput.value.trim();
         if (!inputText) {
             showNotification("Поле ввода пустое.", "warning", "exclamation-triangle");
@@ -1801,23 +1686,16 @@ async function handleUniversalImport() {
         }
 
         const lines = inputText.split('\n').map(line => line.trim()).filter(line => line);
-        const isKnList = lines.length > 0 && lines.every(line => isValidCadastralNumberFormat(line));
-        
-        // Получаем выбранный режим из нового селектора
-        const importMode = document.getElementById('importModeSelect').value;
+        const isFirstLineCadNumber = lines.length > 0 && isValidCadastralNumberFormat(lines[0]);
 
-        if (isKnList) {
-            // Если введен список кадастровых номеров
-            if (importMode === 'xml') {
-                // Старая логика: загрузка из архива XML
+        if (isFirstLineCadNumber) {
+            const areAllCadNumbers = lines.every(line => isValidCadastralNumberFormat(line));
+            if (areAllCadNumbers) {
                 await handleImportFromCadNumbers(lines);
             } else {
-                // Новая логика: загрузка с НСПД и конвертация в выбранную МСК
-                // importMode здесь будет содержать ID системы, например, 'EPSG:6331602'
-                await handleImportFromNspdAndConvertToMsk(lines, importMode);
+                showNotification("Обнаружен кадастровый номер, но не все строки в списке являются корректными кадастровыми номерами. Проверьте ввод.", "error", "list-ol");
             }
         } else {
-            // Если введены координаты, а не КН, импортируем их как обычно
             await handleImportFromTextareaCoordinates(inputText);
         }
     }
