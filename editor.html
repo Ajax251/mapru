@@ -1707,122 +1707,120 @@ async function checkClipboardForObjects() {
         }
     }
 
-
-
-async function handleUniversalImport() {
-    const inputText = coordsInput.value.trim();
-    if (!inputText) {
-        showNotification("Поле ввода пустое.", "warning", "exclamation-triangle");
-        return;
-    }
-
-    const lines = inputText.split('\n').map(line => line.trim()).filter(line => line);
-    const isKnList = lines.length > 0 && lines.every(line => isValidCadastralNumberFormat(line));
-    
-    const importMode = document.getElementById('importModeSelect').value;
-
-    if (isKnList) {
-        // Если введен список кадастровых номеров
-        if (importMode === 'xml') {
-            // Режим 1: Загрузка из архива XML (старая логика)
-            await handleImportFromCadNumbers(lines);
-        } else {
-            // Режим 2: Загрузка с НСПД и конвертация в выбранную МСК
-            // importMode здесь содержит ID системы, например, 'EPSG:6331602'
-            await processAndAddCadastralNumbers(lines, importMode);
+    // --- НОВАЯ ФУНКЦИЯ для запроса с НСПД и конвертации в МСК ---
+    async function handleImportFromNspdAndConvertToMsk(cadNumbers, destScId) {
+        closeCoordsDialog();
+        if (cadNumbers.length > 100) {
+            showNotification("Превышен лимит в 100 кадастровых номеров.", "error");
+            return;
         }
-    } else {
-        // Если введены координаты, а не КН, импортируем их как обычно
-        await handleImportFromTextareaCoordinates(inputText);
-    }
-}
 
+        isConversionInProgress = true;
+        convertBtn.disabled = true;
+        progressBarContainer.style.display = 'block';
 
-sync function processAndAddCadastralNumbers(cadNumbers, destScId) {
-    closeCoordsDialog();
-    if (cadNumbers.length > 100) {
-        showNotification("Превышен лимит в 100 кадастровых номеров.", "error");
-        return;
-    }
+        const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destScId);
+        if (!destSystem || !destSystem.def) {
+            showNotification(`Не найдено определение для целевой СК: ${destScId}`, "error");
+            isConversionInProgress = false;
+            convertBtn.disabled = false;
+            progressBarContainer.style.display = 'none';
+            return;
+        }
+        
+        // Регистрируем нужные СК в Proj4 для конвертации
+        proj4.defs(destSystem.value, destSystem.def);
+        if (typeof proj4.defs['EPSG:3857'] === 'undefined') {
+             proj4.defs("EPSG:3857", COORDINATE_SYSTEMS.find(s => s.value === "EPSG:3857").def);
+        }
+        if (typeof proj4.defs['EPSG:4326'] === 'undefined') {
+             proj4.defs("EPSG:4326", COORDINATE_SYSTEMS.find(s => s.value === "EPSG:4326").def);
+        }
 
-    isConversionInProgress = true;
-    convertBtn.disabled = true;
-    progressBarContainer.style.display = 'block';
+        const allResults = [];
+        const decimalPlaces = 2; // МСК обычно имеют 2 знака после запятой
 
-    const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destScId);
-    if (!destSystem || !destSystem.def) {
-        showNotification(`Не найдено определение для целевой СК: ${destScId}`, "error");
+        for (let i = 0; i < cadNumbers.length; i++) {
+            const kn = cadNumbers[i];
+            const progress = ((i + 1) / cadNumbers.length) * 100;
+            progressBarFill.style.width = `${progress}%`;
+            progressBarLabel.textContent = `Запрос НСПД: ${i + 1}/${cadNumbers.length} (${kn})`;
+
+            try {
+                const feature = await fetchCadastralData(kn); // Используем уже существующую функцию
+                if (!feature.geometry || !feature.geometry.coordinates) {
+                    throw new Error('У объекта нет координат в ЕГРН.');
+                }
+                
+                const geometryType = feature.geometry.type;
+                const polygonsData = geometryType === 'MultiPolygon' ? feature.geometry.coordinates : [feature.geometry.coordinates];
+                
+                const objectMskContours = [];
+                polygonsData.forEach(polygonRings => {
+                    polygonRings.forEach(ring => {
+                        const mskCoords = ring.map(coord_3857 => {
+                            // Конвертация: 3857 (НСПД) -> 4326 (WGS84) -> Целевая МСК
+                            const wgs84 = proj4('EPSG:3857', 'EPSG:4326', coord_3857);
+                            const msk = proj4('EPSG:4326', destSystem.value, wgs84);
+                            const finalX = msk[1]; // +axis=enu в определениях sk.js возвращает [Y, X]
+                            const finalY = msk[0];
+                            return `${finalX.toFixed(decimalPlaces)}\t${finalY.toFixed(decimalPlaces)}`;
+                        });
+                        objectMskContours.push(mskCoords.join('\n'));
+                    });
+                });
+                allResults.push(objectMskContours.join('\n\n'));
+
+            } catch (error) {
+                console.error(`Ошибка для КН ${kn}:`, error);
+                allResults.push(`--- Ошибка для ${kn}: ${error.message} ---`);
+            }
+
+            if (i < cadNumbers.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 1000)); // Пауза 1 секунда
+            }
+        }
+
+        // Вставляем результат в основное поле для координат
+        coordsInput.value = allResults.join('\n\n');
+        
         isConversionInProgress = false;
         convertBtn.disabled = false;
         progressBarContainer.style.display = 'none';
-        return;
-    }
-    
-    proj4.defs(destSystem.value, destSystem.def);
-    if (typeof proj4.defs['EPSG:3857'] === 'undefined') {
-        proj4.defs("EPSG:3857", COORDINATE_SYSTEMS.find(s => s.value === "EPSG:3857").def);
-    }
-    if (typeof proj4.defs['EPSG:4326'] === 'undefined') {
-        proj4.defs("EPSG:4326", COORDINATE_SYSTEMS.find(s => s.value === "EPSG:4326").def);
+        showNotification(`Координаты для ${cadNumbers.length} КН загружены в поле ввода!`, "success", "check-circle");
+        
+        // Открываем диалог снова, чтобы пользователь мог нажать "Загрузить и Добавить"
+        openCoordsDialog();
     }
 
-    const addedObjects = [];
-    let errors = 0;
+async function handleUniversalImport() {
+        const inputText = coordsInput.value.trim();
+        if (!inputText) {
+            showNotification("Поле ввода пустое.", "warning", "exclamation-triangle");
+            return;
+        }
 
-    for (let i = 0; i < cadNumbers.length; i++) {
-        const kn = cadNumbers[i];
-        const progress = ((i + 1) / cadNumbers.length) * 100;
-        progressBarFill.style.width = `${progress}%`;
-        progressBarLabel.textContent = `Запрос НСПД: ${i + 1}/${cadNumbers.length} (${kn})`;
+        const lines = inputText.split('\n').map(line => line.trim()).filter(line => line);
+        const isKnList = lines.length > 0 && lines.every(line => isValidCadastralNumberFormat(line));
+        
+        // Получаем выбранный режим из нового селектора
+        const importMode = document.getElementById('importModeSelect').value;
 
-        try {
-            const feature = await fetchCadastralData(kn);
-            if (!feature.geometry || !feature.geometry.coordinates) {
-                throw new Error('У объекта нет координат в ЕГРН.');
+        if (isKnList) {
+            // Если введен список кадастровых номеров
+            if (importMode === 'xml') {
+                // Старая логика: загрузка из архива XML
+                await handleImportFromCadNumbers(lines);
+            } else {
+                // Новая логика: загрузка с НСПД и конвертация в выбранную МСК
+                // importMode здесь будет содержать ID системы, например, 'EPSG:6331602'
+                await handleImportFromNspdAndConvertToMsk(lines, importMode);
             }
-            
-            const geometryType = feature.geometry.type;
-            const polygonsData = geometryType === 'MultiPolygon' ? feature.geometry.coordinates : [feature.geometry.coordinates];
-            
-            const mskContours = [];
-            polygonsData.forEach(polygonRings => {
-                polygonRings.forEach(ring => {
-                    const mskPoints = ring.map(coord_3857 => {
-                        const wgs84 = proj4('EPSG:3857', 'EPSG:4326', coord_3857);
-                        const msk = proj4('EPSG:4326', destSystem.value, wgs84);
-                        return { x: roundCoord(msk[1]), y: roundCoord(msk[0]) };
-                    });
-                    mskContours.push(mskPoints);
-                });
-            });
-            
-            if (mskContours.length > 0) {
-                const newObj = addObjectInternal(mskContours, kn, "polygon", true);
-                if (newObj) {
-                    addedObjects.push(newObj);
-                } else { errors++; }
-            } else { errors++; }
-
-        } catch (error) {
-            console.error(`Ошибка для КН ${kn}:`, error);
-            errors++;
-            showNotification(`Ошибка для ${kn}: ${error.message}`, "error");
-        }
-
-        if (i < cadNumbers.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 1000)); // Пауза 1 секунда
+        } else {
+            // Если введены координаты, а не КН, импортируем их как обычно
+            await handleImportFromTextareaCoordinates(inputText);
         }
     }
-
-    if (addedObjects.length > 0) {
-        finalizeBatchAdd(addedObjects);
-    }
-    
-    isConversionInProgress = false;
-    convertBtn.disabled = false;
-    progressBarContainer.style.display = 'none';
-    showNotification(`Обработка завершена. Загружено: ${addedObjects.length}. Ошибок: ${errors}.`, "success", "check-circle");
-}
 
 
     async function handleImportFromTextareaCoordinates(text) {
