@@ -6,7 +6,7 @@ const MAPRUAPP_PROXY_BASE_URL = "https://mapruapp.ru";
 
 // --- Список доступных моделей ---
 export const MODELS = [
-    { id: "gemini-2.5-flash-lite-preview-06-17", uiName: "Gemini 2.5 Flash Lite (быстрая)", apiType: "gemini", tier: 'lite' },
+    { id: "gemini-2.5-flash-lite", uiName: "Gemini 2.5 Flash Lite (быстрая)", apiType: "gemini", tier: 'lite' },
     { id: "gemini-2.5-flash", uiName: "Gemini 2.5 Flash", apiType: "gemini", tier: 'standard' },
     { id: "mistral-medium-2505", uiName: "Mistral Medium (быстрая)", apiType: "mistral", tier: 'standard' },
     { id: "magistral-medium-2506", uiName: "Mistral Magistral ", apiType: "mistral", tier: 'standard' },
