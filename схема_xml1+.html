@@ -2084,7 +2084,6 @@ tr:hover {
 const NOTIFICATION_HEIGHT = 60; // Approximate height of a notification + margin
 const NOTIFICATION_MARGIN_TOP = 10; // Margin between notifications
 
- const LARGE_JSON_THRESHOLD_BYTES = 3 * 1024 * 1024; 
  const LARGE_XML_THRESHOLD_BYTES = 10 * 1024 * 1024; // 10 MB
 
 function showLargeXmlDialog(xmlContent, fileName, fileSize, cadNumberToSelectAfterLoad = null) {
@@ -4202,57 +4201,47 @@ cadastralInput.addEventListener('keydown', async function(e) {
 }
     
     
-async function processJsonZipFromSupabase(file, fileSize, cadNumberToSelectAfterLoad = null, jsonTypeFilters = null) {
+    async function processJsonZipFromSupabase(file, fileSize, cadNumberToSelectAfterLoad = null, jsonTypeFilters = null) {
     const loaderContainer = document.getElementById('loaderContainer');
     updateLoaderProgress(0, fileSize, 'Распаковка JSON.ZIP из базы...');
-    
     try {
         const zip = await JSZip.loadAsync(await file.arrayBuffer());
-        let jsonFileEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.json') && !f.dir);
+        let jsonFileEntry = Object.values(zip.files).find(
+            f => f.name.match(/\d{2}_\d{2}_\d{6,7} \d{4}[_-]\d{2}[_-]\d{2}\.json$/i) && !f.dir
+        );
+        if (!jsonFileEntry) {
+           jsonFileEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.json') && !f.dir);
+        }
 
         if (jsonFileEntry) {
             updateLoaderProgress(fileSize, fileSize, 'Извлечение JSON из архива...');
             const jsonContentString = await jsonFileEntry.async('string');
-            const jsonContentSize = jsonContentString.length; // Размер самого JSON
-            const jsonFileEntryName = jsonFileEntry.name;
 
-            // ПРОВЕРКА РАЗМЕРА ПЕРЕД ОБРАБОТКОЙ
-            if (jsonContentSize > LARGE_JSON_THRESHOLD_BYTES) {
-                showNotification('Файл JSON из базы слишком большой, активирован режим выбора.', 'info', 'filter');
-                isSelectiveLoadMode = true;
-                rawJsonContentForSelection = jsonContentString;
-
-                const allIdentifiers = await extractAllIdentifiersFromJson(jsonContentString);
-                if (allIdentifiers.length > 0) {
-                    showSelectionDialog(allIdentifiers, jsonFileEntryName);
-                } else {
-                    showNotification('Не удалось извлечь объекты для выбора из большого JSON.', 'error');
-                    isSelectiveLoadMode = false;
-                    rawJsonContentForSelection = null;
+            updateLoaderProgress(fileSize, fileSize, 'Обработка JSON...');
+             setTimeout(async () => {
+                try {
+                    await handleJsonString(jsonContentString, jsonFileEntry.name, jsonTypeFilters); // Pass jsonTypeFilters
+                     if (cadNumberToSelectAfterLoad) {
+                        setTimeout(() => {
+                            const selectedSuccessfully = findAndSelectByCadastralNumber(cadNumberToSelectAfterLoad);
+                            if (!selectedSuccessfully) {
+                                showNotification(`Не удалось автоматически выбрать объект ${cadNumberToSelectAfterLoad} после загрузки JSON.`, 'warning', 'exclamation-triangle');
+                            }
+                        }, 300);
+                    }
+                } catch (error) {
+                    showNotification('Ошибка при обработке JSON из базы: ' + error.message, 'error', 'exclamation-circle');
+                } finally {
+                    if (loaderContainer) loaderContainer.style.display = 'none';
                 }
-                loaderContainer.style.display = 'none';
+            }, 800);
 
-            } else {
-                // Если файл не большой, обрабатываем как обычно
-                updateLoaderProgress(fileSize, fileSize, 'Обработка JSON...');
-                await new Promise(r => setTimeout(r, 100));
-
-                await handleJsonString(jsonContentString, jsonFileEntryName, jsonTypeFilters);
-                if (cadNumberToSelectAfterLoad) {
-                    setTimeout(() => {
-                        if (!findAndSelectByCadastralNumber(cadNumberToSelectAfterLoad)) {
-                            showNotification(`Не удалось выбрать объект ${cadNumberToSelectAfterLoad}.`, 'warning');
-                        }
-                    }, 300);
-                }
-                loaderContainer.style.display = 'none';
-            }
         } else {
-            throw new Error('JSON-файл не найден в архиве из базы.');
+            throw new Error('JSON-файл с ожидаемым именем не найден в архиве JSON.ZIP из базы.');
         }
     } catch (error) {
-        loaderContainer.style.display = 'none';
-        showNotification('Ошибка при обработке JSON.ZIP из базы: ' + error.message, 'error');
+        if (loaderContainer) loaderContainer.style.display = 'none';
+        showNotification('Ошибка при обработке JSON.ZIP из базы: ' + error.message, 'error', 'exclamation-circle');
     }
 }
 
@@ -6089,13 +6078,13 @@ function redraw(adjacentParcels, adjacentParcelsForImported, preserveTransform =
     function updateLoaderProgress(current, total, text = '') { const loaderText = document.querySelector('.loading-text'); const formattedCurrent = formatFileSize(current); const formattedTotal = formatFileSize(total); if (text) loaderText.innerHTML = `${text}<br>${formattedCurrent} из ${formattedTotal}`; else loaderText.textContent = `${formattedCurrent} из ${formattedTotal}`; }
     function simulateLoading(fileSize, onProgress, onComplete, duration = 3000) { const steps = 30; const interval = duration / steps; let progress = 0; const timer = setInterval(() => { progress += fileSize / steps; if (progress > fileSize) progress = fileSize; onProgress(progress, fileSize); if (progress >= fileSize) { clearInterval(timer); setTimeout(onComplete, 500); } }, interval); return timer; }
 
- document.getElementById('fileInput').addEventListener('change', async function(event) {
+     document.getElementById('fileInput').addEventListener('change', async function(event) {
         const file = event.target.files[0];
         if (!file) {
-            isSelectiveLoadMode = false;
+            isSelectiveLoadMode = false; // Reset if no file selected
             return;
         }
-        event.target.value = null;
+        event.target.value = null; // Reset file input to allow re-selection of the same file
 
         const loaderContainer = document.getElementById('loaderContainer');
         loaderContainer.style.display = 'flex';
@@ -6109,11 +6098,12 @@ function redraw(adjacentParcels, adjacentParcelsForImported, preserveTransform =
 
         updateLoaderProgress(0, fileSize, processingText);
 
-        const handleFileContent = async (content, fileNameFromArchive, fileType, contentSize) => {
+        const handleFileContent = async (content, fileNameFromArchive, fileType) => {
             if (fileType === 'xml') {
-                if (contentSize > LARGE_XML_THRESHOLD_BYTES && !isSelectiveLoadMode) {
+                const xmlBlob = new Blob([content]);
+                if (xmlBlob.size > LARGE_XML_THRESHOLD_BYTES && !isSelectiveLoadMode) {
                     loaderContainer.style.display = 'none';
-                    showLargeXmlDialog(content, fileNameFromArchive, contentSize);
+                    showLargeXmlDialog(content, fileNameFromArchive, xmlBlob.size);
                     return;
                 }
 
@@ -6140,14 +6130,8 @@ function redraw(adjacentParcels, adjacentParcelsForImported, preserveTransform =
                     }, 800);
                 }
             } else if (fileType === 'json') {
-                // НОВАЯ ПРОВЕРКА РАЗМЕРА ДЛЯ JSON
-                if (contentSize > LARGE_JSON_THRESHOLD_BYTES && !isSelectiveLoadMode) {
-                    showNotification('Файл JSON слишком большой, активирован режим выбора объектов.', 'info', 'filter');
-                    isSelectiveLoadMode = true; // Принудительно включаем режим выбора
-                }
-
-                if (isSelectiveLoadMode) {
-                    rawJsonContentForSelection = content;
+                 if (isSelectiveLoadMode) {
+                    rawJsonContentForSelection = content; // Store raw JSON content
                     updateLoaderProgress(fileSize, fileSize, 'Анализ JSON для выбора');
                     try {
                         const allIdentifiers = await extractAllIdentifiersFromJson(content);
@@ -6175,41 +6159,66 @@ function redraw(adjacentParcels, adjacentParcelsForImported, preserveTransform =
                 }
             }
         };
-        
-        // Блок чтения файлов
-        try {
-            if (fileNameLower.endsWith('.xml')) {
-                const reader = new FileReader();
-                reader.onload = (e) => handleFileContent(e.target.result, file.name, 'xml', e.target.result.length);
-                reader.onerror = () => { loaderContainer.style.display = 'none'; showNotification('Ошибка при чтении XML-файла', 'error'); };
-                reader.readAsText(file);
-            } else if (fileNameLower.endsWith('.json.zip')) {
-                const zip = await JSZip.loadAsync(await file.arrayBuffer());
-                let jsonFileEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.json') && !f.dir);
-                if (jsonFileEntry) {
-                    const jsonContentString = await jsonFileEntry.async('string');
-                    // Передаем размер контента, а не всего zip-архива
-                    await handleFileContent(jsonContentString, jsonFileEntry.name, 'json', jsonContentString.length);
+
+        setTimeout(async () => { // Brief delay for loader to show
+            try {
+                if (fileNameLower.endsWith('.xml')) {
+                    const reader = new FileReader();
+                    reader.onprogress = (e) => { if (e.lengthComputable) updateLoaderProgress(e.loaded, e.total, 'Чтение XML'); };
+                    reader.onload = (e) => handleFileContent(e.target.result, file.name, 'xml');
+                    reader.onerror = () => { loaderContainer.style.display = 'none'; showNotification('Ошибка при чтении XML-файла', 'error', 'exclamation-circle'); isSelectiveLoadMode = false; rawXmlContentForSelection = null; rawJsonContentForSelection = null; };
+                    reader.readAsText(file);
+                } else if (fileNameLower.endsWith('.json.zip')) {
+                    updateLoaderProgress(0, fileSize, 'Распаковка JSON.ZIP');
+                    try {
+                        const zip = await JSZip.loadAsync(await file.arrayBuffer());
+                        let jsonFileEntry = Object.values(zip.files).find(
+                            f => f.name.match(/\d{2}_\d{2}_\d{6,7} \d{4}[_-]\d{2}[_-]\d{2}\.json$/i) && !f.dir
+                        );
+                        if (!jsonFileEntry) {
+                           jsonFileEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.json') && !f.dir);
+                        }
+
+                        if (jsonFileEntry) {
+                            updateLoaderProgress(fileSize, fileSize, 'Извлечение JSON из архива');
+                            const jsonContentString = await jsonFileEntry.async('string');
+                            handleFileContent(jsonContentString, jsonFileEntry.name, 'json');
+                        } else {
+                            throw new Error('JSON-файл с ожидаемым форматом имени (*.json) не найден в архиве JSON.ZIP.');
+                        }
+                    } catch (error) {
+                        loaderContainer.style.display = 'none';
+                        showNotification('Ошибка при обработке JSON.ZIP: ' + error.message, 'error', 'exclamation-circle');
+                        isSelectiveLoadMode = false; rawXmlContentForSelection = null; rawJsonContentForSelection = null;
+                    }
+                } else if (fileNameLower.endsWith('.zip')) { // For ZIP archives containing XML
+                    updateLoaderProgress(0, fileSize, 'Распаковка ZIP (XML)');
+                    try {
+                        const zip = await JSZip.loadAsync(await file.arrayBuffer());
+                        let xmlFileEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.xml') && !f.dir);
+                        if (xmlFileEntry) {
+                            updateLoaderProgress(fileSize, fileSize, 'Извлечение XML из архива');
+                            const xmlContent = await xmlFileEntry.async('string');
+                            handleFileContent(xmlContent, xmlFileEntry.name, 'xml');
+                        } else {
+                            throw new Error('XML-файл не найден в архиве ZIP.');
+                        }
+                    } catch (error) {
+                        loaderContainer.style.display = 'none';
+                        showNotification('Ошибка при обработке ZIP-файла: ' + error.message, 'error', 'exclamation-circle');
+                        isSelectiveLoadMode = false; rawXmlContentForSelection = null; rawJsonContentForSelection = null;
+                    }
                 } else {
-                    throw new Error('JSON-файл не найден в архиве.');
+                    loaderContainer.style.display = 'none';
+                    showNotification('Пожалуйста, выберите файл XML, ZIP или JSON.ZIP.', 'warning', 'exclamation-triangle');
+                    isSelectiveLoadMode = false; rawXmlContentForSelection = null; rawJsonContentForSelection = null;
                 }
-            } else if (fileNameLower.endsWith('.zip')) {
-                const zip = await JSZip.loadAsync(await file.arrayBuffer());
-                let xmlFileEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.xml') && !f.dir);
-                if (xmlFileEntry) {
-                    const xmlContent = await xmlFileEntry.async('string');
-                    await handleFileContent(xmlContent, xmlFileEntry.name, 'xml', xmlContent.length);
-                } else {
-                    throw new Error('XML-файл не найден в архиве.');
-                }
-            } else {
-                throw new Error('Пожалуйста, выберите файл XML, ZIP или JSON.ZIP.');
+            } catch (error) {
+                loaderContainer.style.display = 'none';
+                showNotification('Ошибка при обработке файла: ' + error.message, 'error', 'exclamation-circle');
+                isSelectiveLoadMode = false; rawXmlContentForSelection = null; rawJsonContentForSelection = null;
             }
-        } catch (error) {
-            loaderContainer.style.display = 'none';
-            showNotification('Ошибка при обработке файла: ' + error.message, 'error');
-            isSelectiveLoadMode = false;
-        }
+        }, 100);
     });
     
     document.getElementById('buildingsBtn').addEventListener('click', function() {
