@@ -1273,84 +1273,87 @@ function displayResults(data, title) {
         }
     }
     
-    function convertNspdCoordinatesToMsk(originalData) {
-        try {
-            // Глубокое копирование, чтобы не изменять исходные данные
-            const data = JSON.parse(JSON.stringify(originalData));
+function convertNspdCoordinatesToMsk(originalData) {
+    try {
+        const data = JSON.parse(JSON.stringify(originalData));
+        const cadNum = data.common.cadNum;
+
+        if (!cadNum || typeof MskFinder === 'undefined' || typeof proj4 === 'undefined' || typeof COORDINATE_SYSTEMS === 'undefined') {
+            alert('Ошибка: Необходимые для конвертации компоненты не загружены.');
+            return;
+        }
+
+        const mskCode = MskFinder.findMskCode(cadNum);
+        if (!mskCode) {
+            alert(`Не удалось автоматически определить код МСК для кадастрового номера ${cadNum}.`);
+            return;
+        }
+
+        const searchString = `МСК ${mskCode}`;
+        const targetSystem = COORDINATE_SYSTEMS.find(system => system.text && system.text.includes(searchString));
+
+        if (!targetSystem) {
+            alert(`В базе не найдено определение для системы координат "${searchString}".`);
+            return;
+        }
+
+        if ((targetSystem.offsetX === undefined || targetSystem.offsetX === 0) && (targetSystem.offsetY === undefined || targetSystem.offsetY === 0)) {
+            alert("ВНИМАНИЕ: Настройки смещения для этой МСК не настроены, координаты в выписке могут быть неверны.");
+        }
+
+        const sourceSystemDef = COORDINATE_SYSTEMS.find(s => s.value === 'EPSG:3857');
+        if (!sourceSystemDef || !targetSystem.def) {
+             alert('Отсутствует определение для исходной или целевой системы координат.');
+             return;
+        }
+
+        proj4.defs('EPSG:3857', sourceSystemDef.def);
+        proj4.defs(targetSystem.value, targetSystem.def);
+
+        const offsetX = targetSystem.offsetX || 0;
+        const offsetY = targetSystem.offsetY || 0;
+
+        // --- НАЧАЛО ИЗМЕНЕНИЯ ---
+        data.coordinates = data.coordinates.map(contour => {
+            // 1. Конвертируем все точки в контуре
+            const convertedContour = contour.map(point => {
+                const convertedPoint = proj4('EPSG:3857', targetSystem.value, [point.x, point.y]);
+                const newPoint = { ...point };
+                newPoint.x = convertedPoint[1] + offsetX;
+                newPoint.y = convertedPoint[0] + offsetY;
+                return newPoint;
+            });
             
-            const cadNum = data.common.cadNum;
-            // Проверяем, что глобальные переменные из внешних файлов загрузились
-            if (!cadNum || typeof MskFinder === 'undefined' || typeof proj4 === 'undefined' || typeof COORDINATE_SYSTEMS === 'undefined') {
-                alert('Ошибка: Необходимые для конвертации компоненты не загружены. Проверьте подключение sk.js и msk.js.');
-                return;
-            }
-
-            const mskCode = MskFinder.findMskCode(cadNum);
-            if (!mskCode) {
-                alert(`Не удалось автоматически определить код МСК для кадастрового номера ${cadNum}.`);
-                return;
-            }
-
-            const searchString = `МСК ${mskCode}`;
-            const targetSystem = COORDINATE_SYSTEMS.find(system => system.text && system.text.includes(searchString));
-
-            if (!targetSystem) {
-                alert(`В базе не найдено определение для системы координат "${searchString}".`);
-                return;
-            }
+            // 2. Инвертируем порядок точек в контуре
+            const reversedContour = convertedContour.reverse();
             
-            // Проверяем наличие смещений и выводим предупреждение, если их нет
-            if ((targetSystem.offsetX === undefined || targetSystem.offsetX === 0) && (targetSystem.offsetY === undefined || targetSystem.offsetY === 0)) {
-                alert("ВНИМАНИЕ: Настройки смещения для этой МСК не настроены, координаты в выписке могут быть неверны.");
-            }
-
-            const sourceSystemDef = COORDINATE_SYSTEMS.find(s => s.value === 'EPSG:3857');
-            if (!sourceSystemDef || !targetSystem.def) {
-                 alert('Отсутствует определение для исходной или целевой системы координат.');
-                 return;
-            }
-
-            // Определяем проекции для proj4
-            proj4.defs('EPSG:3857', sourceSystemDef.def);
-            proj4.defs(targetSystem.value, targetSystem.def);
-
-            const offsetX = targetSystem.offsetX || 0;
-            const offsetY = targetSystem.offsetY || 0;
-            
-            // Конвертируем каждую точку и инвертируем порядок
-            data.coordinates = data.coordinates.map(contour => {
-                // Сначала, как и раньше, преобразуем все точки в контуре
-                const convertedContour = contour.map(point => {
-                    const convertedPoint = proj4('EPSG:3857', targetSystem.value, [point.x, point.y]);
-                    const newPoint = { ...point };
-                    // Для проекций Меркатора на плоские СК часто требуется поменять X и Y местами
-                    newPoint.x = convertedPoint[1] + offsetX; 
-                    newPoint.y = convertedPoint[0] + offsetY;
-                    return newPoint;
-                });
-                // А затем просто меняем порядок элементов в получившемся массиве на обратный
-                return convertedContour.reverse();
+            // 3. ОБЯЗАТЕЛЬНО: Переназначаем порядковые номера точкам
+            const renumberedContour = reversedContour.map((point, index) => {
+                point.num = index + 1; // Номера точек начинаются с 1, а индекс массива с 0
+                return point;
             });
 
-            // Обновляем данные в выписке
-            data.coordinatesSystem = targetSystem.text;
-            data.source = 'nspd_converted'; // Изменяем источник, чтобы кнопка конвертации больше не появлялась
-            
-            resetAndShowLoader();
-            updateLoaderText('Пересчет координат и перерисовка...');
-            
-            // Небольшая задержка для того, чтобы пользователь увидел сообщение в лоадере
-            setTimeout(() => {
-                displayResults(data, 'Данные из ЕГРН (координаты в МСК)');
-                showLoader(false);
-            }, 250);
+            return renumberedContour;
+        });
+        // --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
-        } catch(e) {
-            console.error("Ошибка при конвертации координат:", e);
-            alert(`Произошла ошибка при конвертации: ${e.message}`);
+        data.coordinatesSystem = targetSystem.text;
+        data.source = 'nspd_converted';
+        
+        resetAndShowLoader();
+        updateLoaderText('Пересчет координат и перерисовка...');
+        
+        setTimeout(() => {
+            displayResults(data, 'Данные из ЕГРН (координаты в МСК)');
             showLoader(false);
-        }
+        }, 250);
+
+    } catch(e) {
+        console.error("Ошибка при конвертации координат:", e);
+        alert(`Произошла ошибка при конвертации: ${e.message}`);
+        showLoader(false);
     }
+}
     
 function toggleMerge(button) {
     const page = button.closest('.page');
