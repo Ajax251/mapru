@@ -955,7 +955,7 @@ function resetAndShowLoader() {
     
 
     
-  function createDataObject() { return { common: {}, params: {}, rights: [], restrictions: [], coordinates: [], coordinatesSystem: '', source: '', links: {} }; }
+    function createDataObject() { return { common: {}, params: {}, rights: [], restrictions: [], coordinates: [], coordinatesSystem: '', source: '' }; }
     function getValue(node, selector, d = '') { return (node.querySelector(selector)?.textContent || d).trim(); }
     function formatDate(d) { return d ? new Date(d).toLocaleDateString('ru-RU') : ''; }
     function formatDateTime(d) { return d ? new Date(d).toLocaleString('ru-RU') : ''; }
@@ -1060,88 +1060,58 @@ async function getNspdData(cadNum) {
         return { data };
     }
 
-async function parseNspdJson(feature) {
-    const options = feature.properties.options || {}; 
-    const data = createDataObject();
-    data.common.cadNum = options.cad_num || options.cad_number; 
-    data.common.objType = feature.properties.categoryName;
-    data.common.location = options.readable_address || options.address_readable_address; 
-    data.common.cost = options.cost_value;
-    data.common.status = options.status; 
-    data.common.assignDate = formatDate(options.land_record_reg_date || options.registration_date || options.build_record_registration_date);
-    
-    // В зависимости от типа объекта, запрашиваем связанные с ним объекты
-    if (data.common.objType === "Земельные участки ЕГРН") {
-        let areaText = ''; 
-        if (options.specified_area) areaText = `${options.specified_area} м² (уточненная)`; 
-        else if (options.declared_area) areaText = `${options.declared_area} м² (декларированная)`;
-        data.params['Площадь'] = areaText; 
-        data.params['Категория земель'] = options.land_record_category_type; 
-        data.params['Разрешенное использование'] = options.permitted_use_established_by_document;
-        data.links['ОКСы на земельном участке'] = await fetchLinkedObjects(feature);
-    } else {
-        data.params['Назначение'] = options.purpose || options.params_purpose; 
-        data.params['Наименование'] = options.name || options.building_name || options.params_name;
-        if (options.area) data.params['Площадь'] = `${options.area} м²`; 
-        if (options.params_extension) data.params['Протяженность'] = `${options.params_extension} м`;
-        data.links['ЗУ под объектом'] = await fetchLinkedObjects(feature);
+    async function parseNspdJson(feature) {
+        const options = feature.properties.options || {}; const data = createDataObject();
+        data.common.cadNum = options.cad_num || options.cad_number; data.common.objType = feature.properties.categoryName;
+        data.common.location = options.readable_address || options.address_readable_address; data.common.cost = options.cost_value;
+        data.common.status = options.status; data.common.assignDate = formatDate(options.land_record_reg_date || options.registration_date || options.build_record_registration_date);
+        if (data.common.objType === "Земельные участки ЕГРН") {
+            let areaText = ''; if (options.specified_area) areaText = `${options.specified_area} м² (уточненная)`; else if (options.declared_area) areaText = `${options.declared_area} м² (декларированная)`;
+            data.params['Площадь'] = areaText; data.params['Категория земель'] = options.land_record_category_type; data.params['Разрешенное использование'] = options.permitted_use_established_by_document;
+        } else {
+            data.params['Назначение'] = options.purpose || options.params_purpose; data.params['Наименование'] = options.name || options.building_name || options.params_name;
+            if (options.area) data.params['Площадь'] = `${options.area} м²`; if (options.params_extension) data.params['Протяженность'] = `${options.params_extension} м`;
+        }
+        
+      
+        data.coordinatesSystem = 'EPSG:3857 (НСПД)';
+       
+        
+        if (feature.geometry) {
+            const extractCoords = (geom) => {
+                if (!geom) return; let contourCounter = 1; 
+                if (geom.type === 'Polygon') { geom.coordinates.forEach(ring => { data.coordinates.push(ring.map((c, i) => ({ x: c[0], y: c[1], num: i + 1, contour: contourCounter }))); contourCounter++; }); }
+                else if (geom.type === 'MultiPolygon') { geom.coordinates.forEach(poly => { data.coordinates.push(poly[0].map((c, i) => ({ x: c[0], y: c[1], num: i + 1, contour: contourCounter }))); contourCounter++; }); }
+                else if (geom.type === 'LineString') { data.coordinates.push(geom.coordinates.map((c, i) => ({ x: c[0], y: c[1], num: i + 1, contour: 1 }))); }
+            }; extractCoords(feature.geometry);
+        }
+        data.source = 'nspd'; return data;
     }
-    
-    data.coordinatesSystem = 'EPSG:3857 (НСПД)';
-    
-    if (feature.geometry) {
-        const extractCoords = (geom) => {
-            if (!geom) return; 
-            let contourCounter = 1; 
-            if (geom.type === 'Polygon') { 
-                geom.coordinates.forEach(ring => { 
-                    data.coordinates.push(ring.map((c, i) => ({ x: c[0], y: c[1], num: i + 1, contour: contourCounter }))); 
-                    contourCounter++; 
-                }); 
-            } else if (geom.type === 'MultiPolygon') { 
-                geom.coordinates.forEach(poly => { 
-                    data.coordinates.push(poly[0].map((c, i) => ({ x: c[0], y: c[1], num: i + 1, contour: contourCounter }))); 
-                    contourCounter++; 
-                }); 
-            } else if (geom.type === 'LineString') { 
-                data.coordinates.push(geom.coordinates.map((c, i) => ({ x: c[0], y: c[1], num: i + 1, contour: 1 }))); 
-            }
-        }; 
-        extractCoords(feature.geometry);
-    }
-    data.source = 'nspd'; 
-    return data;
-}
     
 function displayResults(data, title) {
-    const output = document.getElementById('report-output');
-    const pages = []; 
+        const output = document.getElementById('report-output');
+        const pages = []; // Массив для хранения HTML-кода каждой будущей страницы
 
-    // --- Страница 1: Раздел 1 (Сведения о характеристиках) ---
-    const page1Html = `
-        <div class="main-header">
-            <div>${data.common.organ || 'Филиал ППК "Роскадастр"'}</div>
-            <div class="title-underline">полное наименование органа регистрации прав</div>
-            <h3>Выписка из Единого государственного реестра недвижимости об объекте недвижимости</h3>
-            <h4>${title}</h4>
-        </div>
-        <div class="header-line"><span><b>Раздел 1. Сведения о характеристиках объекта недвижимости</b></span></div>
-        <div class="section-title">${data.common.objType}</div>
-        <div class="section-subtitle">вид объекта недвижимости</div>
-        <table class="main-info-table">
-            ${generateTableRow('Кадастровый номер', data.common.cadNum)}
-            ${generateTableRow('Дата присвоения кадастрового номера', data.common.assignDate)}
-            ${generateTableRow('Местоположение', data.common.location)}
-            ${Object.entries(data.params).map(([key, value]) => generateTableRow(key, value)).join('')}
-            ${generateTableRow('Кадастровая стоимость', data.common.cost ? `${new Intl.NumberFormat('ru-RU').format(data.common.cost)} руб.` : '')}
-            
-            <!-- НАЧАЛО ИЗМЕНЕНИЯ: ДОБАВЬТЕ ЭТУ СТРОКУ -->
-            ${Object.entries(data.links || {}).map(([key, value]) => generateTableRow(key, Array.isArray(value) ? value.join(', ') : value)).join('')}
-            <!-- КОНЕЦ ИЗМЕНЕНИЯ -->
-
-            ${generateTableRow('Статус записи', data.common.status)}
-        </table>`;
-    pages.push(page1Html);
+        // --- Страница 1: Раздел 1 (Сведения о характеристиках) ---
+        const page1Html = `
+            <div class="main-header">
+                <div>${data.common.organ || 'Филиал ППК "Роскадастр"'}</div>
+                <div class="title-underline">полное наименование органа регистрации прав</div>
+                <h3>Выписка из Единого государственного реестра недвижимости об объекте недвижимости</h3>
+                <h4>${title}</h4>
+            </div>
+            <div class="header-line"><span><b>Раздел 1. Сведения о характеристиках объекта недвижимости</b></span></div>
+            <div class="section-title">${data.common.objType}</div>
+            <div class="section-subtitle">вид объекта недвижимости</div>
+            <table class="main-info-table">
+                ${generateTableRow('Кадастровый номер', data.common.cadNum)}
+                ${generateTableRow('Дата присвоения кадастрового номера', data.common.assignDate)}
+                ${generateTableRow('Местоположение', data.common.location)}
+                ${Object.entries(data.params).map(([key, value]) => generateTableRow(key, value)).join('')}
+                ${generateTableRow('Кадастровая стоимость', data.common.cost ? `${new Intl.NumberFormat('ru-RU').format(data.common.cost)} руб.` : '')}
+                ${generateTableRow('Статус записи', data.common.status)}
+            </table>`;
+        pages.push(page1Html);
 
         // --- Страница 2: Раздел 2 (Сведения о правах) ---
         if (data.rights && data.rights.length > 0) {
@@ -1262,42 +1232,6 @@ function toggleMerge(button) {
     }
 }
     
-    
-    async function fetchLinkedObjects(feature) {
-    if (!feature || !feature.properties) return null;
-    
-    // API НСПД использует `id` объекта и `properties.category` в качестве параметров запроса
-    const geomId = feature.id;
-    const categoryId = feature.properties.category;
-    const categoryName = feature.properties.categoryName;
-
-    // Определяем правильный URL в зависимости от типа объекта
-    let path = '';
-    if (categoryName === "Земельные участки ЕГРН") {
-        // Эндпоинт для поиска ОКС'ов на земельном участке
-        path = `/api/geoportal/v1/tab-group-data?tabClass=objectsList&categoryId=${categoryId}&geomId=${geomId}`;
-    } else {
-        // Эндпоинт для поиска земельного участка под ОКС'ом
-        path = `/api/geoportal/v1/tab-values-data?tabClass=landLinks&categoryId=${categoryId}&geomId=${geomId}`;
-    }
-
-    // Проверка на наличие необходимых ID
-    if (!geomId || !categoryId) {
-        console.error("Отсутствует geomId или categoryId, невозможно запросить связанные объекты.");
-        return null;
-    }
-
-    try {
-        const res = await fetch(`https://nspd.gov.ru${path}`);
-        if (!res.ok) return null;
-        const data = await res.json();
-        // Структура ответа для разных эндпоинтов отличается
-        return (data?.object?.[0]?.value || data?.value) || null;
-    } catch (e) {
-        console.error("Ошибка при запросе связанных объектов:", e);
-        return null;
-    }
-}
     
     function drawPlan(contours, canvasId, source) {
         const canvas = document.getElementById(canvasId); if (!canvas) return; const ctx = canvas.getContext('2d'); const container = canvas.parentElement;
