@@ -889,9 +889,9 @@ async function handleFileSelect(event) {
             extractAndShowObjectList(xmlString, records, fileName, reportTitle);
             document.getElementById('selectObjectBtn').style.display = 'inline-flex';
         } else {
-            const { data, isKptFile } = parseXml(xmlString);
-            // --- ИЗМЕНЕНИЕ: Используем новый заголовок и передаем флаг isKptFile ---
-            displayResults(data, reportTitle, isKptFile);
+            const { data } = parseXml(xmlString);
+            // --- ИЗМЕНЕНИЕ: Используем новый заголовок ---
+            displayResults(data, reportTitle);
             showResultsView();
         }
     } catch (error) { displayError(error, true); }
@@ -964,9 +964,9 @@ async function fetchFromKptArchive() {
     const xmlDoc = parser.parseFromString(xmlString, "text/xml");
     const reportTitle = createTitleFromXml(xmlDoc, latestFile.name);
 
-    const { data, isKptFile } = parseXml(xmlString, cadNum);
+    const { data } = parseXml(xmlString, cadNum);
       
-        displayResults(data, reportTitle, isKptFile);
+        displayResults(data, reportTitle);
         showResultsView();
     } catch (error) {
         displayError(error);
@@ -1019,7 +1019,7 @@ function resetAndShowLoader() {
     showLoader(true);
 }
 
-function reShowObjectSelectionDialog() {
+    function reShowObjectSelectionDialog() {
             if (loadedKptData && loadedKptData.objectList.length > 0) {
         // --- ИЗМЕНЕНИЕ: Извлекаем title из loadedKptData ---
         const { xmlString, fileName, objectList, title } = loadedKptData;
@@ -1044,8 +1044,8 @@ function reShowObjectSelectionDialog() {
                     document.body.removeChild(overlay); resetAndShowLoader();
                     setTimeout(() => {
                         try {
-                            const { data, isKptFile } = parseXml(xmlString, obj.cadNum);
-                             displayResults(data, title, isKptFile);
+                            const { data } = parseXml(xmlString, obj.cadNum);
+                             displayResults(data, title);
                             showResultsView();
                         } catch (e) { displayError(e); } 
                         finally { showLoader(false); }
@@ -1141,119 +1141,80 @@ async function getNspdData(cadNum) {
     }
 }
     
-function parseXml(xmlString, targetCadNum = null) {
-    const parser = new DOMParser();
-    const xmlDoc = parser.parseFromString(xmlString, "text/xml");
-    if (xmlDoc.querySelector('parsererror')) {
-        throw new Error('Ошибка парсинга XML-файла.');
-    }
+      function parseXml(xmlString, targetCadNum = null) {
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(xmlString, "text/xml");
+        if (xmlDoc.querySelector('parsererror')) throw new Error('Ошибка парсинга XML-файла.');
+        
+        const isKptFile = xmlDoc.querySelector('extract_cadastral_plan_territory') !== null;
 
-    const isKptFile = xmlDoc.querySelector('extract_cadastral_plan_territory') !== null;
+        let mainRecordNode;
+        const allRecords = xmlDoc.querySelectorAll('land_record, build_record, construction_record');
+        
+        if (targetCadNum) {
+            mainRecordNode = Array.from(allRecords).find(r => getValue(r, 'object > common_data > cad_number') === targetCadNum);
+        } else { mainRecordNode = allRecords[0]; }
 
-    let mainRecordNode;
-    const allRecords = xmlDoc.querySelectorAll('land_record, build_record, construction_record');
-
-    if (targetCadNum) {
-        mainRecordNode = Array.from(allRecords).find(r => getValue(r, 'object > common_data > cad_number') === targetCadNum);
-    } else {
-        mainRecordNode = allRecords[0];
-    }
-
-    if (!mainRecordNode) {
-        throw new Error(`Объект ${targetCadNum || ''} не найден в XML.`);
-    }
-
-    const data = createDataObject();
-    const objectTypeRaw = getValue(mainRecordNode, 'object > common_data > type > value');
-    data.common.organ = getValue(xmlDoc, 'organ_registr_rights');
-    data.common.docDate = formatDate(getValue(xmlDoc, 'date_formation'));
-    data.common.docNum = getValue(xmlDoc, 'registration_number');
-    data.common.cadNum = getValue(mainRecordNode, 'object > common_data > cad_number');
-    data.common.assignDate = formatDate(getValue(mainRecordNode, 'record_info > registration_date'));
-    data.common.objType = {
-        'land_record': 'Земельный участок',
-        'build_record': 'Здание',
-        'construction_record': 'Сооружение'
-    }[mainRecordNode.tagName] || objectTypeRaw;
-    data.common.location = getValue(mainRecordNode, 'address_location > address > readable_address');
-    data.common.cost = getValue(mainRecordNode, 'cost > value');
-    data.common.status = getValue(xmlDoc, 'status');
-
-    if (mainRecordNode.tagName === 'land_record') {
-        data.params['Площадь'] = `${getValue(mainRecordNode, 'area > value')} ± ${getValue(mainRecordNode, 'area > inaccuracy')} кв. м.`;
-        data.params['Категория земель'] = getValue(mainRecordNode, 'params > category > type > value');
-        data.params['Разрешенное использование'] = getValue(mainRecordNode, 'params > permitted_use > permitted_use_established > by_document');
-    } else {
-        data.params['Назначение'] = getValue(mainRecordNode, 'params > purpose > value') || getValue(mainRecordNode, 'params > purpose');
-        data.params['Наименование'] = getValue(mainRecordNode, 'params > name');
-        if (mainRecordNode.tagName === 'build_record') data.params['Площадь'] = `${getValue(mainRecordNode, 'params > area')} кв. м.`;
-        if (mainRecordNode.tagName === 'construction_record') data.params['Протяженность'] = `${getValue(mainRecordNode, 'params base_parameter > extension')} м.`;
-    }
-
-    data.coordinatesSystem = getValue(mainRecordNode, 'contours_location contour entity_spatial sk_id');
-
-    const recordCadNum = data.common.cadNum;
-
-    xmlDoc.querySelectorAll(`right_record`).forEach(rec => {
-        const objectCadNumInRight = getValue(rec, 'object_cad_number');
-        if (!isKptFile || objectCadNumInRight === recordCadNum || !objectCadNumInRight) {
-            const holderNode = rec.querySelector('right_holders > right_holder');
-            let holderName = [getValue(holderNode, 'individual surname'), getValue(holderNode, 'individual name'), getValue(holderNode, 'individual patronymic')].filter(Boolean).join(' ').trim() || getValue(holderNode, 'legal_entity name') || getValue(holderNode, 'public_formation municipality name') || 'не определено';
-            data.rights.push({
-                holder: holderName,
-                type: getValue(rec, 'right_data > right_type > value'),
-                number: getValue(rec, 'right_data > right_number'),
-                date: formatDateTime(getValue(rec, 'record_info > registration_date')),
-                share: getShare(rec.querySelector('right_data'))
-            });
+        if (!mainRecordNode) throw new Error(`Объект ${targetCadNum || ''} не найден в XML.`);
+        
+        const data = createDataObject();
+        const objectTypeRaw = getValue(mainRecordNode, 'object > common_data > type > value');
+        data.common.organ = getValue(xmlDoc, 'organ_registr_rights');
+        data.common.docDate = formatDate(getValue(xmlDoc, 'date_formation'));
+        data.common.docNum = getValue(xmlDoc, 'registration_number');
+        data.common.cadNum = getValue(mainRecordNode, 'object > common_data > cad_number');
+        data.common.assignDate = formatDate(getValue(mainRecordNode, 'record_info > registration_date'));
+        data.common.objType = { 'land_record': 'Земельный участок', 'build_record': 'Здание', 'construction_record': 'Сооружение' }[mainRecordNode.tagName] || objectTypeRaw;
+        data.common.location = getValue(mainRecordNode, 'address_location > address > readable_address');
+        data.common.cost = getValue(mainRecordNode, 'cost > value');
+        data.common.status = getValue(xmlDoc, 'status');
+        if (mainRecordNode.tagName === 'land_record') {
+            data.params['Площадь'] = `${getValue(mainRecordNode, 'area > value')} ± ${getValue(mainRecordNode, 'area > inaccuracy')} кв. м.`;
+            data.params['Категория земель'] = getValue(mainRecordNode, 'params > category > type > value');
+            data.params['Разрешенное использование'] = getValue(mainRecordNode, 'params > permitted_use > permitted_use_established > by_document');
+        } else {
+            data.params['Назначение'] = getValue(mainRecordNode, 'params > purpose > value') || getValue(mainRecordNode, 'params > purpose');
+            data.params['Наименование'] = getValue(mainRecordNode, 'params > name');
+            if (mainRecordNode.tagName === 'build_record') data.params['Площадь'] = `${getValue(mainRecordNode, 'params > area')} кв. м.`;
+            if (mainRecordNode.tagName === 'construction_record') data.params['Протяженность'] = `${getValue(mainRecordNode, 'params base_parameter > extension')} м.`;
         }
-    });
-
-    xmlDoc.querySelectorAll(`restrict_record`).forEach(rec => {
-        const objectCadNumInRestriction = getValue(rec, 'object_cad_number');
-        if (!isKptFile || objectCadNumInRestriction === recordCadNum || !objectCadNumInRestriction) {
-            const docNode = rec.querySelector('underlying_documents > underlying_document');
-            data.restrictions.push({
-                type: getValue(rec, 'restrictions_encumbrances_data > restriction_encumbrance_type > value'),
-                number: getValue(rec, 'restrictions_encumbrances_data > restriction_encumbrance_number'),
-                date: formatDateTime(getValue(rec, 'record_info > registration_date')),
-                basis: docNode ? `${getValue(docNode, 'document_name')} №${getValue(docNode, 'document_number')} от ${formatDate(getValue(docNode, 'document_date'))}` : ''
-            });
-        }
-    });
-
-    // --- ИСПРАВЛЕННАЯ ЛОГИКА ИЗВЛЕЧЕНИЯ КООРДИНАТ И НУМЕРАЦИИ КОНТУРОВ ---
-    const mainContoursLocation = mainRecordNode.querySelector(':scope > contours_location');
-
-    if (mainContoursLocation) {
-        let contourCounter = 1; // Инициализируем счетчик контуров
-
-        // Ищем все элементы <spatial_element>, так как каждый из них является отдельным контуром
-        mainContoursLocation.querySelectorAll('spatial_element, Spatial_Element').forEach(spatialElement => {
-            const contourCoords = [];
-            spatialElement.querySelectorAll('ordinate, Ordinate').forEach(ord => {
-                contourCoords.push({
-                    x: parseFloat(getValue(ord, 'x, X')),
-                    y: parseFloat(getValue(ord, 'y, Y')),
-                    num: getValue(ord, 'num_geopoint, Num_Geopoint, ord_nmb', ''),
-                    delta: getValue(ord, 'delta_geopoint, Delta_Geopoint', ''),
-                    zacrep: getValue(ord, 'geopoint_zacrep, Geopoint_Zacrep', ''),
-                    contour: contourCounter // Присваиваем всем точкам текущий номер контура
-                });
-            });
-
-            if (contourCoords.length > 0) {
-                data.coordinates.push(contourCoords);
+        
+           data.coordinatesSystem = getValue(mainRecordNode, 'entity_spatial > sk_id');
+        
+        const recordCadNum = data.common.cadNum;
+        
+        xmlDoc.querySelectorAll(`right_record`).forEach(rec => {
+            const objectCadNumInRight = getValue(rec, 'object_cad_number');
+            if (!isKptFile || objectCadNumInRight === recordCadNum || !objectCadNumInRight) { // Добавлено условие !objectCadNumInRight для выписок на 1 объект
+                const holderNode = rec.querySelector('right_holders > right_holder');
+                // --- ВОТ ИЗМЕНЕНИЕ ---
+                let holderName = [ getValue(holderNode, 'individual surname'), getValue(holderNode, 'individual name'), getValue(holderNode, 'individual patronymic') ].filter(Boolean).join(' ').trim() || getValue(holderNode, 'legal_entity name') || getValue(holderNode, 'public_formation municipality name') || 'не определено';
+                data.rights.push({ holder: holderName, type: getValue(rec, 'right_data > right_type > value'), number: getValue(rec, 'right_data > right_number'), date: formatDateTime(getValue(rec, 'record_info > registration_date')), share: getShare(rec.querySelector('right_data')) });
             }
-            
-            // Увеличиваем счетчик ПОСЛЕ обработки одного <spatial_element>
-            contourCounter++;
         });
-    }
+        
+        xmlDoc.querySelectorAll(`restrict_record`).forEach(rec => {
+             const objectCadNumInRestriction = getValue(rec, 'object_cad_number');
+             if (!isKptFile || objectCadNumInRestriction === recordCadNum || !objectCadNumInRestriction) {
+                const docNode = rec.querySelector('underlying_documents > underlying_document');
+                data.restrictions.push({ type: getValue(rec, 'restrictions_encumbrances_data > restriction_encumbrance_type > value'), number: getValue(rec, 'restrictions_encumbrances_data > restriction_encumbrance_number'), date: formatDateTime(getValue(rec, 'record_info > registration_date')), basis: docNode ? `${getValue(docNode, 'document_name')} №${getValue(docNode, 'document_number')} от ${formatDate(getValue(docNode, 'document_date'))}` : '' });
+            }
+        });
 
-    data.source = 'xml';
-    return { data, isKptFile };
-}
+        let contourCounter = 1;
+        mainRecordNode.querySelectorAll('contour, Contour').forEach(contourNode => {
+            contourNode.querySelectorAll('spatials_elements > spatial_element, Spatials_Elements > Spatial_Element').forEach(spatialElement => {
+                const contourCoords = [];
+                spatialElement.querySelectorAll('ordinate, Ordinate').forEach(ord => {
+                    contourCoords.push({ x: parseFloat(getValue(ord, 'x, X')), y: parseFloat(getValue(ord, 'y, Y')), num: getValue(ord, 'num_geopoint, Num_Geopoint, ord_nmb', ''), delta: getValue(ord, 'delta_geopoint, Delta_Geopoint', ''), zacrep: getValue(ord, 'geopoint_zacrep, Geopoint_Zacrep', ''), contour: contourCounter });
+                });
+                if (contourCoords.length > 0) data.coordinates.push(contourCoords);
+                contourCounter++;
+            });
+        });
+        data.source = 'xml';
+        return { data };
+    }
 
 async function parseNspdJson(feature) {
     const options = feature.properties.options || {}; 
@@ -1308,20 +1269,16 @@ async function parseNspdJson(feature) {
     return data;
 }
     
-function displayResults(data, title, isKptFile = false) {
+function displayResults(data, title) {
     const output = document.getElementById('report-output');
     const pages = []; 
-
-    const statementTitle = isKptFile 
-        ? 'КПТ из Единого государственного реестра недвижимости' 
-        : 'Выписка из Единого государственного реестра недвижимости об объекте недвижимости';
 
     // --- Страница 1: Раздел 1 (Сведения о характеристиках) ---
     const page1Html = `
         <div class="main-header">
             <div>${data.common.organ || 'Филиал ППК "Роскадастр"'}</div>
             <div class="title-underline">полное наименование органа регистрации прав</div>
-            <h3>${statementTitle}</h3>
+            <h3>Выписка из Единого государственного реестра недвижимости об объекте недвижимости</h3>
             <h4>${title}</h4>
         </div>
         <div class="header-line"><span><b>Раздел 1. Сведения о характеристиках объекта недвижимости</b></span></div>
