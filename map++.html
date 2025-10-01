@@ -3175,17 +3175,10 @@ function updatePolygonStyle() {
                 if (polygon.properties.get('isParcelInQuarter') || polygon.properties.get('isFoundInArea')) { // Check both flags
                             const featureData = polygon.properties.get('featureData');
                      const parcelOptions = featureData?.properties?.options || {};
-           // новый код
-                     let isDeclared = false;
-                    
-                    if (parcelOptions.specified_area != null || parcelOptions.land_record_area_verified != null) {
-                        isDeclared = false;
-                    }
-                    else if (parcelOptions.declared_area != null || parcelOptions.land_record_area_declaration != null || parcelOptions.land_record_area != null) {
-                        isDeclared = true;
-                    }
-
-                    const strokeColor = isDeclared ? polygonStyle.declaredParcelsColor : polygonStyle.parcelsColor;
+                     const isVerified = parcelOptions.specified_area || parcelOptions.land_record_area_verified;
+                     const hasDeclaredField = parcelOptions.declared_area || parcelOptions.land_record_area_declaration || parcelOptions.land_record_area;
+                     const isDeclared = !isVerified && hasDeclaredField;
+                     const strokeColor = isDeclared ? polygonStyle.declaredParcelsColor : polygonStyle.parcelsColor;
                     
                     polygon.options.set({
                         strokeColor: strokeColor,
@@ -4601,7 +4594,7 @@ async function getAllParcelsInQuarter(lat, lon, isSearchMode = false, directQuar
         await populateSidebarWithParcels(nspdParcelsData.features);
         
         updatePlacemarksVisibility();
-     //   applyCurrentTheme();
+        applyCurrentTheme();
         showNotification(`Загружено участков: ${parcelFeaturesData.length} для ${quarterNumberToQuery}`, 'success');
         hideLoader();
 
@@ -7417,38 +7410,50 @@ async function processAndDrawParcels(features, source) {
                  continue;
             }
 
-            const geometryType = feature.geometry.type;
-            
-            // --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
-            const polygonsData = [];
+          
+               const geometryType = feature.geometry.type;
+
+            // --- НАЧАЛО БЛОКА ИЗМЕНЕНИЙ ---
+            let polygonsToProcess = [];
             if (geometryType === 'Polygon' && feature.geometry.coordinates) {
-                polygonsData.push(feature.geometry.coordinates);
+                // Для 'Polygon' у нас один массив с контурами
+                polygonsToProcess.push(feature.geometry.coordinates);
             } else if (geometryType === 'MultiPolygon' && Array.isArray(feature.geometry.coordinates)) {
-                feature.geometry.coordinates.forEach(polyCoords => polygonsData.push(polyCoords));
+                // Для 'MultiPolygon' у нас массив массивов, берем каждый
+                polygonsToProcess = feature.geometry.coordinates;
             } else {
-                continue;
+                continue; // Пропускаем объекты без поддерживаемой геометрии
             }
 
-            for (const polygonRings of polygonsData) {
-                const allProcessedRings = polygonRings.map(ring => {
+            // Перебираем каждый полигон (для MultiPolygon их будет несколько, для Polygon - один)
+            for (const singlePolygonRings of polygonsToProcess) {
+                // singlePolygonRings - это массив контуров для ОДНОГО полигона
+                // Например: [ [внешний], [дырка1], [дырка2] ]
+
+                // Обрабатываем все контуры (внешний и внутренние) этого полигона
+                const allProcessedRingsForYandex = singlePolygonRings.map(ring => {
                     if (!Array.isArray(ring) || ring.length < 3) return null;
 
-                    const coordinates = ring.map(coord => {
+                    const coordinatesWGS84 = ring.map(coord => {
                         if (!Array.isArray(coord) || coord.length !== 2 || typeof coord[0] !== 'number' || typeof coord[1] !== 'number') return null;
                         try {
                             const p = proj4('EPSG:3857', 'EPSG:4326', coord);
-                            return (!p || !isFinite(p[0]) || !isFinite(p[1])) ? null : [p[1], p[0]];
+                            return (!p || !isFinite(p[0]) || !isFinite(p[1])) ? null : [p[1], p[0]]; // [lat, lon]
                         } catch { return null; }
                     }).filter(p => p !== null);
                     
-                    if (coordinates.length < 3) return null;
+                    if (coordinatesWGS84.length < 3) return null;
 
-                    return coordinates.map(coord => [coord[0] - mapOffsetY * 0.000008983, coord[1] - mapOffsetX * 0.000008983]);
+                    // Применяем смещение к готовому контуру
+                    return coordinatesWGS84.map(coord => [coord[0] - mapOffsetY * 0.000008983, coord[1] - mapOffsetX * 0.000008983]);
                 }).filter(r => r !== null);
                 
-                if (allProcessedRings.length === 0) continue;
+                // Если после обработки не осталось валидных контуров, пропускаем этот полигон
+                if (allProcessedRingsForYandex.length === 0) continue;
 
+                // Получаем кадастровый номер и другие свойства
                 const cadastralNumber = feature.properties.descr;
+          
                 const parcelOptions = feature.properties.options || {};
                 const address = parcelOptions.readable_address || 'Адрес не указан';
                 const areaText = getAreaText(parcelOptions);
@@ -7456,45 +7461,10 @@ async function processAndDrawParcels(features, source) {
                 const vri = parcelOptions.permitted_use_established_by_document || null;
                 const ownershipType = parcelOptions.ownership_type || '-';
                 const rightType = parcelOptions.right_type || '-';
-              
-              
-               
-                let isDeclared = false;
-
-                // --- НАЧАЛО БЛОКА ЛОГИРОВАНИЯ ---
-                if (cadastralNumber === "16:56:010136:21" || cadastralNumber === "16:56:010136:23") {
-                    console.log(`--- Логирование для участка ${cadastralNumber} ---`);
-                    console.log("1. Исходные поля площади из parcelOptions:");
-                    console.log(`   - specified_area:`, parcelOptions.specified_area, `(тип: ${typeof parcelOptions.specified_area})`);
-                    console.log(`   - land_record_area_verified:`, parcelOptions.land_record_area_verified, `(тип: ${typeof parcelOptions.land_record_area_verified})`);
-                    console.log(`   - declared_area:`, parcelOptions.declared_area, `(тип: ${typeof parcelOptions.declared_area})`);
-                    console.log(`   - land_record_area_declaration:`, parcelOptions.land_record_area_declaration, `(тип: ${typeof parcelOptions.land_record_area_declaration})`);
-                    console.log(`   - land_record_area:`, parcelOptions.land_record_area, `(тип: ${typeof parcelOptions.land_record_area})`);
-                }
-                // --- КОНЕЦ БЛОКА ЛОГИРОВАНИЯ ---
-
-                if (parcelOptions.specified_area != null || parcelOptions.land_record_area_verified != null) {
-                    isDeclared = false;
-                } else if (parcelOptions.declared_area != null || parcelOptions.land_record_area_declaration != null || parcelOptions.land_record_area != null) {
-                    isDeclared = true;
-                }
-
+                const isVerified = parcelOptions.specified_area || parcelOptions.land_record_area_verified;
+                const hasDeclaredField = parcelOptions.declared_area || parcelOptions.land_record_area_declaration || parcelOptions.land_record_area;
+                const isDeclared = !isVerified && hasDeclaredField;
                 const finalStrokeColor = isAreaSearchSource ? '#FF4500' : (isDeclared ? polygonStyle.declaredParcelsColor : polygonStyle.parcelsColor);
-                
-                // --- НАЧАЛО БЛОКА ЛОГИРОВАНИЯ ---
-                if (cadastralNumber === "16:56:010136:21" || cadastralNumber === "16:56:010136:23") {
-                    console.log(`2. Результат проверки:`);
-                    console.log(`   - isDeclared:`, isDeclared);
-                    console.log(`3. Выбранный цвет:`);
-                    console.log(`   - isAreaSearchSource:`, isAreaSearchSource);
-                    console.log(`   - Цвет для декларированной:`, polygonStyle.declaredParcelsColor);
-                    console.log(`   - Цвет для уточненной:`, polygonStyle.parcelsColor);
-                    console.log(`   - Итоговый цвет (finalStrokeColor):`, finalStrokeColor);
-                    console.log("--- Конец логирования ---");
-                }
-                // --- КОНЕЦ БЛОКА ЛОГИРОВАНИЯ ---
-                
-                
 
                 const hintContent = {
                      cadastralNumber: `${cadastralNumber}`,
@@ -7518,16 +7488,22 @@ async function processAndDrawParcels(features, source) {
                      isFoundInArea: isAreaSearchSource
                  };
 
-                 const parcelPolygon = new ymaps.Polygon(allProcessedRings, polygonProperties, {
-                     strokeColor: finalStrokeColor,
-                     strokeWidth: polygonStyle.width - 1,
-                     strokeOpacity: 0.8,
-                     fillColor: '#00000000',
-                     hintLayout: customHintLayout,
-                     hintOpenTimeout: 100, hintCloseTimeout: 50,
-                     cursor: 'pointer',
-                     zIndex: isAreaSearchSource ? 800 : 500
-                 });
+                    const parcelPolygon = new ymaps.Polygon(
+                     allProcessedRingsForYandex, // <-- ПЕРЕДАЕМ МАССИВ ВСЕХ ОБРАБОТАННЫХ КОНТУРОВ
+                     polygonProperties, 
+                     {
+                         strokeColor: finalStrokeColor,
+                         strokeWidth: polygonStyle.width - 1,
+                         strokeOpacity: 0.8,
+                         fillColor: '#00000000',
+                         // ВАЖНО: Устанавливаем правило заливки для корректной отрисовки дырок
+                         fillMethod: 'evenOdd', 
+                         hintLayout: customHintLayout,
+                         hintOpenTimeout: 100, hintCloseTimeout: 50,
+                         cursor: 'pointer',
+                         zIndex: isAreaSearchSource ? 800 : 500
+                     }
+                 );
                 
                  parcelPolygon.events.add('click', function (e) {
                       if (e.get('altKey')) {
@@ -12917,14 +12893,19 @@ function setActiveTheme(theme) {
     }
 }
 
-// новый код
-// НОВЫЙ КОД - ЗАМЕНИТЬ ВСЮ ФУНКЦИЮ
 function applyCurrentTheme() {
-    // Эта функция временно отключена, чтобы предотвратить 
-    // автоматическое перекрашивание полигонов после загрузки.
-    // Это позволяет сохранить базовые цвета (зеленый/красный) для уточненной/декларированной площади.
-    console.log("Вызов applyCurrentTheme() проигнорирован для сохранения базовых цветов.");
-    return; 
+    hideLegends();
+    if (currentTheme === 'cost') applyCostTheme();
+    else if (currentTheme === 'use') applyUseTheme();
+    else if (currentTheme === 'ownership') applyOwnershipTheme();
+    else if (currentTheme === 'registration_date') applyRegistrationDateTheme();
+    else if (currentTheme === 'ulu') applyUluTheme();
+    else resetThemeVisuals();
+
+    if (currentTheme === 'use' && selectedVriFromLegend !== null) applyVriFilter();
+    if (currentTheme === 'ownership' && selectedOwnershipFromLegend !== null) applyOwnershipFilter();
+    if (currentTheme === 'registration_date' && selectedRegistrationDateFromLegend !== null) applyRegistrationDateFilter();
+    if (currentTheme === 'ulu' && selectedUluFromLegend !== null) applyUluFilter();
 }
 
 // --- NEW FUNCTION ---
@@ -15051,16 +15032,7 @@ async function drawFoundParcels(parcels, markAsFoundInArea = false) {
                 const ownershipType = parcelOptions.ownership_type || '-';
                  const rightType = parcelOptions.right_type || '-';
 
-              // новый код
-                 let isDeclared = false;
-
-                 if (parcelOptions.specified_area != null || parcelOptions.land_record_area_verified != null) {
-                    isDeclared = false;
-                 }
-                 else if (parcelOptions.declared_area != null || parcelOptions.land_record_area_declaration != null || parcelOptions.land_record_area != null) {
-                    isDeclared = true;
-                 }
-
+                 const isDeclared = !parcelOptions.specified_area && !parcelOptions.land_record_area_verified && !parcelOptions.land_record_area && (parcelOptions.land_record_area_declaration || parcelOptions.declared_area);
                  const strokeColor = isDeclared ? polygonStyle.declaredParcelsColor : polygonStyle.parcelsColor;
 
                  // Create hint content including ownership
