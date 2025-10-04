@@ -11157,21 +11157,41 @@ async function getAllZouitsInObject(lat, lon) {
         const cadNumber = targetPolygon.properties.get('cadastralNumber') || 'выбранный объект';
         showLoader(`Подготовка геометрии для запроса по ${cadNumber}...`);
 
-        // 2. Преобразуем геометрию найденного полигона для API запроса
-        const yandexCoordRings = targetPolygon.geometry.getCoordinates();
+        // --- НАЧАЛО ИЗМЕНЕНИЙ ---
+        const geometryType = targetPolygon.geometry.getType();
+        const allCoordRings = targetPolygon.geometry.getCoordinates();
+        let outerRing;
+
+        // Извлекаем только первый (внешний) контур, чтобы упростить геометрию для API
+        if (geometryType === 'Polygon') {
+            outerRing = allCoordRings[0]; // Первый элемент - это всегда внешний контур
+        } else if (geometryType === 'MultiPolygon') {
+            outerRing = allCoordRings[0][0]; // Берем первый полигон из мультиполигона и его внешний контур
+        } else {
+            throw new Error(`Неподдерживаемый тип геометрии для поиска: ${geometryType}`);
+        }
+
+        if (!outerRing || outerRing.length < 3) {
+            throw new Error('Не удалось получить корректный контур объекта для поиска.');
+        }
+
+        // Преобразуем координаты ТОЛЬКО внешнего контура в EPSG:3857
+        const transformedOuterRing = outerRing.map(coord => {
+            const trueLat = coord[0] + (mapOffsetY * 0.000008983);
+            const trueLon = coord[1] + (mapOffsetX * 0.000008983);
+            return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
+        });
+        
+        // Формируем геометрию для API как простой Polygon без "дырок" и с явным указанием CRS
         const geometryForApi = {
-            "type": targetPolygon.geometry.getType(), // 'Polygon' или 'MultiPolygon'
-            "coordinates": yandexCoordRings.map(ring => {
-                // Обрабатываем каждый контур (внешний и внутренние)
-                return ring.map(coord => {
-                    // 2.1. Возвращаем координаты к "истинным" WGS84, убирая смещение карты
-                    const trueLat = coord[0] + (mapOffsetY * 0.000008983);
-                    const trueLon = coord[1] + (mapOffsetX * 0.000008983);
-                    // 2.2. Проецируем из WGS84 в EPSG:3857, который ожидает API
-                    return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
-                });
-            })
+            "crs": {
+                "type": "name",
+                "properties": { "name": "EPSG:3857" }
+            },
+            "type": "Polygon",
+            "coordinates": [transformedOuterRing] // Двойные скобки обязательны для типа Polygon
         };
+        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         showLoader(`Поиск ЗОУИТ в границах объекта ${cadNumber}...`);
 
@@ -11181,7 +11201,7 @@ async function getAllZouitsInObject(lat, lon) {
                 "type": "FeatureCollection",
                 "features": [{
                     "type": "Feature",
-                    "geometry": geometryForApi,
+                    "geometry": geometryForApi, // Используем новую, упрощенную геометрию
                     "properties": {}
                 }]
             },
@@ -11196,7 +11216,10 @@ async function getAllZouitsInObject(lat, lon) {
         });
 
         if (!response.ok) {
-            throw new Error(`Ошибка запроса к НСПД: ${response.status}`);
+            // Попробуем прочитать тело ошибки для более детальной информации
+            const errorData = await response.json().catch(() => null);
+            const errorMessage = errorData?.message || `Ошибка запроса к НСПД: ${response.status}`;
+            throw new Error(errorMessage);
         }
         
         const zouitsData = await response.json();
