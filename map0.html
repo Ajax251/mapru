@@ -5328,10 +5328,6 @@ numberedPointSize = parseInt(localStorage.getItem('numberedPointSize'), 10) || 1
                     <i class="fas fa-exclamation-triangle"></i>ЗОУИТ в квартале
                 </div>
                 
-                   <div class="custom-context-menu-item" id="all-zouits-in-object-menu-item">
-                    <i class="fas fa-search-plus"></i>ЗОУИТ в объекте
-                </div>
-                
                 <div class="custom-context-menu-item" id="quarter-menu-item">
                     <i class="fas fa-th"></i>Границы квартала
                 </div>
@@ -5524,13 +5520,6 @@ contextMenu.addEventListener('click', async function (event) {
             handleExportAction(); // <--- ИЗМЕНЕНО ЗДЕСЬ
         }
         
-        
-                if (event.target.id === 'all-zouits-in-object-menu-item') {
-            const lat = parseFloat(contextMenu.dataset.lat);
-            const lon = parseFloat(contextMenu.dataset.lon);
-            await getAllZouitsInObject(lat, lon); // Вызываем новую основную функцию
-            contextMenu.style.display = 'none';
-        }
         
             if (event.target.id === 'oks-on-zu-menu-item') {
             const lat = parseFloat(contextMenu.dataset.lat);
@@ -11145,107 +11134,6 @@ function showHistoryModal() {
 }
 
 
-async function getAllZouitsInObject(lat, lon) {
-    showLoader("Поиск объекта на карте...");
-    try {
-        // 1. Находим полигон, на который кликнули
-        const targetPolygon = findPolygonAtPoint(lat, lon);
-        if (!targetPolygon) {
-            throw new Error('Объект (полигон) в точке клика не найден.');
-        }
-        
-        const cadNumber = targetPolygon.properties.get('cadastralNumber') || 'выбранный объект';
-        showLoader(`Подготовка геометрии для запроса по ${cadNumber}...`);
-
-        // --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        const geometryType = targetPolygon.geometry.getType();
-        const allCoordRings = targetPolygon.geometry.getCoordinates();
-        let outerRing;
-
-        // Извлекаем только первый (внешний) контур, чтобы упростить геометрию для API
-        if (geometryType === 'Polygon') {
-            outerRing = allCoordRings[0]; // Первый элемент - это всегда внешний контур
-        } else if (geometryType === 'MultiPolygon') {
-            outerRing = allCoordRings[0][0]; // Берем первый полигон из мультиполигона и его внешний контур
-        } else {
-            throw new Error(`Неподдерживаемый тип геометрии для поиска: ${geometryType}`);
-        }
-
-        if (!outerRing || outerRing.length < 3) {
-            throw new Error('Не удалось получить корректный контур объекта для поиска.');
-        }
-
-        // Преобразуем координаты ТОЛЬКО внешнего контура в EPSG:3857
-        const transformedOuterRing = outerRing.map(coord => {
-            const trueLat = coord[0] + (mapOffsetY * 0.000008983);
-            const trueLon = coord[1] + (mapOffsetX * 0.000008983);
-            return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
-        });
-        
-        // Формируем геометрию для API как простой Polygon без "дырок" и с явным указанием CRS
-        const geometryForApi = {
-            "crs": {
-                "type": "name",
-                "properties": { "name": "EPSG:3857" }
-            },
-            "type": "Polygon",
-            "coordinates": [transformedOuterRing] // Двойные скобки обязательны для типа Polygon
-        };
-        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-        showLoader(`Поиск ЗОУИТ в границах объекта ${cadNumber}...`);
-
-        // 3. Формируем тело запроса к /intersects API
-        const requestBody = {
-            "geom": {
-                "type": "FeatureCollection",
-                "features": [{
-                    "type": "Feature",
-                    "geometry": geometryForApi, // Используем новую, упрощенную геометрию
-                    "properties": {}
-                }]
-            },
-            "categories": [{ "id": 36940 }] // ID категории для ЗОУИТ
-        };
-
-        // 4. Выполняем запрос
-        const response = await fetchNspd('https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestBody)
-        });
-
-        if (!response.ok) {
-            // Попробуем прочитать тело ошибки для более детальной информации
-            const errorData = await response.json().catch(() => null);
-            const errorMessage = errorData?.message || `Ошибка запроса к НСПД: ${response.status}`;
-            throw new Error(errorMessage);
-        }
-        
-        const zouitsData = await response.json();
-        const foundZouits = zouitsData.features || [];
-
-        // 5. Обрабатываем результат
-        if (foundZouits.length === 0) {
-            showNotification('Пересекающихся ЗОУИТ с выбранным объектом не найдено.', 'info');
-            return;
-        }
-
-        // Используем существующие функции для отрисовки и добавления в сайдбар
-        await processAndDrawZouits(foundZouits);
-        await populateSidebarWithFoundObjects(foundZouits, 'ЗОУИТ (в объекте)');
-
-        showNotification(`Найдено пересекающихся ЗОУИТ: ${foundZouits.length}`, 'success');
-
-    } catch (error) {
-        console.error('Ошибка в функции getAllZouitsInObject:', error);
-        showNotification(`Ошибка: ${error.message}`, 'error', 'exclamation-circle');
-    } finally {
-        hideLoader();
-    }
-}
-
-
 async function getAllZouitsInQuarter(lat, lon) {
     showLoader("Поиск квартала для ЗОУИТ...");
 
@@ -14110,61 +13998,67 @@ async function populateSidebarWithFoundObjects(features, objectType) {
     const contentDiv = document.getElementById('parcel-list-content');
     const sidebarTitle = document.getElementById('sidebar-title');
 
+    // Проверка на наличие основных элементов интерфейса
     if (!sidebar || !contentDiv || !sidebarTitle) {
         console.error("Не найдены элементы боковой панели для populateSidebarWithFoundObjects");
         return;
     }
     
+    // Очищаем предыдущее содержимое и устанавливаем заголовок
     contentDiv.innerHTML = ''; 
     sidebarTitle.textContent = `Найденные ${objectType} (${features.length})`;
     
+    // Показываем или скрываем панель в зависимости от наличия данных
     if (features && features.length > 0) {
         features.forEach((feature, index) => {
             const properties = feature.properties || {};
             const options = properties.options || {};
             
+            // Переменные для хранения извлеченных данных
             let cadNumber, primaryDesc, secondaryDesc, thirdDesc;
 
-            // --- ИЗМЕНЕНИЕ: Заменяем '===' на 'startsWith()' для гибкости ---
-            if (objectType.startsWith('ЗУ')) {
+            // --- УСЛОВНАЯ ЛОГИКА ДЛЯ РАЗНЫХ ТИПОВ ОБЪЕКТОВ ---
+
+            if (objectType.startsWith('ЗУ')) { // Для земельных участков
                 cadNumber = properties.descr || 'Без номера';
                 primaryDesc = options.readable_address || 'Адрес не указан';
-                secondaryDesc = getAreaText(options);
-                thirdDesc = null;
+                secondaryDesc = getAreaText(options); // Используем хелпер для форматирования площади
+                thirdDesc = null; // Третья строка не нужна
             } 
-            else if (objectType.startsWith('Здания')) {
+            else if (objectType === 'Здания') { // Для зданий
                 cadNumber = options.cad_num || properties.descr || 'Без номера';
-                primaryDesc = properties.descr || 'Тип не указан';
+                primaryDesc = properties.descr || 'Тип не указан'; // Например, "Здание"
                 secondaryDesc = options.readable_address || 'Адрес не указан';
                 const areaValue = options.build_record_area;
                 thirdDesc = (areaValue && isFinite(parseFloat(areaValue))) 
                     ? `Площадь: ${parseFloat(areaValue).toLocaleString('ru-RU')} м²` 
                     : 'Площадь не указана';
             } 
-            else if (objectType.startsWith('Сооружения')) {
+            else if (objectType === 'Сооружения') { // Для сооружений
                 cadNumber = options.cad_number || properties.descr || 'Без номера';
-                primaryDesc = options.params_name || properties.descr || 'Тип не указан';
+                primaryDesc = options.params_name || properties.descr || 'Тип не указан'; // Название сооружения
                 secondaryDesc = options.address_readable_address || 'Адрес не указан';
                 const lengthValue = options.params_extension;
                 thirdDesc = (lengthValue && isFinite(parseFloat(lengthValue))) 
                     ? `Протяженность: ${parseFloat(lengthValue).toLocaleString('ru-RU')} м` 
                     : 'Протяженность не указана';
             }
-            else if (objectType.startsWith('ЗОУИТ')) {
-                cadNumber = options.reg_numb_border || properties.descr || 'Без номера';
-                primaryDesc = options.name_by_doc || 'Название не указано';
-                secondaryDesc = options.content_restrict_encumbrances || 'Ограничения не указаны';
-                thirdDesc = `Дата рег.: ${options.registration_date || 'не указана'}`;
-            }
-            // --- КОНЕЦ ИЗМЕНЕНИЯ ---
             
+              else if (objectType === 'ЗОУИТ') {
+            cadNumber = options.reg_numb_border || properties.descr || 'Без номера';
+            primaryDesc = options.name_by_doc || 'Название не указано';
+            secondaryDesc = options.content_restrict_encumbrances || 'Ограничения не указаны';
+            thirdDesc = `Дата рег.: ${options.registration_date || 'не указана'}`;
+        }
+            
+            // Создаем HTML-элемент для списка
             const itemDiv = document.createElement('div');
             itemDiv.className = 'sidebar-item';
-            // Проверяем, что cadNumber определен, перед вызовом toLowerCase()
-            itemDiv.dataset.cadnum = cadNumber ? cadNumber.toLowerCase() : '';
+            itemDiv.dataset.cadnum = cadNumber.toLowerCase();
 
+            // Формируем внутренний HTML с проверкой на наличие третьей строки
             let html = `
-                <p>${index + 1}. ${cadNumber || 'Неизвестный номер'}</p>
+                <p>${index + 1}. ${cadNumber}</p>
                 <p style="font-style: italic; color: #1e88e5;">${primaryDesc}</p> 
                 <p>${secondaryDesc}</p>`;
             if (thirdDesc) {
@@ -14172,6 +14066,7 @@ async function populateSidebarWithFoundObjects(features, objectType) {
             }
             itemDiv.innerHTML = html;
 
+            // Ищем соответствующий полигон на карте, чтобы привязать событие
             const correspondingPolygon = polygons.find(p => p instanceof ymaps.Polygon && p.properties?.get('cadastralNumber') === cadNumber);
             if (correspondingPolygon) {
                 itemDiv.addEventListener('dblclick', () => {
@@ -14186,9 +14081,11 @@ async function populateSidebarWithFoundObjects(features, objectType) {
             contentDiv.appendChild(itemDiv);
         });
         
+        // Показываем панель, если она была скрыта
         sidebar.classList.remove('hidden', 'collapsed');
 
     } else {
+        // Если данных нет, скрываем панель
         sidebar.classList.add('hidden');
     }
 }
