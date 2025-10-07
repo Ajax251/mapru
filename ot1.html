@@ -1463,123 +1463,85 @@ function displayResults(data, title, isKptFile = false) {
     }
 }
 
-function filterMskList(input) {
-    const filterText = input.value.trim().toLowerCase();
-    const list = input.parentElement.querySelector('.modal-list');
-    if (!list) return;
-    const items = list.getElementsByTagName('li');
-    for (let i = 0; i < items.length; i++) {
-        const item = items[i];
-        const itemText = (item.textContent || item.innerText).toLowerCase();
-        if (itemText.includes(filterText)) {
-            item.style.display = "flex";
-        } else {
-            item.style.display = "none";
-        }
-    }
-}
-
-function showMskSelector(originalData) {
-    if (typeof COORDINATE_SYSTEMS === 'undefined') {
-        alert('Ошибка: База систем координат (msk.js) не загружена.');
-        return;
-    }
-    const overlay = document.createElement('div');
-    overlay.className = 'modal-overlay';
-    const dialog = document.createElement('div');
-    dialog.className = 'modal-dialog';
-    dialog.innerHTML = `
-        <h3>Не удалось определить МСК. Выберите систему координат:</h3>
-        <input type="text" id="msk-filter-input" onkeyup="filterMskList(this)" placeholder="Фильтр по названию или коду региона...">
-    `;
-    const list = document.createElement('ul');
-    list.className = 'modal-list';
-    const mskSystems = COORDINATE_SYSTEMS.filter(sys => sys.text && sys.text.startsWith('МСК-'));
-    mskSystems.forEach(system => {
-        const listItem = document.createElement('li');
-        listItem.innerHTML = `<span>${system.text}</span>`;
-        listItem.style.justifyContent = 'center';
-        listItem.onclick = () => {
-            document.body.removeChild(overlay);
-            performConversion(originalData, system);
-        };
-        list.appendChild(listItem);
-    });
-    dialog.appendChild(list);
-    overlay.appendChild(dialog);
-    document.body.appendChild(overlay);
-    overlay.onclick = (e) => { if (e.target === overlay) document.body.removeChild(overlay); };
-    document.getElementById('msk-filter-input').focus();
-}
-
-
-function performConversion(originalData, targetSystem) {
+function convertNspdCoordinatesToMsk(originalData) {
     try {
         const data = JSON.parse(JSON.stringify(originalData));
-        if (!targetSystem) {
-            alert('Целевая система координат не выбрана.');
+        const cadNum = data.common.cadNum;
+
+        if (!cadNum || typeof MskFinder === 'undefined' || typeof proj4 === 'undefined' || typeof COORDINATE_SYSTEMS === 'undefined') {
+            alert('Ошибка: Необходимые для конвертации компоненты не загружены.');
             return;
         }
+
+        const mskCode = MskFinder.findMskCode(cadNum);
+        if (!mskCode) {
+            alert(`Не удалось автоматически определить код МСК для кадастрового номера ${cadNum}.`);
+            return;
+        }
+
+        const searchString = `МСК ${mskCode}`;
+        const targetSystem = COORDINATE_SYSTEMS.find(system => system.text && system.text.includes(searchString));
+
+        if (!targetSystem) {
+            alert(`В базе не найдено определение для системы координат "${searchString}".`);
+            return;
+        }
+
         if ((targetSystem.offsetX === undefined || targetSystem.offsetX === 0) && (targetSystem.offsetY === undefined || targetSystem.offsetY === 0)) {
             alert("ВНИМАНИЕ: Настройки смещения для этой МСК не настроены, координаты в выписке могут быть неверны.");
         }
+
         const sourceSystemDef = COORDINATE_SYSTEMS.find(s => s.value === 'EPSG:3857');
         if (!sourceSystemDef || !targetSystem.def) {
-            alert('Отсутствует определение для исходной или целевой системы координат.');
-            return;
+             alert('Отсутствует определение для исходной или целевой системы координат.');
+             return;
         }
+
         proj4.defs('EPSG:3857', sourceSystemDef.def);
         proj4.defs(targetSystem.value, targetSystem.def);
+
         const offsetX = targetSystem.offsetX || 0;
         const offsetY = targetSystem.offsetY || 0;
+
         data.coordinates = data.coordinates.map(contour => {
             const convertedContour = contour.map(point => {
                 const convertedPoint = proj4('EPSG:3857', targetSystem.value, [point.x, point.y]);
-                const newPoint = { ...point
-                };
+                const newPoint = { ...point };
                 newPoint.x = convertedPoint[1] + offsetX;
                 newPoint.y = convertedPoint[0] + offsetY;
                 return newPoint;
             });
+
             const reversedContour = convertedContour.reverse();
-            return reversedContour.map((point, index) => ({ ...point,
-                num: index + 1
-            }));
+
+            const renumberedContour = reversedContour.map((point, index) => {
+                point.num = index + 1;
+                return point;
+            });
+
+            return renumberedContour;
         });
+
         data.coordinatesSystem = targetSystem.text;
         data.source = 'nspd_converted';
+
         resetAndShowLoader();
         updateLoaderText('Пересчет координат и перерисовка...');
+
         setTimeout(() => {
+
             const formattedDate = new Date().toLocaleDateString('ru-RU');
+
             displayResults(data, `Дата: ${formattedDate} (${data.coordinatesSystem})`);
+
             showLoader(false);
         }, 250);
-    } catch (e) {
+
+    } catch(e) {
         console.error("Ошибка при конвертации координат:", e);
         alert(`Произошла ошибка при конвертации: ${e.message}`);
         showLoader(false);
     }
-}
-
-function convertNspdCoordinatesToMsk(originalData) {
-    const cadNum = originalData.common.cadNum;
-    if (!cadNum || typeof MskFinder === 'undefined' || typeof proj4 === 'undefined' || typeof COORDINATE_SYSTEMS === 'undefined') {
-        alert('Ошибка: Необходимые для конвертации компоненты не загружены.');
-        return;
-    }
-    const mskCode = MskFinder.findMskCode(cadNum);
-    if (!mskCode) {
-        showMskSelector(originalData);
-        return;
-    }
-    const searchString = `МСК-${mskCode}`;
-    const targetSystem = COORDINATE_SYSTEMS.find(system => system.text && system.text.startsWith(searchString));
-    if (!targetSystem) {
-        showMskSelector(originalData);
-        return;
-    }
-    performConversion(originalData, targetSystem);
 }
 
 function toggleMerge(button) {
