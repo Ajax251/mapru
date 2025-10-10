@@ -5440,11 +5440,47 @@ contextMenu.addEventListener('click', async function (event) {
             measureArea();
         }
         
-        if (event.target.id === 'consolidated-report-menu-item') {
+          if (event.target.id === 'consolidated-report-menu-item') {
             const lat = parseFloat(contextMenu.dataset.lat);
             const lon = parseFloat(contextMenu.dataset.lon);
-            await generateConsolidatedReport(lat, lon);
+            
+            // --- НАЧАЛО НОВОЙ ЛОГИКИ ---
+            showLoader("Поиск объекта для отчета...");
             contextMenu.style.display = 'none';
+
+            try {
+                let targetPolygon = findPolygonAtPoint(lat, lon);
+                
+                // Если полигон не найден на карте, пытаемся его загрузить
+                if (!targetPolygon) {
+                    showLoader("Объект не найден, загрузка из ЕГРН...");
+                    
+                    // Используем логику из пункта "Открыть ЗУ"
+                    const cadastralData = await queryCadastralInfo(lat, lon);
+                    if (!cadastralData || !cadastralData.features || cadastralData.features.length === 0) {
+                        throw new Error('Не удалось найти или загрузить объект для формирования отчета.');
+                    }
+                    const feature = cadastralData.features[0];
+                    
+                    // Отрисовываем объект и получаем ссылку на него
+                    targetPolygon = await drawFeatureFromNspd(feature);
+                }
+
+                // Если после всех попыток полигон есть, генерируем отчет
+                if (targetPolygon) {
+                    await generateConsolidatedReport(targetPolygon);
+                } else {
+                    throw new Error("Не удалось найти или загрузить объект для отчета.");
+                }
+
+            } catch (error) {
+                console.error("Ошибка при подготовке отчета:", error);
+                showNotification(error.message, 'error', 'exclamation-circle');
+                hideLoader(); // Убедимся, что лоадер скрыт в случае ошибки
+            }
+            // hideLoader() теперь вызывается внутри generateConsolidatedReport или в блоке catch
+            // --- КОНЕЦ НОВОЙ ЛОГИКИ ---
+
         }
         
              if (event.target.id === 'screenshot-menu-item') {
@@ -8919,7 +8955,11 @@ function formatCadastralNumber(input) {
 }
 
 async function drawFeatureFromNspd(feature) {
-    if (!map || !feature || !feature.geometry) return;
+    if (!map || !feature || !feature.geometry) return null; // Возвращаем null, если нечего рисовать
+
+    // --- НАЧАЛО ИЗМЕНЕНИЯ: Переменная для хранения созданного полигона ---
+    let mainDrawnPolygon = null; 
+    // --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
     const inputText = feature.properties.descr;
     autoUpdateMskSettings(inputText);
@@ -8967,6 +9007,10 @@ async function drawFeatureFromNspd(feature) {
         map.geoObjects.add(polygon);
         polygons.push(polygon);
         
+        // --- НАЧАЛО ИЗМЕНЕНИЯ: Сохраняем полигон ---
+        mainDrawnPolygon = polygon;
+        // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+        
         const outerGeoCoords = processContour(feature.geometry.coordinates[0]);
         const lats = outerGeoCoords.map(c => c[0]);
         const lons = outerGeoCoords.map(c => c[1]);
@@ -9001,6 +9045,10 @@ async function drawFeatureFromNspd(feature) {
             map.geoObjects.add(polygon);
             polygons.push(polygon);
             
+             // --- НАЧАЛО ИЗМЕНЕНИЯ: Сохраняем (последний) полигон из мультиполигона ---
+            mainDrawnPolygon = polygon;
+            // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
             const outerGeoCoords = processContour(polygonCoordinates[0]);
             const lats = outerGeoCoords.map(c => c[0]);
             const lons = outerGeoCoords.map(c => c[1]);
@@ -9061,6 +9109,10 @@ async function drawFeatureFromNspd(feature) {
     }
 
     addToHistory(inputText);
+    
+    // --- НАЧАЛО ИЗМЕНЕНИЯ: Возвращаем созданный полигон ---
+    return mainDrawnPolygon;
+    // --- КОНЕЦ ИЗМЕНЕНИЯ ---
 }
 
 
@@ -11659,7 +11711,7 @@ function buildReportHtml(mainObjectData, linkedOksResults, oksResults, structure
     };
 
     const generateResultTable = (title, resultObject, headers, rowGenerator, tableClass = '') => {
-        const items = resultObject && resultObject.items ? resultObject.items : (Array.isArray(resultObject) ? resultObject : []);
+        const items = (resultObject && (resultObject.items || resultObject.features)) || (Array.isArray(resultObject) ? resultObject : []);
         const isFullyContained = (resultObject && typeof resultObject.isFullyContained === 'boolean') ? resultObject.isFullyContained : true;
         let tableHtml = `<div class="section-title">${title}</div>`;
         if (items.length > 0 && !isFullyContained) {
@@ -11686,10 +11738,10 @@ function buildReportHtml(mainObjectData, linkedOksResults, oksResults, structure
     const municipalRowGenerator = (f) => { const p = f.properties; return `<tr><td>${p.label || '-'}</td><td>${p.descr || '-'}</td></tr>`; };
     const forestryRowGenerator = (f) => { const o = f.properties.options; return `<tr><td>${o.reg_numb_border || '-'}</td><td>${o.name_by_doc || '-'}</td><td>${o.registration_date || '-'}</td></tr>`; };
 
-    return `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Отчет: ${mainObjectData.cadastralNumber}</title><link rel="icon" href="img/vyp.png"><style>body{font-family: "Times New Roman", Times, serif; margin: 0; background: #e9ecef; color: #212224; font-size: 10pt;}.page{background: white; box-shadow: 0 4px 16px rgba(0,0,0,0.1); margin: 20px auto; padding: 20mm; box-sizing: border-box; width: 210mm; max-width: 100%;}.coords-table-container table { margin-bottom: 20px; } table{width: 100%; border-collapse: collapse; margin: 8px 0 12px 0; table-layout: fixed;}th, td{border: 1px solid #333; padding: 6px 8px; text-align: center; vertical-align: middle; word-break: break-word;}th{background-color: #f8f9fa; font-weight: 600;}.main-info-table{table-layout: auto;}.main-info-table td{text-align: left;}.main-info-table td:first-child{width: 35%; font-weight: bold; background-color: #f8f9fa;}.parcels-table td{text-align: left;}.parcels-table th:nth-child(1), .parcels-table td:nth-child(1){width: 25%;}.parcels-table th:nth-child(3), .parcels-table td:nth-child(3){width: 20%;}.zouit-table td{text-align: left;}.zouit-table th:nth-child(1),.zouit-table td:nth-child(1){width: 25%;}.zouit-table th:nth-child(2),.zouit-table td:nth-child(2){width: 30%;}.header{text-align: center; margin-bottom: 20px;}.section-title{text-align: center; font-weight: bold; margin: 25px 0 10px 0; font-size: 1.1em; page-break-after: avoid;}.scheme-container{text-align: center; margin-top: 25px; page-break-inside: avoid;}.scheme-container img{max-width: 100%; border: 1px solid #ccc;}#togglePointsBtn{display:block; margin: 20px auto 0; padding: 8px 16px; font-size: 10pt; cursor: pointer;}.points-hidden .scheme-with-points, .points-visible .scheme-without-points { display: none; }.points-hidden .point-col { display: none; }@media print{body{background: none;}.page{box-shadow: none; border: none; margin: 0; padding: 15mm;} #togglePointsBtn {display: none;}}</style></head><body class="points-hidden"><div class="page"><div class="header"><h3>Сводный отчет по объекту недвижимости</h3><h4>сформирован ${reportDate}</h4></div><div class="section-title">Сведения об исходном объекте</div><table class="main-info-table">${generateMainInfoRows()}</table>${generateResultTable('Пересекаемые земельные участки', underlyingParcelsResults, ['Кадастровый номер', 'Адрес', 'Площадь'], underlyingParcelRowGenerator, 'parcels-table')}${parcelsSchemeWithoutPoints ? `<div class="scheme-container"><div class="section-title">Схема пересекаемых ЗУ</div><img src="${parcelsSchemeWithoutPoints}" class="scheme-without-points" alt="Схема пересечений"><img src="${parcelsSchemeWithPoints}" class="scheme-with-points" alt="Схема пересечений с точками"></div>` : ''}${generateResultTable('1. Связанные ОКС по сведениям ЕГРН', linkedOksResults, ['Кадастровый номер'], linkedOksRowGenerator)}${generateResultTable('2. Объекты капитального строительства на объекте', oksResults, ['Кадастровый номер', 'Назначение', 'Год ввода', 'Этажность'], oksRowGenerator)}${generateResultTable('3. Сооружения на объекте', structuresResults, ['Кадастровый номер', 'Наименование', 'Протяженность', 'Назначение'], structuresRowGenerator)}${generateResultTable('4. Зоны с особыми условиями использования территории (ЗОУИТ)', zouitResults, ['Рег. номер', 'Наименование', 'Ограничения'], zouitRowGenerator, 'zouit-table')}${generateResultTable('5. Территориальные зоны', terrZoneResults, ['Рег. номер', 'Наименование', 'Дата рег.'], terrZoneRowGenerator)}${generateResultTable('6. Населенные пункты', settlementsResults, ['Тип', 'Наименование'], settlementsRowGenerator)}${generateResultTable('7. Муниципальные образования', municipalResults, ['Наименование', 'Описание'], municipalRowGenerator)}${generateResultTable('8. Лесничества', forestryResults, ['Рег. номер', 'Наименование', 'Дата рег.'], forestryRowGenerator)}<div class="scheme-container"><div class="section-title">Схема расположения объектов</div><img src="${schemeImageWithoutPoints}" class="scheme-without-points" alt="Схема расположения"><img src="${schemeImageWithPoints}" class="scheme-with-points" alt="Схема расположения с точками"></div><button onclick="togglePoints()" id="togglePointsBtn">Показать точки</button><div class="coords-table-container">${coordsTableHtml}</div></div><script>function togglePoints(){const body = document.body; const btn = document.getElementById('togglePointsBtn'); if (body.classList.contains('points-hidden')) { body.classList.remove('points-hidden'); body.classList.add('points-visible'); btn.textContent = 'Скрыть точки'; } else { body.classList.remove('points-visible'); body.classList.add('points-hidden'); btn.textContent = 'Показать точки'; }}<\/script></body></html>`;
+    return `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Отчет: ${mainObjectData.cadastralNumber}</title><link rel="icon" href="img/vyp.png"><style>body{font-family: "Times New Roman", Times, serif; margin: 0; background: #e9ecef; color: #212224; font-size: 10pt;}.page{background: white; box-shadow: 0 4px 16px rgba(0,0,0,0.1); margin: 20px auto; padding: 20mm; box-sizing: border-box; width: 210mm; max-width: 100%;}.coords-table-container table { margin-bottom: 20px; } table{width: 100%; border-collapse: collapse; margin: 8px 0 12px 0; table-layout: fixed;}th, td{border: 1px solid #333; padding: 6px 8px; text-align: center; vertical-align: middle; word-break: break-word;}th{background-color: #f8f9fa; font-weight: 600;}.main-info-table{table-layout: auto;}.main-info-table td{text-align: left;}.main-info-table td:first-child{width: 35%; font-weight: bold; background-color: #f8f9fa;}.parcels-table td{text-align: left;}.parcels-table th:nth-child(1), .parcels-table td:nth-child(1){width: 25%;}.parcels-table th:nth-child(3), .parcels-table td:nth-child(3){width: 20%;}.zouit-table td{text-align: left;}.zouit-table th:nth-child(1),.zouit-table td:nth-child(1){width: 25%;}.zouit-table th:nth-child(2),.zouit-table td:nth-child(2){width: 30%;}.header{text-align: center; margin-bottom: 20px;}.section-title{text-align: center; font-weight: bold; margin: 25px 0 10px 0; font-size: 1.1em; page-break-after: avoid;}.scheme-container{text-align: center; margin-top: 25px; page-break-inside: avoid;}.scheme-container img{max-width: 100%; border: 1px solid #ccc;}#togglePointsBtn{display:block; margin: 20px auto 0; padding: 8px 16px; font-size: 10pt; cursor: pointer; border-radius: 5px; border: 1px solid #ccc; background-color: #f0f0f0;}.points-hidden .scheme-with-points { display: none; }.points-visible .scheme-without-points { display: none; }.points-hidden .point-col { display: none; }.points-hidden .coords-table-container { display: none; }@media print{body{background: none;}.page{box-shadow: none; border: none; margin: 0; padding: 15mm;} #togglePointsBtn {display: none;}}</style></head><body class="points-hidden"><div class="page"><div class="header"><h3>Сводный отчет по объекту недвижимости</h3><h4>сформирован ${reportDate}</h4></div><div class="section-title">Сведения об исходном объекте</div><table class="main-info-table">${generateMainInfoRows()}</table>${generateResultTable('Пересекаемые земельные участки', underlyingParcelsResults, ['Кадастровый номер', 'Адрес', 'Площадь'], underlyingParcelRowGenerator, 'parcels-table')}${parcelsSchemeWithoutPoints ? `<div class="scheme-container"><div class="section-title">Схема пересекаемых ЗУ</div><img src="${parcelsSchemeWithoutPoints}" class="scheme-without-points" alt="Схема пересечений"><img src="${parcelsSchemeWithPoints}" class="scheme-with-points" alt="Схема пересечений с точками"></div>` : ''}${generateResultTable('1. Связанные ОКС по сведениям ЕГРН', linkedOksResults, ['Кадастровый номер'], linkedOksRowGenerator)}${generateResultTable('2. Объекты капитального строительства на объекте', oksResults, ['Кадастровый номер', 'Назначение', 'Год ввода', 'Этажность'], oksRowGenerator)}${generateResultTable('3. Сооружения на объекте', structuresResults, ['Кадастровый номер', 'Наименование', 'Протяженность', 'Назначение'], structuresRowGenerator)}${generateResultTable('4. Зоны с особыми условиями использования территории (ЗОУИТ)', zouitResults, ['Рег. номер', 'Наименование', 'Ограничения'], zouitRowGenerator, 'zouit-table')}${generateResultTable('5. Территориальные зоны', terrZoneResults, ['Рег. номер', 'Наименование', 'Дата рег.'], terrZoneRowGenerator)}${generateResultTable('6. Населенные пункты', settlementsResults, ['Тип', 'Наименование'], settlementsRowGenerator)}${generateResultTable('7. Муниципальные образования', municipalResults, ['Наименование', 'Описание'], municipalRowGenerator)}${generateResultTable('8. Лесничества', forestryResults, ['Рег. номер', 'Наименование', 'Дата рег.'], forestryRowGenerator)}<div class="scheme-container"><div class="section-title">Схема расположения объектов</div><img src="${schemeImageWithoutPoints}" class="scheme-without-points" alt="Схема расположения"><img src="${schemeImageWithPoints}" class="scheme-with-points" alt="Схема расположения с точками"></div><button onclick="togglePoints()" id="togglePointsBtn">Показать точки</button><div class="coords-table-container">${coordsTableHtml}</div></div><script>function togglePoints(){const body = document.body; const btn = document.getElementById('togglePointsBtn'); body.classList.toggle('points-hidden'); body.classList.toggle('points-visible'); if (body.classList.contains('points-visible')) { btn.textContent = 'Скрыть точки'; } else { btn.textContent = 'Показать точки'; }}<\/script></body></html>`;
 }
 
-// ДОБАВЬТЕ ЭТУ ФУНКЦИЮ В ВАШ КОД
+
 async function searchFeaturesByGeometry(targetPolygon, categoryId) {
     try {
         const geometryType = targetPolygon.geometry.getType();
@@ -11884,19 +11936,19 @@ function isBboxInsidePolygon(bbox, polygonFeature) {
 }
 
 // ЗАМЕНИТЕ ЭТУ ФУНКЦИЮ ПОЛНОСТЬЮ
-async function generateConsolidatedReport(lat, lon) {
+async function generateConsolidatedReport(targetPolygon) { // <-- ИЗМЕНЕНИЕ: Принимаем полигон как аргумент
     showLoader("Формирование отчета...");
     const delay = ms => new Promise(res => setTimeout(res, ms));
 
     try {
-        const targetPolygon = findPolygonAtPoint(lat, lon);
-        
+        // --- НАЧАЛО ИЗМЕНЕНИЙ: Проверка и получение данных из переданного полигона ---
+        if (!targetPolygon) { // Дополнительная проверка на всякий случай
+             throw new Error('Объект для формирования отчета не был найден или загружен.');
+        }
+
         const isRealObject = targetPolygon && (targetPolygon.properties.get('isParcelInQuarter') || targetPolygon.properties.get('isFoundInArea') || targetPolygon.properties.get('isParcelFromSingleSearch'));
         const isManualObject = targetPolygon && targetPolygon.properties.get('isManuallyDrawn');
-
-        if (!isRealObject && !isManualObject) {
-            throw new Error('Для формирования отчета необходимо выбрать существующий или образованный земельный участок');
-        }
+        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         let mainObjectData;
         let underlyingParcelsResults = [];
@@ -11952,27 +12004,17 @@ async function generateConsolidatedReport(lat, lon) {
         await delay(100);
         const forestryResults = await searchContainingObjectByPoint(centerLat, centerLon, 36314, targetPolygon);
         
-        // --- ЛОГИКА ДЛЯ ДВУХ ВЕРСИЙ СХЕМ ---
-
-        // Собираем объекты для схем
-        const mainSchemeOtherObjects = [];
-        oksResults.forEach(f => { const p = createTemporaryYmapsPolygon(f); if(p) mainSchemeOtherObjects.push(p); });
-        structuresResults.forEach(f => { const p = createTemporaryYmapsPolygon(f); if(p) mainSchemeOtherObjects.push(p); });
-
-        // Генерируем ОСНОВНУЮ схему С ТОЧКАМИ (она же сгенерирует полную таблицу координат)
+        const mainSchemeOtherObjects = [...oksResults, ...structuresResults];
+        
         const { image: mainSchemeWithPoints, coordsTable } = await drawAllObjectsToCanvas(targetPolygon, mainSchemeOtherObjects, true);
-        // Генерируем ОСНОВНУЮ схему БЕЗ ТОЧЕК
         const { image: mainSchemeWithoutPoints } = await drawAllObjectsToCanvas(targetPolygon, mainSchemeOtherObjects, false);
 
         let parcelsSchemeWithPoints = null;
         let parcelsSchemeWithoutPoints = null;
         if (underlyingParcelsResults.length > 0) {
-            const intersectingParcelPolygons = underlyingParcelsResults.map(f => createTemporaryYmapsPolygon(f)).filter(Boolean);
-            // Генерируем схему пересечений С ТОЧКАМИ
-            const { image: imageParcelsWithPoints } = await drawAllObjectsToCanvas(targetPolygon, intersectingParcelPolygons, true, underlyingParcelsResults);
+            const { image: imageParcelsWithPoints } = await drawAllObjectsToCanvas(targetPolygon, underlyingParcelsResults, true);
             parcelsSchemeWithPoints = imageParcelsWithPoints;
-            // Генерируем схему пересечений БЕЗ ТОЧЕК
-            const { image: imageParcelsWithoutPoints } = await drawAllObjectsToCanvas(targetPolygon, intersectingParcelPolygons, false, underlyingParcelsResults);
+            const { image: imageParcelsWithoutPoints } = await drawAllObjectsToCanvas(targetPolygon, underlyingParcelsResults, false);
             parcelsSchemeWithoutPoints = imageParcelsWithoutPoints;
         }
         
@@ -15236,44 +15278,78 @@ async function drawAllObjectsToCanvas(mainObject, otherObjects, showPoints = tru
     const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
     const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destSc);
     if (!destSystem) throw new Error(`Определение для ${destSc} не найдено.`);
+    
+    // --- НАЧАЛО ИЗМЕНЕНИЙ ---
+    // Получаем полное имя системы координат для заголовков таблицы
+    const mskName = destSystem.text || 'МСК'; 
+    // --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     const isAutoLoadEnabled = (localStorage.getItem('autoLoadMskOffset') !== 'false');
     const mskOffsetX = isAutoLoadEnabled ? (destSystem.offsetX || 0) : (parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0);
     const mskOffsetY = isAutoLoadEnabled ? (destSystem.offsetY || 0) : (parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0);
 
-    const underlyingCadNumbers = new Set(underlyingParcels.map(f => f.properties.descr));
+    const underlyingCadNumbers = new Set((underlyingParcels || []).map(f => f.properties.descr));
 
+    // --- УНИВЕРСАЛЬНАЯ ФУНКЦИЯ ОБРАБОТКИ ОБЪЕКТОВ ---
     const processObject = (obj) => {
-        if (!obj || !(obj instanceof ymaps.Polygon)) return null;
-        const cadNum = obj.properties.get('cadastralNumber') || 'Объект';
-        const featureData = obj.properties.get('featureData');
-        const isBuilding = obj.properties.get('isBuilding') || (featureData && featureData.properties.categoryName === 'Здания');
-        const isStructure = obj.properties.get('isStructure') || (featureData && featureData.properties.categoryName === 'Сооружения');
-        let type = 'ЗУ';
-        let color = isDeclared(obj) ? polygonStyle.declaredParcelsColor : polygonStyle.parcelsColor;
+        let cadNum, type, color, geometry, isYmapsObject = false;
 
-        if (isBuilding) { type = 'Здание'; color = polygonStyle.buildingsColor; } 
-        else if (isStructure) { type = 'Сооружение'; color = polygonStyle.structuresColor; }
+        if (obj instanceof ymaps.Polygon) { // Обработка объекта Яндекс.Карт
+            isYmapsObject = true;
+            cadNum = obj.properties.get('cadastralNumber') || 'Объект';
+            const featureData = obj.properties.get('featureData');
+            const isBuilding = obj.properties.get('isBuilding') || (featureData && featureData.properties.categoryName === 'Здания');
+            const isStructure = obj.properties.get('isStructure') || (featureData && featureData.properties.categoryName === 'Сооружения');
+            
+            type = 'ЗУ';
+            color = isDeclared(obj) ? polygonStyle.declaredParcelsColor : polygonStyle.parcelsColor;
+
+            if (isBuilding) { type = 'Здание'; color = polygonStyle.buildingsColor; } 
+            else if (isStructure) { type = 'Сооружение'; color = polygonStyle.structuresColor; }
+
+            geometry = obj.geometry.getCoordinates();
+
+        } else if (obj && obj.type === 'Feature' && obj.geometry) { // Обработка сырого GeoJSON Feature
+            const props = obj.properties || {};
+            const opts = props.options || {};
+            cadNum = opts.cad_num || opts.cad_number || props.descr || 'Объект';
+            const isBuilding = props.categoryName === 'Здания';
+            const isStructure = props.categoryName === 'Сооружения';
+
+            type = 'ЗУ';
+            color = isDeclared({ properties: { get: (key) => key === 'featureData' ? obj : undefined }}) ? polygonStyle.declaredParcelsColor : polygonStyle.parcelsColor;
+
+            if (isBuilding) { type = 'Здание'; color = polygonStyle.buildingsColor; } 
+            else if (isStructure) { type = 'Сооружение'; color = polygonStyle.structuresColor; }
+
+            geometry = obj.geometry.type === 'Polygon' ? [obj.geometry.coordinates] : obj.geometry.coordinates;
+
+        } else {
+            return null; // Неподдерживаемый тип объекта
+        }
         
         if (underlyingCadNumbers.has(cadNum)) { color = '#FFA500'; }
 
-        const rings = obj.geometry.getCoordinates();
-        const projectedRings = rings.map(ring => {
-            return ring.map(coord => {
-                const trueLat = coord[0] + (mapOffsetY * 0.000008983);
-                const trueLon = coord[1] + (mapOffsetX * 0.000008983);
-                const projected = proj4('EPSG:4326', 'EPSG:3857', [trueLon, trueLat]);
-                return { projected, original: coord };
-            });
+        const projectedRings = [];
+        // Geometry всегда имеет вид [[...кольцо1...], [...кольцо2...]]
+        geometry.forEach(ringOrPolygon => {
+            const ring = Array.isArray(ringOrPolygon[0][0]) ? ringOrPolygon[0] : ringOrPolygon;
+            projectedRings.push(ring.map(coord => {
+                if (isYmapsObject) {
+                    const trueLat = coord[0] + (mapOffsetY * 0.000008983);
+                    const trueLon = coord[1] + (mapOffsetX * 0.000008983);
+                    return { projected: proj4('EPSG:4326', 'EPSG:3857', [trueLon, trueLat]), original: [trueLat, trueLon] };
+                } else { // GeoJSON Feature, координаты уже в EPSG:3857
+                    return { projected: coord, original: proj4('EPSG:3857', 'EPSG:4326', coord).reverse() };
+                }
+            }));
         });
+        
         return { name: cadNum, type, color, projectedRings };
     };
-    
-    const mainObjectClean = new ymaps.Polygon(mainObject.geometry.getCoordinates().map(ring => {
-        return ring.map(coord => [ coord[0] + (mapOffsetY * 0.000008983), coord[1] + (mapOffsetX * 0.000008983) ]);
-    }), { ...mainObject.properties.getAll() });
 
-    const mainObjectInfo = processObject(mainObjectClean);
-    const otherObjectsInfo = otherObjects.map(obj => processObject(obj)).filter(Boolean);
+    const mainObjectInfo = processObject(mainObject);
+    const otherObjectsInfo = otherObjects.map(processObject).filter(Boolean);
     const objectDrawInfo = [mainObjectInfo, ...otherObjectsInfo].filter(Boolean);
 
     let bboxCoords = [];
@@ -15363,7 +15439,7 @@ async function drawAllObjectsToCanvas(mainObject, otherObjects, showPoints = tru
                     return false;
                 };
 
-                const visiblePoints = canvasPoints.filter(p => p.x >= -padding && p.x <= canvas.width + padding && p.y >= -padding && p.y <= canvas.height + padding);
+                const visiblePoints = canvasPoints.filter(p => p.x >= 0 && p.x <= canvas.width && p.y >= 0 && p.y <= canvas.height);
                 if (visiblePoints.length === 0) return;
 
                 const visMinX = Math.min(...visiblePoints.map(p => p.x));
@@ -15372,16 +15448,14 @@ async function drawAllObjectsToCanvas(mainObject, otherObjects, showPoints = tru
                 const visMaxY = Math.max(...visiblePoints.map(p => p.y));
                 const centerX = (visMinX + visMaxX) / 2;
                 const centerY = (visMinY + visMaxY) / 2;
-
+                
+                const isSkinny = (visMaxX - visMinX < labelWidth) || (visMaxY - visMinY < labelHeight);
                 const centerIsOffscreen = centerX < padding || centerX > canvas.width - padding || centerY < padding || centerY > canvas.height - padding;
-                const isSkinny = (visMaxX - visMinX < labelWidth / 2) || (visMaxY - visMinY < labelHeight / 2);
 
                 let finalX, finalY;
                 let anchorPoint = { x: centerX, y: centerY };
 
                 if (isSkinny || centerIsOffscreen) {
-                    // --- НОВАЯ ЛОГИКА ДЛЯ ПРОБЛЕМНЫХ ОБЪЕКТОВ ---
-                    // Находим ближайшую видимую точку к центру холста
                     let closestVisiblePoint = visiblePoints[0];
                     let minDistanceSq = Infinity;
                     visiblePoints.forEach(p => {
@@ -15393,11 +15467,9 @@ async function drawAllObjectsToCanvas(mainObject, otherObjects, showPoints = tru
                     });
                     anchorPoint = closestVisiblePoint;
 
-                    // Размещаем подпись в ближайшем углу от точки-якоря
                     const targetX = anchorPoint.x > canvas.width / 2 ? canvas.width - padding : padding;
                     const targetY = anchorPoint.y > canvas.height / 2 ? canvas.height - padding : padding;
                     
-                    // Пытаемся найти свободное место вокруг целевого угла
                     for (let i = 0; i < 5; i++) {
                          let testX = targetX + (i % 2 === 0 ? i * 15 : -i * 15);
                          let testY = targetY;
@@ -15407,9 +15479,7 @@ async function drawAllObjectsToCanvas(mainObject, otherObjects, showPoints = tru
                              break;
                          }
                     }
-
                 } else {
-                    // Стандартная логика для полигонов с видимым центром
                     const offsets = [ { x: 0, y: 0 }, { x: 0, y: -20 }, { x: 0, y: 20 }, { x: -30, y: 0 }, { x: 30, y: 0 }];
                     for (const offset of offsets) {
                         if (!isOverlapping(centerX + offset.x, centerY + offset.y)) {
@@ -15429,20 +15499,24 @@ async function drawAllObjectsToCanvas(mainObject, otherObjects, showPoints = tru
                          ctx.lineWidth = 1;
                          ctx.stroke();
                     }
-
                     ctx.strokeStyle = 'white';
                     ctx.lineWidth = 3;
                     ctx.strokeText(name, finalX, finalY);
                     ctx.fillText(name, finalX, finalY);
-                    drawnLabelBounds.push({ left: finalX - labelWidth / 2, right: finalX + labelWidth / 2, top: finalY - labelHeight / 2, bottom: finalY + labelHeight / 2 });
+                    
+                    let boxX = (ctx.textAlign === 'center') ? finalX : (ctx.textAlign === 'left' ? finalX + labelWidth/2 : finalX - labelWidth/2);
+                    drawnLabelBounds.push({ left: boxX - labelWidth / 2, right: boxX + labelWidth / 2, top: finalY - labelHeight / 2, bottom: finalY + labelHeight / 2 });
                 }
             }
         });
         
         if (currentObjectTableBody) {
+            // --- НАЧАЛО ИЗМЕНЕНИЙ ---
+            // Используем переменную mskName для формирования заголовков
             const tableHeaders = showPoints 
-                ? '<thead><tr><th>Номер точки</th><th>X (МСК)</th><th>Y (МСК)</th></tr></thead>'
-                : '<thead><tr><th>X (МСК)</th><th>Y (МСК)</th></tr></thead>';
+                ? `<thead><tr><th class="point-col">Номер точки</th><th>X (${mskName})</th><th>Y (${mskName})</th></tr></thead>`
+                : `<thead><tr><th>X (${mskName})</th><th>Y (${mskName})</th></tr></thead>`;
+            // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
             allTablesHtml += `
                 <div class="section-title">Каталог координат: ${name} (${type})</div>
