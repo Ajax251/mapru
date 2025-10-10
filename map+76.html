@@ -3869,14 +3869,14 @@ async function drawFeatures(geoCoordinates) {
                 const bounds = polygonObj.geometry.getBounds();
                 if (bounds) allBounds.push(bounds);
 
-       } else if (validCoords.length > 1) {
+          } else if (validCoords.length > 1) {
     const polyline = new ymaps.Polyline(validCoords, {
-        isDrawableLine: true // <<< ЭТОТ ФЛАГ ДОЛЖЕН БЫТЬ
+        isDrawableLine: true // <<< ДОБАВЬТЕ ЭТО СВОЙСТВО
     }, {
         strokeColor: polygonStyle.color,
         strokeWidth: polygonStyle.width,
         strokeOpacity: 0.8,
-        interactivityModel: 'default#geoObject' // И эта опция тоже важна для других функций (например, выделение/удаление)
+        interactivityModel: 'default#geoObject' // <<< И ЭТО ТОЖЕ
     });
     map.geoObjects.add(polyline);
     polygons.push(polyline);
@@ -5009,7 +5009,6 @@ function stopDistanceMeasurement() {
     
 
 function initMap() {
-    let contextMenuTargetObject = null;
     // Загружаем сохраненный центр и масштаб из localStorage
     const savedCenterStr = localStorage.getItem('mapCenter');
     const savedZoomStr = localStorage.getItem('mapZoom');
@@ -5299,14 +5298,10 @@ numberedPointSize = parseInt(localStorage.getItem('numberedPointSize'), 10) || 1
                     <i class="fas fa-file-alt"></i>ЕГРН
                 </div>
                 
-          <div class="custom-context-menu-item" id="consolidated-report-menu-item">
-                    <i class="fas fa-file-invoice"></i>Отчет
-                </div>
+          <div class="custom-context-submenu">
+            <div class="custom-context-menu-item" id="consolidated-report-menu-item"><i class="fas fa-file-invoice"></i>Отчет (площадной)</div>
+            <div class="custom-context-menu-item" id="linear-report-menu-item"><i class="fas fa-road"></i>Отчет (линейный)</div>
                 
-              <div class="custom-context-menu-item" id="linear-report-menu-item">
-        <i class="fas fa-road"></i>Отчет по линейному объекту
-    </div>
- 
                 <div class="custom-context-menu-item" id="egrn-xml-menu-item">
                     <i class="fas fa-file-code"></i>Открыть КН в XML
                 </div>
@@ -5415,18 +5410,17 @@ numberedPointSize = parseInt(localStorage.getItem('numberedPointSize'), 10) || 1
     `;
 
     // Показ контекстного меню при правом клике
-map.events.add('contextmenu', function (e) {
-    e.preventDefault();
-    const coords = e.get('coords');
-    const position = e.get('position');
-    
-    contextMenu.style.left = position[0] + 'px';
-    contextMenu.style.top = position[1] + 'px';
-    contextMenu.style.display = 'block';
+    map.events.add('contextmenu', function (e) {
+        e.preventDefault();
+        const coords = e.get('coords');
+        const position = e.get('position');
+        contextMenu.style.left = position[0] + 'px';
+        contextMenu.style.top = position[1] + 'px';
+        contextMenu.style.display = 'block';
 
-    contextMenu.dataset.lat = coords[0].toFixed(8);
-    contextMenu.dataset.lon = coords[1].toFixed(8);
-});
+        contextMenu.dataset.lat = coords[0].toFixed(8);
+        contextMenu.dataset.lon = coords[1].toFixed(8);
+    });
 
     // Закрытие контекстного меню при клике вне его
     document.addEventListener('click', function (e) {
@@ -5449,29 +5443,81 @@ contextMenu.addEventListener('click', async function (event) {
             measureArea();
         }
         
-if (event.target.id === 'linear-report-menu-item') {
+        if (event.target.id === 'linear-report-menu-item') {
     contextMenu.style.display = 'none';
     
-    // 1. Находим все линейные объекты на карте
-    const linearObjects = [];
-    map.geoObjects.each(function(geoObject) {
-        // Проверяем по флагу, который вы уже добавили в drawFeatures
-        if (geoObject.properties.get('isDrawableLine') === true && geoObject instanceof ymaps.Polyline) {
-            linearObjects.push(geoObject);
+    // Сначала ищем выделенную линию
+    let targetObject = selectedLine;
+    
+    // Если линия не выделена, ищем под курсором
+    if (!targetObject) {
+        const lat = parseFloat(contextMenu.dataset.lat);
+        const lon = parseFloat(contextMenu.dataset.lon);
+        targetObject = findLineAtPoint(lat, lon);
+    }
+    
+    // Если конкретная линия не найдена, ищем все линии на карте
+    if (!targetObject) {
+        const linearObjects = polygons.filter(obj => 
+            obj instanceof ymaps.Polyline && obj.properties.get('isDrawableLine')
+        );
+        
+        if (linearObjects.length === 0) {
+            showNotification('На карте нет нарисованных линейных объектов для отчета.', 'warning');
+        } else if (linearObjects.length === 1) {
+            generateLinearObjectReport(linearObjects[0]); // Если линия одна, сразу отчет
+        } else {
+            showLineSelectionModal(linearObjects); // Если несколько, предлагаем выбор
         }
-    });
-
-    // 2. Анализируем количество найденных линий
-    if (linearObjects.length === 0) {
-        showNotification('На карте нет линейных объектов для отчета.', 'warning');
-    } else if (linearObjects.length === 1) {
-        // Если линия одна, сразу запускаем отчет
-        generateConsolidatedReport(linearObjects[0]);
     } else {
-        // Если линий несколько, показываем модальное окно для выбора
-        showLineSelectionModal(linearObjects);
+        generateLinearObjectReport(targetObject); // Если нашли конкретную, отчет для нее
     }
 }
+        
+          if (event.target.id === 'consolidated-report-menu-item') {
+            const lat = parseFloat(contextMenu.dataset.lat);
+            const lon = parseFloat(contextMenu.dataset.lon);
+            
+            // --- НАЧАЛО НОВОЙ ЛОГИКИ ---
+            showLoader("Поиск объекта для отчета...");
+            contextMenu.style.display = 'none';
+
+            try {
+                let targetPolygon = findPolygonAtPoint(lat, lon);
+                
+                // Если полигон не найден на карте, пытаемся его загрузить
+                if (!targetPolygon) {
+                    showLoader("Объект не найден, загрузка из ЕГРН...");
+                    
+                    // Используем логику из пункта "Открыть ЗУ"
+                    const cadastralData = await queryCadastralInfo(lat, lon);
+                    if (!cadastralData || !cadastralData.features || cadastralData.features.length === 0) {
+                        throw new Error('Не удалось найти или загрузить объект для формирования отчета.');
+                    }
+                    const feature = cadastralData.features[0];
+                    
+                    // Отрисовываем объект и получаем ссылку на него
+                    targetPolygon = await drawFeatureFromNspd(feature);
+                }
+
+                // Если после всех попыток полигон есть, генерируем отчет
+                if (targetPolygon) {
+                    await generateConsolidatedReport(targetPolygon);
+                } else {
+                    throw new Error("Не удалось найти или загрузить объект для отчета.");
+                }
+
+            } catch (error) {
+                console.error("Ошибка при подготовке отчета:", error);
+                showNotification(error.message, 'error', 'exclamation-circle');
+                hideLoader(); // Убедимся, что лоадер скрыт в случае ошибки
+            }
+            // hideLoader() теперь вызывается внутри generateConsolidatedReport или в блоке catch
+            // --- КОНЕЦ НОВОЙ ЛОГИКИ ---
+
+        }
+        
+        
         
              if (event.target.id === 'screenshot-menu-item') {
             contextMenu.style.display = 'none';
@@ -6630,11 +6676,9 @@ function stopLineDrawing() {
             strokeColor: currentLine.options.get('strokeColor', currentLineColor),
             strokeWidth: currentLine.options.get('strokeWidth', currentLineWidth)
         };
-        currentLine.isDrawableLine = true;
-        // --- НАЧАЛО ИЗМЕНЕНИЯ ---
-        // Явно делаем линию интерактивной, чтобы она могла быть целью события
+        // Устанавливаем флаг и делаем линию интерактивной
+        currentLine.properties.set('isDrawableLine', true);
         currentLine.options.set('interactivityModel', 'default#geoObject');
-        // --- КОНЕЦ ИЗМЕНЕНИЯ ---
     }
 
     map.geoObjects.each(function (obj) {
@@ -7565,6 +7609,431 @@ async function processAndDrawParcels(features, source) {
 
     return newlyDrawnObjects;
 }
+
+
+
+// --- НОВЫЕ ФУНКЦИИ ДЛЯ ОТЧЕТА ПО ЛИНЕЙНЫМ ОБЪЕКТАМ ---
+
+/**
+ * Находит ближайшую линию к точке клика.
+ */
+function findLineAtPoint(lat, lon) {
+    let closestLine = null;
+    let minDistance = Infinity;
+    const clickPoint = [lat, lon];
+    const pixelThreshold = 10; // Допуск в 10 пикселей
+
+    polygons.forEach(obj => {
+        if (obj instanceof ymaps.Polyline && obj.properties.get('isDrawableLine')) {
+            const closest = obj.geometry.getClosest(clickPoint);
+            const dist = closest.distance; // API Яндекс.Карт возвращает расстояние в пикселях
+            if (dist < pixelThreshold && dist < minDistance) {
+                minDistance = dist;
+                closestLine = obj;
+            }
+        }
+    });
+    return closestLine;
+}
+
+
+/**
+ * Показывает модальное окно для выбора линии, если на карте их несколько.
+ */
+function showLineSelectionModal(lines) {
+    const modal = document.createElement('div');
+    modal.className = 'style-modal';
+    modal.style.display = 'flex';
+
+    const modalContent = document.createElement('div');
+    modalContent.className = 'style-modal-content';
+    modalContent.style.width = '400px';
+    modalContent.innerHTML = '<h3>Выберите объект для отчета</h3>';
+    
+    // Кнопка для анализа всех линий как единого объекта
+    const analyzeAllButton = document.createElement('button');
+    analyzeAllButton.textContent = `Анализировать все ${lines.length} контура как один объект`;
+    Object.assign(analyzeAllButton.style, {
+        display: 'block', width: '100%', padding: '12px', marginTop: '10px', marginBottom: '20px',
+        cursor: 'pointer', backgroundColor: '#4CAF50', color: 'white', border: 'none', borderRadius: '5px'
+    });
+    
+    analyzeAllButton.onclick = () => {
+        document.body.removeChild(modal);
+        generateLinearObjectReport(lines); 
+    };
+    modalContent.appendChild(analyzeAllButton);
+
+    // Кнопки для каждой отдельной линии
+    lines.forEach((line, index) => {
+        const coords = line.geometry.getCoordinates();
+        const turfLine = turf.lineString(coords.map(c => [c[1], c[0]]));
+        const length = turf.length(turfLine, { units: 'meters' });
+
+        const button = document.createElement('button');
+        button.textContent = `Только контур ${index + 1} (Протяженность: ${length.toFixed(2)} м)`;
+        Object.assign(button.style, {
+            display: 'block', width: '100%', padding: '10px', marginTop: '10px', cursor: 'pointer'
+        });
+        
+        button.onclick = () => {
+            document.body.removeChild(modal);
+            generateLinearObjectReport(line);
+        };
+        modalContent.appendChild(button);
+    });
+
+    const cancelBtn = document.createElement('button');
+    cancelBtn.textContent = 'Отмена';
+    Object.assign(cancelBtn.style, { marginTop: '20px', padding: '10px', cursor: 'pointer' });
+    cancelBtn.onclick = () => document.body.removeChild(modal);
+    modalContent.appendChild(cancelBtn);
+
+    modal.appendChild(modalContent);
+    document.body.appendChild(modal);
+
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) document.body.removeChild(modal);
+    });
+}
+
+
+/**
+ * Основная функция для генерации отчета по линейному объекту.
+ */
+async function generateLinearObjectReport(targetObject) {
+    const delay = ms => new Promise(res => setTimeout(res, ms));
+    showLoader("Формирование отчета по линии...");
+
+    try {
+        const isMultiContour = Array.isArray(targetObject);
+        const lines = isMultiContour ? targetObject : [targetObject];
+        if (lines.length === 0) throw new Error('Нет линий для анализа.');
+
+        const allCoords = [];
+        const turfLines = lines.map(line => {
+            const coords = line.geometry.getCoordinates();
+            allCoords.push(...coords);
+            return turf.lineString(coords.map(c => [c[1], c[0]]));
+        });
+        
+        const multiLineString = turf.multiLineString(turfLines.map(l => l.geometry.coordinates));
+        const totalLength = turf.length(multiLineString, { units: 'meters' });
+        
+        const mainObjectData = {
+            type: isMultiContour ? `Многоконтурный линейный объект (${lines.length} контура)` : 'Линейный объект',
+            totalLength: totalLength.toFixed(2),
+            pointsCount: allCoords.length,
+            coordinates: allCoords
+        };
+
+        showLoader('Поиск пересекаемых объектов...');
+        const totalBbox = turf.bbox(multiLineString);
+        const bounds = [ [totalBbox[1], totalBbox[0]], [totalBbox[3], totalBbox[2]] ];
+
+        const bufferedBounds = [
+            [bounds[0][0] - 0.0005, bounds[0][1] - 0.0005],
+            [bounds[1][0] + 0.0005, bounds[1][1] + 0.0005]
+        ];
+        const searchPolygonForApi = [
+            [bufferedBounds[0][1], bufferedBounds[0][0]], [bufferedBounds[1][1], bufferedBounds[0][0]],
+            [bufferedBounds[1][1], bufferedBounds[1][0]], [bufferedBounds[0][1], bufferedBounds[1][0]],
+            [bufferedBounds[0][1], bufferedBounds[0][0]]
+        ].map(coord => proj4("EPSG:4326", "EPSG:3857", coord));
+
+        const parcelsInArea = await searchObjectsByArea(searchPolygonForApi, 36368); // Категория ЗУ
+        await delay(100);
+        const zouitsInArea = await searchObjectsByArea(searchPolygonForApi, 36940); // Категория ЗОУИТ
+
+        showLoader('Анализ наложений...');
+        const underlyingParcelsResults = findLinearIntersections(turfLines, parcelsInArea);
+        const zouitResults = findLinearIntersections(turfLines, zouitsInArea);
+
+        const { image, coordsTable } = await drawLinearObjectToCanvas(lines, [...underlyingParcelsResults.map(r => r.feature), ...zouitResults.map(r => r.feature)]);
+        
+        const reportHtml = buildLinearReportHtml(mainObjectData, underlyingParcelsResults, zouitResults, image, coordsTable);
+        
+        const reportWindow = window.open('', '_blank');
+        if (reportWindow) {
+            reportWindow.document.write(reportHtml);
+            reportWindow.document.close();
+        } else {
+            throw new Error('Не удалось открыть новое окно. Возможно, оно заблокировано браузером.');
+        }
+
+    } catch (error) {
+        console.error("Ошибка при формировании отчета по линии:", error);
+        showNotification(error.message, 'error', 'exclamation-circle', 5000);
+    } finally {
+        hideLoader();
+    }
+}
+
+
+/**
+ * Универсальная функция для поиска объектов по области.
+ */
+async function searchObjectsByArea(searchPolygonCoordsEPSG3857, categoryId) {
+    const requestBody = {
+        "geom": { "type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"crs": { "type": "name", "properties": { "name": "EPSG:3857" } }, "type": "Polygon", "coordinates": [searchPolygonCoordsEPSG3857]}, "properties": {}}] },
+        "categories": [{"id": categoryId}]
+    };
+    try {
+        const response = await fetchNspd('https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody)
+        });
+        const text = await response.text();
+        if (!text) return [];
+        const data = JSON.parse(text);
+        return data.features || [];
+    } catch (error) {
+        console.error(`Ошибка при запросе объектов для категории ${categoryId}:`, error);
+        return [];
+    }
+}
+
+
+/**
+ * Новая, исправленная функция для поиска пересечений линий и полигонов.
+ */
+function findLinearIntersections(turfLines, targetFeatures) {
+    const results = [];
+    const processedFeatureIds = new Set();
+
+    targetFeatures.forEach(feature => {
+        const featureId = feature.properties.descr || feature.properties.options?.reg_numb_border;
+        if (!featureId || processedFeatureIds.has(featureId) || !feature.geometry || !['Polygon', 'MultiPolygon'].includes(feature.geometry.type)) {
+            return;
+        }
+
+        let totalLengthInside = 0;
+        
+        const processPolygonRings = (rings) => {
+            try {
+                // Конвертируем координаты полигона из EPSG:3857 (с сервера) в WGS84 [lon, lat] для Turf.js
+                const wgsCoords = rings[0].map(coord3857 => proj4('EPSG:3857', 'EPSG:4326', coord3857));
+                
+                if (wgsCoords.length < 4) return;
+                const first = wgsCoords[0];
+                const last = wgsCoords[wgsCoords.length - 1];
+                if (first[0] !== last[0] || first[1] !== last[1]) wgsCoords.push(first);
+
+                const targetTurfPoly = turf.polygon([wgsCoords]);
+
+                turfLines.forEach(lineFeature => {
+                    // turfLines уже в WGS84, можно сразу проверять пересечение
+                    if (turf.booleanDisjoint(lineFeature, targetTurfPoly)) return;
+                    
+                    try {
+                        const intersection = turf.intersect(lineFeature, targetTurfPoly);
+                        if (intersection) {
+                            totalLengthInside += turf.length(intersection, { units: 'meters' });
+                        }
+                    } catch (intersectError) {
+                        console.warn(`Ошибка Turf.js при вычислении пересечения для ${featureId}: ${intersectError.message}`);
+                    }
+                });
+            } catch (e) {
+                console.error(`Ошибка при обработке полигона ${featureId} для анализа пересечений:`, e);
+            }
+        };
+
+        if (feature.geometry.type === 'Polygon') {
+            processPolygonRings(feature.geometry.coordinates);
+        } else { // MultiPolygon
+            feature.geometry.coordinates.forEach(polyRings => processPolygonRings(polyRings));
+        }
+
+        if (totalLengthInside > 0.01) {
+            results.push({ feature: feature, length: totalLengthInside });
+            processedFeatureIds.add(featureId);
+        }
+    });
+    return results;
+}
+
+
+/**
+ * Новая функция для отрисовки схемы линейного объекта.
+ */
+async function drawLinearObjectToCanvas(mainLines, otherObjects) {
+    const canvasWidth = 800;
+    const canvas = document.createElement('canvas');
+    const ctx = canvas.getContext('2d');
+    const padding = 40;
+
+    const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
+    const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destSc);
+    if (!destSystem) throw new Error(`Определение для ${destSc} не найдено.`);
+    const mskName = destSystem.text || 'МСК';
+
+    const isAutoLoadEnabled = (localStorage.getItem('autoLoadMskOffset') !== 'false');
+    const mskOffsetX = isAutoLoadEnabled ? (destSystem.offsetX || 0) : (parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0);
+    const mskOffsetY = isAutoLoadEnabled ? (destSystem.offsetY || 0) : (parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0);
+
+    const bboxCoords = [];
+    mainLines.forEach(line => {
+        line.geometry.getCoordinates().forEach(c => {
+            const trueLat = c[0] + (mapOffsetY * 0.000008983);
+            const trueLon = c[1] + (mapOffsetX * 0.000008983);
+            bboxCoords.push(proj4('EPSG:4326', 'EPSG:3857', [trueLon, trueLat]));
+        });
+    });
+
+    const minX = Math.min(...bboxCoords.map(p => p[0]));
+    const maxX = Math.max(...bboxCoords.map(p => p[0]));
+    const minY = Math.min(...bboxCoords.map(p => p[1]));
+    const maxY = Math.max(...bboxCoords.map(p => p[1]));
+    
+    const projectedWidth = maxX - minX;
+    const projectedHeight = maxY - minY;
+    
+    const scale = (canvasWidth - padding * 2) / (projectedWidth > 0 ? projectedWidth : 1);
+    canvas.width = canvasWidth;
+    canvas.height = projectedHeight * scale + padding * 2;
+    
+    const cOffsetX = (canvas.width - projectedWidth * scale) / 2;
+    const cOffsetY = (canvas.height - projectedHeight * scale) / 2;
+    
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    // Отрисовка пересекаемых объектов (ЗУ, ЗОУИТ)
+    otherObjects.forEach(feature => {
+        if (!feature.geometry || !['Polygon', 'MultiPolygon'].includes(feature.geometry.type)) return;
+        
+        const isZouit = !!feature.properties.options?.reg_numb_border;
+        const color = isZouit ? getZouitColor(feature.properties.options.name_by_doc) : '#cccccc';
+
+        const processPolygon = (polygonCoords) => {
+            ctx.beginPath();
+            polygonCoords[0].forEach((coord3857, index) => {
+                const x = cOffsetX + (coord3857[0] - minX) * scale;
+                const y = canvas.height - (cOffsetY + (coord3857[1] - minY) * scale);
+                if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            });
+            ctx.closePath();
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 1;
+            ctx.stroke();
+            ctx.fillStyle = `${color}1A`; // 10% прозрачность
+            ctx.fill();
+        };
+
+        if (feature.geometry.type === 'Polygon') {
+            processPolygon(feature.geometry.coordinates);
+        } else {
+            feature.geometry.coordinates.forEach(poly => processPolygon(poly));
+        }
+    });
+
+    let totalPointCounter = 1;
+    let currentObjectTableBody = '';
+
+    // Отрисовка основной линии
+    mainLines.forEach((line) => {
+        ctx.beginPath();
+        line.geometry.getCoordinates().forEach((coord, index) => {
+            const trueLat = coord[0] + (mapOffsetY * 0.000008983);
+            const trueLon = coord[1] + (mapOffsetX * 0.000008983);
+            const projected = proj4('EPSG:4326', 'EPSG:3857', [trueLon, trueLat]);
+            
+            const x = cOffsetX + (projected[0] - minX) * scale;
+            const y = canvas.height - (cOffsetY + (projected[1] - minY) * scale);
+            
+            if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            
+            ctx.fillStyle = '#000000';
+            ctx.fillRect(x - 2, y - 2, 4, 4);
+            ctx.font = '10px Arial';
+            ctx.fillText(`т${totalPointCounter}`, x + 5, y - 5);
+            
+            const mskCoords = convertWgs84ToMskWithOffset([[trueLon, trueLat]], destSc, destSystem.def, mskOffsetX, mskOffsetY).split('\t');
+            currentObjectTableBody += `<tr><td>т${totalPointCounter}</td><td>${mskCoords[0]}</td><td>${mskCoords[1]}</td></tr>`;
+            totalPointCounter++;
+        });
+        ctx.strokeStyle = '#FF0000';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+    });
+
+    const coordsTable = `
+        <div class="section-title">Каталог координат поворотных точек</div>
+        <table>
+            <thead><tr><th class="point-col">Номер точки</th><th>X (${mskName})</th><th>Y (${mskName})</th></tr></thead>
+            <tbody>${currentObjectTableBody}</tbody>
+        </table>`;
+
+    return { image: canvas.toDataURL('image/png'), coordsTable };
+}
+
+
+/**
+ * Новая функция для сборки HTML отчета по линейному объекту.
+ */
+function buildLinearReportHtml(mainObjectData, parcelsResults, zouitResults, schemeImage, coordsTableHtml) {
+    const reportDate = new Date().toLocaleDateString('ru-RU');
+
+    const generateResultTable = (title, items, headers, rowGenerator) => {
+        let tableHtml = `<div class="section-title">${title}</div>`;
+        if (!items || items.length === 0) return tableHtml + '<p style="text-align: center; margin: 10px 0;">Объекты не найдены.</p>';
+        
+        tableHtml += `<table><thead><tr>`;
+        headers.forEach(h => tableHtml += `<th>${h}</th>`);
+        tableHtml += '</tr></thead><tbody>';
+        items.forEach(item => tableHtml += rowGenerator(item));
+        tableHtml += '</tbody></table>';
+        return tableHtml;
+    };
+    
+    const parcelRowGenerator = (item) => `<tr>
+        <td>${item.feature.properties.descr || '-'}</td>
+        <td>${item.feature.properties.options.readable_address || '-'}</td>
+        <td>${item.length.toFixed(2)} м</td>
+    </tr>`;
+
+    const zouitRowGenerator = (item) => `<tr>
+        <td>${item.feature.properties.options.reg_numb_border || '-'}</td>
+        <td>${item.feature.properties.options.name_by_doc || '-'}</td>
+        <td>${item.length.toFixed(2)} м</td>
+    </tr>`;
+
+    return `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Отчет по линейному объекту</title><link rel="icon" href="img/vyp.png">
+    <style>
+        body{font-family: 'Liberation Serif', 'Times New Roman', Times, serif; margin: 0; background: #e9ecef; color: #212224; font-size: 11pt; line-height: 1.5;}
+        .page{background: white; box-shadow: 0 4px 16px rgba(0,0,0,0.1); margin: 20px auto; padding: 20mm; box-sizing: border-box; width: 210mm; max-width: 98%;}
+        table{width: 100%; border-collapse: collapse; margin: 15px 0 20px 0; table-layout: fixed;}
+        th, td{border: 1px solid #ccc; padding: 8px 10px; text-align: left; vertical-align: middle; word-break: break-word;}
+        th{background-color: #eaf0ff; color: #002a5c; font-weight: bold; text-align: center;}
+        tbody tr:nth-child(even){background-color: #f8f9fa;}
+        .main-info-table td:first-child{width: 35%; font-weight: bold; background-color: #f4f8ff;}
+        .header{text-align: center; margin-bottom: 30px; padding-top: 15px; border-top: 4px solid #003366;}
+        .header h3{font-size: 16pt; color: #002a5c; margin: 10px 0 5px 0; font-weight: 600; letter-spacing: 0.5px;}
+        .header h4{font-size: 11pt; font-weight: normal; color: #555; margin: 0; font-style: italic;}
+        .section-title{text-align: center; font-weight: bold; margin: 35px 0 15px 0; font-size: 12pt; page-break-after: avoid; color: #002a5c; border-bottom: 1px solid #d6e4ff; padding-bottom: 8px; text-transform: uppercase; letter-spacing: 1px;}
+        .scheme-container{text-align: center; margin-top: 25px; page-break-inside: avoid;}
+        .scheme-container img{max-width: 100%; border: 1px solid #ccc;}
+        @media print{body{background: none;}.page{box-shadow: none; border: none; margin: 0; padding: 15mm; width: 100%;}}
+    </style>
+    </head>
+    <body><div class="page">
+        <div class="header">
+            <h3>Сводный отчет по линейному объекту</h3>
+            <h4>сформирован ${reportDate}</h4>
+        </div>
+        <div class="section-title">Общие характеристики</div>
+        <table class="main-info-table">
+            <tr><td>Тип объекта</td><td>${mainObjectData.type}</td></tr>
+            <tr><td>Общая протяженность</td><td>${mainObjectData.totalLength} м</td></tr>
+            <tr><td>Количество поворотных точек</td><td>${mainObjectData.pointsCount}</td></tr>
+        </table>
+        ${generateResultTable('Пересекаемые земельные участки', parcelsResults, ['Кадастровый номер', 'Адрес', 'Протяженность наложения'], parcelRowGenerator)}
+        ${generateResultTable('Пересекаемые ЗОУИТ', zouitResults, ['Рег. номер', 'Наименование', 'Протяженность наложения'], zouitRowGenerator)}
+        <div class="scheme-container"><div class="section-title">Схема расположения</div><img src="${schemeImage}" alt="Схема расположения"></div>
+        ${coordsTableHtml}
+    </div></body></html>`;
+}
+
 
 // Add this function to populate the sidebar with all currently loaded parcel features
 function populateSidebarWithParcels(features, loadDate = null) {
@@ -12093,222 +12562,22 @@ function isBboxInsidePolygon(bbox, polygonFeature) {
     }
 }
 
-function showLineSelectionModal(lines) {
-    const modal = document.createElement('div');
-    modal.className = 'style-modal'; // Используем существующий класс для фона
-    modal.style.display = 'flex';
-
-    const modalContent = document.createElement('div');
-    modalContent.className = 'style-modal-content';
-    modalContent.style.width = '400px';
-    modalContent.innerHTML = '<h3>Выберите объект для отчета</h3>';
-    
-    // Кнопка для анализа всех линий как единого объекта
-    const analyzeAllButton = document.createElement('button');
-    analyzeAllButton.textContent = `Анализировать все ${lines.length} контура как один объект`;
-    analyzeAllButton.style.display = 'block';
-    analyzeAllButton.style.width = '100%';
-    analyzeAllButton.style.padding = '12px';
-    analyzeAllButton.style.marginTop = '10px';
-    analyzeAllButton.style.marginBottom = '20px'; // Отступ снизу
-    analyzeAllButton.style.cursor = 'pointer';
-    analyzeAllButton.style.backgroundColor = '#4CAF50'; // Зеленый цвет для выделения
-    analyzeAllButton.style.color = 'white';
-    analyzeAllButton.style.border = 'none';
-    analyzeAllButton.style.borderRadius = '5px';
-    
-    analyzeAllButton.onclick = () => {
-        document.body.removeChild(modal);
-        // Передаем в функцию отчета массив всех найденных линий
-        generateConsolidatedReport(lines); 
-    };
-    modalContent.appendChild(analyzeAllButton);
-
-    lines.forEach((line, index) => {
-        const coords = line.geometry.getCoordinates();
-        const turfLine = turf.lineString(coords.map(c => [c[1], c[0]]));
-        const length = turf.length(turfLine, { units: 'meters' });
-
-        const button = document.createElement('button');
-        button.textContent = `Только контур ${index + 1} (Протяженность: ${length.toFixed(2)} м)`;
-        button.style.display = 'block';
-        button.style.width = '100%';
-        button.style.padding = '10px';
-        button.style.marginTop = '10px';
-        button.style.cursor = 'pointer';
-        
-        button.onclick = () => {
-            document.body.removeChild(modal);
-            generateConsolidatedReport(line);
-        };
-        modalContent.appendChild(button);
-    });
-
-    const cancelBtn = document.createElement('button');
-    cancelBtn.textContent = 'Отмена';
-    cancelBtn.style.marginTop = '20px';
-    cancelBtn.style.padding = '10px';
-    cancelBtn.style.cursor = 'pointer';
-    cancelBtn.onclick = () => {
-        document.body.removeChild(modal);
-    };
-    modalContent.appendChild(cancelBtn);
-
-    modal.appendChild(modalContent);
-    document.body.appendChild(modal);
-
-    // Закрытие по клику на фон
-    modal.addEventListener('click', (e) => {
-        if (e.target === modal) {
-            document.body.removeChild(modal);
-        }
-    });
-}
-
-
-async function generateConsolidatedReport(targetObject) {
+async function generateConsolidatedReport(targetPolygon) {
+    showLoader("Формирование отчета...");
     const delay = ms => new Promise(res => setTimeout(res, ms));
 
-    // --- НАЧАЛО ВЕТКИ ЛОГИКИ ДЛЯ ЛИНЕЙНЫХ ОБЪЕКТОВ ---
-    if (targetObject instanceof ymaps.Polyline || Array.isArray(targetObject)) {
-        showLoader("Формирование отчета по линии...");
-        try {
-            const isMultiContour = Array.isArray(targetObject);
-            const lines = isMultiContour ? targetObject : [targetObject];
-            
-            if (lines.length === 0) throw new Error('Нет линий для анализа.');
-
-            // --- Объединение геометрии для анализа ---
-            const allCoords = []; // Координаты для каталога (в системе WGS84 со смещением карты)
-
-            // Создаем линии в проекции EPSG:3857 для анализа пересечений в Turf.js
-            const turfLinesEPSG3857 = lines.map(line => {
-                const coordsWithOffset = line.geometry.getCoordinates(); // Координаты со смещением [lat, lon]
-                allCoords.push(...coordsWithOffset); // Собираем исходные смещенные координаты для каталога
-
-                // Конвертируем в "чистые" EPSG:3857
-                const coords3857 = coordsWithOffset.map(c => {
-                    const trueLat = c[0] + (mapOffsetY * 0.000008983);
-                    const trueLon = c[1] + (mapOffsetX * 0.000008983);
-                    return proj4('EPSG:4326', 'EPSG:3857', [trueLon, trueLat]);
-                });
-                return turf.lineString(coords3857);
-            });
-            
-            const multiLineString = turf.multiLineString(turfLinesEPSG3857.map(l => l.geometry.coordinates));
-            const totalLength = turf.length(multiLineString, { units: 'meters' });
-            
-            const mainObjectData = {
-                type: isMultiContour ? `Многоконтурный линейный объект (${lines.length} контура)` : 'Линейный объект',
-                totalLength: totalLength.toFixed(2),
-                pointsCount: allCoords.length,
-                coordinates: allCoords
-            };
-
-            showLoader('Поиск пересекаемых объектов...');
-            
-            const totalBbox = turf.bbox(multiLineString);
-            const bounds = [ [totalBbox[1], totalBbox[0]], [totalBbox[3], totalBbox[2]] ];
-
-            const bufferedBounds = [
-                [bounds[0][0] - 0.0005, bounds[0][1] - 0.0005],
-                [bounds[1][0] + 0.0005, bounds[1][1] + 0.0005]
-            ];
-            const searchPolygonForApi = [
-                [bufferedBounds[0][1], bufferedBounds[0][0]], [bufferedBounds[1][1], bufferedBounds[0][0]],
-                [bufferedBounds[1][1], bufferedBounds[1][0]], [bufferedBounds[0][1], bufferedBounds[1][0]],
-                [bufferedBounds[0][1], bufferedBounds[0][0]]
-            ].map(coord => proj4("EPSG:4326", "EPSG:3857", coord));
-
-            const parcelsInArea = await searchParcelsByArea(searchPolygonForApi);
-            await delay(100);
-            
-            const tempYmapsPolygonForZouit = new ymaps.Polygon([[
-                [bounds[0][0], bounds[0][1]], [bounds[0][0], bounds[1][1]],
-                [bounds[1][0], bounds[1][1]], [bounds[1][0], bounds[0][1]]
-            ]]);
-            const zouitsInArea = await searchFeaturesByGeometry(tempYmapsPolygonForZouit, 36940);
-
-            showLoader('Анализ наложений...');
-
-            const analyzeLinearIntersections = (linesEPSG3857, polygonFeatures) => {
-                const results = [];
-                polygonFeatures.forEach(polyFeature => {
-                    if (!polyFeature.geometry || !['Polygon', 'MultiPolygon'].includes(polyFeature.geometry.type)) return;
-
-                    const featureId = polyFeature.properties.descr || polyFeature.properties.options.reg_numb_border;
-                    let totalLengthInside = 0;
-
-                    const processSinglePolygonRing = (polygonRingEPSG3857) => {
-                        if (!polygonRingEPSG3857 || polygonRingEPSG3857.length < 4) return 0;
-                        let lengthInRing = 0;
-                        try {
-                            const turfPoly = turf.polygon([polygonRingEPSG3857]);
-                            linesEPSG3857.forEach(lineFeature => {
-                                if (turf.booleanDisjoint(lineFeature, turfPoly)) return;
-                                const intersection = turf.intersect(lineFeature, turfPoly);
-                                if (intersection) {
-                                    lengthInRing += turf.length(intersection, { units: 'meters' });
-                                }
-                            });
-                        } catch (e) { console.error("Ошибка при анализе пересечения:", featureId, e); }
-                        return lengthInRing;
-                    };
-
-                    if (polyFeature.geometry.type === 'Polygon') {
-                        polyFeature.geometry.coordinates.forEach(ring => totalLengthInside += processSinglePolygonRing(ring));
-                    } else { // MultiPolygon
-                        polyFeature.geometry.coordinates.forEach(polyRings => polyRings.forEach(ring => totalLengthInside += processSinglePolygonRing(ring)));
-                    }
-
-                    if (totalLengthInside > 0.01) {
-                        results.push({ feature: polyFeature, length: totalLengthInside });
-                    }
-                });
-                return results;
-            };
-
-            const underlyingParcelsResults = analyzeLinearIntersections(turfLinesEPSG3857, parcelsInArea);
-            const zouitResults = analyzeLinearIntersections(turfLinesEPSG3857, zouitsInArea);
-
-            const { image, coordsTable } = await drawLinearObjectToCanvas(lines, [...parcelsInArea, ...zouitsInArea]);
-            const reportHtml = buildLinearReportHtml(mainObjectData, underlyingParcelsResults, zouitResults, image, coordsTable);
-            
-            const reportWindow = window.open('', '_blank');
-            if (reportWindow) {
-                reportWindow.document.write(reportHtml);
-                reportWindow.document.close();
-            } else {
-                throw new Error('Не удалось открыть новое окно. Возможно, оно заблокировано браузером.');
-            }
-
-        } catch (error) {
-            console.error("Ошибка при формировании отчета по линии:", error);
-            showNotification(error.message, 'error', 'exclamation-circle', 5000);
-        } finally {
-            hideLoader();
-        }
-        return;
-    }
-    // --- КОНЕЦ ВЕТКИ ЛОГИКИ ДЛЯ ЛИНЕЙНЫХ ОБЪЕКТОВ ---
-
-
-    // --- НАЧАЛО ВЕТКИ ЛОГИКИ ДЛЯ ПОЛИГОНОВ (исправленная версия) ---
-    showLoader("Формирование отчета...");
-    const targetPolygon = targetObject;
-
     try {
-        if (!targetPolygon || !(targetPolygon instanceof ymaps.Polygon)) {
-             throw new Error('Объект для формирования отчета не является полигоном.');
+        if (!targetPolygon) {
+             throw new Error('Объект для формирования отчета не был найден или загружен.');
         }
 
         const isRealObject = targetPolygon.properties.get('isParcelInQuarter') || targetPolygon.properties.get('isFoundInArea') || targetPolygon.properties.get('isParcelFromSingleSearch');
         const isManualObject = targetPolygon.properties.get('isManuallyDrawn');
         
         let mainObjectData;
-        let underlyingParcelsResults = [];
+        let underlyingParcelsResults = []; // Теперь будет массив объектов { feature, intersectionArea, percentage }
         let linkedOksResults = [];
-        let mainObjectAreaInMeters; 
+        let mainObjectAreaInMeters; // --- НОВАЯ ПЕРЕМЕННАЯ ДЛЯ ПЛОЩАДИ
 
         if (isRealObject) {
             const featureData = targetPolygon.properties.get('featureData');
@@ -12326,10 +12595,14 @@ async function generateConsolidatedReport(targetObject) {
                 rightType: opts.right_type
             };
 
+            // --- НАЧАЛО НОВЫХ ИЗМЕНЕНИЙ ---
+            
+            // Получаем площадь исходного объекта для расчета процента наложения
             const coordsForArea = targetPolygon.geometry.getCoordinates()[0];
             const turfPolyForArea = turf.polygon([coordsForArea.map(c => [c[1], c[0]])]);
             mainObjectAreaInMeters = turf.area(turfPolyForArea);
 
+            // Логика поиска пересекающихся ЗУ (аналогично 'Созданному объекту')
             showLoader('Поиск наложений с ЗУ...');
             const boundsForSearch = targetPolygon.geometry.getBounds();
             const bufferedBoundsForSearch = [
@@ -12345,50 +12618,53 @@ async function generateConsolidatedReport(targetObject) {
             const fetchedCandidateFeatures = await searchParcelsByArea(searchPolygonForApi);
             
             if (fetchedCandidateFeatures.length > 0) {
-                 const mainObjectTrueWgsCoords = coordsForArea.map(c => {
-                    const trueLat = c[0] + (mapOffsetY * 0.000008983);
-                    const trueLon = c[1] + (mapOffsetX * 0.000008983);
-                    return [trueLon, trueLat];
-                });
-                let searchTurfPoly = turf.polygon([mainObjectTrueWgsCoords]);
-                
+                let searchTurfPoly = turf.polygon([coordsForArea.map(c => [c[1], c[0]])]);
                 const bufferedSearchPoly = turf.buffer(searchTurfPoly, -0.005, { units: 'meters' });
                 if (bufferedSearchPoly) searchTurfPoly = bufferedSearchPoly;
 
                 fetchedCandidateFeatures.forEach(feature => {
-                    if (feature.properties.descr === mainObjectData.cadastralNumber) return;
+                    // Отфильтровываем сам исходный объект
+                    if (feature.properties.descr === mainObjectData.cadastralNumber) {
+                        return; // continue
+                    }
+                    
                     if (!feature.geometry || !feature.geometry.coordinates || feature.geometry.type !== 'Polygon') return;
                     
-                    const featureWgsCoords = feature.geometry.coordinates[0].map(coord3857 => {
+                    const featureWgsCoordsWithOffset = feature.geometry.coordinates[0].map(coord3857 => {
                         const wgsCoord = proj4('EPSG:3857', 'EPSG:4326', coord3857);
-                        return [wgsCoord[0], wgsCoord[1]];
+                        const latWithOffset = wgsCoord[1] - (mapOffsetY * 0.000008983);
+                        const lonWithOffset = wgsCoord[0] - (mapOffsetX * 0.000008983);
+                        return [lonWithOffset, latWithOffset];
                     });
-                    const targetTurfPoly = turf.polygon([featureWgsCoords]);
+                    const targetTurfPoly = turf.polygon([featureWgsCoordsWithOffset]);
 
                     if (turf.booleanIntersects(searchTurfPoly, targetTurfPoly)) {
-                        const intersectionGeometry = turf.intersect(searchTurfPoly, targetTurfPoly);
+                        const unbufferedTurfPoly = turf.polygon([coordsForArea.map(c => [c[1], c[0]])]);
+                        const intersectionGeometry = turf.intersect(unbufferedTurfPoly, targetTurfPoly);
+                        
                         let intersectionArea = 0;
                         if (intersectionGeometry) intersectionArea = turf.area(intersectionGeometry);
 
                         if (intersectionArea > 0.01) {
                             const percentage = (intersectionArea / mainObjectAreaInMeters) * 100;
-                            underlyingParcelsResults.push({ feature, intersectionArea, percentage });
+                            underlyingParcelsResults.push({
+                                feature: feature,
+                                intersectionArea: intersectionArea,
+                                percentage: percentage
+                            });
                         }
                     }
                 });
             }
+            // --- КОНЕЦ НОВЫХ ИЗМЕНЕНИЙ ---
+
             linkedOksResults = await fetchLinkedOks(mainObjectData.cadastralNumber);
         
         } else if (isManualObject) { 
             const coords = targetPolygon.geometry.getCoordinates()[0];
-            const trueWgsCoords = coords.map(c => {
-                const trueLat = c[0] + (mapOffsetY * 0.000008983);
-                const trueLon = c[1] + (mapOffsetX * 0.000008983);
-                return [trueLon, trueLat];
-            });
-            const unbufferedTurfPoly = turf.polygon([trueWgsCoords]);
+            const unbufferedTurfPoly = turf.polygon([coords.map(c => [c[1], c[0]])]);
             const areaInMeters = turf.area(unbufferedTurfPoly);
-            mainObjectAreaInMeters = areaInMeters;
+            mainObjectAreaInMeters = areaInMeters; // --- СОХРАНЯЕМ ПЛОЩАДЬ
             
             mainObjectData = {
                 cadastralNumber: 'Созданный объект',
@@ -12397,6 +12673,7 @@ async function generateConsolidatedReport(targetObject) {
             };
 
             showLoader('Загрузка участков в области...');
+
             const bounds = targetPolygon.geometry.getBounds();
             const bufferedBounds = [
                 [bounds[0][0] - 0.00005, bounds[0][1] - 0.00005],
@@ -12412,27 +12689,39 @@ async function generateConsolidatedReport(targetObject) {
             
             if (fetchedCandidateFeatures.length > 0) {
                 showLoader('Поиск наложений...');
-                let searchTurfPoly = turf.polygon([trueWgsCoords]);
+                
+                let searchTurfPoly = turf.polygon([coords.map(c => [c[1], c[0]])]);
                 const bufferedSearchPoly = turf.buffer(searchTurfPoly, -0.005, { units: 'meters' });
-                if (bufferedSearchPoly) searchTurfPoly = bufferedSearchPoly;
+                if (bufferedSearchPoly) {
+                    searchTurfPoly = bufferedSearchPoly;
+                }
 
                 fetchedCandidateFeatures.forEach(feature => {
                     if (!feature.geometry || !feature.geometry.coordinates || feature.geometry.type !== 'Polygon') return;
                     
-                    const featureWgsCoords = feature.geometry.coordinates[0].map(coord3857 => {
+                    const featureWgsCoordsWithOffset = feature.geometry.coordinates[0].map(coord3857 => {
                         const wgsCoord = proj4('EPSG:3857', 'EPSG:4326', coord3857);
-                        return [wgsCoord[0], wgsCoord[1]];
+                        const latWithOffset = wgsCoord[1] - (mapOffsetY * 0.000008983);
+                        const lonWithOffset = wgsCoord[0] - (mapOffsetX * 0.000008983);
+                        return [lonWithOffset, latWithOffset];
                     });
-                    const targetTurfPoly = turf.polygon([featureWgsCoords]);
+                    const targetTurfPoly = turf.polygon([featureWgsCoordsWithOffset]);
 
                     if (turf.booleanIntersects(searchTurfPoly, targetTurfPoly)) {
                         const intersectionGeometry = turf.intersect(unbufferedTurfPoly, targetTurfPoly);
+                        
                         let intersectionArea = 0;
-                        if (intersectionGeometry) intersectionArea = turf.area(intersectionGeometry);
+                        if (intersectionGeometry) {
+                            intersectionArea = turf.area(intersectionGeometry);
+                        }
 
                         if (intersectionArea > 0.01) {
-                            const percentage = (intersectionArea / mainObjectAreaInMeters) * 100;
-                            underlyingParcelsResults.push({ feature, intersectionArea, percentage });
+                            const percentage = (intersectionArea / mainObjectAreaInMeters) * 100; // --- ИСПОЛЬЗУЕМ СОХРАНЕННУЮ ПЛОЩАДЬ
+                            underlyingParcelsResults.push({
+                                feature: feature,
+                                intersectionArea: intersectionArea,
+                                percentage: percentage
+                            });
                         }
                     }
                 });
@@ -12448,22 +12737,29 @@ async function generateConsolidatedReport(targetObject) {
         const centerLat = (bounds[0][0] + bounds[1][0]) / 2;
         const centerLon = (bounds[0][1] + bounds[1][1]) / 2;
 
-        const oksResults = await searchFeaturesByGeometry(targetPolygon, 36369); await delay(100);
-        const structuresResults = await searchFeaturesByGeometry(targetPolygon, 36383); await delay(100);
-        const zouitResults = await searchFeaturesByGeometry(targetPolygon, 36940); await delay(100);
+        const oksResults = await searchFeaturesByGeometry(targetPolygon, 36369);
+        await delay(100);
+        const structuresResults = await searchFeaturesByGeometry(targetPolygon, 36383);
+        await delay(100);
+        const zouitResults = await searchFeaturesByGeometry(targetPolygon, 36940);
+        await delay(100);
         
-        const terrZoneResults = await searchContainingObjectByPoint(centerLat, centerLon, 36315, targetPolygon); await delay(100);
-        const settlementsResults = await searchContainingObjectByPoint(centerLat, centerLon, 36281, targetPolygon); await delay(100);
-        const municipalResults = await searchContainingObjectByPoint(centerLat, centerLon, 36278, targetPolygon); await delay(100);
+        const terrZoneResults = await searchContainingObjectByPoint(centerLat, centerLon, 36315, targetPolygon);
+        await delay(100);
+        const settlementsResults = await searchContainingObjectByPoint(centerLat, centerLon, 36281, targetPolygon);
+        await delay(100);
+        const municipalResults = await searchContainingObjectByPoint(centerLat, centerLon, 36278, targetPolygon);
+        await delay(100);
         const forestryResults = await searchContainingObjectByPoint(centerLat, centerLon, 36314, targetPolygon);
         
         const mainSchemeOtherObjects = [...oksResults, ...structuresResults];
-        const underlyingParcelsForDrawing = underlyingParcelsResults.map(item => item.feature);
         
+        const underlyingParcelsForDrawing = underlyingParcelsResults.map(item => item.feature);
         const { image: mainSchemeWithPoints, coordsTable } = await drawAllObjectsToCanvas(targetPolygon, mainSchemeOtherObjects, true);
         const { image: mainSchemeWithoutPoints } = await drawAllObjectsToCanvas(targetPolygon, mainSchemeOtherObjects, false);
 
-        let parcelsSchemeWithPoints = null, parcelsSchemeWithoutPoints = null;
+        let parcelsSchemeWithPoints = null;
+        let parcelsSchemeWithoutPoints = null;
         if (underlyingParcelsResults.length > 0) {
             const { image: imageParcelsWithPoints } = await drawAllObjectsToCanvas(targetPolygon, underlyingParcelsForDrawing, true, underlyingParcelsForDrawing);
             parcelsSchemeWithPoints = imageParcelsWithPoints;
@@ -12493,196 +12789,6 @@ async function generateConsolidatedReport(targetObject) {
     } finally {
         hideLoader();
     }
-}
-
-async function drawLinearObjectToCanvas(mainLines, otherObjects) { // Аргумент теперь mainLines (массив)
-    const canvasWidth = 800;
-    const canvas = document.createElement('canvas');
-    const ctx = canvas.getContext('2d');
-    const padding = 40;
-
-    const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
-    const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destSc);
-    if (!destSystem) throw new Error(`Определение для ${destSc} не найдено.`);
-    const mskName = destSystem.text || 'МСК';
-
-    const isAutoLoadEnabled = (localStorage.getItem('autoLoadMskOffset') !== 'false');
-    const mskOffsetX = isAutoLoadEnabled ? (destSystem.offsetX || 0) : (parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0);
-    const mskOffsetY = isAutoLoadEnabled ? (destSystem.offsetY || 0) : (parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0);
-
-    // Собираем Bbox со всех линий
-    const bboxCoords = [];
-    mainLines.forEach(line => {
-        const lineCoords = line.geometry.getCoordinates();
-        lineCoords.forEach(c => {
-            const trueLat = c[0] + (mapOffsetY * 0.000008983);
-            const trueLon = c[1] + (mapOffsetX * 0.000008983);
-            bboxCoords.push(proj4('EPSG:4326', 'EPSG:3857', [trueLon, trueLat]));
-        });
-    });
-
-    const minX = Math.min(...bboxCoords.map(p => p[0]));
-    const maxX = Math.max(...bboxCoords.map(p => p[0]));
-    const minY = Math.min(...bboxCoords.map(p => p[1]));
-    const maxY = Math.max(...bboxCoords.map(p => p[1]));
-
-    const projectedWidth = maxX - minX;
-    const projectedHeight = maxY - minY;
-    
-    const scale = (canvasWidth - padding * 2) / (projectedWidth > 0 ? projectedWidth : 1);
-    canvas.width = canvasWidth;
-    canvas.height = projectedHeight * scale + padding * 2;
-    
-    const cOffsetX = (canvas.width - projectedWidth * scale) / 2;
-    const cOffsetY = (canvas.height - projectedHeight * scale) / 2;
-    
-    ctx.fillStyle = '#FFFFFF';
-    ctx.fillRect(0, 0, canvas.width, canvas.height);
-
-    otherObjects.forEach(feature => {
-        if (!feature.geometry || !['Polygon', 'MultiPolygon'].includes(feature.geometry.type)) return;
-        
-        const processPolygon = (polygonCoords) => {
-            ctx.beginPath();
-            polygonCoords[0].forEach((coord3857, index) => {
-                const x = cOffsetX + (coord3857[0] - minX) * scale;
-                const y = canvas.height - (cOffsetY + (coord3857[1] - minY) * scale);
-                if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-            });
-            ctx.closePath();
-            ctx.strokeStyle = '#cccccc';
-            ctx.lineWidth = 1;
-            ctx.stroke();
-            ctx.fillStyle = '#f0f0f033';
-            ctx.fill();
-        };
-
-        if (feature.geometry.type === 'Polygon') {
-            processPolygon(feature.geometry.coordinates);
-        } else {
-            feature.geometry.coordinates.forEach(poly => processPolygon(poly));
-        }
-    });
-
-    // Отрисовка всех линий
-    let totalPointCounter = 1;
-    let currentObjectTableBody = '';
-
-    mainLines.forEach((line, lineIndex) => {
-        const mainLineCoords = line.geometry.getCoordinates();
-        
-        ctx.beginPath();
-        mainLineCoords.forEach((coord, index) => {
-            const trueLat = coord[0] + (mapOffsetY * 0.000008983);
-            const trueLon = coord[1] + (mapOffsetX * 0.000008983);
-            const projected = proj4('EPSG:4326', 'EPSG:3857', [trueLon, trueLat]);
-            
-            const x = cOffsetX + (projected[0] - minX) * scale;
-            const y = canvas.height - (cOffsetY + (projected[1] - minY) * scale);
-            
-            if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-            
-            ctx.fillStyle = '#000000';
-            ctx.fillRect(x - 2, y - 2, 4, 4);
-            ctx.font = '10px Arial';
-            ctx.fillText(`т${totalPointCounter}`, x + 5, y - 5);
-            
-            const mskCoords = convertWgs84ToMskWithOffset([[trueLon, trueLat]], destSc, destSystem.def, mskOffsetX, mskOffsetY).split('\t');
-            currentObjectTableBody += `<tr><td>т${totalPointCounter}</td><td>${mskCoords[0]}</td><td>${mskCoords[1]}</td></tr>`;
-            totalPointCounter++;
-        });
-        ctx.strokeStyle = '#FF0000';
-        ctx.lineWidth = 3;
-        ctx.stroke();
-    });
-
-    const coordsTable = `
-        <div class="section-title">Каталог координат поворотных точек</div>
-        <table>
-            <thead><tr><th class="point-col">Номер точки</th><th>X (${mskName})</th><th>Y (${mskName})</th></tr></thead>
-            <tbody>${currentObjectTableBody}</tbody>
-        </table>`;
-
-    return { image: canvas.toDataURL('image/png'), coordsTable };
-}
-
-
-// Функция для сборки HTML для линейного отчета
-function buildLinearReportHtml(mainObjectData, parcelsResults, zouitResults, schemeImage, coordsTableHtml) {
-    const reportDate = new Date().toLocaleDateString('ru-RU');
-
-    const generateResultTable = (title, items, headers, rowGenerator) => {
-        let tableHtml = `<div class="section-title">${title}</div>`;
-        if (!items || items.length === 0) {
-            return tableHtml + '<p style="text-align: center; margin: 10px 0;">Объекты не найдены.</p>';
-        }
-        tableHtml += `<table><thead><tr>`;
-        headers.forEach(h => tableHtml += `<th>${h}</th>`);
-        tableHtml += '</tr></thead><tbody>';
-        items.forEach(item => tableHtml += rowGenerator(item));
-        tableHtml += '</tbody></table>';
-        return tableHtml;
-    };
-    
-    const parcelRowGenerator = (item) => `<tr>
-        <td>${item.feature.properties.descr || '-'}</td>
-        <td>${item.feature.properties.options.readable_address || '-'}</td>
-        <td>${item.length.toFixed(2)} м</td>
-    </tr>`;
-
-    const zouitRowGenerator = (item) => `<tr>
-        <td>${item.feature.properties.options.reg_numb_border || '-'}</td>
-        <td>${item.feature.properties.options.name_by_doc || '-'}</td>
-        <td>${item.length.toFixed(2)} м</td>
-    </tr>`;
-
-    return `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Отчет по линейному объекту</title><link rel="icon" href="img/vyp.png">
-    <style>
-        body{font-family: 'Liberation Serif', 'Times New Roman', Times, serif; margin: 0; background: #e9ecef; color: #212224; font-size: 11pt; line-height: 1.5;}
-        .page{background: white; box-shadow: 0 4px 16px rgba(0,0,0,0.1); margin: 20px auto; padding: 20mm; box-sizing: border-box; width: 210mm; max-width: 98%;}
-        table{width: 100%; border-collapse: collapse; margin: 15px 0 20px 0; table-layout: fixed;}
-        th, td{border: 1px solid #ccc; padding: 8px 10px; text-align: left; vertical-align: middle; word-break: break-word;}
-        th{background-color: #eaf0ff; color: #002a5c; font-weight: bold; text-align: center;}
-        tbody tr:nth-child(even){background-color: #f8f9fa;}
-        .main-info-table td:first-child{width: 35%; font-weight: bold; background-color: #f4f8ff;}
-        .header{text-align: center; margin-bottom: 30px; padding-top: 15px; border-top: 4px solid #003366;}
-        .header h3{font-size: 16pt; color: #002a5c; margin: 10px 0 5px 0; font-weight: 600; letter-spacing: 0.5px;}
-        .header h4{font-size: 11pt; font-weight: normal; color: #555; margin: 0; font-style: italic;}
-        .section-title{text-align: center; font-weight: bold; margin: 35px 0 15px 0; font-size: 12pt; page-break-after: avoid; color: #002a5c; border-bottom: 1px solid #d6e4ff; padding-bottom: 8px; text-transform: uppercase; letter-spacing: 1px;}
-        .scheme-container{text-align: center; margin-top: 25px; page-break-inside: avoid;}
-        .scheme-container img{max-width: 100%; border: 1px solid #ccc;}
-        @media print{body{background: none;}.page{box-shadow: none; border: none; margin: 0; padding: 15mm; width: 100%;}}
-    </style>
-    </head>
-    <body><div class="page">
-        <div class="header">
-            <h3>Сводный отчет по линейному объекту</h3>
-            <h4>сформирован ${reportDate}</h4>
-        </div>
-        <div class="section-title">Общие характеристики</div>
-        <table class="main-info-table">
-            <tr><td>Тип объекта</td><td>${mainObjectData.type}</td></tr>
-            <tr><td>Общая протяженность</td><td>${mainObjectData.totalLength} м</td></tr>
-            <tr><td>Количество поворотных точек</td><td>${mainObjectData.pointsCount}</td></tr>
-        </table>
-        ${generateResultTable(
-            `Пересекаемые земельные участки`, 
-            parcelsResults, 
-            ['Кадастровый номер', 'Адрес', 'Протяженность наложения'], 
-            parcelRowGenerator
-        )}
-        ${generateResultTable(
-            `Пересекаемые ЗОУИТ`, 
-            zouitResults, 
-            ['Рег. номер', 'Наименование', 'Протяженность наложения'], 
-            zouitRowGenerator
-        )}
-        <div class="scheme-container">
-            <div class="section-title">Схема расположения</div>
-            <img src="${schemeImage}" alt="Схема расположения">
-        </div>
-        ${coordsTableHtml}
-    </div></body></html>`;
 }
 
 
