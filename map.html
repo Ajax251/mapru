@@ -7907,28 +7907,34 @@ async function drawLinearObjectToCanvas(mainLines, otherObjects) {
         const isZouit = !!feature.properties.options?.reg_numb_border;
         const color = isZouit ? getZouitColor(feature.properties.options.name_by_doc) : '#cccccc';
         
-        // --- ИЗМЕНЕНИЕ: Формируем полное имя для ЗОУИТ ---
         const name = isZouit 
             ? `${feature.properties.options?.reg_numb_border || ''} ${feature.properties.options?.name_by_doc || ''}`.trim()
             : (feature.properties.descr || feature.properties.options?.reg_numb_border || 'Объект');
 
-        const processPolygon = (polygonCoords) => {
+        const processPolygon = (polygonRings) => { // <-- ИЗМЕНЕНИЕ: теперь это polygonRings
             let canvasPoints = [];
             ctx.beginPath();
-            polygonCoords[0].forEach((coord3857, index) => {
-                const x = cOffsetX + (coord3857[0] - minX) * scale;
-                const y = canvas.height - (cOffsetY + (coord3857[1] - minY) * scale);
-                canvasPoints.push({x, y});
-                if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+            
+            // --- ИЗМЕНЕНИЕ: Рисуем все контуры (внешний и внутренние) ---
+            polygonRings.forEach(ring => {
+                ring.forEach((coord3857, index) => {
+                    const x = cOffsetX + (coord3857[0] - minX) * scale;
+                    const y = canvas.height - (cOffsetY + (coord3857[1] - minY) * scale);
+                    if (ring === polygonRings[0]) { // Собираем точки только от внешнего контура
+                        canvasPoints.push({x, y});
+                    }
+                    if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
+                });
+                ctx.closePath(); // Закрываем каждый контур
             });
-            ctx.closePath();
+            // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
             ctx.strokeStyle = color;
             ctx.lineWidth = 1;
             ctx.stroke();
             ctx.fillStyle = `${color}1A`;
-            ctx.fill();
+            ctx.fill(); // Canvas сам обработает "дырки" благодаря правилу non-zero winding
             
-            // --- ИЗМЕНЕНИЕ: Улучшенный алгоритм размещения подписей ---
             if (name) {
                 ctx.fillStyle = '#555';
                 ctx.font = '10px Arial';
@@ -10754,7 +10760,7 @@ async function drawSelectedZouits(features, selectedIndex, map, polygons, polygo
         let currentLabelPreset;
         if (currentStrokeColor === '#FF0000') {
             currentLabelPreset = 'islands#redStretchyIcon';
-        } else if (currentStrokeColor === '#FFA500') {
+        } else if (currentStrokeColor === '#FFBF00' || currentStrokeColor === '#FFA500') { // Добавлен желтый
             currentLabelPreset = 'islands#yellowStretchyIcon';
         } else {
             currentLabelPreset = 'islands#violetStretchyIcon';
@@ -10767,9 +10773,10 @@ async function drawSelectedZouits(features, selectedIndex, map, polygons, polygo
         const isMultiPolygon = feature.geometry.type === 'MultiPolygon';
         const polygonsCoords = isMultiPolygon ? feature.geometry.coordinates : [feature.geometry.coordinates];
 
-        for (const polygonCoords of polygonsCoords) {
-            // --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
-            const allProcessedRings = polygonCoords.map(contour => {
+        for (const singlePolygonRings of polygonsCoords) {
+             if (!Array.isArray(singlePolygonRings) || singlePolygonRings.length === 0) continue;
+
+             const allProcessedRings = singlePolygonRings.map(contour => {
                 if (!Array.isArray(contour) || contour.length < 3) return null;
 
                 const coords = [];
@@ -10789,14 +10796,15 @@ async function drawSelectedZouits(features, selectedIndex, map, polygons, polygo
             if (allProcessedRings.length === 0) continue;
 
             try {
-               const polygonObj = new ymaps.Polygon(allProcessedRings, { /*...*/ }, {
+               const polygonObj = new ymaps.Polygon(allProcessedRings, // <-- ИЗМЕНЕНИЕ: Передаем все контуры
+                { /*...*/ }, 
+                {
                    strokeColor: currentStrokeColor,
-                   fillColor: '#00000000',
+                   fillColor: `${currentStrokeColor}33`, // <-- ИЗМЕНЕНИЕ: Добавляем легкую заливку
                    strokeWidth: polygonStyle.width,
                    strokeOpacity: 0.9,
                    hintContent: fullLabelText,
                });
-            // --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
                map.geoObjects.add(polygonObj);
                polygons.push(polygonObj);
@@ -10808,7 +10816,7 @@ async function drawSelectedZouits(features, selectedIndex, map, polygons, polygo
                    if (!firstFeatureCenterGeo) firstFeatureCenterGeo = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
                }
                
-               const outerRingWGS84 = polygonCoords[0].map(c => proj4('EPSG:3857', 'EPSG:4326', c));
+               const outerRingWGS84 = singlePolygonRings[0].map(c => proj4('EPSG:3857', 'EPSG:4326', c));
                const turfContour = turf.polygon([outerRingWGS84.map(p => [p[0], p[1]])]);
                const centroidFeature = turf.centroid(turfContour);
                const labelPosition = [centroidFeature.geometry.coordinates[1] - mapOffsetY * 0.000008983, centroidFeature.geometry.coordinates[0] - mapOffsetX * 0.000008983];
@@ -12002,7 +12010,6 @@ async function processAndDrawZouits(features) {
             const nameRaw = options.name_by_doc || 'Без названия';
             const restrictions = options.content_restrict_encumbrances || 'Ограничения не указаны';
 
-            // --- ИЗМЕНЕНИЕ: Используем единую функцию для получения цвета ---
             const strokeColor = getZouitColor(nameRaw);
 
             const hintContent = {
@@ -12014,21 +12021,25 @@ async function processAndDrawZouits(features) {
             if (!feature?.geometry?.coordinates) continue;
 
             const geometryType = feature.geometry.type;
-            let allContours = [];
-            if (geometryType === 'Polygon') allContours = [feature.geometry.coordinates[0]];
-            else if (geometryType === 'MultiPolygon') feature.geometry.coordinates.forEach(poly => allContours.push(poly[0]));
-            else continue;
+            const polygonsCoords = (geometryType === 'Polygon') ? [feature.geometry.coordinates] : feature.geometry.coordinates;
+            
+            if (!polygonsCoords) continue;
 
-            for (const contour of allContours) {
-                 if (!Array.isArray(contour) || contour.length < 3) continue;
+            for (const singlePolygonRings of polygonsCoords) {
+                 if (!Array.isArray(singlePolygonRings) || singlePolygonRings.length === 0) continue;
 
-                 const coordinates = contour.map(coord => {
-                     const p = proj4('EPSG:3857', 'EPSG:4326', coord);
-                     return [p[1], p[0]];
-                 });
-                 const offsetCoordinates = coordinates.map(c => [c[0] - mapOffsetY * 0.000008983, c[1] - mapOffsetX * 0.000008983]);
+                 const allProcessedRings = singlePolygonRings.map(ring => {
+                     if (!Array.isArray(ring) || ring.length < 3) return null;
+                     const coordinates = ring.map(coord => {
+                         const p = proj4('EPSG:3857', 'EPSG:4326', coord);
+                         return [p[1], p[0]];
+                     });
+                     return coordinates.map(c => [c[0] - mapOffsetY * 0.000008983, c[1] - mapOffsetX * 0.000008983]);
+                 }).filter(r => r !== null);
 
-                 const zouitPolygon = new ymaps.Polygon([offsetCoordinates], 
+                 if (allProcessedRings.length === 0) continue;
+
+                 const zouitPolygon = new ymaps.Polygon(allProcessedRings, // <-- ИЗМЕНЕНИЕ: Передаем все контуры сразу
                     {
                         cadastralNumber: regNumber,
                         name: nameRaw,
@@ -12036,10 +12047,10 @@ async function processAndDrawZouits(features) {
                         isZouit: true
                     }, 
                     {
-                        strokeColor: strokeColor, // <-- Применяем полученный цвет
+                        strokeColor: strokeColor,
                         strokeWidth: polygonStyle.width - 1,
                         strokeOpacity: 0.8,
-                        fillColor: '#00000000',
+                        fillColor: `${strokeColor}33`, // <-- ИЗМЕНЕНИЕ: Добавляем легкую заливку
                         cursor: 'pointer',
                         hintLayout: customHintLayout
                     }
@@ -12053,6 +12064,7 @@ async function processAndDrawZouits(features) {
                 map.geoObjects.add(zouitPolygon);
                 polygons.push(zouitPolygon);
 
+                // Логика добавления метки остается прежней, но теперь она будет по центру корректной фигуры
                 const bounds = zouitPolygon.geometry.getBounds();
                 if (bounds && bounds[0] && bounds[1]) {
                     const centerGeo = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
