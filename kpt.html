@@ -431,7 +431,7 @@
             });
         }
 
-        function convertJsonToXml(allData, quarterNumber, choices) {
+function convertJsonToXml(allData, quarterNumber, choices) {
             const targetCS_value = destScSelect.value;
             const targetCS_text = destScSelect.options[destScSelect.selectedIndex].text;
             const offsetX = parseFloat(offsetXInput.value) || 0;
@@ -452,59 +452,165 @@
             const filenameBase = `${quarterNumber.replace(/:/g, '_')} ${dateString} NSPD`;
             const escapeXml = (unsafe) => unsafe ? String(unsafe).replace(/[<>&'"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','\'':'&apos;','"':'&quot;'}[c])) : '';
 
-            const generateOrdinates = (points) => {
+            const generateOrdinates = (points, objectType) => {
                 return points.map((point, i) => {
                     const convertedPoint = proj4(sourceCS_value, targetCS_value, point);
                     const decimalPlaces = targetCS_value === 'EPSG:4326' ? 8 : 2;
                     const y_from_proj = convertedPoint[0] + offsetY;
                     const x_from_proj = convertedPoint[1] + offsetX;
                     const [xml_x, xml_y] = swapXmlCoords ? [x_from_proj, y_from_proj] : [y_from_proj, x_from_proj];
-                    return `<ordinate><x>${xml_x.toFixed(decimalPlaces)}</x><y>${xml_y.toFixed(decimalPlaces)}</y><ord_nmb>${i + 1}</ord_nmb></ordinate>`;
-                }).join('');
-            };
-
-            const generateContoursXml = (geometry, parentTag) => {
-                if (!geometry || !geometry.coordinates) return '';
-                const skIdText = targetCS_text.split('(')[0].trim();
-                let allRings = [];
-                if (geometry.type === 'Polygon') allRings = geometry.coordinates;
-                else if (geometry.type === 'MultiPolygon') allRings = geometry.coordinates.flat(1);
-                else return '';
-
-                return allRings.map((ring, contourIndex) => {
-                    if(!ring || ring.length < 1) return '';
-                    let points = ring;
-                    if (reverseDirection) points = [...points].reverse();
-                    const ordinatesXml = generateOrdinates(points);
                     
-                    const spatialElement = `<spatial_element><ordinates>${ordinatesXml}</ordinates></spatial_element>`;
-                    if (parentTag === 'spatial_data') {
-                         return `<spatials_elements>${spatialElement}</spatials_elements>`;
+                    let ordinateContent = `<x>${xml_x.toFixed(decimalPlaces)}</x><y>${xml_y.toFixed(decimalPlaces)}</y><ord_nmb>${i + 1}</ord_nmb>`;
+                    
+                    switch(objectType) {
+                        case 'land_record':
+                             ordinateContent += `<num_geopoint></num_geopoint><geopoint_zacrep></geopoint_zacrep><delta_geopoint>0</delta_geopoint>`;
+                             break;
+                        case 'build_record':
+                        case 'construction_record':
+                             ordinateContent += `<num_geopoint></num_geopoint><delta_geopoint>0</delta_geopoint>`;
+                             break;
+                        case 'municipal_boundary_record':
+                            ordinateContent += `<num_geopoint></num_geopoint><geopoint_opred><code></code><value/></geopoint_opred><delta_geopoint>0</delta_geopoint>`;
+                            break;
+                        case 'inhabited_locality_boundary_record':
+                            // No extra tags needed
+                            break;
+                        case 'zones_and_territories_record':
+                             ordinateContent += `<num_geopoint></num_geopoint><geopoint_zacrep></geopoint_zacrep><geopoint_opred><code></code><value/></geopoint_opred><delta_geopoint>0</delta_geopoint>`;
+                             break;
+                        case 'quarter_bounds':
+                            return `<ordinate><x>${xml_x.toFixed(decimalPlaces)}</x><y>${xml_y.toFixed(decimalPlaces)}</y></ordinate>`;
                     }
-                    return `<contour><number_pp>${contourIndex + 1}</number_pp><entity_spatial><sk_id>${escapeXml(skIdText)}</sk_id><spatials_elements>${spatialElement}</spatials_elements></entity_spatial></contour>`;
+                    return `<ordinate>${ordinateContent}</ordinate>`;
                 }).join('');
             };
             
+            // ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: Эта функция теперь создает один <spatial_element> с НЕСКОЛЬКИМИ <ordinates> внутри.
+            const generateSpatialElementForLandRecord = (geometry, objectType) => {
+                let allRings = [];
+                if (geometry.type === 'Polygon') allRings = geometry.coordinates;
+                else if (geometry.type === 'MultiPolygon') allRings = geometry.coordinates.flat(1);
+
+                const ordinatesBlocks = allRings.map(ring => {
+                    let points = ring;
+                    if (reverseDirection) points = [...points].reverse();
+                    return `<ordinates>${generateOrdinates(points, objectType)}</ordinates>`;
+                }).join('');
+                
+                return `<spatial_element>${ordinatesBlocks}</spatial_element>`;
+            };
+
+            const generateSpatialElementsForOthers = (geometry, objectType) => {
+                let allRings = [];
+                if (geometry.type === 'Polygon') allRings = [geometry.coordinates]; // treat as a single multi-ring polygon
+                else if (geometry.type === 'MultiPolygon') allRings = geometry.coordinates;
+
+                return allRings.map(rings => {
+                     return rings.map(ring => {
+                        let points = ring;
+                        if (reverseDirection) points = [...points].reverse();
+                        const ordinatesXml = `<ordinates>${generateOrdinates(points, objectType)}</ordinates>`;
+                        return `<spatial_element>${ordinatesXml}</spatial_element>`;
+                     }).join('');
+                }).join('');
+            };
+
+            const generateContoursXml = (geometry, objectType) => {
+                 if (!geometry || !geometry.coordinates) return '';
+                 const skIdText = targetCS_text.split('(')[0].trim();
+                 
+                 let spatialContent = '';
+                 if (objectType === 'land_record') {
+                    spatialContent = generateSpatialElementForLandRecord(geometry, objectType);
+                 } else { // OKS, Boundaries, Zones etc.
+                    spatialContent = generateSpatialElementsForOthers(geometry, objectType);
+                 }
+                 
+                 if (objectType === 'quarter_bounds') {
+                    return `<spatials_elements>${spatialContent}</spatials_elements>`;
+                 }
+                 
+                 const needsNumberPp = ['land_record', 'inhabited_locality_boundary_record', 'zones_and_territories_record'].includes(objectType);
+                 const numberPpTag = needsNumberPp ? `<number_pp>1</number_pp>` : '';
+
+                 return `<contour>${numberPpTag}<entity_spatial><sk_id>${escapeXml(skIdText)}</sk_id><spatials_elements>${spatialContent}</spatials_elements></entity_spatial></contour>`;
+            };
+            
+            const generateAddressFiasBlock = () => {
+                const addressFiasContent = `
+                    <level_settlement><okato/><kladr/><region><code></code><value/></region><district><type_district/><name_district/></district><city><type_city/><name_city/></city></level_settlement>
+                    <detailed_level><street><type_street/><name_street/></street><level1><type_level1/><name_level1/></level1></detailed_level>`;
+                return `<address_fias>${addressFiasContent}</address_fias>`;
+            };
+
             const generateLandRecordXml = (f) => {
                 const p = f.properties.options || {};
                 const areaVal = p.specified_area || p.land_record_area_verified || p.declared_area || p.land_record_area_declaration || p.land_record_area;
                 const areaBlock = (p.specified_area || p.land_record_area_verified) ? `<area><value>${escapeXml(areaVal)}</value><inaccuracy>0</inaccuracy></area>` : `<area><value>${escapeXml(areaVal)}</value></area>`;
-                return `<land_record><object><common_data><type><code>002001001000</code><value>Земельный участок</value></type><cad_number>${escapeXml(p.cad_num)}</cad_number></common_data></object><params>${areaBlock}<category><type><code>-</code><value>${escapeXml(p.land_record_category_type)}</value></type></category><permitted_use><permitted_use_established><by_document>${escapeXml(p.permitted_use_established_by_document)}</by_document></permitted_use_established></permitted_use></params><address_location><address><readable_address>${escapeXml(p.readable_address)}</readable_address></address></address_location><cost><value>${escapeXml(p.cost_value)}</value></cost><contours_location><contours>${generateContoursXml(f.geometry)}</contours></contours_location></land_record>`;
+                return `<land_record>
+                    <object>
+                        <common_data><type><code>002001001000</code><value>Земельный участок</value></type><cad_number>${escapeXml(p.cad_num)}</cad_number></common_data>
+                        <subtype><code></code><value></value></subtype>
+                    </object>
+                    <params>
+                        <category><type><code>-</code><value>${escapeXml(p.land_record_category_type)}</value></type></category>
+                        <permitted_use><permitted_use_established><by_document>${escapeXml(p.permitted_use_established_by_document)}</by_document></permitted_use_established></permitted_use>
+                        <permittes_uses_grad_reg><reg_numb_border/></permittes_uses_grad_reg>
+                        ${areaBlock}
+                    </params>
+                    <address_location>
+                        <address_type><code></code><value/></address_type>
+                        <address>${generateAddressFiasBlock()}<readable_address>${escapeXml(p.readable_address)}</readable_address></address>
+                        <rel_position><in_boundaries_mark/></rel_position>
+                    </address_location>
+                    <cost><value>${escapeXml(p.cost_value) || 0}</value></cost>
+                    <contours_location><contours>${generateContoursXml(f.geometry, 'land_record')}</contours></contours_location>
+                </land_record>`;
             };
             const generateBuildRecordXml = (f) => {
                  const p = f.properties.options || {};
-                 return `<build_record><object><common_data><type><code>002001002000</code><value>Здание</value></type><cad_number>${escapeXml(p.cad_num)}</cad_number></common_data></object><params><area>${escapeXml(p.build_record_area)}</area><purpose><code>-</code><value>${escapeXml(p.purpose)}</value></purpose></params><address_location><address><readable_address>${escapeXml(p.readable_address)}</readable_address></address></address_location><cost><value>${escapeXml(p.cost_value)}</value></cost><contours>${generateContoursXml(f.geometry)}</contours></build_record>`;
+                 return `<build_record>
+                    <object><common_data><type><code>002001002000</code><value>Здание</value></type><cad_number>${escapeXml(p.cad_num)}</cad_number></common_data></object>
+                    <params><area>${escapeXml(p.build_record_area) || 0}</area><purpose><code>-</code><value>${escapeXml(p.purpose)}</value></purpose></params>
+                    <address_location>
+                        <address>${generateAddressFiasBlock()}<readable_address>${escapeXml(p.readable_address)}</readable_address></address>
+                        <location><okato/><region><code></code><value/></region><position_description/></location>
+                    </address_location>
+                    <cost><value>${escapeXml(p.cost_value) || 0}</value></cost>
+                    <contours>${generateContoursXml(f.geometry, 'build_record')}</contours>
+                 </build_record>`;
             };
             const generateConstructionRecordXml = (f) => {
                 const p = f.properties.options || {};
                 const baseParam = p.params_extension ? `<extension>${escapeXml(p.params_extension)}</extension>` : (p.params_area ? `<area>${escapeXml(p.params_area)}</area>` : '');
-                return `<construction_record><object><common_data><type><code>002001004000</code><value>Сооружение</value></type><cad_number>${escapeXml(p.cad_number)}</cad_number></common_data></object><params><base_parameters><base_parameter>${baseParam}</base_parameter></base_parameters><purpose>${escapeXml(p.params_purpose)}</purpose></params><address_location><address><readable_address>${escapeXml(p.address_readable_address)}</readable_address></address></address_location><cost><value>${escapeXml(p.cost_value)}</value></cost><contours>${generateContoursXml(f.geometry)}</contours></construction_record>`;
+                return `<construction_record>
+                    <object><common_data><type><code>002001004000</code><value>Сооружение</value></type><cad_number>${escapeXml(p.cad_number)}</cad_number></common_data></object>
+                    <params><base_parameters><base_parameter>${baseParam}</base_parameter></base_parameters><purpose>${escapeXml(p.params_purpose)}</purpose></params>
+                    <address_location>
+                        <address>${generateAddressFiasBlock()}<readable_address>${escapeXml(p.address_readable_address)}</readable_address></address>
+                    </address_location>
+                    <cost><value>${escapeXml(p.cost_value) || 0}</value></cost>
+                    <contours>${generateContoursXml(f.geometry, 'construction_record')}</contours>
+                </construction_record>`;
             };
             const generateBoundaryRecordXml = (f, tagName) => {
                 const p = f.properties.options || {};
                 const regNumb = p.reg_numb_border || p.brd_nmb || f.properties.descr;
-                const typeCode = { 'Граница муниципального образования': '3', 'Граница населенного пункта': '4', 'Территориальная зона': '7' }[p.type_boundary_value] || '5';
-                return `<${tagName}><record_info><registration_date>${escapeXml(p.registration_date)}</registration_date></record_info><b_object_${tagName.replace('_record','')}><b_object><reg_numb_border>${escapeXml(regNumb)}</reg_numb_border><type_boundary><code>${typeCode}</code><value>${escapeXml(p.type_boundary_value || f.properties.categoryName)}</value></type_boundary></b_object><name_by_doc>${escapeXml(p.name_by_doc || p.name || f.properties.label)}</name_by_doc></b_object_${tagName.replace('_record','')}><b_contours_location><contours>${generateContoursXml(f.geometry)}</contours></b_contours_location></${tagName}>`;
+                const typeCodeValue = { 'Граница муниципального образования': '3', 'Граница населенного пункта': '4', 'Территориальная зона': '7' }[p.type_boundary_value] || '5';
+                
+                let bObjectInnerContent = `<b_object><reg_numb_border>${escapeXml(regNumb)}</reg_numb_border><type_boundary><code>${typeCodeValue}</code><value>${escapeXml(p.type_boundary_value || f.properties.categoryName)}</value></type_boundary></b_object>`;
+                
+                if (tagName === 'zones_and_territories_record') {
+                    bObjectInnerContent += `<type_zone><code></code><value/></type_zone><number/><index/><description/>
+                    <name_by_doc>${escapeXml(p.name_by_doc || p.name || f.properties.label)}</name_by_doc><other/>`;
+                }
+
+                return `<${tagName}>
+                    <record_info><registration_date>${escapeXml(p.registration_date)}</registration_date></record_info>
+                    <b_object_${tagName.replace('_record','')}>${bObjectInnerContent}</b_object_${tagName.replace('_record','')}>
+                    <b_contours_location><contours>${generateContoursXml(f.geometry, tagName)}</contours></b_contours_location>
+                </${tagName}>`;
             };
 
             let landRecordsXml = '', buildRecordsXml = '', constructionRecordsXml = '', zonesAndTerritoriesXml = '', municipalBoundariesXml = '', inhabitedLocalityBoundariesXml = '', spatialDataXml = '';
@@ -520,24 +626,39 @@
             if (choices.municipal && allData.municipal?.features) allData.municipal.features.forEach(f => municipalBoundariesXml += generateBoundaryRecordXml(f, 'municipal_boundary_record'));
             if (choices.quarterBounds && allData.quarter?.features) allData.quarter.features.forEach(f => {
                 const skIdText = targetCS_text.split('(')[0].trim();
-                spatialDataXml = `<spatial_data><entity_spatial><sk_id>${escapeXml(skIdText)}</sk_id>${generateContoursXml(f.geometry, 'spatial_data')}</entity_spatial></spatial_data>`;
+                spatialDataXml = `<spatial_data><entity_spatial><sk_id>${escapeXml(skIdText)}</sk_id>${generateContoursXml(f.geometry, 'quarter_bounds')}</entity_spatial></spatial_data>`;
             });
 
             const fullXml = `<?xml version="1.0" encoding="UTF-8"?>
 <extract_cadastral_plan_territory>
-    <details_statement><group_top_requisites><organ_registr_rights>Филиал ППК "Роскадастр" (данные из EPSG3857)</organ_registr_rights><date_formation>${dateString}</date_formation><registration_number>EPSG3857-КОНВЕРТЕР</registration_number></group_top_requisites></details_statement>
-    <cadastral_blocks><cadastral_block>
+    <details_statement>
+      <group_top_requisites>
+        <organ_registr_rights>Филиал ППК "Роскадастр" (данные из EPSG3857)</organ_registr_rights>
+        <date_formation>${dateString}</date_formation>
+        <registration_number>EPSG3857-КОНВЕРТЕР</registration_number>
+      </group_top_requisites>
+    </details_statement>
+    <details_request>
+        <date_received_request>${dateString}</date_received_request>
+        <date_receipt_request_reg_authority_rights>${dateString}</date_receipt_request_reg_authority_rights>
+    </details_request>
+    <cadastral_blocks>
+      <cadastral_block>
         <cadastral_number>${escapeXml(quarterNumber)}</cadastral_number>
-        ${spatialDataXml}
-        <record_data><base_data>
+        <area_quarter><area>0</area><unit>059</unit></area_quarter>
+        <record_data>
+          <base_data>
             ${landRecordsXml ? `<land_records>${landRecordsXml}</land_records>` : ''}
             ${buildRecordsXml ? `<build_records>${buildRecordsXml}</build_records>` : ''}
             ${constructionRecordsXml ? `<construction_records>${constructionRecordsXml}</construction_records>` : ''}
-        </base_data></record_data>
+          </base_data>
+        </record_data>
+        ${spatialDataXml}
         ${municipalBoundariesXml ? `<municipal_boundaries>${municipalBoundariesXml}</municipal_boundaries>` : ''}
         ${inhabitedLocalityBoundariesXml ? `<inhabited_locality_boundaries>${inhabitedLocalityBoundariesXml}</inhabited_locality_boundaries>` : ''}
         ${zonesAndTerritoriesXml ? `<zones_and_territories_boundaries>${zonesAndTerritoriesXml}</zones_and_territories_boundaries>` : ''}
-    </cadastral_block></cadastral_blocks>
+      </cadastral_block>
+    </cadastral_blocks>
 </extract_cadastral_plan_territory>`;
             
             return { xmlContent: fullXml, filenameBase };

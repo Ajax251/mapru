@@ -460,59 +460,95 @@ function convertJsonToXml(allData, quarterNumber, choices) {
                     const x_from_proj = convertedPoint[1] + offsetX;
                     const [xml_x, xml_y] = swapXmlCoords ? [x_from_proj, y_from_proj] : [y_from_proj, x_from_proj];
                     
-                    let ordinateContent = `<x>${xml_x.toFixed(decimalPlaces)}</x><y>${xml_y.toFixed(decimalPlaces)}</y><ord_nmb>${i + 1}</ord_nmb><num_geopoint></num_geopoint>`;
+                    let ordinateContent = `<x>${xml_x.toFixed(decimalPlaces)}</x><y>${xml_y.toFixed(decimalPlaces)}</y><ord_nmb>${i + 1}</ord_nmb>`;
                     
                     switch(objectType) {
                         case 'land_record':
-                             // ord_nmb is enough
-                            break;
                         case 'build_record':
                         case 'construction_record':
-                            ordinateContent += `<delta_geopoint></delta_geopoint>`;
-                            break;
+                             ordinateContent += `<num_geopoint></num_geopoint><delta_geopoint>0</delta_geopoint>`;
+                             break;
                         case 'municipal_boundary_record':
+                            ordinateContent += `<num_geopoint></num_geopoint><geopoint_opred><code></code><value/></geopoint_opred><delta_geopoint>0</delta_geopoint>`;
+                            break;
                         case 'inhabited_locality_boundary_record':
-                            ordinateContent += `<geopoint_opred><value/><code/></geopoint_opred><delta_geopoint></delta_geopoint>`;
+                            // No extra tags needed here
                             break;
                         case 'zones_and_territories_record':
-                             // Ошибка 17: Исправлен порядок
-                             ordinateContent += `<geopoint_zacrep></geopoint_zacrep><geopoint_opred><value/><code/></geopoint_opred><delta_geopoint></delta_geopoint>`;
+                             ordinateContent += `<num_geopoint></num_geopoint><geopoint_zacrep></geopoint_zacrep><geopoint_opred><code></code><value/></geopoint_opred><delta_geopoint>0</delta_geopoint>`;
                              break;
                         case 'quarter_bounds':
-                            // Для квартала нужен только X и Y
                             return `<ordinate><x>${xml_x.toFixed(decimalPlaces)}</x><y>${xml_y.toFixed(decimalPlaces)}</y></ordinate>`;
                     }
                     return `<ordinate>${ordinateContent}</ordinate>`;
                 }).join('');
             };
-
-            const generateContoursXml = (geometry, objectType) => {
-                if (!geometry || !geometry.coordinates) return '';
-                const skIdText = targetCS_text.split('(')[0].trim();
+            
+            // РЕШЕНИЕ ОШИБКИ 2: Для ЗУ - один spatial_element, один ordinates со всеми точками.
+            const generateSpatialElementXml_Single = (geometry, objectType) => {
                 let allRings = [];
                 if (geometry.type === 'Polygon') allRings = geometry.coordinates;
                 else if (geometry.type === 'MultiPolygon') allRings = geometry.coordinates.flat(1);
-                else return '';
 
-                const generateSpatialElement = (ring) => {
+                // Собираем ВСЕ точки из всех колец в один массив
+                const allPoints = [];
+                allRings.forEach(ring => {
                     let points = ring;
                     if (reverseDirection) points = [...points].reverse();
-                    const ordinatesXml = generateOrdinates(points, objectType);
-                    return `<spatial_element><ordinates>${ordinatesXml}</ordinates></spatial_element>`;
-                };
+                    allPoints.push(...points);
+                });
                 
-                // Ошибки 7 и 13: Оборачиваем все spatial_element в ОДИН spatials_elements
-                const spatialElementsXml = allRings.map(ring => generateSpatialElement(ring)).join('');
-                
-                if (objectType === 'quarter_bounds') {
-                    return `<spatials_elements>${spatialElementsXml}</spatials_elements>`;
-                }
-                
-                const numberPpTag = (objectType === 'land_record') ? `<number_pp>1</number_pp>` : ''; // Ошибка 11: number_pp нужен только для ЗУ
+                const ordinatesXml = `<ordinates>${generateOrdinates(allPoints, objectType)}</ordinates>`;
+                return `<spatial_element>${ordinatesXml}</spatial_element>`;
+            };
 
-                return `<contour>${numberPpTag}<entity_spatial><sk_id>${escapeXml(skIdText)}</sk_id><spatials_elements>${spatialElementsXml}</spatials_elements></entity_spatial></contour>`;
+            // РЕШЕНИЕ ОШИБКИ 6: Для Границ - несколько spatial_element, по одному на каждое кольцо.
+            const generateSpatialElementsXml_Multi = (geometry, objectType) => {
+                let allRings = [];
+                if (geometry.type === 'Polygon') allRings = [geometry.coordinates];
+                else if (geometry.type === 'MultiPolygon') allRings = geometry.coordinates;
+
+                return allRings.map(rings => { // rings is an array of [outer, inner1, inner2...]
+                     return rings.map(ring => {
+                        let points = ring;
+                        if (reverseDirection) points = [...points].reverse();
+                        const ordinatesXml = `<ordinates>${generateOrdinates(points, objectType)}</ordinates>`;
+                        return `<spatial_element>${ordinatesXml}</spatial_element>`;
+                     }).join('');
+                }).join('');
+            };
+
+            const generateContoursXml = (geometry, objectType) => {
+                 if (!geometry || !geometry.coordinates) return '';
+                 const skIdText = targetCS_text.split('(')[0].trim();
+                 
+                 let spatialContent = '';
+                 // В зависимости от типа объекта выбираем разную логику генерации геометрии
+                 if (objectType === 'land_record') {
+                    spatialContent = generateSpatialElementXml_Single(geometry, objectType);
+                 } else { // OKS, Boundaries, Zones etc.
+                    spatialContent = generateSpatialElementsXml_Multi(geometry, objectType);
+                 }
+                 
+                 if (objectType === 'quarter_bounds') {
+                    return `<spatials_elements>${spatialContent}</spatials_elements>`;
+                 }
+                 
+                 // РЕШЕНИЕ ОШИБОК 3, 4, 5: number_pp добавляется только нужным типам
+                 const needsNumberPp = ['land_record', 'inhabited_locality_boundary_record', 'zones_and_territories_record'].includes(objectType);
+                 const numberPpTag = needsNumberPp ? `<number_pp>1</number_pp>` : '';
+
+                 return `<contour>${numberPpTag}<entity_spatial><sk_id>${escapeXml(skIdText)}</sk_id><spatials_elements>${spatialContent}</spatials_elements></entity_spatial></contour>`;
             };
             
+            const generateAddressFiasBlock = () => {
+                // РЕШЕНИЕ ОШИБКИ 1: Удален лишний postal_code для ЗУ.
+                const addressFiasContent = `
+                    <level_settlement><okato/><kladr/><region><code></code><value/></region><district><type_district/><name_district/></district><city><type_city/><name_city/></city></level_settlement>
+                    <detailed_level><street><type_street/><name_street/></street><level1><type_level1/><name_level1/></level1></detailed_level>`;
+                return `<address_fias>${addressFiasContent}</address_fias>`;
+            };
+
             const generateLandRecordXml = (f) => {
                 const p = f.properties.options || {};
                 const areaVal = p.specified_area || p.land_record_area_verified || p.declared_area || p.land_record_area_declaration || p.land_record_area;
@@ -520,7 +556,7 @@ function convertJsonToXml(allData, quarterNumber, choices) {
                 return `<land_record>
                     <object>
                         <common_data><type><code>002001001000</code><value>Земельный участок</value></type><cad_number>${escapeXml(p.cad_num)}</cad_number></common_data>
-                        <subtype><value/><code/></subtype>
+                        <subtype><code></code><value></value></subtype>
                     </object>
                     <params>
                         <category><type><code>-</code><value>${escapeXml(p.land_record_category_type)}</value></type></category>
@@ -529,10 +565,10 @@ function convertJsonToXml(allData, quarterNumber, choices) {
                         ${areaBlock}
                     </params>
                     <address_location>
-                        <address><address_fias><detailed_level/><level_settlement/></address_fias><readable_address>${escapeXml(p.readable_address)}</readable_address></address>
+                        <address>${generateAddressFiasBlock()}<readable_address>${escapeXml(p.readable_address)}</readable_address></address>
                         <rel_position><in_boundaries_mark/></rel_position>
                     </address_location>
-                    <cost><value>${escapeXml(p.cost_value)}</value></cost>
+                    <cost><value>${escapeXml(p.cost_value) || 0}</value></cost>
                     <contours_location><contours>${generateContoursXml(f.geometry, 'land_record')}</contours></contours_location>
                 </land_record>`;
             };
@@ -540,12 +576,12 @@ function convertJsonToXml(allData, quarterNumber, choices) {
                  const p = f.properties.options || {};
                  return `<build_record>
                     <object><common_data><type><code>002001002000</code><value>Здание</value></type><cad_number>${escapeXml(p.cad_num)}</cad_number></common_data></object>
-                    <params><area>${escapeXml(p.build_record_area)}</area><purpose><code>-</code><value>${escapeXml(p.purpose)}</value></purpose></params>
+                    <params><area>${escapeXml(p.build_record_area) || 0}</area><purpose><code>-</code><value>${escapeXml(p.purpose)}</value></purpose></params>
                     <address_location>
-                        <address><address_fias><detailed_level/><level_settlement/></address_fias><readable_address>${escapeXml(p.readable_address)}</readable_address></address>
-                        <location><okato/><region/><position_description/></location>
+                        <address>${generateAddressFiasBlock()}<readable_address>${escapeXml(p.readable_address)}</readable_address></address>
+                        <location><okato/><region><code></code><value/></region><position_description/></location>
                     </address_location>
-                    <cost><value>${escapeXml(p.cost_value)}</value></cost>
+                    <cost><value>${escapeXml(p.cost_value) || 0}</value></cost>
                     <contours>${generateContoursXml(f.geometry, 'build_record')}</contours>
                  </build_record>`;
             };
@@ -556,9 +592,9 @@ function convertJsonToXml(allData, quarterNumber, choices) {
                     <object><common_data><type><code>002001004000</code><value>Сооружение</value></type><cad_number>${escapeXml(p.cad_number)}</cad_number></common_data></object>
                     <params><base_parameters><base_parameter>${baseParam}</base_parameter></base_parameters><purpose>${escapeXml(p.params_purpose)}</purpose></params>
                     <address_location>
-                        <address><address_fias><detailed_level/><level_settlement/></address_fias><readable_address>${escapeXml(p.address_readable_address)}</readable_address></address>
+                        <address>${generateAddressFiasBlock()}<readable_address>${escapeXml(p.address_readable_address)}</readable_address></address>
                     </address_location>
-                    <cost><value>${escapeXml(p.cost_value)}</value></cost>
+                    <cost><value>${escapeXml(p.cost_value) || 0}</value></cost>
                     <contours>${generateContoursXml(f.geometry, 'construction_record')}</contours>
                 </construction_record>`;
             };
@@ -570,14 +606,8 @@ function convertJsonToXml(allData, quarterNumber, choices) {
                 let bObjectInnerContent = `<b_object><reg_numb_border>${escapeXml(regNumb)}</reg_numb_border><type_boundary><code>${typeCodeValue}</code><value>${escapeXml(p.type_boundary_value || f.properties.categoryName)}</value></type_boundary></b_object>`;
                 
                 if (tagName === 'zones_and_territories_record') {
-                    // Ошибки 14, 15, 16: Добавляем недостающие поля и исправляем порядок
-                    bObjectInnerContent += `
-                        <type_zone><value/><code/></type_zone>
-                        <number/>
-                        <index/>
-                        <description/>
-                        <other/>
-                        <name_by_doc>${escapeXml(p.name_by_doc || p.name || f.properties.label)}</name_by_doc>`;
+                    bObjectInnerContent += `<type_zone><code></code><value/></type_zone><number/><index/><description/>
+                    <name_by_doc>${escapeXml(p.name_by_doc || p.name || f.properties.label)}</name_by_doc><other/>`;
                 }
 
                 return `<${tagName}>
@@ -603,6 +633,7 @@ function convertJsonToXml(allData, quarterNumber, choices) {
                 spatialDataXml = `<spatial_data><entity_spatial><sk_id>${escapeXml(skIdText)}</sk_id>${generateContoursXml(f.geometry, 'quarter_bounds')}</entity_spatial></spatial_data>`;
             });
 
+            // РЕШЕНИЕ ПРОБЛЕМЫ СБОЯ: Заполняем теги, которые должны содержать числа, нулями по умолчанию.
             const fullXml = `<?xml version="1.0" encoding="UTF-8"?>
 <extract_cadastral_plan_territory>
     <details_statement>
@@ -613,13 +644,13 @@ function convertJsonToXml(allData, quarterNumber, choices) {
       </group_top_requisites>
     </details_statement>
     <details_request>
-        <date_received_request/>
-        <date_receipt_request_reg_authority_rights/>
+        <date_received_request>${dateString}</date_received_request>
+        <date_receipt_request_reg_authority_rights>${dateString}</date_receipt_request_reg_authority_rights>
     </details_request>
     <cadastral_blocks>
       <cadastral_block>
         <cadastral_number>${escapeXml(quarterNumber)}</cadastral_number>
-        <area_quarter><unit/><area/></area_quarter>
+        <area_quarter><area>0</area><unit>059</unit></area_quarter>
         <record_data>
           <base_data>
             ${landRecordsXml ? `<land_records>${landRecordsXml}</land_records>` : ''}
