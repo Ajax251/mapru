@@ -321,6 +321,7 @@
                 const userChoices = await showObjectSelectionModal(quarterNumber);
                 if (!userChoices) {
                     setStatus('Операция отменена.');
+                    getXmlButton.disabled = false;
                     setTimeout(() => setStatus(''), 3000);
                     return;
                 }
@@ -395,8 +396,8 @@
                 
                 const savedChoices = JSON.parse(localStorage.getItem(LOCAL_STORAGE_CHOICES_KEY));
                 const defaultChoices = {
-                    zu: true, oks: false, zouit: false, terrZones: false,
-                    quarterBounds: true, settlements: false, municipal: false
+                    zu: true, oks: true, zouit: true, terrZones: true,
+                    quarterBounds: true, settlements: true, municipal: true
                 };
                 const choices = savedChoices || defaultChoices;
 
@@ -431,7 +432,10 @@
             });
         }
 
-function convertJsonToXml(allData, quarterNumber, choices) {
+        // ===================================================================================
+        // --- ФИНАЛЬНАЯ ВЕРСИЯ ФУНКЦИИ ГЕНЕРАЦИИ XML ---
+        // ===================================================================================
+        function convertJsonToXml(allData, quarterNumber, choices) {
             const targetCS_value = destScSelect.value;
             const targetCS_text = destScSelect.options[destScSelect.selectedIndex].text;
             const offsetX = parseFloat(offsetXInput.value) || 0;
@@ -452,46 +456,77 @@ function convertJsonToXml(allData, quarterNumber, choices) {
             const filenameBase = `${quarterNumber.replace(/:/g, '_')} ${dateString} NSPD`;
             const escapeXml = (unsafe) => unsafe ? String(unsafe).replace(/[<>&'"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','\'':'&apos;','"':'&quot;'}[c])) : '';
 
-            // --- ВОЗВРАЩЕНИЕ К СТАРОЙ, РАБОЧЕЙ ЛОГИКЕ ГЕНЕРАЦИИ ГЕОМЕТРИИ ---
-            const generateContoursXml = (geometry, objectType) => {
-                if (!geometry || !geometry.coordinates) return '';
-                const skIdText = targetCS_text.split('(')[0].trim();
-
-                let rings;
-                // Эта логика в точности повторяет ваш старый рабочий код
-                if (geometry.type === 'MultiPolygon') {
-                    rings = geometry.coordinates.map(part => part[0]); // Берем только внешний контур каждой части
-                } else { // Polygon
-                    rings = geometry.coordinates;
-                }
-
-                // Создаем по одному тегу <contour> на каждый 'ring'
-                return rings.map((ring, contourIndex) => {
-                    let points = ring;
-                    if (reverseDirection) { points = points.slice().reverse(); }
+            const generateOrdinates = (points, objectType) => {
+                return points.map((point, i) => {
+                    const convertedPoint = proj4(sourceCS_value, targetCS_value, point);
+                    const decimalPlaces = targetCS_value === 'EPSG:4326' ? 8 : 2;
+                    const y_from_proj = convertedPoint[0] + offsetY;
+                    const x_from_proj = convertedPoint[1] + offsetX;
+                    const [xml_x, xml_y] = swapXmlCoords ? [x_from_proj, y_from_proj] : [y_from_proj, x_from_proj];
                     
-                    const ordinatesXml = points.map((point, i) => {
-                        const convertedPoint = proj4(sourceCS_value, targetCS_value, point);
-                        const decimalPlaces = targetCS_value === 'EPSG:4326' ? 8 : 2;
-                        const y_from_proj = convertedPoint[0] + offsetY;
-                        const x_from_proj = convertedPoint[1] + offsetX;
-                        const [xml_x, xml_y] = swapXmlCoords ? [x_from_proj, y_from_proj] : [y_from_proj, x_from_proj];
-                        
-                        // Внутренности <ordinate> берем из нашей последней рабочей версии
-                        let ordinateContent = `<x>${xml_x.toFixed(decimalPlaces)}</x><y>${xml_y.toFixed(decimalPlaces)}</y><ord_nmb>${i + 1}</ord_nmb>`;
-                        switch(objectType) {
-                            case 'land_record':
-                                ordinateContent += `<num_geopoint></num_geopoint><geopoint_zacrep></geopoint_zacrep><delta_geopoint>0</delta_geopoint>`;
-                                break;
-                            // ... другие типы объектов, если им нужна своя структура ordinate
-                        }
-                        return `<ordinate>${ordinateContent}</ordinate>`;
-                    }).join('');
+                    let ordinateContent = `<x>${xml_x.toFixed(decimalPlaces)}</x><y>${xml_y.toFixed(decimalPlaces)}</y><ord_nmb>${i + 1}</ord_nmb>`;
                     
-                    const numberPpTag = (objectType === 'land_record') ? `<number_pp>${contourIndex + 1}</number_pp>` : '';
-
-                    return `<contour>${numberPpTag}<entity_spatial><sk_id>${escapeXml(skIdText)}</sk_id><spatials_elements><spatial_element><ordinates>${ordinatesXml}</ordinates></spatial_element></spatials_elements></entity_spatial></contour>`;
+                    // Генерация тегов в <ordinate> строго по правилам из эталона
+                    switch(objectType) {
+                        case 'land_record':
+                             ordinateContent += `<num_geopoint></num_geopoint><geopoint_zacrep></geopoint_zacrep><delta_geopoint>0.1</delta_geopoint>`;
+                             break;
+                        case 'build_record':
+                        case 'construction_record':
+                             ordinateContent += `<num_geopoint></num_geopoint><delta_geopoint>0.1</delta_geopoint>`;
+                             break;
+                        case 'municipal_boundary_record':
+                            ordinateContent += `<num_geopoint></num_geopoint><geopoint_opred><code></code><value/></geopoint_opred><delta_geopoint>0.1</delta_geopoint>`;
+                            break;
+                        case 'inhabited_locality_boundary_record':
+                             ordinateContent = `<x>${xml_x.toFixed(decimalPlaces)}</x><y>${xml_y.toFixed(decimalPlaces)}</y><ord_nmb>${i + 1}</ord_nmb>`;
+                            break;
+                        case 'zones_and_territories_record':
+                             ordinateContent += `<num_geopoint></num_geopoint><geopoint_zacrep></geopoint_zacrep><geopoint_opred><code></code><value/></geopoint_opred><delta_geopoint>0.1</delta_geopoint>`;
+                             break;
+                        case 'quarter_bounds':
+                            return `<ordinate><x>${xml_x.toFixed(decimalPlaces)}</x><y>${xml_y.toFixed(decimalPlaces)}</y></ordinate>`;
+                    }
+                    return `<ordinate>${ordinateContent}</ordinate>`;
                 }).join('');
+            };
+
+            const generateContoursXml = (geometry, objectType) => {
+                 if (!geometry || !geometry.coordinates) return '';
+                 
+                 const skIdText = (() => {
+                    const match = targetCS_text.match(/МСК\s*(\d+)/i);
+                    if (match) return `МСК-${match[1]}`;
+                    return targetCS_text.split('(')[0].trim();
+                 })();
+                 
+                 let allRings = [];
+                 if (geometry.type === 'Polygon') {
+                    allRings = geometry.coordinates;
+                 } else if (geometry.type === 'MultiPolygon') {
+                    allRings = geometry.coordinates.flat(1);
+                 }
+
+                 // Генерируем по одному <spatial_element> на каждый контур (кольцо).
+                 const spatialContent = allRings.map(ring => {
+                    let points = ring;
+                    if (reverseDirection) points = points.slice().reverse();
+                    const ordinatesXml = `<ordinates>${generateOrdinates(points, objectType)}</ordinates>`;
+                    return `<spatial_element>${ordinatesXml}</spatial_element>`;
+                 }).join('');
+
+                 if (objectType === 'quarter_bounds') {
+                    return `<spatials_elements>${spatialContent}</spatials_elements>`;
+                 }
+                 
+                 // Создаем ОДИН <contour>, который содержит ВСЕ <spatial_element>
+                 let numberPpTag = `<number_pp>1</number_pp>`;
+                 // Для Зданий и Сооружений number_pp не нужен
+                 if (objectType === 'build_record' || objectType === 'construction_record' || objectType === 'municipal_boundary_record') {
+                    numberPpTag = '';
+                 }
+
+                 return `<contour>${numberPpTag}<entity_spatial><sk_id>${escapeXml(skIdText)}</sk_id><spatials_elements>${spatialContent}</spatials_elements></entity_spatial></contour>`;
             };
             
             const generateAddressFiasBlock = (objectType) => {
@@ -505,7 +540,8 @@ function convertJsonToXml(allData, quarterNumber, choices) {
             const generateLandRecordXml = (f) => {
                 const p = f.properties.options || {};
                 const areaVal = p.specified_area || p.land_record_area_verified || p.declared_area || p.land_record_area_declaration || p.land_record_area;
-                const areaBlock = (p.specified_area || p.land_record_area_verified) ? `<area><value>${escapeXml(areaVal)}</value><inaccuracy>0</inaccuracy></area>` : `<area><value>${escapeXml(areaVal)}</value></area>`;
+                const areaBlock = (p.specified_area || p.land_record_area_verified) ? `<area><value>${escapeXml(areaVal)}</value><inaccuracy>0</inaccuracy></area>` : `<area><value>${escapeXml(areaVal) || 0}</value></area>`;
+                
                 return `<land_record>
                     <object>
                         <common_data><type><code>002001001000</code><value>Земельный участок</value></type><cad_number>${escapeXml(p.cad_num)}</cad_number></common_data>
@@ -518,6 +554,7 @@ function convertJsonToXml(allData, quarterNumber, choices) {
                         ${areaBlock}
                     </params>
                     <address_location>
+                        <address_type><code></code><value/></address_type>
                         <address>${generateAddressFiasBlock('land_record')}<readable_address>${escapeXml(p.readable_address)}</readable_address></address>
                         <rel_position><in_boundaries_mark/></rel_position>
                     </address_location>
@@ -525,10 +562,6 @@ function convertJsonToXml(allData, quarterNumber, choices) {
                     <contours_location><contours>${generateContoursXml(f.geometry, 'land_record')}</contours></contours_location>
                 </land_record>`;
             };
-            
-            // Остальные функции генерации (ОКС, Зоны и т.д.) остаются как были в последней версии,
-            // но теперь они будут использовать новую (старую) рабочую функцию generateContoursXml
-            
             const generateBuildRecordXml = (f) => {
                  const p = f.properties.options || {};
                  return `<build_record>
@@ -539,7 +572,7 @@ function convertJsonToXml(allData, quarterNumber, choices) {
                         <location><okato/><region><code></code><value/></region><position_description/></location>
                     </address_location>
                     <cost><value>${escapeXml(p.cost_value) || 0}</value></cost>
-                    <contours_location><contours>${generateContoursXml(f.geometry, 'build_record')}</contours></contours_location>
+                    <contours>${generateContoursXml(f.geometry, 'build_record')}</contours>
                  </build_record>`;
             };
             const generateConstructionRecordXml = (f) => {
@@ -552,7 +585,7 @@ function convertJsonToXml(allData, quarterNumber, choices) {
                         <address>${generateAddressFiasBlock('construction_record')}<readable_address>${escapeXml(p.address_readable_address)}</readable_address></address>
                     </address_location>
                     <cost><value>${escapeXml(p.cost_value) || 0}</value></cost>
-                    <contours_location><contours>${generateContoursXml(f.geometry, 'construction_record')}</contours></contours_location>
+                    <contours>${generateContoursXml(f.geometry, 'construction_record')}</contours>
                 </construction_record>`;
             };
             const generateBoundaryRecordXml = (f, tagName) => {
@@ -586,8 +619,12 @@ function convertJsonToXml(allData, quarterNumber, choices) {
             if (choices.settlements && allData.settlements?.features) allData.settlements.features.forEach(f => inhabitedLocalityBoundariesXml += generateBoundaryRecordXml(f, 'inhabited_locality_boundary_record'));
             if (choices.municipal && allData.municipal?.features) allData.municipal.features.forEach(f => municipalBoundariesXml += generateBoundaryRecordXml(f, 'municipal_boundary_record'));
             if (choices.quarterBounds && allData.quarter?.features) allData.quarter.features.forEach(f => {
-                const skIdText = targetCS_text.split('(')[0].trim();
-                spatialDataXml = `<spatial_data><entity_spatial><sk_id>${escapeXml(skIdText)}</sk_id><contours>${generateContoursXml(f.geometry, 'quarter_bounds')}</contours></entity_spatial></spatial_data>`;
+                const skIdText = (() => {
+                    const match = targetCS_text.match(/МСК\s*(\d+)/i);
+                    if (match) return `МСК-${match[1]}`;
+                    return targetCS_text.split('(')[0].trim();
+                })();
+                spatialDataXml = `<spatial_data><entity_spatial><sk_id>${escapeXml(skIdText)}</sk_id>${generateContoursXml(f.geometry, 'quarter_bounds')}</entity_spatial></spatial_data>`;
             });
 
             const fullXml = `<?xml version="1.0" encoding="UTF-8"?>
@@ -624,7 +661,7 @@ function convertJsonToXml(allData, quarterNumber, choices) {
             
             return { xmlContent: fullXml, filenameBase };
         }
-
+        
         async function createAndDownloadZip(xmlContent, filenameBase) {
             const zip = new JSZip();
             zip.file(`${filenameBase}.xml`, xmlContent);
