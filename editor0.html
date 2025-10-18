@@ -844,9 +844,6 @@
     let movedPointInfo = null;
     let snappedToPointVisual = null;
     let geometryHistory = [];
-    
-    let isNspdLoadCancelled = false; 
-    
     const MAX_GEOMETRY_HISTORY = 10;
 
     const SNAP_RADIUS_SCREEN = 10;
@@ -1497,23 +1494,11 @@ async function checkClipboardForObjects() {
              calculateBounds();
              redraw(true);
         });
-        
-        
-      document.addEventListener('keydown', (e) => {
-    // Прерывание длительных загрузок
-    if (e.key === 'Escape' && loaderContainer.style.display === 'flex') {
-        isNspdLoadCancelled = true;
-        showLoader(false); // ИСПРАВЛЕНО: hideLoader() -> showLoader(false)
-        showNotification("Загрузка отменена пользователем.", "warning", "hand-paper");
-        console.log("Запрос на отмену загрузки...");
-        return; 
-    }
-
-    // Существующая логика для других режимов
-    if (isGeometryEditMode && e.key === 'Escape') {
-        deactivateGeometryEditMode();
-    }
-});
+        document.addEventListener('keydown', (e) => {
+            if (isGeometryEditMode && e.key === 'Escape') {
+                deactivateGeometryEditMode();
+            }
+        });
            document.getElementById('deleteAllObjectsBtn').addEventListener('click', deleteAllObjects);
            
                 document.getElementById('importModeSelect').addEventListener('change', (e) => {
@@ -1777,99 +1762,93 @@ function populateImportModeSelect() {
     }
 
 async function handleImportFromNspdAndConvertToMsk(cadNumbers, destScId) {
-    closeCoordsDialog();
-    if (cadNumbers.length > 100) {
-        showNotification("Превышен лимит в 100 кадастровых номеров.", "error");
-        return;
-    }
-
-    const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destScId);
-    if (!destSystem || !destSystem.def) {
-        showNotification(`Не найдено определение для целевой СК: ${destScId}`, "error");
-        return;
-    }
-
-    proj4.defs(destSystem.value, destSystem.def);
-    if (typeof proj4.defs['EPSG:3857'] === 'undefined') {
-         proj4.defs("EPSG:3857", COORDINATE_SYSTEMS.find(s => s.value === "EPSG:3857").def);
-    }
-    if (typeof proj4.defs['EPSG:4326'] === 'undefined') {
-         proj4.defs("EPSG:4326", COORDINATE_SYSTEMS.find(s => s.value === "EPSG:4326").def);
-    }
-
-    let addedObjects = [];
-    let errors = 0;
-    
-    // --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    isNspdLoadCancelled = false; // Сбрасываем флаг перед началом новой операции
-    // --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-    showLoader(true, `Подготовка к загрузке ${cadNumbers.length} участков...`);
-
-    for (let i = 0; i < cadNumbers.length; i++) {
-        // --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        if (isNspdLoadCancelled) {
-            console.log("Загрузка из НСПД прервана пользователем.");
-            break; // Выходим из цикла, если пользователь нажал Escape
+        closeCoordsDialog();
+        if (cadNumbers.length > 100) {
+            showNotification("Превышен лимит в 100 кадастровых номеров.", "error");
+            return;
         }
-        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-        const kn = cadNumbers[i];
-        showLoader(true, `Загрузка ${i + 1}/${cadNumbers.length}: ${kn}`);
+        const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destScId);
+        if (!destSystem || !destSystem.def) {
+            showNotification(`Не найдено определение для целевой СК: ${destScId}`, "error");
+            return;
+        }
+        
+        // Регистрируем СК в Proj4 для конвертации
+        proj4.defs(destSystem.value, destSystem.def);
+        if (typeof proj4.defs['EPSG:3857'] === 'undefined') {
+             proj4.defs("EPSG:3857", COORDINATE_SYSTEMS.find(s => s.value === "EPSG:3857").def);
+        }
+        if (typeof proj4.defs['EPSG:4326'] === 'undefined') {
+             proj4.defs("EPSG:4326", COORDINATE_SYSTEMS.find(s => s.value === "EPSG:4326").def);
+        }
 
-        try {
-            const feature = await fetchCadastralData(kn);
-            if (!feature.geometry || !feature.geometry.coordinates) {
-                throw new Error('У объекта нет координат в ЕГРН.');
-            }
-            
-            const geometryType = feature.geometry.type;
-            const polygonsData = geometryType === 'MultiPolygon' ? feature.geometry.coordinates : [feature.geometry.coordinates];
-            
-            const objectMskContours = [];
-            polygonsData.forEach(polygonRings => {
-                polygonRings.forEach(ring => {
-                    const mskPoints = ring.map(coord_3857 => {
-                        const wgs84 = proj4('EPSG:3857', 'EPSG:4326', coord_3857);
-                        const msk = proj4('EPSG:4326', destSystem.value, wgs84);
-                        
-                        const finalX = msk[1] + (destSystem.offsetX || 0);
-                        const finalY = msk[0] + (destSystem.offsetY || 0);
+        let addedObjects = [];
+        let errors = 0;
+        
+        showLoader(true, `Подготовка к загрузке ${cadNumbers.length} участков...`);
 
-                        return { x: roundCoord(finalX), y: roundCoord(finalY) };
-                    });
-                    objectMskContours.push(mskPoints);
-                });
-            });
+        for (let i = 0; i < cadNumbers.length; i++) {
+            const kn = cadNumbers[i];
+            showLoader(true, `Загрузка ${i + 1}/${cadNumbers.length}: ${kn}`);
 
-            if (objectMskContours.length > 0) {
-                const newObj = addObjectInternal(objectMskContours, kn, "polygon", true);
-                if (newObj) {
-                    addedObjects.push(newObj);
+            try {
+                const feature = await fetchCadastralData(kn);
+                if (!feature.geometry || !feature.geometry.coordinates) {
+                    throw new Error('У объекта нет координат в ЕГРН.');
                 }
-            } else {
-                throw new Error('Не удалось извлечь контуры.');
+                
+                const geometryType = feature.geometry.type;
+                const polygonsData = geometryType === 'MultiPolygon' ? feature.geometry.coordinates : [feature.geometry.coordinates];
+                
+                const objectMskContours = [];
+                polygonsData.forEach(polygonRings => {
+                    polygonRings.forEach(ring => {
+                        const mskPoints = ring.map(coord_3857 => {
+                            const wgs84 = proj4('EPSG:3857', 'EPSG:4326', coord_3857);
+                            const msk = proj4('EPSG:4326', destSystem.value, wgs84);
+                            
+                            // --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+                            // Применяем смещение, если оно определено для данной СК
+                            const finalX = msk[1] + (destSystem.offsetX || 0);
+                            const finalY = msk[0] + (destSystem.offsetY || 0);
+                            // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
+                            return { x: roundCoord(finalX), y: roundCoord(finalY) };
+                        });
+                        objectMskContours.push(mskPoints);
+                    });
+                });
+
+                if (objectMskContours.length > 0) {
+                    const newObj = addObjectInternal(objectMskContours, kn, "polygon", true);
+                    if (newObj) {
+                        addedObjects.push(newObj);
+                    }
+                } else {
+                    throw new Error('Не удалось извлечь контуры.');
+                }
+
+            } catch (error) {
+                console.error(`Ошибка для КН ${kn}:`, error);
+                showNotification(`Ошибка для ${kn}: ${error.message}`, "error");
+                errors++;
             }
 
-        } catch (error) {
-            console.error(`Ошибка для КН ${kn}:`, error);
-            showNotification(`Ошибка для ${kn}: ${error.message}`, "error");
-            errors++;
+            // Небольшая задержка между запросами
+            if (i < cadNumbers.length - 1) {
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
         }
 
-        if (i < cadNumbers.length - 1) {
-            await new Promise(resolve => setTimeout(resolve, 500));
+        showLoader(false);
+        if (addedObjects.length > 0) {
+            finalizeBatchAdd(addedObjects);
+            showNotification(`Загружено ${addedObjects.length} участков. ${errors > 0 ? errors + ' с ошибками.' : ''}`, "success", "check-circle");
+        } else if (errors > 0) {
+            showNotification(`Не удалось загрузить участки. Ошибок: ${errors}.`, "error", "exclamation-triangle");
         }
     }
-
-    showLoader(false);
-    if (addedObjects.length > 0) {
-        finalizeBatchAdd(addedObjects);
-        showNotification(`Загружено ${addedObjects.length} участков. ${errors > 0 ? errors + ' с ошибками.' : ''}`, "success", "check-circle");
-    } else if (errors > 0 && !isNspdLoadCancelled) { // Не показываем ошибку, если просто отменили
-        showNotification(`Не удалось загрузить участки. Ошибок: ${errors}.`, "error", "exclamation-triangle");
-    }
-}
     
     function isQuarterFormat(text) {
         if (!text) return false;
@@ -1951,188 +1930,53 @@ async function handleUniversalImport() {
         }
     }
     
+// НАЙДИТЕ И ПОЛНОСТЬЮ ЗАМЕНИТЕ ЭТУ ФУНКЦИЮ
 async function processQuarterLoad(quarterNumber, filterType) {
     closeQuarterLoadOptionsDialog();
-
-    // Определяем источник данных из основного диалогового окна
-    const importMode = document.getElementById('importModeSelect').value;
-
-    if (importMode === 'xml') {
-        // --- Существующая логика для загрузки из XML-архива КПТ ---
-        showLoader(true, `Загрузка данных КПТ для квартала ${quarterNumber}...`);
-        try {
-            const xmlContent = await fetchKptXmlContent(quarterNumber);
-            if (!xmlContent) {
-                showLoader(false);
-                return;
-            }
-
-            showLoader(true, `Обработка XML, фильтр: ${filterType}...`);
-            await new Promise(resolve => setTimeout(resolve, 50));
-            
-            const objectsToAdd = extractObjectsFromXml(xmlContent, filterType);
-            
-            if (objectsToAdd.length === 0) {
-                showNotification(`В файле КПТ для квартала ${quarterNumber} не найдено объектов, соответствующих фильтру.`, "info");
-                showLoader(false);
-                return;
-            }
-
-            let addedObjectsBatch = [];
-            objectsToAdd.forEach(objData => {
-                const isPolygon = objData.contours.some(c => c.length >= 3);
-                const objectType = isPolygon ? 'polygon' : (objData.contours.some(c => c.length >= 2) ? 'line' : 'point');
-                const newObj = addObjectInternal(objData.contours, objData.name, objectType, true);
-                if (newObj) {
-                    addedObjectsBatch.push(newObj);
-                }
-            });
-
-            if (addedObjectsBatch.length > 0) {
-                finalizeBatchAdd(addedObjectsBatch);
-                showNotification(`Загружено ${addedObjectsBatch.length} объектов из файла КПТ ${quarterNumber}.`, "success");
-            }
-        } catch (error) {
-            console.error("Ошибка при загрузке квартала из КПТ XML:", error);
-            showNotification(`Ошибка загрузки из КПТ: ${error.message}`, "error");
-        } finally {
-            showLoader(false);
-        }
-    } else {
-        // --- Новая логика для загрузки из НСПД с конвертацией в МСК ---
-        if (filterType === 'adjacent') {
-            showNotification(`Загрузка смежных объектов из НСПД не поддерживается.`, "warning");
-            return;
-        }
-        // 'importMode' в этом случае является ID целевой системы координат, например 'EPSG:6331602'
-        await handleImportQuarterFromNspdAndConvertToMsk(quarterNumber, filterType, importMode);
-    }
-}
-
-// НОВАЯ ФУНКЦИЯ
-async function handleImportQuarterFromNspdAndConvertToMsk(quarterNumber, filterType, destScId) {
-    isNspdLoadCancelled = false;
-    showLoader(true, `Загрузка данных НСПД для квартала ${quarterNumber}...`);
+    showLoader(true, `Загрузка данных для квартала ${quarterNumber}...`);
 
     try {
-        const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destScId);
-        if (!destSystem || !destSystem.def) {
-            throw new Error(`Не найдено определение для целевой СК: ${destScId}`);
-        }
-        proj4.defs(destSystem.value, destSystem.def);
-        if (typeof proj4.defs['EPSG:3857'] === 'undefined') {
-             proj4.defs("EPSG:3857", COORDINATE_SYSTEMS.find(s => s.value === "EPSG:3857").def);
-        }
-        if (typeof proj4.defs['EPSG:4326'] === 'undefined') {
-             proj4.defs("EPSG:4326", COORDINATE_SYSTEMS.find(s => s.value === "EPSG:4326").def);
-        }
-
-        showLoader(true, `Запрос геометрии квартала ${quarterNumber}...`);
-        if (isNspdLoadCancelled) return; 
-
-        const quarterGeomUrl = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=2&query=${quarterNumber}`;
-        const quarterGeomData = await fetchNspd(quarterGeomUrl);
-        const quarterFeature = quarterGeomData?.data?.features?.[0];
-        if (!quarterFeature || !quarterFeature.geometry) {
-            throw new Error(`Не найдена геометрия для квартала ${quarterNumber} в НСПД.`);
-        }
-        
-        const categories = [];
-        if (filterType === 'zu' || filterType === 'all') categories.push({ "id": 36368 });
-        if (filterType === 'oks' || filterType === 'all') categories.push({ "id": 36369 });
-        if (filterType === 'construction' || filterType === 'all') categories.push({ "id": 36383 });
-        
-        if (categories.length === 0) {
-             throw new Error(`Неизвестный тип фильтра для НСПД: ${filterType}`);
-        }
-        
-        showLoader(true, `Загрузка объектов (${filterType}) в квартале ${quarterNumber}...`);
-        if (isNspdLoadCancelled) return; 
-
-        const requestBody = {
-            "geom": { "type": "FeatureCollection", "features": [{ "type": "Feature", "geometry": quarterFeature.geometry, "properties": {} }] },
-            "categories": categories
-        };
-        const intersectsUrl = 'https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject';
-        
-        const intersectsResponse = await fetch(intersectsUrl, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json', 'Referer': 'https://nspd.gov.ru/' },
-            body: JSON.stringify(requestBody)
-        });
-        if (!intersectsResponse.ok) throw new Error(`Ошибка НСПД при запросе объектов: ${intersectsResponse.statusText}`);
-        const objectsData = await intersectsResponse.json();
-        
-        const featuresToConvert = objectsData.features || [];
-        if (featuresToConvert.length === 0) {
-            showNotification(`В квартале ${quarterNumber} не найдено объектов типа '${filterType}' через НСПД.`, "info");
+        const xmlContent = await fetchKptXmlContent(quarterNumber);
+        if (!xmlContent) {
+            showLoader(false);
             return;
         }
 
-        showLoader(true, `Конвертация ${featuresToConvert.length} объектов...`);
-        let addedObjectsBatch = [];
-        let errors = 0;
+        showLoader(true, `Обработка XML, фильтр: ${filterType}...`);
+        await new Promise(resolve => setTimeout(resolve, 50));
 
-        for (const feature of featuresToConvert) {
-            if (isNspdLoadCancelled) {
-                console.log("Конвертация объектов квартала прервана пользователем.");
-                break;
-            }
+        // ВЫЗЫВАЕМ extractObjectsFromXml С ПРАВИЛЬНЫМ ФИЛЬТРОМ
+        // И больше ничего лишнего в этой функции не делаем.
+        const objectsToAdd = extractObjectsFromXml(xmlContent, filterType);
 
-            try {
-                const cadNumber = feature.properties.descr || feature.properties.options?.cad_num || `Объект без КН`;
-                if (!feature.geometry || !feature.geometry.coordinates) {
-                    console.warn(`Пропущен объект ${cadNumber} - нет геометрии.`);
-                    continue;
-                }
-
-                const geometryType = feature.geometry.type;
-                const polygonsData = geometryType === 'MultiPolygon' ? feature.geometry.coordinates : [feature.geometry.coordinates];
-
-                const objectMskContours = [];
-                polygonsData.forEach(polygonRings => {
-                    polygonRings.forEach(ring => {
-                        const mskPoints = ring.map(coord_3857 => {
-                            const wgs84 = proj4('EPSG:3857', 'EPSG:4326', coord_3857);
-                            const msk = proj4('EPSG:4326', destSystem.value, wgs84);
-                            const finalX = msk[1] + (destSystem.offsetX || 0);
-                            const finalY = msk[0] + (destSystem.offsetY || 0);
-                            return { x: roundCoord(finalX), y: roundCoord(finalY) };
-                        });
-                        objectMskContours.push(mskPoints);
-                    });
-                });
-
-                if (objectMskContours.length > 0) {
-                    const newObj = addObjectInternal(objectMskContours, cadNumber, "polygon", true);
-                    if (newObj) {
-                        addedObjectsBatch.push(newObj);
-                    }
-                } else {
-                     errors++;
-                }
-            } catch (convertError) {
-                errors++;
-                console.error(`Ошибка конвертации для объекта`, feature, convertError);
-            }
+        if (objectsToAdd.length === 0) {
+            showNotification(`В квартале ${quarterNumber} не найдено объектов, соответствующих вашему выбору (или у них нет координат).`, "info", "info-circle");
+            showLoader(false);
+            return;
         }
-        
+
+        let addedObjectsBatch = [];
+        objectsToAdd.forEach(objData => {
+            // Определяем тип объекта для корректного создания
+            const isPolygon = objData.contours.some(c => c.length >= 3);
+            const objectType = isPolygon ? 'polygon' : (objData.contours.some(c => c.length >= 2) ? 'line' : 'point');
+
+            const newObj = addObjectInternal(objData.contours, objData.name, objectType, true);
+            if (newObj) {
+                addedObjectsBatch.push(newObj);
+            }
+        });
+
         if (addedObjectsBatch.length > 0) {
             finalizeBatchAdd(addedObjectsBatch);
-            showNotification(`Загружено и конвертировано ${addedObjectsBatch.length} объектов из НСПД. ${errors > 0 ? errors + ' с ошибками.' : ''}`, "success");
-        } else if (errors > 0 && !isNspdLoadCancelled) {
-             showNotification(`Не удалось загрузить или конвертировать объекты из НСПД. Ошибок: ${errors}.`, "error");
+            showNotification(`Загружено ${addedObjectsBatch.length} объектов из квартала ${quarterNumber}.`, "success", "check-circle");
         }
 
     } catch (error) {
-        if (!isNspdLoadCancelled) { 
-            console.error("Ошибка при загрузке квартала из НСПД:", error);
-            showNotification(`Ошибка загрузки из НСПД: ${error.message}`, "error");
-        }
+        console.error("Ошибка при загрузке квартала:", error);
+        showNotification(`Ошибка: ${error.message}`, "error", "exclamation-triangle");
     } finally {
-        if (!isNspdLoadCancelled) { 
-            showLoader(false); // ИСПРАВЛЕНО: hideLoader() -> showLoader(false)
-        }
+        showLoader(false);
     }
 }
 
