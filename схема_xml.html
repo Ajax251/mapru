@@ -5694,6 +5694,9 @@ function getJsonFiltersForFile(fileName) {
     if (rulerMode) return;
 
     let clickedObjects = [];
+    
+    // <<< НОВОЕ: Определяем порог клика в координатах карты. 5 пикселей - хороший порог. >>>
+    const lineClickThreshold = 5 / scale;
 
     // 1. Check Imported Objects
     if (importedContours.length > 0) {
@@ -5702,13 +5705,33 @@ function getJsonFiltersForFile(fileName) {
             if (!contour || contour.length === 0) continue;
             const isSinglePoint = contour.length === 1 || (contour.length === 2 && Math.abs(contour[0].x - contour[1].x) < 1e-6 && Math.abs(contour[0].y - contour[1].y) < 1e-6);
             const isPolygon = contour.length >= 3 && checkIfClosedContour(contour);
-            const lineClickThreshold = 5 / scale;
             let hit = false;
-            if (isPolygon && isPointInPolygon({ x: clickX, y: clickY }, contour)) { hit = true; }
-            else if (isSinglePoint) { const point = contour[0]; const pointRadius = 10 / scale; const dx = point.x - clickX; const dy = point.y - clickY; if (Math.sqrt(dx * dx + dy * dy) < pointRadius) { hit = true; } }
-            else if (contour.length >= 2) { for (let j = 0; j < contour.length - 1; j++) { const p1 = contour[j]; const p2 = contour[j + 1]; if (distanceToLine(clickX, clickY, p1.x, p1.y, p2.x, p2.y) < lineClickThreshold) { hit = true; break; } } }
+
+            // <<< ИЗМЕНЕНИЕ: Добавляем проверку близости к границе для полигонов >>>
+            let hitOnBoundary = false;
+            if (contour.length >= 2) {
+                for (let j = 0; j < contour.length; j++) {
+                    // Для незамкнутых линий последняя точка не соединяется с первой
+                    if (j === contour.length - 1 && !isPolygon) break;
+                    const p1 = contour[j];
+                    const p2 = contour[(j + 1) % contour.length];
+                    if (distanceToLine(clickX, clickY, p1.x, p1.y, p2.x, p2.y) < lineClickThreshold) {
+                        hitOnBoundary = true;
+                        break;
+                    }
+                }
+            }
+
+            if (isPolygon && (isPointInPolygon({ x: clickX, y: clickY }, contour) || hitOnBoundary)) {
+                hit = true;
+            } else if (!isPolygon && hitOnBoundary) { // Для линий проверяем только границу
+                hit = true;
+            } else if (isSinglePoint) { // Логика для точек остается
+                const point = contour[0]; const pointRadius = 10 / scale; const dx = point.x - clickX; const dy = point.y - clickY; if (Math.sqrt(dx * dx + dy * dy) < pointRadius) { hit = true; }
+            }
+
             if (hit) {
-                clickedObjects.push({ type: 'imported', identifier: `imported_${i}`, importedIndex: i, object: contour }); // Добавляем объект для сортировки, если понадобится
+                clickedObjects.push({ type: 'imported', identifier: `imported_${i}`, importedIndex: i, object: contour });
             }
         }
     }
@@ -5719,10 +5742,22 @@ function getJsonFiltersForFile(fileName) {
             const zone = zonesAndTerritoriesContours[i];
             if (!zone || !zone.contours) continue;
             for (const contour of zone.contours) {
-                if (!contour || contour.length < 3 || !checkIfClosedContour(contour)) continue; // Check for valid polygon
-                if (isPointInPolygon({ x: clickX, y: clickY }, contour)) {
+                if (!contour || contour.length < 3 || !checkIfClosedContour(contour)) continue;
+
+                // <<< ИЗМЕНЕНИЕ: Добавляем проверку близости к границе >>>
+                let hitOnBoundary = false;
+                for (let j = 0; j < contour.length; j++) {
+                    const p1 = contour[j];
+                    const p2 = contour[(j + 1) % contour.length];
+                    if (distanceToLine(clickX, clickY, p1.x, p1.y, p2.x, p2.y) < lineClickThreshold) {
+                        hitOnBoundary = true;
+                        break;
+                    }
+                }
+
+                if (isPointInPolygon({ x: clickX, y: clickY }, contour) || hitOnBoundary) {
                     clickedObjects.push({ type: 'zone', identifier: zone.regNumbBorder, zoneObject: zone, area: calculateContourArea(contour) });
-                    break; // Found in one contour of this zone, move to next zone
+                    break;
                 }
             }
         }
@@ -5735,37 +5770,66 @@ function getJsonFiltersForFile(fileName) {
             if (!building || !building.contours) continue;
             for (const contour of building.contours) {
                 if (!contour || contour.length === 0) continue;
+                
+                // <<< ИЗМЕНЕНИЕ: Добавляем проверку близости к границе для всех ОКС >>>
+                let hitOnBoundary = false;
                 const isClosed = checkIfClosedContour(contour);
-                const lineClickThreshold = 5 / scale;
-                let hit = false;
-                if (isClosed && contour.length >= 3 && isPointInPolygon({ x: clickX, y: clickY }, contour)) { hit = true; }
-                else if (!isClosed && contour.length >= 2) { // Check for line
-                    for (let j = 0; j < contour.length - 1; j++) { const p1 = contour[j]; const p2 = contour[j + 1]; if (distanceToLine(clickX, clickY, p1.x, p1.y, p2.x, p2.y) < lineClickThreshold) { hit = true; break; } }
+                if (contour.length >= 2) {
+                    for (let j = 0; j < contour.length; j++) {
+                        if (j === contour.length - 1 && !isClosed) break;
+                        const p1 = contour[j];
+                        const p2 = contour[(j + 1) % contour.length];
+                        if (distanceToLine(clickX, clickY, p1.x, p1.y, p2.x, p2.y) < lineClickThreshold) {
+                            hitOnBoundary = true;
+                            break;
+                        }
+                    }
                 }
+
+                let hit = false;
+                if (isClosed && contour.length >= 3 && (isPointInPolygon({ x: clickX, y: clickY }, contour) || hitOnBoundary)) {
+                    hit = true;
+                } else if (!isClosed && hitOnBoundary) {
+                    hit = true;
+                }
+
                 if (hit) {
-                    clickedObjects.push({ type: 'building', identifier: building.cadastralNumber, buildingObject: building, area: isClosed ? calculateContourArea(contour) : Infinity }); // Infinity for lines to be last
+                    clickedObjects.push({ type: 'building', identifier: building.cadastralNumber, buildingObject: building, area: isClosed ? calculateContourArea(contour) : Infinity });
                     break;
                 }
             }
         }
     }
 
-    // 4. Check Land Parcels (always check these last if multiple layers)
+    // 4. Check Land Parcels
     if (allContours) {
         let foundParcelsUnderClick = [];
         for (let i = 0; i < allContours.length; i++) {
             const parcel = allContours[i];
             if (!parcel || !parcel.contours) continue;
             for (const contour of parcel.contours) {
-                if (contour.length >= 3 && isPointInPolygon({ x: clickX, y: clickY }, contour)) {
+                // <<< ИЗМЕНЕНИЕ: Добавляем проверку близости к границе >>>
+                let hitOnBoundary = false;
+                if (contour.length >= 2) { // Проверяем границу даже для невалидных полигонов (линий)
+                    for (let j = 0; j < contour.length; j++) {
+                        const p1 = contour[j];
+                        const p2 = contour[(j + 1) % contour.length];
+                        if (distanceToLine(clickX, clickY, p1.x, p1.y, p2.x, p2.y) < lineClickThreshold) {
+                            hitOnBoundary = true;
+                            break;
+                        }
+                    }
+                }
+                
+                // Попадание, если точка внутри ИЛИ рядом с границей
+                if ((contour.length >= 3 && isPointInPolygon({ x: clickX, y: clickY }, contour)) || hitOnBoundary) {
                     foundParcelsUnderClick.push({ parcelObject: parcel, area: calculateContourArea(contour) });
-                    break; // Found in one contour of this parcel
+                    break;
                 }
             }
         }
         if (foundParcelsUnderClick.length > 0) {
-            foundParcelsUnderClick.sort((a, b) => a.area - b.area); // Smallest area first
-            // Add only the smallest parcel at the click point, or all if that's preferred
+            foundParcelsUnderClick.sort((a, b) => a.area - b.area);
             clickedObjects.push({ type: 'parcel', identifier: foundParcelsUnderClick[0].parcelObject.cadastralNumber, parcelObject: foundParcelsUnderClick[0].parcelObject, area: foundParcelsUnderClick[0].area });
         }
     }
