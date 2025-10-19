@@ -8097,14 +8097,26 @@ function isValidClipboardCadastralOrQuarter(text) {
 
 function openNspdLoadDialog() {
     const cadastralInput = document.getElementById('cadastralInput');
-    const quarterNumber = cadastralInput ? cadastralInput.value.trim().replace(/:$/, '') : '';
-    const isValidQuarterFormat = (num) => /^\d{2}:\d{2}:\d{6,7}$/.test(num);
+    // 1. Очищаем значение от пробелов и убираем возможное двоеточие в конце
+    const identifier = cadastralInput ? cadastralInput.value.trim().replace(/:$/, '') : '';
 
-    if (!quarterNumber || !isValidQuarterFormat(quarterNumber)) {
-        showNotification('Кадастровый квартал не указан', 'warning', 'exclamation-triangle');
+    // Регулярное выражение для проверки, является ли номер кварталом (6 или 7 цифр)
+    const isQuarterFormat = (num) => /^\d{2}:\d{2}:\d{6,7}$/.test(num);
+    
+    // 2. Проверка на "нулевой" квартал
+    const isZeroQuarter = isQuarterFormat(identifier) && /:0{6,7}$/.test(identifier);
+    if (isZeroQuarter) {
+        showNotification('Загрузка по нулевому кварталу не поддерживается.', 'error', 'times-circle');
+        return;
+    }
+
+    // 3. Проверяем, что введен либо квартал, либо полный кадастровый номер
+    if (!identifier || (!isQuarterFormat(identifier) && !isValidCadastralNumber(identifier))) {
+        showNotification('Введите корректный номер квартала или объекта для загрузки из ЕГРН.', 'warning', 'exclamation-triangle');
         return; 
     }
     
+    // ... остальная часть функции без изменений ...
     const nspdMskSelect = document.getElementById('nspdMskSelect');
     nspdMskSelect.innerHTML = '';
     
@@ -8118,7 +8130,7 @@ function openNspdLoadDialog() {
         
         let detectedMskValue = null;
         if (typeof MskFinder !== 'undefined') {
-            const mskCode = MskFinder.findMskCode(quarterNumber);
+            const mskCode = MskFinder.findMskCode(identifier); // Используем очищенный identifier
             if (mskCode) {
                 const foundSystem = COORDINATE_SYSTEMS.find(system => system.text.includes(`МСК ${mskCode}`));
                 if (foundSystem) detectedMskValue = foundSystem.value;
@@ -8137,38 +8149,69 @@ function closeNspdLoadDialog() {
     nspdLoadDialogOverlay.style.display = 'none';
 }
 
-/**
- * Новая основная функция, которая получает данные из НСПД и генерирует XML.
- * Она будет вызываться обеими кнопками.
- */
 async function generateNspdKptData() {
     const cadastralInput = document.getElementById('cadastralInput');
-    const quarterNumber = cadastralInput ? cadastralInput.value.trim().replace(/:$/, '') : '';
+    // Снова очищаем значение на случай, если оно изменилось
+    const identifier = cadastralInput ? cadastralInput.value.trim().replace(/:$/, '') : '';
     const nspdMskSelect = document.getElementById('nspdMskSelect');
     const destScId = nspdMskSelect.value;
     const destScText = nspdMskSelect.options[nspdMskSelect.selectedIndex].text;
     const filterType = document.getElementById('nspdObjectTypeSelect').value;
 
     closeNspdLoadDialog();
-    setStatus(`Загрузка геометрии квартала ${quarterNumber} из ЕГРН...`, true);
+    setStatus(`Загрузка данных для ${identifier} из ЕГРН...`, true);
 
-    const quarterGeomUrl = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=2&query=${quarterNumber}`;
-    const quarterResponse = await fetch(quarterGeomUrl);
-    if (!quarterResponse.ok) throw new Error(`Ошибка сети (геометрия): ${quarterResponse.status}`);
-    const quarterData = await quarterResponse.json();
-    const quarterFeature = quarterData?.data?.features?.[0];
-    if (!quarterFeature?.geometry) throw new Error('Не удалось получить геометрию квартала из ЕГРН.');
-    
-    const categories = [];
-    if (filterType === 'zu' || filterType === 'all') categories.push({ "id": CATEGORY_IDS.ZU });
-    if (filterType === 'oks' || filterType === 'all') categories.push({ "id": CATEGORY_IDS.BUILDINGS });
-    if (filterType === 'construction' || filterType === 'all') categories.push({ "id": CATEGORY_IDS.CONSTRUCTIONS });
-    
-    setStatus(`Загрузка объектов (${filterType}) из ЕГРН...`, true);
-    const objectsData = await fetchObjectsByGeom(quarterFeature.geometry, categories.map(c => c.id));
+    let objectsData = null;
+    let quarterForXml = '';
+
+    // Регулярное выражение для проверки формата квартала
+    const isQuarterFormat = (num) => /^\d{2}:\d{2}:\d{6,7}$/.test(num);
+
+    if (isValidCadastralNumber(identifier)) {
+        // --- НОВАЯ ЛОГИКА: ЗАГРУЗКА ПО НОМЕРУ ОБЪЕКТА ---
+        quarterForXml = identifier.split(':').slice(0, 3).join(':');
+        const objectUrl = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${identifier}`;
+        const objectResponse = await fetch(objectUrl);
+        if (!objectResponse.ok) throw new Error(`Ошибка сети (объект): ${objectResponse.status}`);
+        
+        objectsData = await objectResponse.json();
+        
+        if (!objectsData?.data?.features?.[0]?.geometry) {
+            throw new Error(`Объект ${identifier} найден в ЕГРН, но не содержит координат.`);
+        }
+        // Переименовываем ключ для совместимости с дальнейшей логикой
+        objectsData.features = objectsData.data.features;
+
+    } else if (isQuarterFormat(identifier)) {
+        // --- СТАРАЯ ЛОГИКА: ЗАГРУЗКА ПО НОМЕРУ КВАРТАЛА ---
+        quarterForXml = identifier;
+        // Проверка на нулевой квартал (дублируется для надежности)
+        if (/:0{6,7}$/.test(quarterForXml)) {
+            throw new Error('Загрузка по нулевому кварталу не поддерживается.');
+        }
+
+        setStatus(`Загрузка геометрии квартала ${quarterForXml}...`, true);
+        const quarterGeomUrl = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=2&query=${quarterForXml}`;
+        const quarterResponse = await fetch(quarterGeomUrl);
+        if (!quarterResponse.ok) throw new Error(`Ошибка сети (геометрия): ${quarterResponse.status}`);
+        const quarterData = await quarterResponse.json();
+        const quarterFeature = quarterData?.data?.features?.[0];
+        if (!quarterFeature?.geometry) throw new Error('Не удалось получить геометрию квартала из ЕГРН.');
+
+        const categories = [];
+        if (filterType === 'zu' || filterType === 'all') categories.push({ "id": CATEGORY_IDS.ZU });
+        if (filterType === 'oks' || filterType === 'all') categories.push({ "id": CATEGORY_IDS.BUILDINGS });
+        if (filterType === 'construction' || filterType === 'all') categories.push({ "id": CATEGORY_IDS.CONSTRUCTIONS });
+
+        setStatus(`Загрузка объектов (${filterType}) из ЕГРН...`, true);
+        objectsData = await fetchObjectsByGeom(quarterFeature.geometry, categories.map(c => c.id));
+
+    } else {
+        throw new Error('Введенный номер не является ни номером квартала, ни кадастровым номером объекта.');
+    }
     
     if (!objectsData || !objectsData.features || objectsData.features.length === 0) {
-        throw new Error(`В квартале ${quarterNumber} не найдено объектов типа '${filterType}' через ЕГРН.`);
+        throw new Error(`В ЕГРН не найдено объектов по запросу: ${identifier}.`);
     }
     
     setStatus(`Конвертация ${objectsData.features.length} объектов в XML...`, true);
@@ -8181,8 +8224,7 @@ async function generateNspdKptData() {
     };
     const userChoicesForXml = { zu: true, oks: true };
 
-    // Передаем ID и ТЕКСТ выбранной МСК в функцию конвертации
-    const { xmlContent, filenameBase } = convertJsonToXml(allDataForXml, quarterNumber, userChoicesForXml, destScId, destScText);
+    const { xmlContent, filenameBase } = convertJsonToXml(allDataForXml, quarterForXml, userChoicesForXml, destScId, destScText);
     
     return { xmlContent, filenameBase, totalObjects: objectsData.features.length, destScText };
 }
