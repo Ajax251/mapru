@@ -8149,8 +8149,6 @@ function closeNspdLoadDialog() {
     nspdLoadDialogOverlay.style.display = 'none';
 }
 
-// ЗАМЕНИТЕ СУЩЕСТВУЮЩУЮ ФУНКЦИЮ generateNspdKptData НА ЭТУ
-
 async function generateNspdKptData() {
     const cadastralInput = document.getElementById('cadastralInput');
     const identifier = cadastralInput ? cadastralInput.value.trim().replace(/:$/, '') : '';
@@ -8164,15 +8162,14 @@ async function generateNspdKptData() {
 
     let objectsData = null;
     let quarterForXml = '';
-    let identifierForFilename = '';
-    let primaryObjectType = 'unknown'; // <<< НОВАЯ ПЕРЕМЕННАЯ ДЛЯ ТИПА ОБЪЕКТА
+    let identifierForFilename = ''; // <<< НОВАЯ ПЕРЕМЕННАЯ ДЛЯ ИМЕНИ ФАЙЛА
 
     const isQuarterFormat = (num) => /^\d{2}:\d{2}:\d{6,7}$/.test(num);
 
     if (isValidCadastralNumber(identifier)) {
         // --- ЗАГРУЗКА ПО НОМЕРУ ОБЪЕКТА ---
         quarterForXml = identifier.split(':').slice(0, 3).join(':');
-        identifierForFilename = identifier;
+        identifierForFilename = identifier; // <<< Используем полный номер для имени файла
         
         const objectUrl = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${identifier}`;
         const objectResponse = await fetch(objectUrl);
@@ -8180,34 +8177,20 @@ async function generateNspdKptData() {
         
         objectsData = await objectResponse.json();
         
-        const primaryFeature = objectsData?.data?.features?.[0];
-        if (!primaryFeature?.geometry) {
+        if (!objectsData?.data?.features?.[0]?.geometry) {
             throw new Error(`Объект ${identifier} найден в ЕГРН, но не содержит координат.`);
         }
-        
-        // <<< НАЧАЛО НОВОГО БЛОКА: ОПРЕДЕЛЕНИЕ ТИПА >>>
-        if (primaryFeature) {
-            const category = primaryFeature.properties.category;
-            if (category === CATEGORY_IDS.ZU) {
-                primaryObjectType = 'zu';
-            } else if (category === CATEGORY_IDS.BUILDINGS || category === CATEGORY_IDS.CONSTRUCTIONS) {
-                primaryObjectType = 'oks';
-            }
-        }
-        // <<< КОНЕЦ НОВОГО БЛОКА >>>
-
         objectsData.features = objectsData.data.features;
 
     } else if (isQuarterFormat(identifier)) {
         // --- ЗАГРУЗКА ПО НОМЕРУ КВАРТАЛА ---
         quarterForXml = identifier;
-        identifierForFilename = quarterForXml;
+        identifierForFilename = quarterForXml; // <<< Используем номер квартала для имени файла
         
         if (/:0{6,7}$/.test(quarterForXml)) {
             throw new Error('Загрузка по нулевому кварталу не поддерживается.');
         }
 
-        // ... остальная часть логики загрузки по кварталу без изменений ...
         setStatus(`Загрузка геометрии квартала ${quarterForXml}...`, true);
         const quarterGeomUrl = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=2&query=${quarterForXml}`;
         const quarterResponse = await fetch(quarterGeomUrl);
@@ -8223,7 +8206,7 @@ async function generateNspdKptData() {
 
         setStatus(`Загрузка объектов (${filterType}) из ЕГРН...`, true);
         objectsData = await fetchObjectsByGeom(quarterFeature.geometry, categories.map(c => c.id));
-        
+
     } else {
         throw new Error('Введенный номер не является ни номером квартала, ни кадастровым номером объекта.');
     }
@@ -8242,10 +8225,10 @@ async function generateNspdKptData() {
     };
     const userChoicesForXml = { zu: true, oks: true };
 
+    // <<< ИЗМЕНЕНИЕ: ПЕРЕДАЕМ НОВЫЙ ПАРАМЕТР `identifierForFilename` В ФУНКЦИЮ КОНВЕРТАЦИИ >>>
     const { xmlContent, filenameBase } = convertJsonToXml(allDataForXml, quarterForXml, identifierForFilename, userChoicesForXml, destScId, destScText);
     
-    // <<< ИЗМЕНЕНИЕ: ВОЗВРАЩАЕМ ДОПОЛНИТЕЛЬНЫЙ ПАРАМЕТР `primaryObjectType` >>>
-    return { xmlContent, filenameBase, totalObjects: objectsData.features.length, destScText, primaryObjectType };
+    return { xmlContent, filenameBase, totalObjects: objectsData.features.length, destScText };
 }
 
 /**
@@ -8256,32 +8239,18 @@ async function handleNspdToXmlConversion() {
     if (actionButton) actionButton.disabled = true;
 
     try {
-        // <<< ИЗМЕНЕНИЕ: Получаем новый параметр `primaryObjectType` >>>
-        const { xmlContent, filenameBase, totalObjects, destScText, primaryObjectType } = await generateNspdKptData();
+        // --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
+        // Теперь эта функция вызывает общую логику и затем обрабатывает результат
+        const { xmlContent, filenameBase, totalObjects, destScText } = await generateNspdKptData();
         
         setStatus('Обработка сгенерированного XML...', true);
         await new Promise(r => setTimeout(r, 100));
         
         const generatedFileName = `${filenameBase}.xml`;
         
+        // ВАЖНОЕ ИСПРАВЛЕНИЕ: Передаем `undefined` вместо `null` для параметра filters,
+        // чтобы сработали значения по умолчанию внутри processXMLContent.
         await processXMLContent(xmlContent, generatedFileName, null, undefined, destScText);
-
-        // <<< НАЧАЛО НОВОГО БЛОКА: АВТОМАТИЧЕСКОЕ ВКЛЮЧЕНИЕ СЛОЯ ОКС >>>
-        if (primaryObjectType === 'oks' && !showBuildings) {
-            showBuildings = true; // Включаем флаг
-            const buildingsButton = document.getElementById('buildingsBtn');
-            if (buildingsButton) {
-                // Обновляем внешний вид кнопки
-                buildingsButton.classList.add('active');
-                buildingsButton.style.backgroundColor = '#3498db'; // Активный цвет
-                
-                // Перерисовываем схему, чтобы отобразить изменения
-                redraw(new Set(), new Set(), true);
-                
-                showNotification('Слой ОКС был  включен для отображения загруженного объекта', 'info', 'eye');
-            }
-        }
-        // <<< КОНЕЦ НОВОГО БЛОКА >>>
 
         setStatus(`Готово! Загружено и обработано ${totalObjects} объектов`, false, false, true);
         setTimeout(() => setStatus(''), 5000);
