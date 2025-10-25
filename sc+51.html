@@ -500,7 +500,6 @@ function isExactlyZeroQuarterNumber(numberString) {
 }
 
 
-// ЗАМЕНИТЕ ЭТУ ФУНКЦИЮ ЦЕЛИКОМ
 
 async function handleParcelsInQuarter(centerCoords) {
     if (globalAbortController) globalAbortController.abort();
@@ -512,18 +511,17 @@ async function handleParcelsInQuarter(centerCoords) {
         if (signal.aborted) throw new DOMException('Aborted');
         if (!wmsData?.features?.length) { 
             showNotification('Не удалось определить ЗУ в центре карты', 'warning'); 
+            hideLoader();
             return; 
         }
         
         const quarterNumber = wmsData.features[0].properties.descr.split(':').slice(0, 3).join(':');
         
-      
         if (isExactlyZeroQuarterNumber(quarterNumber)) {
             showNotification('Поиск в нулевом квартале не выполняется', 'warning');
-            hideLoader(); // Прячем лоадер перед выходом
+            hideLoader();
             return;
         }
-    
 
         showLoader(`Загрузка ЗУ в квартале ${quarterNumber}...`);
         const quarterFeature = await queryNSPD_Search(quarterNumber, 2, signal);
@@ -531,7 +529,13 @@ async function handleParcelsInQuarter(centerCoords) {
         if (!quarterFeature) { showNotification(`Квартал ${quarterNumber} не найден`, 'error'); return; }
 
         const requestBody = { "geom": { "type": "FeatureCollection", "features": [{"type": "Feature", "geometry": quarterFeature.geometry}] }, "categories": [{"id": 36368}] };
-        const intersectsResponse = await fetch(`https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody), signal });
+        
+        const intersectsResponse = await fetch(`https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject`, { 
+            method: 'POST', 
+            headers: { 'Content-Type': 'application/json' }, 
+            body: JSON.stringify(requestBody), 
+            signal 
+        });
 
         if (signal.aborted) throw new DOMException('Aborted');
         if (!intersectsResponse.ok) { showNotification(`Ошибка запроса участков для ${quarterNumber}`, 'error'); return; }
@@ -545,14 +549,22 @@ async function handleParcelsInQuarter(centerCoords) {
             return;
         }
         
+        // --- ИСПРАВЛЕНИЕ: Добавлен 'options' в вызов drawNspdFeature ---
         filteredFeatures.forEach(f => drawNspdFeature(f, { 
             baseColorType: isZuDeclared(f.properties?.options) ? '#FF0000' : '#00FF00', 
-            hintText: f.properties?.descr
+            hintText: f.properties?.descr,
+            // Добавляем 'options', чтобы из них можно было извлечь данные для метки
+            options: f.properties?.options 
         }));
+        // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+        
         showNotification(`Загружено ${filteredFeatures.length} ЗУ`, 'success');
 
     } catch (error) {
-        if (error.name !== 'AbortError') showNotification('Ошибка при загрузке ЗУ в квартале', 'error');
+        if (error.name !== 'AbortError') {
+             showNotification('Ошибка при загрузке ЗУ в квартале', 'error');
+             console.error("Ошибка в handleParcelsInQuarter:", error);
+        }
     } finally {
         hideLoader();
     }
@@ -586,24 +598,81 @@ async function loadLayerByCenter(layerId, layerName, color, isOutline = false) {
 }
 
 function drawNspdFeature(feature, options = {}) {
-    let { baseColorType, fillColorOpacity = 0.2, hintText } = options;
-    const geometry = feature.geometry;
-    if (!geometry || !geometry.coordinates) return null;
+    let { baseColorType, fillColorOpacity = 0.2, hintText, labelText } = options; // Добавили labelText сюда
+    const actualStrokeColor = (typeof baseColorType === 'string' && baseColorType.startsWith('#')) ? baseColorType : '#4682B4';
+    const actualFillColor = (baseColorType === '#AAAAAA') ? '#00000000' : `${actualStrokeColor}${Math.round(fillColorOpacity * 255).toString(16).padStart(2, '0')}`;
+    
+    if (!feature || !feature.geometry || !feature.geometry.coordinates) return null;
+    
+    const geometryType = feature.geometry.type;
+    let allContoursCoords = [];
+    if (geometryType === "Polygon") {
+        if (Array.isArray(feature.geometry.coordinates) && feature.geometry.coordinates.length > 0 && Array.isArray(feature.geometry.coordinates[0])) {
+            allContoursCoords = feature.geometry.coordinates; // Это уже массив контуров
+        } else {
+            return null;
+        }
+    } else if (geometryType === "MultiPolygon") {
+        if (Array.isArray(feature.geometry.coordinates)) {
+            allContoursCoords = feature.geometry.coordinates.map(poly => (Array.isArray(poly) && poly.length > 0 && Array.isArray(poly[0])) ? poly : null).filter(Boolean);
+        } else {
+            return null;
+        }
+    } else {
+        return null;
+    }
+
+    if (allContoursCoords.length === 0) return null;
+
     const yandexPolygonsGeometries = [];
-    const contours = geometry.type === "Polygon" ? [geometry.coordinates] : geometry.coordinates;
-    contours.forEach(polygonRings => {
-        const rings = Array.isArray(polygonRings[0][0]) ? polygonRings : [polygonRings];
-        rings.forEach(ring => {
-            const wgsCoords = ring.map(coord => { const p = proj4('EPSG:3857', 'EPSG:4326', coord); return [p[1], p[0]]; });
-            const offsetCoords = wgsCoords.map(c => [c[0] - mapOffsetY * 0.000008983, c[1] - mapOffsetX * 0.000008983]);
-            yandexPolygonsGeometries.push(offsetCoords);
-        });
+    let combinedBounds = null;
+
+    allContoursCoords.forEach(contourRings => {
+        const processedRings = contourRings.map(ring => {
+            if (!Array.isArray(ring)) return null;
+            const wgsCoords = ring.map(coord => {
+                if (!Array.isArray(coord) || coord.length !== 2) return null;
+                try {
+                    const p = proj4('EPSG:3857', 'EPSG:4326', coord);
+                    return [p[1], p[0]];
+                } catch (e) { return null; }
+            }).filter(Boolean);
+            if (wgsCoords.length < 3) return null;
+            return wgsCoords.map(c => [c[0] - mapOffsetY * 0.000008983, c[1] - mapOffsetX * 0.000008983]);
+        }).filter(Boolean);
+        
+        if(processedRings.length > 0) {
+            yandexPolygonsGeometries.push(...processedRings);
+        }
     });
+
     if (yandexPolygonsGeometries.length > 0) {
-        const fillColor = `${baseColorType}${Math.round(fillColorOpacity * 255).toString(16).padStart(2, '0')}`;
-        const mapPolygon = new ymaps.Polygon(yandexPolygonsGeometries, { hintContent }, { strokeColor: baseColorType, strokeWidth: 2, fillColor, strokeOpacity: 0.8 });
+        const mapPolygon = new ymaps.Polygon(yandexPolygonsGeometries, 
+            { hintContent: hintText || feature.properties?.descr || 'Объект' }, 
+            { strokeColor: actualStrokeColor, strokeWidth: 2, fillColor: actualFillColor, strokeOpacity: 0.8 }
+        );
         yandexMap.geoObjects.add(mapPolygon);
-        return mapPolygon;
+
+        const currentObjectBounds = mapPolygon.geometry.getBounds();
+        
+        // --- БЛОК ДЛЯ МЕТКИ (С ИСПРАВЛЕНИЕМ) ---
+        if (labelText && currentObjectBounds) {
+            const centerLat = (currentObjectBounds[0][0] + currentObjectBounds[1][0]) / 2;
+            const centerLon = (currentObjectBounds[0][1] + currentObjectBounds[1][1]) / 2;
+            
+            const cnLabel = new ymaps.Placemark([centerLat, centerLon], {
+                iconContent: labelText,
+                // --- ИСПРАВЛЕНИЕ ЗДЕСЬ: `hintContent` заменено на `hintText` ---
+                hintContent: hintText 
+            }, {
+                preset: 'islands#blackStretchyIcon',
+                iconColor: actualStrokeColor
+            });
+            yandexMap.geoObjects.add(cnLabel);
+        }
+        // --- КОНЕЦ БЛОКА ИСПРАВЛЕНИЯ ---
+        
+        return { mapObject: mapPolygon, bounds: currentObjectBounds };
     }
     return null;
 }
@@ -613,17 +682,23 @@ async function queryNSPD_WMS(coords, layerId, signal) {
     const bboxSize = 0.15;
     const bbox = `${centerPoint.x - bboxSize / 2},${centerPoint.y - bboxSize / 2},${centerPoint.x + bboxSize / 2},${centerPoint.y + bboxSize / 2}`;
     const path = `/api/aeggis/v3/${layerId}/wms?REQUEST=GetFeatureInfo&QUERY_LAYERS=${layerId}&SERVICE=WMS&VERSION=1.3.0&FORMAT=image%2Fpng&STYLES=&TRANSPARENT=true&LAYERS=${layerId}&INFO_FORMAT=application%2Fjson&FEATURE_COUNT=10&I=256&J=256&WIDTH=512&HEIGHT=512&CRS=EPSG%3A3857&BBOX=${bbox}`;
+    
+    // --- ИСПРАВЛЕНИЕ: Добавлен полный URL ---
     const response = await fetch(`https://nspd.gov.ru${path}`, { signal });
     if (!response.ok) throw new Error(`HTTP error ${response.status}`);
     return await response.json();
 }
+
 async function queryNSPD_Search(query, thematicSearchId, signal) {
     const path = `/api/geoportal/v2/search/geoportal?thematicSearchId=${thematicSearchId}&query=${encodeURIComponent(query)}`;
+    
+    // --- ИСПРАВЛЕНИЕ: Добавлен полный URL ---
     const response = await fetch(`https://nspd.gov.ru${path}`, { signal });
     if (!response.ok) throw new Error(`HTTP error ${response.status}`);
     const data = await response.json();
     return data?.data?.features?.[0] || null;
 }
+
 function toEPSG3857(latitude, longitude) { const R = 6378137; return { x: R * longitude * Math.PI / 180, y: R * Math.log(Math.tan(Math.PI / 4 + latitude * Math.PI / 360)) }; }
 function isZuDeclared(opts) { return !opts?.specified_area && !opts?.land_record_area_verified && (opts?.declared_area || opts?.land_record_area_declaration || opts?.land_record_area); }
 
