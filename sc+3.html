@@ -340,9 +340,10 @@ function setupEventListeners() {
     document.getElementById('modalCancelBtn').onclick = () => { textModal.style.display = 'none'; };
     jsonInput.addEventListener('change', handleJsonImport);
     document.addEventListener('click', () => textContextMenu.style.display = 'none');
+    
+    
+    
 }
-
-// --- НОВЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С КАРТОЙ ---
 
 function showLayoutSchemeOnMap() {
     const inputText = coordsInput.value.trim();
@@ -350,8 +351,10 @@ function showLayoutSchemeOnMap() {
         showNotification('Нет исходных данных для построения схемы');
         return;
     }
+
     const mapModal = document.getElementById('mapModal');
     mapModal.style.display = 'flex';
+    
     showNotification('Загрузка карты...');
 
     const populateMapWithObjects = () => {
@@ -360,6 +363,28 @@ function showLayoutSchemeOnMap() {
             const mainContoursCollection = new ymaps.GeoObjectCollection(null, {});
             yandexMap.geoObjects.add(mainContoursCollection);
 
+            // Вспомогательная функция для добавления обработчика правого клика
+            const addContextMenuHandler = (ymapsObject) => {
+                ymapsObject.events.add('contextmenu', (e) => {
+                    e.preventDefault();
+                    ymaps.ready(() => {
+                        const menu = new ymaps.ContextMenu({
+                            items: [{
+                                text: 'Удалить объект',
+                                onClick: () => {
+                                    // Проверяем, есть ли объект на карте перед удалением
+                                    if (yandexMap.geoObjects.indexOf(ymapsObject) !== -1) {
+                                        yandexMap.geoObjects.remove(ymapsObject);
+                                        showNotification('Объект удален', 'success');
+                                    }
+                                }
+                            }]
+                        });
+                        menu.open(e.get('pagePixels'));
+                    });
+                });
+            };
+
             const coordGroups = parseCoordinates(inputText);
             const { system, swap } = determineCoordinateSystem(coordGroups);
             if (system === 'unknown') throw new Error("Не удалось определить систему координат.");
@@ -367,41 +392,71 @@ function showLayoutSchemeOnMap() {
             const geoCoordGroups = convertCoordinatesToGeo(coordGroups, system, swap);
             if (geoCoordGroups.length === 0) throw new Error("Ошибка конвертации координат.");
 
+            const geoObjectCollection = new ymaps.GeoObjectCollection();
+
+            // Отрисовка контуров
             geoCoordGroups.forEach(group => {
                 if (group.length > 1) {
-                    const offsetCoords = group.map(coord => [coord[0] - mapOffsetY * 0.000008983, coord[1] - mapOffsetX * 0.000008983]);
+                    const offsetCoords = group.map(coord => [
+                        coord[0] - mapOffsetY * 0.000008983,
+                        coord[1] - mapOffsetX * 0.000008983
+                    ]);
                     const isClosed = isContourClosed(offsetCoords.map(c => `${c[1]}\t${c[0]}`));
                     const object = isClosed
                         ? new ymaps.Polygon([offsetCoords], {}, { strokeColor: "#ff0000", strokeWidth: 2, fillColor: "#ff000033" })
                         : new ymaps.Polyline(offsetCoords, {}, { strokeColor: "#ff0000", strokeWidth: 2 });
+                    
+                    addContextMenuHandler(object); // Добавляем обработчик
                     mainContoursCollection.add(object);
                 }
             });
             
+            // Отрисовка аннотаций
             const annotations = [...arrows, ...lines, ...texts, ...geodeticConstructions];
             annotations.forEach(item => {
                 const itemColor = (item.color && typeof item.color === 'string' && item.color.startsWith('#')) ? item.color : '#0000FF';
+                let ymapsObject; // Переменная для хранения созданного объекта
+
                 if (item.start && item.end) {
                     const geoStart = convertMskPointToGeo(item.start, system, swap);
                     const geoEnd = convertMskPointToGeo(item.end, system, swap);
-                    if (geoStart && geoEnd) yandexMap.geoObjects.add(new ymaps.Polyline([geoStart, geoEnd], {}, { strokeColor: itemColor, strokeWidth: item.thickness || 2 }));
+                    if (geoStart && geoEnd) {
+                        ymapsObject = new ymaps.Polyline([geoStart, geoEnd], {}, { strokeColor: itemColor, strokeWidth: item.thickness || 2 });
+                        geoObjectCollection.add(ymapsObject);
+                    }
                 } else if (item.text) {
                     const geoPos = convertMskPointToGeo({x: item.x, y: item.y}, system, swap);
-                    if (geoPos) yandexMap.geoObjects.add(new ymaps.Placemark(geoPos, { iconContent: item.text || '' }, { preset: 'islands#blackStretchyIcon', iconColor: itemColor }));
+                    if (geoPos) {
+                        ymapsObject = new ymaps.Placemark(geoPos, { iconContent: item.text || '' }, { preset: 'islands#blackStretchyIcon', iconColor: itemColor });
+                        geoObjectCollection.add(ymapsObject);
+                    }
                 } else if (item.p1 && item.center && item.p3) {
                     const geoP1 = convertMskPointToGeo(item.p1, system, swap);
                     const geoCenter = convertMskPointToGeo(item.center, system, swap);
                     const geoP3 = convertMskPointToGeo(item.p3, system, swap);
                     if(geoP1 && geoCenter && geoP3) {
-                         yandexMap.geoObjects.add(new ymaps.Polyline([geoP1, geoCenter], {}, { strokeColor: itemColor, strokeStyle: 'dash' }));
-                         yandexMap.geoObjects.add(new ymaps.Polyline([geoCenter, geoP3], {}, { strokeColor: itemColor, strokeStyle: 'dash' }));
-                         yandexMap.geoObjects.add(new ymaps.Placemark(geoCenter, {}, {preset: 'islands#blueCircleIcon'}));
+                         const line1 = new ymaps.Polyline([geoP1, geoCenter], {}, { strokeColor: itemColor, strokeStyle: 'dash' });
+                         const line2 = new ymaps.Polyline([geoCenter, geoP3], {}, { strokeColor: itemColor, strokeStyle: 'dash' });
+                         const centerMark = new ymaps.Placemark(geoCenter, {}, {preset: 'islands#blueCircleIcon'});
+                         addContextMenuHandler(line1);
+                         addContextMenuHandler(line2);
+                         addContextMenuHandler(centerMark);
+                         geoObjectCollection.add(line1).add(line2).add(centerMark);
                     }
                 }
+                if(ymapsObject) addContextMenuHandler(ymapsObject); // Добавляем обработчик
             });
 
-            if (yandexMap.geoObjects.getLength() > 0) {
-                yandexMap.setBounds(yandexMap.geoObjects.getBounds(), { checkZoomRange: true, zoomMargin: 20 });
+            if (geoObjectCollection.getLength() > 0) {
+                yandexMap.geoObjects.add(geoObjectCollection);
+            }
+            
+            const allObjects = yandexMap.geoObjects;
+            if (allObjects.getLength() > 0) {
+                yandexMap.setBounds(allObjects.getBounds(), {
+                    checkZoomRange: true,
+                    zoomMargin: 20
+                });
             } else {
                  throw new Error("Не найдено объектов для отображения на карте.");
             }
@@ -597,54 +652,80 @@ async function loadLayerByCenter(layerId, layerName, color, isOutline = false) {
     }
 }
 
+
+function logCoords(step, coords) {
+    if (coords && coords.length > 0) {
+        const sample = coords.slice(0, 2).map(c => `[${c[0].toFixed(6)}, ${c[1].toFixed(6)}]`).join(', ');
+        console.log(`[MAP LOG] ${step}: ${sample}... (всего ${coords.length} точек)`);
+    } else {
+        console.log(`[MAP LOG] ${step}: Координаты отсутствуют или пустые.`);
+    }
+}
+
+
+
+// Находит объект карты (полигон или линию) под указанными координатами
+function findMapObjectAtCoords(coords) {
+    let foundObject = null;
+    let minDistance = Infinity;
+
+    // Ищем среди всех объектов на карте
+    yandexMap.geoObjects.each(function (geoObject) {
+        if (geoObject instanceof ymaps.Polygon || geoObject instanceof ymaps.Polyline) {
+            const closestPoint = geoObject.geometry.getClosest(coords);
+            // getClosest возвращает расстояние в пикселях проекции,
+            // 0 означает, что точка находится на границе или внутри
+            if (closestPoint && closestPoint.distance === 0) {
+                 // Если нашли объект, делаем его кандидатом
+                 // (вдруг под точкой несколько объектов, выберем тот, что выше по Z-index)
+                 foundObject = geoObject;
+            }
+        }
+    });
+    return foundObject;
+}
+
 function drawNspdFeature(feature, options = {}) {
-    let { baseColorType, fillColorOpacity = 0.2, hintText, labelText } = options; // Добавили labelText сюда
-    const actualStrokeColor = (typeof baseColorType === 'string' && baseColorType.startsWith('#')) ? baseColorType : '#4682B4';
-    const actualFillColor = (baseColorType === '#AAAAAA') ? '#00000000' : `${actualStrokeColor}${Math.round(fillColorOpacity * 255).toString(16).padStart(2, '0')}`;
+    // ИЗМЕНЕНИЕ: fillColorOpacity по умолчанию теперь 0
+    let { baseColorType, fillColorOpacity = 0, hintText, labelText } = options;
     
-    if (!feature || !feature.geometry || !feature.geometry.coordinates) return null;
+    const actualStrokeColor = (typeof baseColorType === 'string' && baseColorType.startsWith('#')) ? baseColorType : '#4682B4';
+    const actualFillColor = `${actualStrokeColor}${Math.round(fillColorOpacity * 255).toString(16).padStart(2, '0')}`;
+    
+    if (!feature?.geometry?.coordinates) return null;
     
     const geometryType = feature.geometry.type;
-    let allContoursCoords = [];
+    const yandexPolygonsGeometries = [];
+
+    const processRings = (rings) => {
+        const wgsCoords = rings.map(coord => {
+            if (!Array.isArray(coord) || coord.length !== 2) return null;
+            try {
+                const p = proj4('EPSG:3857', 'EPSG:4326', coord);
+                return [p[1], p[0]];
+            } catch (e) { return null; }
+        }).filter(Boolean);
+
+        if (wgsCoords.length < 3) return null;
+        
+        return wgsCoords.map(c => [c[0] - mapOffsetY * 0.000008983, c[1] - mapOffsetX * 0.000008983]);
+    };
+
     if (geometryType === "Polygon") {
-        if (Array.isArray(feature.geometry.coordinates) && feature.geometry.coordinates.length > 0 && Array.isArray(feature.geometry.coordinates[0])) {
-            allContoursCoords = feature.geometry.coordinates; // Это уже массив контуров
-        } else {
-            return null;
-        }
+        feature.geometry.coordinates.forEach(ring => {
+            const processed = processRings(ring);
+            if (processed) yandexPolygonsGeometries.push(processed);
+        });
     } else if (geometryType === "MultiPolygon") {
-        if (Array.isArray(feature.geometry.coordinates)) {
-            allContoursCoords = feature.geometry.coordinates.map(poly => (Array.isArray(poly) && poly.length > 0 && Array.isArray(poly[0])) ? poly : null).filter(Boolean);
-        } else {
-            return null;
-        }
+        feature.geometry.coordinates.forEach(polygon => {
+            polygon.forEach(ring => {
+                const processed = processRings(ring);
+                if (processed) yandexPolygonsGeometries.push(processed);
+            });
+        });
     } else {
         return null;
     }
-
-    if (allContoursCoords.length === 0) return null;
-
-    const yandexPolygonsGeometries = [];
-    let combinedBounds = null;
-
-    allContoursCoords.forEach(contourRings => {
-        const processedRings = contourRings.map(ring => {
-            if (!Array.isArray(ring)) return null;
-            const wgsCoords = ring.map(coord => {
-                if (!Array.isArray(coord) || coord.length !== 2) return null;
-                try {
-                    const p = proj4('EPSG:3857', 'EPSG:4326', coord);
-                    return [p[1], p[0]];
-                } catch (e) { return null; }
-            }).filter(Boolean);
-            if (wgsCoords.length < 3) return null;
-            return wgsCoords.map(c => [c[0] - mapOffsetY * 0.000008983, c[1] - mapOffsetX * 0.000008983]);
-        }).filter(Boolean);
-        
-        if(processedRings.length > 0) {
-            yandexPolygonsGeometries.push(...processedRings);
-        }
-    });
 
     if (yandexPolygonsGeometries.length > 0) {
         const mapPolygon = new ymaps.Polygon(yandexPolygonsGeometries, 
@@ -655,22 +736,15 @@ function drawNspdFeature(feature, options = {}) {
 
         const currentObjectBounds = mapPolygon.geometry.getBounds();
         
-        // --- БЛОК ДЛЯ МЕТКИ (С ИСПРАВЛЕНИЕМ) ---
         if (labelText && currentObjectBounds) {
             const centerLat = (currentObjectBounds[0][0] + currentObjectBounds[1][0]) / 2;
             const centerLon = (currentObjectBounds[0][1] + currentObjectBounds[1][1]) / 2;
-            
-            const cnLabel = new ymaps.Placemark([centerLat, centerLon], {
-                iconContent: labelText,
-                // --- ИСПРАВЛЕНИЕ ЗДЕСЬ: `hintContent` заменено на `hintText` ---
-                hintContent: hintText 
-            }, {
-                preset: 'islands#blackStretchyIcon',
-                iconColor: actualStrokeColor
-            });
+            const cnLabel = new ymaps.Placemark([centerLat, centerLon], 
+                { iconContent: labelText, hintContent: hintText }, 
+                { preset: 'islands#blackStretchyIcon', iconColor: actualStrokeColor }
+            );
             yandexMap.geoObjects.add(cnLabel);
         }
-        // --- КОНЕЦ БЛОКА ИСПРАВЛЕНИЯ ---
         
         return { mapObject: mapPolygon, bounds: currentObjectBounds };
     }
