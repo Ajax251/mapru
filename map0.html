@@ -3574,37 +3574,21 @@ function findAndConvert() {
                 });
             }
             else {
-                // --- НАЧАЛО ИСПРАВЛЕНИЙ ---
+                // --- БЛОК ОБРАБОТКИ МСК ---
                 const sourceSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
                 console.log(`Определена система: МСК (по умолчанию из localStorage), используется ${sourceSc}`);
 
-                const destSystem = COORDINATE_SYSTEMS.find(s => s.value === sourceSc);
-                if (!destSystem || !destSystem.def) {
-                    throw new Error(`Определение для ${sourceSc} не найдено в sk.js`);
-                }
+                // Загружаем смещения.
+                const mskOffsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
+                const mskOffsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
 
-                let mskOffsetX = 0;
-                let mskOffsetY = 0;
-                const isAutoLoadEnabled = (localStorage.getItem('autoLoadMskOffset') !== 'false');
-
-                if (isAutoLoadEnabled) {
-                    mskOffsetX = destSystem.offsetX || 0;
-                    mskOffsetY = destSystem.offsetY || 0;
-                    console.log(`[findAndConvert] Автозагрузка смещения: включена. Смещения из sk.js для ${sourceSc}: X=${mskOffsetX}, Y=${mskOffsetY}`);
-                } else {
-                    const offsetXRaw = localStorage.getItem('savedMskOffsetX') || '0';
-                    const offsetYRaw = localStorage.getItem('savedMskOffsetY') || '0';
-                    mskOffsetX = parseFloat(offsetXRaw.replace(',', '.')) || 0;
-                    mskOffsetY = parseFloat(offsetYRaw.replace(',', '.')) || 0;
-                    console.log(`[findAndConvert] Автозагрузка смещения: выключена. Используются сохраненные вручную смещения: X=${mskOffsetX}, Y=${mskOffsetY}`);
-                }
-                
-                const sourceDef = destSystem.def;
+                const sourceDef = COORDINATE_SYSTEMS.find(s => s.value === sourceSc)?.def;
+                if (!sourceDef) throw new Error(`Определение для ${sourceSc} не найдено в sk.js`);
                 proj4.defs(sourceSc, sourceDef);
-                // --- КОНЕЦ ИСПРАВЛЕНИЙ ---
 
                 geoGroups = coordGroups.map(group => {
                     return group.map(coord => {
+                        // В вашем коде первая колонка X (Northing), вторая Y (Easting).
                         const x_input_msk = coord[0]; 
                         const y_input_msk = coord[1];
 
@@ -3612,11 +3596,13 @@ function findAndConvert() {
                         console.log(`Шаг 1: Исходные МСК: X=${x_input_msk.toFixed(4)}, Y=${y_input_msk.toFixed(4)}`);
                         console.log(`Шаг 2: Загруженное смещение: mskOffsetX = ${mskOffsetX}, mskOffsetY = ${mskOffsetY}`);
 
+                        // --- ФИНАЛЬНОЕ ИСПРАВЛЕНИЕ: ВЫЧИТАЕМ ОБА СМЕЩЕНИЯ ---
                         const corrected_x_msk = x_input_msk - mskOffsetX;
                         const corrected_y_msk = y_input_msk - mskOffsetY;
 
                         console.log(`Шаг 3: Скорректированные МСК (X-mskOffsetX, Y-mskOffsetY): X=${corrected_x_msk.toFixed(4)}, Y=${corrected_y_msk.toFixed(4)}`);
 
+                        // Proj4 с определением "+axis=enu" ожидает координаты в порядке [Y (Easting), X (Northing)]
                         const point3857 = proj4(sourceSc, "EPSG:3857", [corrected_y_msk, corrected_x_msk]);
                         
                         console.log(`Шаг 4: Промежуточный результат в EPSG:3857: X=${point3857[0].toFixed(4)}, Y=${point3857[1].toFixed(4)}`);
@@ -13774,7 +13760,7 @@ async function findOnMap(coordinatesText) {
         if (looksLikeMsk) {
             console.log("[Наложения] Обнаружены координаты, похожие на МСК. Применяется калибровка...");
             
-            // --- НАЧАЛО ИСПРАВЛЕНИЙ ---
+            // --- НАЧАЛО ИЗМЕНЕНИЙ: Та же самая логика, что и выше ---
             const sourceSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
             const sourceSystem = COORDINATE_SYSTEMS.find(s => s.value === sourceSc);
             if (!sourceSystem) throw new Error(`Определение для ${sourceSc} не найдено в sk.js`);
@@ -13791,38 +13777,22 @@ async function findOnMap(coordinatesText) {
                 mskOffsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
             }
             console.log(`[Наложения] Используются смещения: X=${mskOffsetX}, Y=${mskOffsetY}`);
+            // --- КОНЕЦ ИЗМЕНЕНИЙ ---
             
             const sourceDef = sourceSystem.def;
             proj4.defs(sourceSc, sourceDef);
 
             geoCoordGroups = coordGroups.map(group => {
                 return group.map(coord => {
-                    // ШАГ 1: Правильно присваиваем X и Y. Пользователь вводит X, затем Y.
-                    const x_input_msk = coord[0];
+                    const x_input_msk = coord[0]; 
                     const y_input_msk = coord[1];
-                    console.log(`[Наложения] Исходная точка (X, Y): [${x_input_msk}, ${y_input_msk}]`);
-
-                    // ШАГ 2: Применяем обратное смещение к соответствующим осям
                     const corrected_x_msk = x_input_msk - mskOffsetX;
                     const corrected_y_msk = y_input_msk - mskOffsetY;
-                    console.log(`[Наложения] Координаты после вычета смещения (X, Y): [${corrected_x_msk.toFixed(4)}, ${corrected_y_msk.toFixed(4)}]`);
-
-                    // ШАГ 3: Конвертируем в EPSG:3857
-                    // Proj4 с параметром +axis=enu ожидает на вход [Y, X] (Easting, Northing)
-                    const coordsForProj4 = [corrected_y_msk, corrected_x_msk];
-                    console.log(`[Наложения] Передаем в proj4 (Y, X): [${coordsForProj4[0].toFixed(4)}, ${coordsForProj4[1].toFixed(4)}]`);
-                    const point3857 = proj4(sourceSc, 'EPSG:3857', coordsForProj4);
-                    console.log(`[Наложения] Результат в EPSG:3857 (X, Y): [${point3857[0].toFixed(4)}, ${point3857[1].toFixed(4)}]`);
-
-                    // ШАГ 4: Конвертируем в WGS84
-                    const finalWgs84 = proj4('EPSG:3857', 'EPSG:4326', point3857); // proj4 возвращает [lon, lat]
-                    console.log(`[Наложения] Результат в WGS84 (lon, lat): [${finalWgs84[0].toFixed(8)}, ${finalWgs84[1].toFixed(8)}]`);
-                    
-                    // Возвращаем в формате [широта, долгота] для Яндекс.Карт
-                    return [finalWgs84[1], finalWgs84[0]];
+                    const point3857 = proj4(sourceSc, 'EPSG:3857', [corrected_y_msk, corrected_x_msk]);
+                    const finalWgs84 = proj4('EPSG:3857', 'EPSG:4326', point3857);
+                    return [finalWgs84[1], finalWgs84[0]]; 
                 });
             });
-            // --- КОНЕЦ ИСПРАВЛЕНИЙ ---
 
         } else {
             console.log("[Наложения] Координаты не похожи на МСК. Используется стандартное определение.");
@@ -14011,18 +13981,15 @@ function findIntersectingParcelsFrontend(searchShapes) {
                 } else if (searchShape instanceof ymaps.Polygon) {
                     const searchPolygonCoords = searchShape.geometry.getCoordinates()[0];
                     
+                    // --- ИСПРАВЛЕННАЯ ЛОГИКА ---
+                    // Преобразуем оба полигона в формат Turf.js ([долгота, широта])
                     const searchTurfPoly = turf.polygon([searchPolygonCoords.map(c => [c[1], c[0]])]);
                     const targetTurfPoly = turf.polygon([targetPolygonCoords.map(c => [c[1], c[0]])]);
 
-                    // Рассчитываем геометрию пересечения
-                    const intersectionGeometry = turf.intersect(turf.featureCollection([searchTurfPoly, targetTurfPoly]));
-
-                    // --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
-                    // Считаем пересечением, только если площадь наложения больше 0.005 м²
-                    if (intersectionGeometry && turf.area(intersectionGeometry) > 0.005) {
-                        isIntersecting = true;
-                    }
-                    // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+                    // Используем booleanIntersects, который корректно обрабатывает любые пересечения,
+                    // включая касания границами, что было проблемой в новой версии.
+                    isIntersecting = turf.booleanIntersects(searchTurfPoly, targetTurfPoly);
+                    // --- КОНЕЦ ИСПРАВЛЕНИЙ ---
                 }
             } catch(intersectionError) {
                 console.error("Ошибка при проверке пересечения:", intersectionError, "Фигура поиска:", searchShape, "Целевой объект:", obj);
@@ -14040,11 +14007,10 @@ function findIntersectingParcelsFrontend(searchShapes) {
             }
         }
     }
-    // --- ИЗМЕНЕНИЕ В ЛОГЕ ---
-    console.log("Найдено пересекающихся участков (с площадью наложения > 0.005 м²):", intersectingParcels.length);
-    // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+    console.log("Найдено пересекающихся участков:", intersectingParcels.length);
     return intersectingParcels;
 }
+
 function doLinesIntersect(p1, p2, p3, p4) {
     function ccw(a, b, c) {
         return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0]);
@@ -16960,6 +16926,7 @@ function openMskConverterModal() {
 
     const modalContent = document.createElement('div');
     modalContent.className = 'converter-modal-content';
+    // --- НАЧАЛО ИЗМЕНЕНИЙ В HTML ---
     modalContent.innerHTML = `
         <button class="close-btn" title="Закрыть">&times;</button>
         <h3>Настройка МСК</h3>
@@ -16979,12 +16946,15 @@ function openMskConverterModal() {
              <select id="msk-select"></select>
              <button id="execute-msk-conversion" class="action-btn" title="Отобразить на карте"><img src="img/play.png" alt=">"></button>
         </div>
+        
+        <!-- НОВЫЙ ЭЛЕМЕНТ TEXTAREA ДЛЯ ШАБЛОНОВ -->
         <textarea id="msk-templates-input" 
                   placeholder="текст_поиска_МСК;префикс_Y;префикс_X \nнапример: 16-2;22;3" 
                   title="Автоопределение по шаблону: текст для поиска в названии МСК;префикс Y;префикс X (каждый с новой строки)"
                   style="width: 100%; min-height: 100px; margin-top: 15px; padding: 10px; border-radius: 12px; border: 1px solid rgba(0,0,0,0.1); font-family: monospace; resize: vertical; box-sizing: border-box; background: rgba(255, 255, 255, 0.7);"
         ></textarea>
     `;
+    // --- КОНЕЦ ИЗМЕНЕНИЙ В HTML ---
 
     modalContent.style.background = modalGradients[Math.floor(Math.random() * modalGradients.length)];
     modalContent.querySelector('.action-btn').style.background = buttonGradients[Math.floor(Math.random() * buttonGradients.length)];
@@ -16993,7 +16963,7 @@ function openMskConverterModal() {
     document.body.appendChild(modal);
     
     // --- НАЧАЛО ИЗМЕНЕНИЙ В JAVASCRIPT ---
-    const select = document.getElementById('msk-select');
+     const select = document.getElementById('msk-select');
     const modeSwitch = document.getElementById('mskConversionModeSwitch');
     const autoLoadSwitch = document.getElementById('autoLoadOffsetSwitch');
     const offsetXInput = document.getElementById('mskOffsetX');
