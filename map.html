@@ -2315,6 +2315,11 @@ const sevenDigitsRegions = [
   '50', '52', '53', '56', '57', '58', '59', '60', '61', '62',
   '63', '64', '65', '66', '67', '69', '70', '71', '72', '74',
   '77', '78', '79'];
+  
+  const CATEGORY_IDS = {
+            ZU: 36368, BUILDINGS: 36369, CONSTRUCTIONS: 36383,
+            ZOUIT: 36940, TERR_ZONES: 36315, SETTLEMENTS: 36281, MUNICIPAL: 36278
+        };
 
         let isMobile = window.innerWidth <= 768;
         let isSearching = false;
@@ -5315,9 +5320,20 @@ contextMenu.innerHTML = `
             <div class="custom-context-menu-item" id="convert-all-msk-menu-item">
                 <i class="fas fa-layer-group"></i>Конвертировать все объекты в МСК
             </div>
+            
+                     <div class="custom-context-menu-item" id="georedaсtor-all-objects-menu-item">
+                <i class="fas fa-drafting-compass"></i>Георедактор
+            </div>
+            
+            
             <div class="custom-context-menu-item" id="quarter-msk-xml-menu-item">
                 <i class="fas fa-file-archive"></i>Конвертировать ЗУ в XML КПТ
             </div>
+            
+               <div class="custom-context-menu-item" id="schema-xml-all-objects-menu-item">
+                <i class="fas fa-sitemap"></i>Конвертировать все объекты в XML
+            </div>
+            
             <div class="custom-context-menu-item" id="all-oks-on-object-menu-item">
                 <i class="fas fa-building"></i>ОКС на объекте
             </div>
@@ -5904,6 +5920,18 @@ if (event.target.id === 'find-on-map-menu-item') {
             const lat = parseFloat(contextMenu.dataset.lat);
             const lon = parseFloat(contextMenu.dataset.lon);
             await handleEgrnRelatedAction(lat, lon, 'схема_xml.html');
+            contextMenu.style.display = 'none';
+        }
+        
+        
+          if (event.target.id === 'schema-xml-all-objects-menu-item') {
+            await generateXmlForAllObjects();
+            contextMenu.style.display = 'none';
+        }
+        
+        
+          if (event.target.id === 'georedaсtor-all-objects-menu-item') {
+            await exportAllObjectsToGeoredaсtor();
             contextMenu.style.display = 'none';
         }
         
@@ -7380,6 +7408,317 @@ async function convertAllObjectsToMskAndCopy() {
     } catch (error) {
         console.error("Ошибка при конвертации всех объектов в МСК:", error);
         showNotification(`Ошибка конвертации: ${error.message}`, 'error', 'exclamation-circle');
+    } finally {
+        hideLoader();
+    }
+}
+
+
+async function exportAllObjectsToGeoredaсtor() {
+    try {
+        const allDrawableObjects = new Set([...polygons, ...areaObjects]);
+        const draggableTextElements = Array.from(document.querySelectorAll('.draggable-text'));
+
+        if (allDrawableObjects.size === 0 && draggableTextElements.length === 0) {
+            showNotification('На карте нет объектов для экспорта в Георедактор', 'warning', 'exclamation-triangle');
+            return;
+        }
+        
+        showLoader(`Подготовка данных для Георедактора...`);
+
+        const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
+        const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destSc);
+        if (!destSystem || !destSystem.def) {
+            throw new Error(`Определение для ${destSc} не найдено в sk.js`);
+        }
+
+        let offsetX = 0;
+        let offsetY = 0;
+        const isAutoLoadEnabled = (localStorage.getItem('autoLoadMskOffset') !== 'false');
+
+        if (isAutoLoadEnabled) {
+            offsetX = destSystem.offsetX || 0;
+            offsetY = destSystem.offsetY || 0;
+        } else {
+            const offsetXRaw = localStorage.getItem('savedMskOffsetX') || '0';
+            const offsetYRaw = localStorage.getItem('savedMskOffsetY') || '0';
+            offsetX = parseFloat(offsetXRaw.replace(',', '.')) || 0;
+            offsetY = parseFloat(offsetYRaw.replace(',', '.')) || 0;
+        }
+        
+        const formattedBlocks = [];
+        let objectCounter = 1;
+
+        // Обработка геообъектов Яндекса
+        for (const targetObject of allDrawableObjects) {
+            let identifier = `Объект_${objectCounter++}`;
+            let yandexCoords;
+
+            if (targetObject instanceof ymaps.Polygon) {
+                identifier = targetObject.properties.get('cadastralNumber') || identifier;
+                yandexCoords = targetObject.geometry.getCoordinates()[0];
+            } else if (targetObject instanceof ymaps.Polyline) {
+                identifier = targetObject.properties.get('hintContent') || identifier;
+                yandexCoords = targetObject.geometry.getCoordinates();
+            } else if (targetObject instanceof ymaps.Placemark) {
+                identifier = targetObject.properties.get('iconContent') || identifier;
+                yandexCoords = [targetObject.geometry.getCoordinates()];
+            } else {
+                continue;
+            }
+
+            if (!yandexCoords || yandexCoords.length === 0) continue;
+
+            const reversedYandexCoords = [...yandexCoords].reverse();
+            const wgs84Coords = reversedYandexCoords.map(coord => {
+                const trueLat = coord[0] + (mapOffsetY * 0.000008983);
+                const trueLon = coord[1] + (mapOffsetX * 0.000008983);
+                return [trueLon, trueLat];
+            });
+            const mskCoordsText = convertWgs84ToMskWithOffset(wgs84Coords, destSc, destSystem.def, offsetX, offsetY);
+            
+            if (mskCoordsText) {
+                formattedBlocks.push(`${identifier}\n${mskCoordsText}`);
+            }
+        }
+
+        // Обработка текстовых меток
+        for (const textEl of draggableTextElements) {
+            const textContent = textEl.querySelector('span')?.textContent || `Текст_${objectCounter++}`;
+            const rect = textEl.getBoundingClientRect();
+            const pageX = rect.left + rect.width / 2 + window.scrollX;
+            const pageY = rect.top + rect.height / 2 + window.scrollY;
+
+            let geoCoords;
+            try {
+                const globalPixelCoords = map.converter.pageToGlobal([pageX, pageY]);
+                geoCoords = map.options.get('projection').fromGlobalPixels(globalPixelCoords, map.getZoom());
+            } catch (e) {
+                continue;
+            }
+
+            if (!geoCoords) continue;
+
+            const trueLat = geoCoords[0] + (mapOffsetY * 0.000008983);
+            const trueLon = geoCoords[1] + (mapOffsetX * 0.000008983);
+            const mskCoordsText = convertWgs84ToMskWithOffset([[trueLon, trueLat]], destSc, destSystem.def, offsetX, offsetY);
+            
+            if (mskCoordsText) {
+                formattedBlocks.push(`${textContent}\n${mskCoordsText}`);
+            }
+        }
+
+        if (formattedBlocks.length === 0) {
+            throw new Error('Не удалось получить координаты ни для одного объекта.');
+        }
+
+        const finalStringToCopy = formattedBlocks.join('\n\n');
+        await navigator.clipboard.writeText(finalStringToCopy);
+        
+        showNotification(`Координаты ${formattedBlocks.length} объектов для Георедактора скопированы`, 'success', 'check-circle');
+        window.open('editor.html', '_blank');
+
+    } catch (error) {
+        console.error("Ошибка при экспорте в Георедактор:", error);
+        showNotification(`Ошибка: ${error.message}`, 'error', 'exclamation-circle');
+    } finally {
+        hideLoader();
+    }
+}
+
+
+
+
+
+async function generateXmlForAllObjects() {
+    try {
+        const allDrawableObjects = new Set([...polygons, ...areaObjects]);
+        const draggableTextElements = Array.from(document.querySelectorAll('.draggable-text'));
+
+        if (allDrawableObjects.size === 0 && draggableTextElements.length === 0) {
+            showNotification('На карте нет объектов для формирования XML', 'warning', 'exclamation-triangle');
+            return;
+        }
+        
+        showLoader('Формирование XML схемы...');
+
+        const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
+        const destSystemObject = (typeof COORDINATE_SYSTEMS !== 'undefined') ? COORDINATE_SYSTEMS.find(s => s.value === destSc) : null;
+        if (!destSystemObject || !destSystemObject.def) {
+            throw new Error(`Определение для СК ${destSc} не найдено в sk.js`);
+        }
+        const destSystemDef = destSystemObject.def;
+        const destSystemText = destSystemObject.text;
+        
+        let offsetX = 0, offsetY = 0;
+        const isAutoLoadEnabled = (localStorage.getItem('autoLoadMskOffset') !== 'false');
+        if (isAutoLoadEnabled) {
+            offsetX = destSystemObject.offsetX || 0;
+            offsetY = destSystemObject.offsetY || 0;
+        } else {
+            offsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
+            offsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
+        }
+        
+        const escapeXml = (unsafe) => unsafe ? String(unsafe).replace(/[<>&'"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','\'':'&apos;','"':'&quot;'}[c])) : '';
+        const skIdText = destSystemText.split('(')[0].trim();
+        const today = new Date();
+        const dateString = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+        
+        proj4.defs(destSc, destSystemDef);
+        proj4.defs("EPSG:4326", "+proj=longlat +datum=WGS84 +no_defs");
+
+        const generateOrdinatesXml = (wgs84Coords) => {
+            return wgs84Coords.map((coord, i) => {
+                const mskPoint = proj4("EPSG:4326", destSc, coord);
+                const y_msk = mskPoint[0] + offsetY;
+                const x_msk = mskPoint[1] + offsetX;
+                return `<ordinate><x>${x_msk.toFixed(2)}</x><y>${y_msk.toFixed(2)}</y><ord_nmb>${i + 1}</ord_nmb></ordinate>`;
+            }).join('');
+        };
+        
+        const generateEntitySpatialXml = (wgs84Coords) => {
+            const ordinatesXml = generateOrdinatesXml(wgs84Coords);
+            return `<entity_spatial><sk_id>${escapeXml(skIdText)}</sk_id><spatials_elements><spatial_element><ordinates>${ordinatesXml}</ordinates></spatial_element></spatials_elements></entity_spatial>`;
+        };
+
+        const generateLandRecordXml = (f, entitySpatial) => {
+            const p = f.properties.options || {};
+            const areaVal = p.specified_area || p.land_record_area_verified || p.declared_area || p.land_record_area_declaration || p.land_record_area;
+            const areaBlock = areaVal ? ((p.specified_area || p.land_record_area_verified) ? `<area><value>${escapeXml(areaVal)}</value><inaccuracy>0</inaccuracy></area>` : `<area><value>${escapeXml(areaVal)}</value></area>`) : '';
+            return `<land_record><object><common_data><type><code>002001001000</code><value>Земельный участок</value></type><cad_number>${escapeXml(p.cad_num || f.properties.descr)}</cad_number></common_data></object><params>${areaBlock}<category><type><code>-</code><value>${escapeXml(p.land_record_category_type)}</value></type></category><permitted_use><permitted_use_established><by_document>${escapeXml(p.permitted_use_established_by_document)}</by_document></permitted_use_established></permitted_use></params><address_location><address><readable_address>${escapeXml(p.readable_address)}</readable_address></address></address_location><cost><value>${escapeXml(p.cost_value)}</value></cost><contours_location><contours><contour>${entitySpatial}</contour></contours></contours_location></land_record>`;
+        };
+        const generateBuildRecordXml = (f, entitySpatial) => {
+            const p = f.properties.options || {};
+            return `<build_record><object><common_data><type><code>002001002000</code><value>Здание</value></type><cad_number>${escapeXml(p.cad_num || f.properties.descr)}</cad_number></common_data></object><params><area>${escapeXml(p.build_record_area)}</area><purpose><code>-</code><value>${escapeXml(p.purpose)}</value></purpose></params><address_location><address><readable_address>${escapeXml(p.readable_address)}</readable_address></address></address_location><cost><value>${escapeXml(p.cost_value)}</value></cost><contours><contour>${entitySpatial}</contour></contours></build_record>`;
+        };
+        
+        // ***** НАЧАЛО ИЗМЕНЕНИЯ: ИСПРАВЛЕНА СТРУКТУРА address_location *****
+        const generateConstructionRecordXml = (f, entitySpatial) => {
+            const p = f.properties.options || {};
+            const baseParam = p.params_extension ? `<extension>${escapeXml(p.params_extension)}</extension>` : (p.params_area ? `<area>${escapeXml(p.params_area)}</area>` : '');
+            return `<construction_record><object><common_data><type><code>002001004000</code><value>Сооружение</value></type><cad_number>${escapeXml(p.cad_number || p.cad_num || f.properties.descr)}</cad_number></common_data></object><params><base_parameters><base_parameter>${baseParam}</base_parameter></base_parameters><purpose>${escapeXml(p.params_purpose)}</purpose></params><address_location><address><readable_address>${escapeXml(p.address_readable_address || p.readable_address)}</readable_address></address></address_location><cost><value>${escapeXml(p.cost_value)}</value></cost><contours><contour>${entitySpatial}</contour></contours></construction_record>`;
+        };
+        // ***** КОНЕЦ ИЗМЕНЕНИЯ *****
+
+        let landRecordsXml = '', buildRecordsXml = '', constructionRecordsXml = '', spatialDataXml = '';
+        let objectCounter = 1;
+        
+        for (const targetObject of allDrawableObjects) {
+            let yandexCoords, isPolygon = false, isLine = false, isPoint = false;
+            let identifier, featureData;
+
+            if (targetObject instanceof ymaps.Polygon) {
+                if (targetObject.options.get('strokeStyle') === 'dash') {
+                    const quarterCoords = targetObject.geometry.getCoordinates()[0];
+                    const wgs84CoordsForQuarter = [...quarterCoords].reverse().map(coord => [coord[1] + (mapOffsetX * 0.000008983), coord[0] + (mapOffsetY * 0.000008983)]);
+                    spatialDataXml = `<spatial_data>${generateEntitySpatialXml(wgs84CoordsForQuarter)}</spatial_data>`;
+                    continue; 
+                }
+                isPolygon = true;
+                yandexCoords = targetObject.geometry.getCoordinates()[0]; 
+                featureData = targetObject.properties.get('featureData');
+                identifier = targetObject.properties.get('cadastralNumber');
+            } else if (targetObject instanceof ymaps.Polyline) {
+                isLine = true;
+                yandexCoords = targetObject.geometry.getCoordinates();
+                featureData = targetObject.properties.get('featureData');
+                identifier = targetObject.properties.get('cadastralNumber');
+            } else if (targetObject instanceof ymaps.Placemark) {
+                isPoint = true;
+                yandexCoords = [targetObject.geometry.getCoordinates()];
+                featureData = targetObject.properties.get('featureData');
+                identifier = targetObject.properties.get('cadastralNumber') || targetObject.properties.get('iconContent');
+            } else {
+                continue;
+            }
+
+            if (!yandexCoords || yandexCoords.length === 0) continue;
+
+            const wgs84Coords = [...yandexCoords].reverse().map(coord => {
+                const trueLat = coord[0] + (mapOffsetY * 0.000008983);
+                const trueLon = coord[1] + (mapOffsetX * 0.000008983);
+                return [trueLon, trueLat];
+            });
+
+            const entitySpatial = generateEntitySpatialXml(wgs84Coords);
+            const finalIdentifier = identifier || (isPolygon ? `Площадной_объект_${objectCounter++}` : (isLine ? `Линейный_объект_${objectCounter++}` : `Точка_${objectCounter++}`));
+            
+            let recordType = 'unknown';
+            if (featureData && featureData.properties) {
+                const category = featureData.properties.category;
+                if (category === CATEGORY_IDS.ZU) recordType = 'land';
+                else if (category === CATEGORY_IDS.BUILDINGS) recordType = 'building';
+                else if (category === CATEGORY_IDS.CONSTRUCTIONS) recordType = 'construction';
+            }
+            if (recordType === 'unknown') {
+                recordType = isPolygon ? 'land' : 'construction';
+            }
+            
+            if (recordType === 'land') {
+                landRecordsXml += (featureData ? generateLandRecordXml(featureData, entitySpatial) : `<land_record><object><common_data><type><code>002001001000</code><value>Земельный участок</value></type><cad_number>${escapeXml(finalIdentifier)}</cad_number></common_data></object><contours_location><contours><contour>${entitySpatial}</contour></contours></contours_location></land_record>`) + '\n';
+            } else if (recordType === 'building') {
+                buildRecordsXml += (featureData ? generateBuildRecordXml(featureData, entitySpatial) : `<build_record><object><common_data><type><code>002001002000</code><value>Здание</value></type><cad_number>${escapeXml(finalIdentifier)}</cad_number></common_data></object><contours><contour>${entitySpatial}</contour></contours></build_record>`) + '\n';
+            } else if (recordType === 'construction') {
+                constructionRecordsXml += (featureData ? generateConstructionRecordXml(featureData, entitySpatial) : `<construction_record><object><common_data><type><code>002001004000</code><value>Сооружение</value></type><cad_number>${escapeXml(finalIdentifier)}</cad_number></common_data></object><contours><contour>${entitySpatial}</contour></contours></construction_record>`) + '\n';
+            }
+        }
+        
+        for (const textEl of draggableTextElements) {
+            const textContent = textEl.querySelector('span')?.textContent || `Текст_${objectCounter++}`;
+            const rect = textEl.getBoundingClientRect();
+            let geoCoords;
+            try {
+                const globalPixelCoords = map.converter.pageToGlobal([rect.left + rect.width / 2, rect.top + rect.height / 2]);
+                geoCoords = map.options.get('projection').fromGlobalPixels(globalPixelCoords, map.getZoom());
+            } catch (e) { continue; }
+            if (!geoCoords) continue;
+            const trueLat = geoCoords[0] + (mapOffsetY * 0.000008983);
+            const trueLon = geoCoords[1] + (mapOffsetX * 0.000008983);
+            const entitySpatial = generateEntitySpatialXml([[trueLon, trueLat]]);
+            // Используем новую функцию с правильной структурой
+            constructionRecordsXml += generateConstructionRecordXml({ properties: { descr: textContent } }, entitySpatial) + '\n';
+        }
+
+        const uniqueQuarters = new Set();
+        if (currentQuarterNumber) uniqueQuarters.add(currentQuarterNumber);
+        allDrawableObjects.forEach(obj => {
+            const cadNum = obj.properties?.get('cadastralNumber');
+            if (cadNum && cadNum.includes(':')) {
+                const parts = cadNum.split(':');
+                if (parts.length >= 3 && !isZeroQuarterRequest(parts.slice(0,3).join(':'))) {
+                    uniqueQuarters.add(parts.slice(0, 3).join(':'));
+                }
+            }
+        });
+
+        let quarterForXml, filenameQuarterPart;
+        if (uniqueQuarters.size === 1) {
+            quarterForXml = Array.from(uniqueQuarters)[0];
+            filenameQuarterPart = quarterForXml.replace(/:/g, '_');
+        } else if (uniqueQuarters.size > 1) {
+            const sortedQuarters = Array.from(uniqueQuarters).sort();
+            quarterForXml = sortedQuarters[0];
+            filenameQuarterPart = sortedQuarters.map(q => q.replace(/:/g, '_')).join(' ');
+        } else {
+            quarterForXml = '00:00:000000';
+            filenameQuarterPart = '00_00_000000';
+        }
+        const filenameBase = `Схема_XML_${filenameQuarterPart}_${dateString}`;
+            
+        const fullXml = `<?xml version="1.0" encoding="UTF-8"?><extract_cadastral_plan_territory><details_statement><group_top_requisites><organ_registr_rights>Схема XML</organ_registr_rights><date_formation>${dateString}</date_formation></group_top_requisites></details_statement><cadastral_blocks><cadastral_block><cadastral_number>${escapeXml(quarterForXml)}</cadastral_number>${spatialDataXml}<record_data><base_data>${landRecordsXml ? `<land_records>${landRecordsXml}</land_records>` : ''}${buildRecordsXml ? `<build_records>${buildRecordsXml}</build_records>` : ''}${constructionRecordsXml ? `<construction_records>${constructionRecordsXml}</construction_records>` : ''}</base_data></record_data></cadastral_block></cadastral_blocks></extract_cadastral_plan_territory>`;
+        
+        const minifiedXml = fullXml.replace(/>\s+</g, '><').replace(/(\r\n|\n|\r)/gm, "");
+        await navigator.clipboard.writeText(minifiedXml);
+        
+        await createAndDownloadZip(fullXml, filenameBase);
+        
+        showNotification('XML скопирован и скачан', 'success', 'check-circle');
+        window.open('схема_xml.html', '_blank');
+
+    } catch (error) {
+        console.error("Ошибка при генерации XML схемы:", error);
+        showNotification(`Ошибка: ${error.message}`, 'error', 'exclamation-circle');
     } finally {
         hideLoader();
     }
@@ -14890,7 +15229,7 @@ async function processAndDrawStructures(features) {
             const properties = feature.properties || {};
             const options = properties.options || {};
             const cadNumber = options.cad_number || properties.descr || 'Без номера';
-            const name = options.params_name || properties.descr || 'Без названия'; // params_name приоритетнее
+            const name = options.params_name || properties.descr || 'Без названия'; 
             const address = options.address_readable_address || 'Адрес не указан';
             
             const lengthValue = options.params_extension;
@@ -14905,10 +15244,9 @@ async function processAndDrawStructures(features) {
             const hintContent = {
                 cadastralNumber: cadNumber,
                 address: address,
-                area: lengthText, // Используем area для универсальности в макете
+                area: lengthText, 
                 purpose: purpose,
-                yearBuilt: yearBuilt,
-                // Добавляем другие поля, если нужно
+                yearBuilt: yearBuilt
             };
             
             if (!feature?.geometry?.coordinates) continue;
@@ -14928,15 +15266,18 @@ async function processAndDrawStructures(features) {
                  });
                  const offsetCoordinates = coordinates.map(c => [c[0] - mapOffsetY * 0.000008983, c[1] - mapOffsetX * 0.000008983]);
 
+                 // ***** НАЧАЛО ИЗМЕНЕНИЯ: ДОБАВЛЯЕМ featureData В СВОЙСТВА *****
                  const structurePolygon = new ymaps.Polygon([offsetCoordinates], 
                     {
                         cadastralNumber: cadNumber, 
                         name: name,
                         hintContent: hintContent,
-                        isStructure: true // <-- Новый флаг
+                        isStructure: true,
+                        featureData: feature // <--- ВОТ КЛЮЧЕВОЕ ИЗМЕНЕНИЕ
                     }, 
+                 // ***** КОНЕЦ ИЗМЕНЕНИЯ *****
                     {
-                        strokeColor: polygonStyle.structuresColor, // <-- Новый цвет
+                        strokeColor: polygonStyle.structuresColor,
                         strokeWidth: polygonStyle.width - 1,
                         strokeOpacity: 0.8,
                         fillColor: '#00000000',
@@ -15382,15 +15723,18 @@ async function processAndDrawBuildings(features) {
                  });
                  const offsetCoordinates = coordinates.map(c => [c[0] - mapOffsetY * 0.000008983, c[1] - mapOffsetX * 0.000008983]);
 
+                 // ***** НАЧАЛО ИЗМЕНЕНИЯ: ДОБАВЛЯЕМ featureData В СВОЙСТВА *****
                  const buildingPolygon = new ymaps.Polygon([offsetCoordinates], 
-                    { // properties
+                    { 
                         cadastralNumber: cadNumber, 
                         name: name,
                         hintContent: hintContent,
-                        isBuilding: true // <-- Флаг изменен
+                        isBuilding: true,
+                        featureData: feature // <--- ВОТ КЛЮЧЕВОЕ ИЗМЕНЕНИЕ
                     }, 
-                    { // options
-                        strokeColor: polygonStyle.buildingsColor, // <-- Используем цвет для зданий
+                 // ***** КОНЕЦ ИЗМЕНЕНИЯ *****
+                    { 
+                        strokeColor: polygonStyle.buildingsColor,
                         strokeWidth: polygonStyle.width - 1,
                         strokeOpacity: 0.8,
                         fillColor: '#00000000',
@@ -15412,27 +15756,15 @@ async function processAndDrawBuildings(features) {
                 const bounds = buildingPolygon.geometry.getBounds();
                 if (bounds && bounds[0] && bounds[1]) {
                     const centerGeo = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
-                    
                     const parts = cadNumber.split(':');
                     const displayNumber = parts.length > 3 ? ':' + parts[parts.length - 1] : cadNumber;
                     
-                    const labelProperties = {
-                        iconContent: displayNumber,
-                        hintContent: hintContent,
-                        cadastralNumber: cadNumber
-                    };
-                    
-                    const buildingText = new ymaps.Placemark(centerGeo, labelProperties, {
+                    const buildingText = new ymaps.Placemark(centerGeo, { iconContent: displayNumber, hintContent: hintContent }, {
                         iconLayout: customPlacemarkLayout,
-                        hintLayout: customHintLayout,
-                        hasBalloon: false,
-                        draggable: false,
-                        visible: map.getZoom() > 14,
-                        zIndex: 550
+                        visible: map.getZoom() > 14
                     });
                     
                     buildingText.polygon = buildingPolygon;
-                    
                     map.geoObjects.add(buildingText);
                     polygons.push(buildingText);
                     parcelPlacemarks.push(buildingText);
