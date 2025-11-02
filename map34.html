@@ -3967,143 +3967,87 @@ function getRasterCorners() {
     return null;
 }
 
-
-// Вспомогательная функция для конвертации Data URL в Blob
-function dataURLToBlob(dataURL) {
-    const parts = dataURL.split(',');
-    const byteString = atob(parts[1]);
-    const mimeString = parts[0].split(':')[1].split(';')[0];
-    const ab = new ArrayBuffer(byteString.length);
-    const ia = new Uint8Array(ab);
-    for (let i = 0; i < byteString.length; i++) {
-        ia[i] = byteString.charCodeAt(i);
-    }
-    return new Blob([ab], { type: mimeString });
-}
-
-
 // Функция для экспорта настроек
-async function exportRasterSettings() {
+function exportRasterSettings() {
     if (!rasterOverlay) {
         showNotification('Нет растра для экспорта настроек', 'warning');
         return;
     }
 
     const corners = getRasterCorners();
-    const imageUrl = rasterOverlay.options.get('fillImageHref');
-
-    if (!corners || !imageUrl) {
-        showNotification('Не удалось получить данные растра для экспорта', 'error');
+    if (!corners) {
+        showNotification('Не удалось получить координаты растра', 'error');
         return;
     }
-    
-    showLoader('Создание архива растра...');
 
-    try {
-        const settings = {
-            type: "RasterBindingData",
-            version: 1,
-            imageSize: rasterImageSize,
-            opacity: rasterOverlay.options.get('opacity'),
-            corners: corners
-        };
+    const settings = {
+        type: "RasterBindingData",
+        version: 1,
+        imageSize: rasterImageSize, // Сохраняем исходный размер для проверки
+        opacity: rasterOverlay.options.get('opacity'),
+        corners: corners // Сохраняем гео-координаты углов
+    };
 
-        const imageBlob = dataURLToBlob(imageUrl);
-        const imageExtension = imageBlob.type.split('/')[1] || 'jpg';
-
-        // Создаем ZIP
-        const zip = new JSZip();
-        zip.file('raster-settings.json', JSON.stringify(settings, null, 2));
-        zip.file(`raster.${imageExtension}`, imageBlob);
-
-        const zipBlob = await zip.generateAsync({
-            type: "blob",
-            compression: "DEFLATE",
-            compressionOptions: { level: 9 }
-        });
-
-        saveAs(zipBlob, 'raster-archive.zip');
-        showNotification('Архив с растром и настройками сохранен', 'success');
-
-    } catch (error) {
-        console.error("Ошибка при экспорте растра:", error);
-        showNotification('Ошибка при создании архива растра', 'error');
-    } finally {
-        hideLoader();
-    }
+    const blob = new Blob([JSON.stringify(settings, null, 2)], { type: 'application/json' });
+    saveAs(blob, 'raster-settings.json');
+    showNotification('Настройки растра экспортированы', 'success');
 }
 
 // Функция для импорта настроек
-// Функция для импорта настроек и изображения из ZIP
 function importRasterSettings() {
+    if (!rasterOverlay) {
+        showNotification('Сначала добавьте растр для импорта настроек', 'warning');
+        return;
+    }
+
     const input = document.createElement('input');
     input.type = 'file';
-    input.accept = '.zip';
+    input.accept = '.json';
 
     input.onchange = e => {
         const file = e.target.files[0];
         if (!file) return;
 
-        showLoader('Импорт архива растра...');
         const reader = new FileReader();
-        reader.onload = async (event) => {
+        reader.onload = (event) => {
             try {
-                const zip = await JSZip.loadAsync(event.target.result);
+                const settings = JSON.parse(event.target.result);
 
-                const settingsFile = zip.file('raster-settings.json');
-                let imageFile = zip.file(/raster\.(jpg|jpeg|png|gif|bmp)/i)[0];
-
-                if (!settingsFile || !imageFile) {
-                    throw new Error('Архив должен содержать raster-settings.json и файл изображения.');
-                }
-
-                const settingsText = await settingsFile.async('string');
-                const imageBlob = await imageFile.async('blob');
-                const settings = JSON.parse(settingsText);
-
-                // Валидация JSON
-                if (settings.type !== "RasterBindingData" || !settings.corners || settings.corners.length !== 4) {
+                // Валидация файла
+                if (settings.type !== "RasterBindingData" || !settings.imageSize || !settings.corners || settings.corners.length !== 4) {
                     throw new Error('Некорректный формат файла настроек.');
                 }
                 
-                // Используем FileReader, чтобы получить Data URL из Blob для fillImageHref
-                const imageReader = new FileReader();
-                imageReader.onload = (imgEvent) => {
-                    // Создаем новый полигон с импортированными настройками и изображением
-                    const newPolygonOverlay = new ymaps.Polygon([settings.corners], {}, {
-                        fillImageHref: imgEvent.target.result,
-                        fillMethod: 'stretch',
-                        stroke: false,
-                        opacity: settings.opacity || 0.8,
-                        interactivityModel: 'default#transparent'
-                    });
+                // Ключевая проверка: сравниваем размеры изображения
+                if (settings.imageSize.width !== rasterImageSize.width || settings.imageSize.height !== rasterImageSize.height) {
+                    throw new Error(`Настройки предназначены для изображения другого размера (${settings.imageSize.width}x${settings.imageSize.height}).`);
+                }
 
-                    // Удаляем старый растр (если он есть) и панель
-                    if (rasterOverlay) map.geoObjects.remove(rasterOverlay);
-                    if (rasterControlsPanel) document.body.removeChild(rasterControlsPanel);
+                // Создаем новый полигон с импортированными настройками
+                const newPolygonOverlay = new ymaps.Polygon([settings.corners], {}, {
+                    fillImageHref: rasterOverlay.options.get('fillImageHref'),
+                    fillMethod: 'stretch',
+                    stroke: false,
+                    opacity: settings.opacity || 0.8,
+                    interactivityModel: 'default#transparent'
+                });
 
-                    // Устанавливаем новый растр и создаем для него панель
-                    rasterOverlay = newPolygonOverlay;
-                    rasterImageSize = settings.imageSize; // Восстанавливаем исходный размер
-                    map.geoObjects.add(rasterOverlay);
-                    createRasterControls();
-                    
-                    // Обновляем ползунок прозрачности на новой панели
-                    rasterControlsPanel.querySelector('#raster-opacity').value = settings.opacity || 0.8;
-                    
-                    showNotification('Настройки и растр успешно импортированы!', 'success');
-                    hideLoader();
-                };
-                imageReader.onerror = () => { throw new Error('Не удалось прочитать файл изображения из архива.'); };
-                imageReader.readAsDataURL(imageBlob);
+                // Заменяем текущий растр на новый
+                map.geoObjects.remove(rasterOverlay);
+                rasterOverlay = newPolygonOverlay;
+                map.geoObjects.add(rasterOverlay);
+                
+                // Обновляем ползунок прозрачности
+                rasterControlsPanel.querySelector('#raster-opacity').value = settings.opacity || 0.8;
+
+                showNotification('Настройки растра успешно импортированы!', 'success');
 
             } catch (error) {
                 console.error("Ошибка импорта настроек:", error);
                 showNotification(`Ошибка импорта: ${error.message}`, 'error');
-                hideLoader();
             }
         };
-        reader.readAsArrayBuffer(file);
+        reader.readAsText(file);
     };
 
     input.click();
