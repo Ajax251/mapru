@@ -396,6 +396,10 @@
     .notification.error {
         background: linear-gradient(135deg, #ff6b6b, #ff3d3d);
     }
+    
+      .notification.info {
+        background: linear-gradient(135deg, #3a7bd5, #00d2ff);
+    }
 
     .notification.show {
         opacity: 1;
@@ -2506,9 +2510,15 @@ let selectedVriFromLegend = null; // Tracks the VRI selected in the legend, null
        let isVercelProxyBlocked = false;
        let lastVercelBlockTime = 0;
        
-let rasterLayer = null;
+       let rasterOverlay = null;
 let rasterControlsPanel = null;
-let previousMapType = 'yandex#map'; 
+let rasterImageSize = { width: 0, height: 0 };
+
+let bindingState = 0; // 0: inactive, 1: wait for raster P1, 2: wait for raster P2, 3: wait for map P1, 4: wait for map P2
+let bindingPoints = {
+    raster: [], // Will store relative [x, y] coords (0.0 to 1.0)
+    map: []     // Will store geo [lat, lon] coords
+};
 
 const vercelProxyUrl = 'https://nsp-two.vercel.app/';
 
@@ -3747,7 +3757,528 @@ function findAndConvert() {
     }
 }
 
-// ДОБАВЬТЕ ЭТУ НОВУЮ ВСПОМОГАТЕЛЬНУЮ ФУНКЦИЮ
+
+
+function startBindingProcess() {
+    if (!rasterOverlay) {
+        showNotification('Сначала добавьте растровое изображение', 'warning');
+        return;
+    }
+    if (bindingState !== 0) {
+        stopBindingProcess(); // Отменяем предыдущий процесс, если он был запущен
+    }
+
+    bindingState = 1;
+    bindingPoints = { raster: [], map: [] };
+    
+    // <<< ИСПРАВЛЕНО: Растр должен быть ПРОЗРАЧНЫМ для кликов, чтобы событие дошло до карты >>>
+    rasterOverlay.options.set('interactivityModel', 'default#transparent');
+    
+    map.behaviors.disable('drag'); // Отключаем перетаскивание карты
+    map.options.set('cursor', 'crosshair'); // Устанавливаем курсор-перекрестие
+
+    showNotification('Шаг 1: Укажите первую точку на РАСТРЕ', 'info', 'mouse-pointer', 10000);
+    map.events.add('click', handleBindingClick);
+    document.addEventListener('keydown', handleBindingKeyDown);
+}
+
+function stopBindingProcess() {
+    bindingState = 0;
+    if (rasterOverlay) {
+        // Возвращаем растр в неинтерактивное состояние
+        rasterOverlay.options.set('interactivityModel', 'default#transparent');
+    }
+    map.behaviors.enable('drag'); // Включаем перетаскивание карты обратно
+    map.options.set('cursor', 'grab'); // <<< ИСПРАВЛЕНО: Возвращаем стандартный курсор-руку
+    map.events.remove('click', handleBindingClick);
+    document.removeEventListener('keydown', handleBindingKeyDown);
+    showNotification('Процесс привязки отменен', 'warning');
+}
+
+function handleBindingKeyDown(e) {
+    if (e.key === 'Escape') {
+        stopBindingProcess();
+    }
+}
+
+function handleBindingClick(e) {
+    e.preventDefault();
+    const clickCoords = e.get('coords'); // Гео-координаты клика
+
+    switch (bindingState) {
+        case 1: // Ожидание первой точки на растре
+        case 2: // Ожидание второй точки на растре
+            // Проверяем, был ли клик внутри растра
+            if (!rasterOverlay.geometry.contains(clickCoords)) {
+                showNotification(`Клик был вне растра. Пожалуйста, укажите точку на ИЗОБРАЖЕНИИ`, 'error', 5000);
+                return;
+            }
+            
+            // Конвертируем гео-координаты клика в относительные координаты растра (от 0.0 до 1.0)
+            const projection = map.options.get('projection');
+            const zoom = map.getZoom();
+            const rasterBounds = rasterOverlay.geometry.getBounds(); 
+            
+            // <<< НАЧАЛО ИСПРАВЛЕНИЯ: Корректное определение углов из getBounds() >>>
+            // getBounds() возвращает [[minLat, minLon], [maxLat, maxLon]] (юго-запад, северо-восток).
+            // Нам нужны левый верхний и правый нижний углы для правильного расчета.
+            const minLat = rasterBounds[0][0], minLon = rasterBounds[0][1];
+            const maxLat = rasterBounds[1][0], maxLon = rasterBounds[1][1];
+
+            const topLeftGeo = [maxLat, minLon];       // Верхний-левый угол
+            const bottomRightGeo = [minLat, maxLon];   // Нижний-правый угол
+            // <<< КОНЕЦ ИСПРАВЛЕНИЯ >>>
+
+            const topLeftPixel = projection.toGlobalPixels(topLeftGeo, zoom);
+            const bottomRightPixel = projection.toGlobalPixels(bottomRightGeo, zoom);
+            const clickPixel = projection.toGlobalPixels(clickCoords, zoom);
+
+            const pixelWidth = Math.abs(bottomRightPixel[0] - topLeftPixel[0]);
+            const pixelHeight = Math.abs(bottomRightPixel[1] - topLeftPixel[1]);
+
+            // Проверяем, чтобы не было деления на ноль
+            if (pixelWidth === 0 || pixelHeight === 0) {
+                showNotification('Ошибка: растр имеет нулевой размер.', 'error');
+                stopBindingProcess();
+                return;
+            }
+
+            const relativeX = (clickPixel[0] - topLeftPixel[0]) / pixelWidth;
+            const relativeY = (clickPixel[1] - topLeftPixel[1]) / pixelHeight;
+
+            bindingPoints.raster.push([relativeX, relativeY]);
+
+            if (bindingState === 1) {
+                bindingState = 2;
+                showNotification('Шаг 2: Укажите вторую точку на РАСТРЕ', 'info', 'mouse-pointer', 10000);
+            } else {
+                bindingState = 3;
+                showNotification('Шаг 3: Укажите первую точку на КАРТЕ', 'info', 'map-marker-alt', 10000);
+            }
+            break;
+
+        case 3: // Ожидание первой точки на карте
+            bindingPoints.map.push(clickCoords);
+            bindingState = 4;
+            showNotification('Шаг 4: Укажите вторую точку на КАРТЕ', 'info', 'map-marker-alt', 10000);
+            break;
+
+        case 4: // Ожидание второй точки на карте и выполнение привязки
+            bindingPoints.map.push(clickCoords);
+            performRasterBinding();
+            break;
+    }
+}
+
+function performRasterBinding() {
+    showLoader('Выполняется привязка растра...');
+    try {
+        const { raster, map: mapPoints } = bindingPoints;
+        const projection = map.options.get('projection');
+        const zoom = map.getZoom();
+
+        // 1. Вектор на растре в относительных единицах
+        const rasterVectorRel = [raster[1][0] - raster[0][0], raster[1][1] - raster[0][1]];
+        // Вектор на растре в пикселях исходного изображения
+        const rasterVectorImgPx = [rasterVectorRel[0] * rasterImageSize.width, rasterVectorRel[1] * rasterImageSize.height];
+
+        // 2. Вектор на карте в глобальных пикселях
+        const mapP1_px = projection.toGlobalPixels(mapPoints[0], zoom);
+        const mapP2_px = projection.toGlobalPixels(mapPoints[1], zoom);
+        const mapVectorPx = [mapP2_px[0] - mapP1_px[0], mapP2_px[1] - mapP1_px[1]];
+
+        // 3. Рассчитываем масштаб
+        const rasterVectorLength = Math.sqrt(rasterVectorImgPx[0]**2 + rasterVectorImgPx[1]**2);
+        const mapVectorLength = Math.sqrt(mapVectorPx[0]**2 + mapVectorPx[1]**2);
+        const scale = mapVectorLength / rasterVectorLength;
+
+        // 4. Рассчитываем угол поворота (в радианах)
+        const rasterAngle = Math.atan2(rasterVectorImgPx[1], rasterVectorImgPx[0]);
+        const mapAngle = Math.atan2(mapVectorPx[1], mapVectorPx[0]);
+        const rotationRad = mapAngle - rasterAngle;
+        const rotationDeg = rotationRad * 180 / Math.PI;
+
+        // 5. Рассчитываем новые координаты углов растра
+        const cornersRel = [[0, 0], [1, 0], [1, 1], [0, 1]]; // TL, TR, BR, BL
+        const newCornersGeo = cornersRel.map(corner => {
+            // Вектор от первой точки растра до угла в пикселях изображения
+            const cornerVecImgPx = [(corner[0] - raster[0][0]) * rasterImageSize.width, (corner[1] - raster[0][1]) * rasterImageSize.height];
+            // Масштабируем
+            const scaledVec = [cornerVecImgPx[0] * scale, cornerVecImgPx[1] * scale];
+            // Поворачиваем
+            const rotatedVec = [
+                scaledVec[0] * Math.cos(rotationRad) - scaledVec[1] * Math.sin(rotationRad),
+                scaledVec[0] * Math.sin(rotationRad) + scaledVec[1] * Math.cos(rotationRad)
+            ];
+            // Находим итоговую позицию угла в глобальных пикселях
+            const finalCornerPx = [mapP1_px[0] + rotatedVec[0], mapP1_px[1] + rotatedVec[1]];
+            // Конвертируем обратно в гео-координаты
+            return projection.fromGlobalPixels(finalCornerPx, zoom);
+        });
+
+        // 6. Создаем новый полигон с изображением
+        const newPolygonOverlay = new ymaps.Polygon([newCornersGeo], {}, {
+            fillImageHref: rasterOverlay.options.get('fillImageHref'),
+            fillMethod: 'stretch',
+            stroke: false,
+            opacity: rasterOverlay.options.get('opacity'),
+            interactivityModel: 'default#transparent' // Возвращаем в неинтерактивное состояние
+        });
+        
+        // 7. Заменяем старый оверлей новым
+        map.geoObjects.remove(rasterOverlay);
+        rasterOverlay = newPolygonOverlay;
+        map.geoObjects.add(rasterOverlay);
+        
+        showNotification('Растр успешно привязан!', 'success');
+
+    } catch (error) {
+        console.error("Ошибка привязки растра:", error);
+        showNotification('Ошибка привязки растра', 'error');
+    } finally {
+        bindingState = 0;
+        map.behaviors.enable('drag'); // Включаем перетаскивание карты
+        map.options.set('cursor', 'grab'); // <<< ИСПРАВЛЕНО: Возвращаем стандартный курсор-руку
+        map.events.remove('click', handleBindingClick);
+        document.removeEventListener('keydown', handleBindingKeyDown);
+        hideLoader();
+    }
+}
+
+
+function getRasterCorners() {
+    if (!rasterOverlay) return null;
+
+    const geometry = rasterOverlay.geometry;
+    const coords = geometry.getCoordinates();
+    const type = geometry.getType();
+
+    if (type === 'Rectangle') {
+        const topLeft = coords[0];
+        const bottomRight = coords[1];
+        // Рассчитываем остальные углы
+        const topRight = [topLeft[0], bottomRight[1]]; // maxLat, maxLon
+        const bottomLeft = [bottomRight[0], topLeft[1]]; // minLat, minLon
+        return [topLeft, topRight, bottomRight, bottomLeft]; // Возвращаем в порядке обхода
+    } else if (type === 'Polygon') {
+        // Полигон уже хранит все 4 угла (и пятую замыкающую точку)
+        return coords[0].slice(0, 4); // Возвращаем первые 4 точки
+    }
+    return null;
+}
+
+
+// Вспомогательная функция для конвертации Data URL в Blob
+function dataURLToBlob(dataURL) {
+    const parts = dataURL.split(',');
+    const byteString = atob(parts[1]);
+    const mimeString = parts[0].split(':')[1].split(';')[0];
+    const ab = new ArrayBuffer(byteString.length);
+    const ia = new Uint8Array(ab);
+    for (let i = 0; i < byteString.length; i++) {
+        ia[i] = byteString.charCodeAt(i);
+    }
+    return new Blob([ab], { type: mimeString });
+}
+
+
+// Функция для экспорта настроек
+async function exportRasterSettingsToFile() {
+    if (!rasterOverlay) {
+        showNotification('Нет растра для экспорта настроек', 'warning');
+        return;
+    }
+
+    const corners = getRasterCorners();
+    const imageUrl = rasterOverlay.options.get('fillImageHref');
+
+    if (!corners || !imageUrl) {
+        showNotification('Не удалось получить данные растра для экспорта', 'error');
+        return;
+    }
+    
+    showLoader('Создание архива растра...');
+
+    try {
+        const settings = {
+            type: "RasterBindingData",
+            version: 1,
+            imageSize: rasterImageSize,
+            opacity: rasterOverlay.options.get('opacity'),
+            corners: corners
+        };
+
+        const imageBlob = dataURLToBlob(imageUrl);
+        const imageExtension = imageBlob.type.split('/')[1] || 'jpg';
+
+        // Создаем ZIP
+        const zip = new JSZip();
+        zip.file('raster-settings.json', JSON.stringify(settings, null, 2));
+        zip.file(`raster.${imageExtension}`, imageBlob);
+
+           const zipBlob = await zip.generateAsync({
+            type: "blob",
+            compression: "DEFLATE",
+            compressionOptions: { level: 9 }
+        });
+
+        saveAs(zipBlob, 'raster-archive.rst'); 
+        showNotification('Архив с растром и настройками сохранен', 'success');
+
+    } catch (error) {
+        console.error("Ошибка при экспорте растра:", error);
+        showNotification('Ошибка при создании архива растра', 'error');
+    } finally {
+        hideLoader();
+    }
+}
+
+
+async function pasteRasterFromClipboard() {
+    showLoader('Поиск изображения в буфере...');
+    try {
+        const clipboardItems = await navigator.clipboard.read();
+        let imageBlob = null;
+
+        for (const item of clipboardItems) {
+            const imageType = item.types.find(type => type.startsWith('image/'));
+            if (imageType) {
+                imageBlob = await item.getType(imageType);
+                break;
+            }
+        }
+
+        if (imageBlob) {
+            // Если изображение найдено, создаем/обновляем подложку
+            await createRasterOverlay(imageBlob);
+            showNotification('Растр вставлен из буфера обмена', 'success');
+        } else {
+            // Если изображений нет, просто показываем уведомление
+            showNotification('Изображение в буфере не найдено.', 'info');
+        }
+    } catch (err) {
+        console.error('Ошибка доступа к буферу обмена:', err);
+        showNotification('Ошибка доступа к буферу. Используйте импорт.', 'warning');
+    } finally {
+        hideLoader();
+    }
+}
+
+async function exportRasterToCloud() {
+    if (!rasterOverlay) {
+        showNotification('Нет растра для экспорта в облако', 'warning');
+        return;
+    }
+
+    // Запрашиваем у пользователя номер квартала
+    const quarterNumber = await promptForQuarterNumber(currentQuarterNumber);
+    if (!quarterNumber) {
+        showNotification('Экспорт отменен', 'info');
+        return;
+    }
+
+    showLoader(`Экспорт растра для ${quarterNumber}...`);
+
+    try {
+        // Собираем данные для .rst архива
+        const corners = getRasterCorners();
+        const imageUrl = rasterOverlay.options.get('fillImageHref');
+        if (!corners || !imageUrl) throw new Error('Не удалось получить данные растра.');
+
+        const settings = {
+            type: "RasterBindingData", version: 1, imageSize: rasterImageSize,
+            opacity: rasterOverlay.options.get('opacity'), corners: corners
+        };
+        const imageBlob = dataURLToBlob(imageUrl);
+        const imageExtension = imageBlob.type.split('/')[1] || 'jpg';
+
+        const zip = new JSZip();
+        zip.file('raster-settings.json', JSON.stringify(settings, null, 2));
+        zip.file(`raster.${imageExtension}`, imageBlob);
+        const zipBlob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", level: 9 });
+
+        const filename = quarterNumber.replace(/:/g, '_') + '.rst';
+        const formData = new FormData();
+        formData.append('file', new File([zipBlob], filename, { type: 'application/zip' }));
+
+        // Отправляем на тот же эндпоинт, что и для *.nspd
+        const response = await fetch(`${STORAGE_API_URL}/nspd/upload`, {
+            method: 'POST',
+            body: formData,
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ error: `Сервер ответил ошибкой: ${response.statusText}` }));
+            throw new Error(errorData.error);
+        }
+
+        showNotification(`Растр для квартала ${quarterNumber} успешно загружен`, 'success');
+    } catch (error) {
+        console.error("Ошибка экспорта растра в облако:", error);
+        showNotification(`Ошибка экспорта: ${error.message}`, 'error');
+    } finally {
+        hideLoader();
+    }
+}
+
+// Функция для импорта растра с сервера
+async function importRasterFromCloud() {
+    let quarterNumber = currentQuarterNumber;
+
+    if (!quarterNumber) {
+        quarterNumber = await promptForQuarterNumber();
+    }
+    
+    if (!quarterNumber) {
+        showNotification('Импорт отменен', 'info');
+        return;
+    }
+
+    showLoader(`Поиск растра для ${quarterNumber}...`);
+
+    try {
+        const filename = quarterNumber.replace(/:/g, '_') + '.rst';
+        // Запрашиваем файл с того же эндпоинта, что и для *.nspd
+        const response = await fetch(`${STORAGE_API_URL}/nspd/${filename}`);
+
+        if (!response.ok) {
+            if (response.status === 404) {
+                throw new Error(`Привязанный растр для квартала ${quarterNumber} не найден на сервере.`);
+            } else {
+                throw new Error(`Ошибка сервера: ${response.statusText}`);
+            }
+        }
+
+        const zipBlob = await response.blob();
+        
+        // Передаем blob в существующую логику импорта
+        await processImportedZipBlob(zipBlob);
+
+    } catch (error) {
+        console.error("Ошибка импорта растра из облака:", error);
+        showNotification(`Ошибка импорта: ${error.message}`, 'error');
+    } finally {
+        hideLoader();
+    }
+}
+
+// Новая вспомогательная функция для запроса номера квартала
+async function promptForQuarterNumber(defaultValue = '') {
+    return new Promise((resolve) => {
+        const modal = document.createElement('div');
+        modal.className = 'color-modal';
+        modal.style.width = '400px';
+        modal.innerHTML = `
+            <div class="color-modal-content">
+                <h3 style="margin-top:0;">Введите номер квартала</h3>
+                <input type="text" id="quarter-prompt-input" value="${defaultValue}" style="width: 80%; padding: 10px; border-radius: 8px; border: 1px solid #ccc; margin-bottom: 20px; text-align: center; font-size: 1rem;">
+                <div class="buttons">
+                    <button id="prompt-ok-btn" class="apply-btn"><i class="fas fa-check"></i> OK</button>
+                    <button id="prompt-cancel-btn" class="cancel-btn"><i class="fas fa-times"></i> Отмена</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        modal.style.display = 'block';
+
+        const input = document.getElementById('quarter-prompt-input');
+        const okBtn = document.getElementById('prompt-ok-btn');
+        const cancelBtn = document.getElementById('prompt-cancel-btn');
+        input.focus();
+        input.select();
+
+        const close = (value) => {
+            document.body.removeChild(modal);
+            resolve(value);
+        };
+
+        okBtn.onclick = () => {
+            const value = input.value.trim();
+            if (value && isCadastralQuarter(value)) {
+                close(value);
+            } else {
+                showNotification('Введите корректный номер квартала (например, 16:56:010115)', 'warning');
+            }
+        };
+        cancelBtn.onclick = () => close(null);
+        modal.addEventListener('click', e => { if (e.target === modal) close(null); });
+        input.onkeydown = (e) => { if (e.key === 'Enter') okBtn.click(); if (e.key === 'Escape') cancelBtn.click(); };
+    });
+}
+
+
+async function processImportedZipBlob(zipBlob) {
+    const zip = await JSZip.loadAsync(zipBlob);
+    const settingsFile = zip.file('raster-settings.json');
+    const imageFile = zip.file(/raster\.(jpg|jpeg|png|gif|bmp)/i)[0];
+
+    if (!settingsFile || !imageFile) {
+        throw new Error('Архив не содержит необходимых файлов (settings.json и изображения).');
+    }
+
+    const settingsText = await settingsFile.async('string');
+    const imageBlob = await imageFile.async('blob');
+    const settings = JSON.parse(settingsText);
+
+    if (settings.type !== "RasterBindingData" || !settings.corners || settings.corners.length !== 4) {
+        throw new Error('Некорректный формат файла настроек.');
+    }
+
+    const imageReader = new FileReader();
+    imageReader.readAsDataURL(imageBlob);
+    await new Promise((resolve, reject) => {
+        imageReader.onload = (imgEvent) => {
+            const newPolygonOverlay = new ymaps.Polygon([settings.corners], {}, {
+                fillImageHref: imgEvent.target.result,
+                fillMethod: 'stretch',
+                stroke: false,
+                opacity: settings.opacity || 0.8,
+                interactivityModel: 'default#transparent'
+            });
+
+            if (rasterOverlay) map.geoObjects.remove(rasterOverlay);
+            if (!rasterControlsPanel) createRasterControls();
+
+            rasterOverlay = newPolygonOverlay;
+            rasterImageSize = settings.imageSize;
+            map.geoObjects.add(rasterOverlay);
+
+            rasterControlsPanel.querySelector('#raster-opacity').value = settings.opacity || 0.8;
+            showNotification('Растр и настройки успешно импортированы!', 'success');
+            resolve();
+        };
+        imageReader.onerror = () => reject(new Error('Не удалось прочитать файл изображения из архива.'));
+    });
+}
+
+// Функция для импорта настроек и изображения из ZIP
+function importRasterSettingsFromFile() {
+    const input = document.createElement('input');
+    input.type = 'file';
+    input.accept = '.rst';
+
+    input.onchange = e => {
+        const file = e.target.files[0];
+        if (!file) return;
+
+        showLoader('Импорт архива растра...');
+        const reader = new FileReader();
+        reader.onload = async (event) => {
+            try {
+                // Просто передаем blob в новую общую функцию
+                await processImportedZipBlob(new Blob([event.target.result]));
+            } catch (error) {
+                console.error("Ошибка импорта настроек из файла:", error);
+                showNotification(`Ошибка импорта: ${error.message}`, 'error');
+            } finally {
+                hideLoader();
+            }
+        };
+        reader.readAsArrayBuffer(file);
+    };
+    input.click();
+}
+
 function fillAuxiliaryTextareas(originalCoordGroups, geoGroups) {
     let convertedText = '';
     let geoText = '';
@@ -5599,38 +6130,16 @@ contextMenu.addEventListener('click', async function (event) {
     }
 }
 
-  if (event.target.id === 'raster-menu-item') {
-        contextMenu.style.display = 'none';
-        showLoader('Вставка изображения из буфера...');
 
-        (async () => {
-            try {
-                const clipboardItems = await navigator.clipboard.read();
-                let imageBlob = null;
-                for (const item of clipboardItems) {
-                    const imageType = item.types.find(type => type.startsWith('image/'));
-                    if (imageType) {
-                        imageBlob = await item.getType(imageType);
-                        break;
-                    }
-                }
+if (event.target.id === 'raster-menu-item') {
+    contextMenu.style.display = 'none';
 
-                if (imageBlob) {
-                    await createRasterMapType(imageBlob);
-                    showNotification('Растр вставлен из буфера обмена', 'success');
-                } else {
-                    showNotification('Изображение в буфере обмена не найдено', 'warning');
-                }
-            } catch (err) {
-                console.error('Ошибка при вставке из буфера обмена:', err);
-                showNotification('Ошибка доступа к буферу обмена', 'error');
-            } finally {
-                hideLoader();
-            }
-        })();
+    // Просто создаем и показываем панель, если ее еще нет.
+    if (!rasterControlsPanel) {
+        createRasterControls();
     }
-
-
+    // Больше ничего не делаем.
+}
         
           if (event.target.id === 'consolidated-report-menu-item') {
             const lat = parseFloat(contextMenu.dataset.lat);
@@ -6292,8 +6801,8 @@ if (event.target.id === 'copy-all-epsg3857-menu-item') {
             contextMenu.style.display = 'none';
         }
 
-   // НАЙДИТЕ ЭТОТ БЛОК В ВАШЕМ КОДЕ И ЗАМЕНИТЕ ЕГО ПОЛНОСТЬЮ
-// НАЙДИТЕ ЭТОТ БЛОК В ВАШЕМ КОДЕ И ЗАМЕНИТЕ ЕГО ПОЛНОСТЬЮ
+
+
 if (event.target.id === 'change-color-menu-item') {
     const lat = parseFloat(contextMenu.dataset.lat);
     const lon = parseFloat(contextMenu.dataset.lon);
@@ -6355,7 +6864,8 @@ if (event.target.id === 'change-color-menu-item') {
 
     const modal = document.createElement('div');
     modal.className = 'color-modal';
-    // <-- ИЗМЕНЕНО: HTML для модального окна теперь содержит ДВА слайдера -->
+    
+    // <<< НАЧАЛО ИЗМЕНЕНИЯ: Добавлен HTML для слайдера толщины линии >>>
     modal.innerHTML = `
         <div class="color-modal-content">
             <h3></h3>
@@ -6368,7 +6878,11 @@ if (event.target.id === 'change-color-menu-item') {
                 <label>Прозрачность: <span id="opacity-value">0.2</span></label>
                 <input type="range" id="opacity-slider" min="0" max="1" step="0.1" value="0.2">
             </div>
-             <div class="opacity-slider"> 
+            <div class="opacity-slider">
+                <label>Толщина линии: <span id="line-width-value"></span>px</label>
+                <input type="range" id="line-width-slider" min="1" max="10" step="1" value="4">
+            </div>
+            <div class="opacity-slider"> 
                 <label>Размер точки (н1): <span id="dot-size-value">${numberedDotSize}</span>px</label>
                 <input type="range" id="numbered-dot-size-slider" min="6" max="24" value="${numberedDotSize}">
             </div>
@@ -6398,6 +6912,8 @@ if (event.target.id === 'change-color-menu-item') {
             </div>
         </div>
     `;
+    // <<< КОНЕЦ ИЗМЕНЕНИЯ HTML >>>
+
     document.body.appendChild(modal);
     modal.style.display = 'block';
     modal.style.width = '400px';
@@ -6417,13 +6933,24 @@ if (event.target.id === 'change-color-menu-item') {
     const showPointsBtn = modal.querySelector('#show-points-btn');
     const showNumberedPointsBtn = modal.querySelector('#show-numbered-points-btn');
     
-    // <-- НАЧАЛО ЛОГИКИ ДЛЯ ДВУХ СЛАЙДЕРОВ -->
+    // <<< НАЧАЛО ИЗМЕНЕНИЯ: Инициализация и обработка нового слайдера >>>
+    const lineWidthSlider = modal.querySelector('#line-width-slider');
+    const lineWidthValueSpan = modal.querySelector('#line-width-value');
+    
+    const currentStrokeWidth = targetPolygon.options.get('strokeWidth') || polygonStyle.width;
+    lineWidthSlider.value = currentStrokeWidth;
+    lineWidthValueSpan.textContent = currentStrokeWidth;
+
+    lineWidthSlider.addEventListener('input', () => {
+        lineWidthValueSpan.textContent = lineWidthSlider.value;
+    });
+    // <<< КОНЕЦ ИЗМЕНЕНИЯ >>>
+
     const dotSizeSlider = modal.querySelector('#numbered-dot-size-slider');
     const dotSizeValueSpan = modal.querySelector('#dot-size-value');
     const pointSizeSlider = modal.querySelector('#numbered-point-size-slider');
     const pointSizeValueSpan = modal.querySelector('#point-size-value');
     
-    // Обработчик для слайдера размера ТОЧКИ
     dotSizeSlider.addEventListener('input', () => {
         const newSize = dotSizeSlider.value;
         dotSizeValueSpan.textContent = newSize;
@@ -6431,16 +6958,13 @@ if (event.target.id === 'change-color-menu-item') {
         localStorage.setItem('numberedDotSize', numberedDotSize);
     });
 
-    // Обработчик для слайдера размера ПОДПИСИ
     pointSizeSlider.addEventListener('input', () => {
         const newSize = pointSizeSlider.value;
         pointSizeValueSpan.textContent = newSize;
         numberedPointSize = parseInt(newSize, 10);
         localStorage.setItem('numberedPointSize', numberedPointSize);
     });
-    // <-- КОНЕЦ ЛОГИКИ ДЛЯ ДВУХ СЛАЙДЕРОВ -->
 
-    // ... (весь остальной код обработчика остается здесь без изменений)
     const currentFillColor = targetPolygon.options.get('fillColor') || '#00000000';
     let opacity = 0.2;
     if (currentFillColor && currentFillColor !== '#00000000') {
@@ -6490,12 +7014,16 @@ if (event.target.id === 'change-color-menu-item') {
         const fillEnabled = fillToggle.checked;
         const opacity = parseFloat(opacitySlider.value) || 0;
         const opacityHex = Math.round(opacity * 255).toString(16).padStart(2, '0');
+        const newLineWidth = parseInt(lineWidthSlider.value, 10); // <<< ИЗМЕНЕНИЕ: Читаем значение толщины
+        
         targetPolygon.options.set({
             strokeColor: newColor,
-            fillColor: fillEnabled ? `${newColor}${opacityHex}` : '#00000000'
+            fillColor: fillEnabled ? `${newColor}${opacityHex}` : '#00000000',
+            strokeWidth: newLineWidth // <<< ИЗМЕНЕНИЕ: Применяем толщину линии
         });
         document.body.removeChild(modal);
     });
+    
     cancelBtn.addEventListener('click', () => { document.body.removeChild(modal); });
     deleteBtn.addEventListener('click', () => {
         if (map.geoObjects.indexOf(targetPolygon) !== -1) { map.geoObjects.remove(targetPolygon); }
@@ -6637,7 +7165,6 @@ if (event.target.id === 'change-color-menu-item') {
     });
 
     showNumberedPointsBtn.addEventListener('click', () => {
-        // ... (код очистки предыдущих точек и получения координат остается)
         const pointsToRemove = [];
         polygons.forEach(p => {
             if (p instanceof ymaps.Placemark && p.properties.get('isVertexPoint') === true && p.properties.get('relatedPolygon') === targetPolygon) {
@@ -6660,8 +7187,6 @@ if (event.target.id === 'change-color-menu-item') {
         const isClosed = coordinates.length > 1 &&
             Math.abs(coordinates[0][0] - coordinates[coordinates.length - 1][0]) < 1e-7 &&
             Math.abs(coordinates[0][1] - coordinates[coordinates.length - 1][1]) < 1e-7;
-        
-        // ... (код расчета смещения finalOffset остается)
         
         const pointsToAdd = [];
         const numPoints = isClosed ? coordinates.length - 1 : coordinates.length;
@@ -6707,11 +7232,10 @@ if (event.target.id === 'change-color-menu-item') {
             redDotMarker.properties.set({ 'isVertexPoint': true, 'relatedPolygon': targetPolygon });
             pointsToAdd.push(redDotMarker);
             
-            // <-- ИЗМЕНЕНО: Используем переменную для размера подписи -->
             const textLabelMarker = new ymaps.Placemark(currentCoord, {
                 iconContent: placemarkLabel,
                 hintContent: `Точка ${placemarkLabel}`,
-                fontSize: numberedPointSize // Используем переменную для размера подписи
+                fontSize: numberedPointSize
             }, {
                 iconLayout: numberedPointLayout,
                 iconOffset: finalOffset,
@@ -9136,9 +9660,15 @@ function clearMapAndResetTheme() {
     if (!map) return;
     
     
-  cleanupRaster();
-  
-  
+      if (rasterOverlay) {
+             map.geoObjects.remove(rasterOverlay); // <--- ИЗМЕНЕНИЕ 4: Используем geoObjects
+        rasterOverlay = null;
+    }
+    if (rasterControlsPanel) {
+        document.body.removeChild(rasterControlsPanel);
+        rasterControlsPanel = null;
+    }
+    
     map.geoObjects.removeAll();
     polygons = [];
     parcelPlacemarks = [];
@@ -18014,8 +18544,245 @@ function filterParcelList() {
 }
 
 
+async function createRasterOverlay(imageBlob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            const img = new Image();
+            img.onload = () => {
+                if (rasterOverlay) {
+                    map.geoObjects.remove(rasterOverlay);
+                }
+
+                rasterImageSize = { width: img.width, height: img.height };
+                const mapSize = map.container.getSize();
+                const mapAspectRatio = mapSize[0] / mapSize[1];
+                const imageAspectRatio = img.width / img.height;
+
+                let overlayWidth, overlayHeight;
+                if (mapAspectRatio > imageAspectRatio) {
+                    overlayHeight = mapSize[1] * 0.8;
+                    overlayWidth = overlayHeight * imageAspectRatio;
+                } else {
+                    overlayWidth = mapSize[0] * 0.8;
+                    overlayHeight = overlayWidth / imageAspectRatio;
+                }
+
+                const center = map.getCenter();
+                const projection = map.options.get('projection');
+                const zoom = map.getZoom();
+                const centerPixel = projection.toGlobalPixels(center, zoom);
+
+                const halfWidthPixel = overlayWidth / 2;
+                const halfHeightPixel = overlayHeight / 2;
+
+                const topLeftPixel = [centerPixel[0] - halfWidthPixel, centerPixel[1] - halfHeightPixel];
+                const bottomRightPixel = [centerPixel[0] + halfWidthPixel, centerPixel[1] + halfHeightPixel];
+
+                const topLeftGeo = projection.fromGlobalPixels(topLeftPixel, zoom);
+                const bottomRightGeo = projection.fromGlobalPixels(bottomRightPixel, zoom);
+
+                const bounds = [topLeftGeo, bottomRightGeo];
+
+                rasterOverlay = new ymaps.Rectangle(bounds, {}, {
+                    fillImageHref: event.target.result,
+                    fillMethod: 'stretch',
+                    stroke: false,
+                    opacity: 0.8,
+                    interactivityModel: 'default#transparent'
+                });
+
+                map.geoObjects.add(rasterOverlay);
+                resolve();
+            };
+            img.onerror = () => reject(new Error('Не удалось загрузить изображение.'));
+            img.src = event.target.result;
+        };
+        reader.onerror = () => reject(new Error('Не удалось прочитать данные изображения.'));
+        reader.readAsDataURL(imageBlob);
+    });
+}
+
+function createRasterControls() {
+    rasterControlsPanel = document.createElement('div');
+    rasterControlsPanel.className = 'raster-controls-panel';
+    
+    rasterControlsPanel.innerHTML = `
+        <h4>Растр</h4>
+        <button class="close-btn" title="Удалить растр">&times;</button>
+        <div class="control-group">
+            <div></div><button id="raster-up"><i class="fas fa-arrow-up"></i></button><div></div>
+        </div>
+        <div class="control-group">
+            <button id="raster-left"><i class="fas fa-arrow-left"></i></button>
+            <button id="raster-bind-btn" title="Привязка по двум точкам"><i class="fas fa-map-pin"></i></button>
+            <button id="raster-right"><i class="fas fa-arrow-right"></i></button>
+        </div>
+        <div class="control-group">
+            <div></div><button id="raster-down"><i class="fas fa-arrow-down"></i></button><div></div>
+        </div>
+        <div class="control-group" style="justify-content: space-evenly; margin-top: 5px;">
+            <button id="raster-export-file-btn" title="Экспорт в файл"><i class="fas fa-download"></i></button>
+            <button id="raster-import-file-btn" title="Импорт из файла"><i class="fas fa-upload"></i></button>
+            <button id="raster-paste-btn" title="Вставить из буфера обмена"><i class="fas fa-paste"></i></button>
+        </div>
+        <div class="control-group" style="justify-content: space-evenly; margin-top: 5px;">
+             <button id="raster-export-cloud-btn" title="Экспорт в облако"><i class="fas fa-cloud-upload-alt"></i></button>
+             <button id="raster-import-cloud-btn" title="Импорт из облака"><i class="fas fa-cloud-download-alt"></i></button>
+        </div>
+        <input type="range" id="raster-zoom" min="10" max="500" value="100" title="Масштаб">
+        <input type="range" id="raster-opacity" min="0" max="1" step="0.05" value="0.8" title="Прозрачность">
+    `;
+    document.body.appendChild(rasterControlsPanel);
+
+    // Обработчики событий
+    rasterControlsPanel.querySelector('#raster-up').addEventListener('click', (e) => { e.stopPropagation(); moveRaster(0, -1); });
+    rasterControlsPanel.querySelector('#raster-down').addEventListener('click', (e) => { e.stopPropagation(); moveRaster(0, 1); });
+    rasterControlsPanel.querySelector('#raster-left').addEventListener('click', (e) => { e.stopPropagation(); moveRaster(-1, 0); });
+    rasterControlsPanel.querySelector('#raster-right').addEventListener('click', (e) => { e.stopPropagation(); moveRaster(1, 0); });
+    rasterControlsPanel.querySelector('#raster-zoom').addEventListener('input', (e) => { e.stopPropagation(); zoomRaster(parseFloat(e.target.value) / 100); });
+    rasterControlsPanel.querySelector('#raster-opacity').addEventListener('input', (e) => { e.stopPropagation(); if (rasterOverlay) rasterOverlay.options.set('opacity', parseFloat(e.target.value)); });
+    
+    rasterControlsPanel.querySelector('.close-btn').addEventListener('click', (e) => {
+        e.stopPropagation();
+        if (rasterOverlay) map.geoObjects.remove(rasterOverlay);
+        if (rasterControlsPanel) document.body.removeChild(rasterControlsPanel);
+        rasterOverlay = null;
+        rasterControlsPanel = null;
+    });
+    
+    rasterControlsPanel.querySelector('#raster-bind-btn').addEventListener('click', (e) => { e.stopPropagation(); startBindingProcess(); });
+    rasterControlsPanel.querySelector('#raster-export-file-btn').addEventListener('click', (e) => { e.stopPropagation(); exportRasterSettingsToFile(); });
+    rasterControlsPanel.querySelector('#raster-import-file-btn').addEventListener('click', (e) => { e.stopPropagation(); importRasterSettingsFromFile(); });
+    rasterControlsPanel.querySelector('#raster-paste-btn').addEventListener('click', (e) => { e.stopPropagation(); pasteRasterFromClipboard(); });
+    
+    // <<< НОВЫЕ ОБРАБОТЧИКИ >>>
+    rasterControlsPanel.querySelector('#raster-export-cloud-btn').addEventListener('click', (e) => { e.stopPropagation(); exportRasterToCloud(); });
+    rasterControlsPanel.querySelector('#raster-import-cloud-btn').addEventListener('click', (e) => { e.stopPropagation(); importRasterFromCloud(); });
+
+    // Логика перетаскивания панели
+    let isDraggingPanel = false;
+    let panelDragStartX, panelDragStartY;
+    rasterControlsPanel.addEventListener('mousedown', (e) => {
+        if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT' || e.target.tagName === 'I') return;
+        isDraggingPanel = true;
+        panelDragStartX = e.clientX - rasterControlsPanel.offsetLeft;
+        panelDragStartY = e.clientY - rasterControlsPanel.offsetTop;
+    });
+    document.addEventListener('mousemove', (e) => {
+        if (!isDraggingPanel) return;
+        rasterControlsPanel.style.left = `${e.clientX - panelDragStartX}px`;
+        rasterControlsPanel.style.top = `${e.clientY - panelDragStartY}px`;
+    });
+    document.addEventListener('mouseup', () => { isDraggingPanel = false; });
+}
 
 
+function moveRaster(dx, dy) {
+    if (!rasterOverlay) return;
+    const moveStep = 2; // Шаг перемещения в пикселях
+    const projection = map.options.get('projection');
+    const zoom = map.getZoom();
+    
+    // 1. Надежно получаем все 4 текущих угла в гео-координатах
+    const currentCornersGeo = getRasterCorners(); 
+    if (!currentCornersGeo) {
+        console.error("Не удалось получить углы растра для перемещения.");
+        return;
+    }
+
+    // 2. Конвертируем все 4 угла в пиксели и применяем смещение
+    const newCornersPixel = currentCornersGeo.map(geoCoord => {
+        const pixelCoord = projection.toGlobalPixels(geoCoord, zoom);
+        return [pixelCoord[0] + dx * moveStep, pixelCoord[1] + dy * moveStep];
+    });
+
+    // 3. Конвертируем новые пиксельные координаты обратно в гео
+    const newCornersGeo = newCornersPixel.map(pixelCoord => {
+        return projection.fromGlobalPixels(pixelCoord, zoom);
+    });
+
+    // 4. Заменяем старый растр на новый с обновленными координатами
+    // Этот подход работает как для прямоугольников, так и для полигонов.
+    const newOverlay = new ymaps.Polygon([newCornersGeo], {}, {
+        fillImageHref: rasterOverlay.options.get('fillImageHref'),
+        fillMethod: 'stretch',
+        stroke: false,
+        opacity: rasterOverlay.options.get('opacity'),
+        interactivityModel: 'default#transparent'
+    });
+    
+    map.geoObjects.remove(rasterOverlay);
+    rasterOverlay = newOverlay;
+    map.geoObjects.add(rasterOverlay);
+}
+
+// --- НОВОЕ: Функция масштабирования растра ---
+function zoomRaster(scale) {
+    if (!rasterOverlay) return;
+    const projection = map.options.get('projection');
+    const zoom = map.getZoom();
+    const bounds = rasterOverlay.geometry.getBounds(); // <<< ИСПРАВЛЕНО: Используем универсальный getBounds()
+
+    // <<< НАЧАЛО КЛЮЧЕВОГО ИСПРАВЛЕНИЯ >>>
+    // Корректно определяем углы из результата getBounds() [[minLat, minLon], [maxLat, maxLon]]
+    const minLat = bounds[0][0], minLon = bounds[0][1];
+    const maxLat = bounds[1][0], maxLon = bounds[1][1];
+    
+    // Собираем нужные нам углы для расчетов
+    const topLeftGeo = [maxLat, minLon];     // Верхний-левый
+    const bottomRightGeo = [minLat, maxLon]; // Нижний-правый
+    // <<< КОНЕЦ КЛЮЧЕВОГО ИСПРАВЛЕНИЯ >>>
+
+    const topLeftPixel = projection.toGlobalPixels(topLeftGeo, zoom);
+    const bottomRightPixel = projection.toGlobalPixels(bottomRightGeo, zoom);
+
+    const centerPixelX = (topLeftPixel[0] + bottomRightPixel[0]) / 2;
+    const centerPixelY = (topLeftPixel[1] + bottomRightPixel[1]) / 2;
+
+    const mapSize = map.container.getSize();
+    const mapAspectRatio = mapSize[0] / mapSize[1];
+    const imageAspectRatio = rasterImageSize.width / rasterImageSize.height;
+
+    let baseSize;
+    if(mapAspectRatio > imageAspectRatio) {
+        baseSize = mapSize[1] * 0.8;
+    } else {
+        baseSize = mapSize[0] * 0.8;
+    }
+
+    const newWidth = (baseSize * imageAspectRatio) * scale;
+    const newHeight = baseSize * scale;
+
+    const newTopLeftPixel = [centerPixelX - newWidth / 2, centerPixelY - newHeight / 2];
+    const newBottomRightPixel = [centerPixelX + newWidth / 2, centerPixelY + newHeight / 2];
+
+    const newTopLeftGeo = projection.fromGlobalPixels(newTopLeftPixel, zoom);
+    const newBottomRightGeo = projection.fromGlobalPixels(newBottomRightPixel, zoom);
+
+    // Важно: так как после импорта или привязки растр становится полигоном,
+    // мы не можем просто изменить его bounds. Нужно пересоздать полигон.
+    const newCornersGeo = [
+        newTopLeftGeo, // Верхний-левый
+        [newTopLeftGeo[0], newBottomRightGeo[1]], // Верхний-правый
+        newBottomRightGeo, // Нижний-правый
+        [newBottomRightGeo[0], newTopLeftGeo[1]]  // Нижний-левый
+    ];
+
+    // Создаем новый полигон с новыми координатами
+    const newPolygonOverlay = new ymaps.Polygon([newCornersGeo], {}, {
+        fillImageHref: rasterOverlay.options.get('fillImageHref'),
+        fillMethod: 'stretch',
+        stroke: false,
+        opacity: rasterOverlay.options.get('opacity'),
+        interactivityModel: 'default#transparent'
+    });
+    
+    // Заменяем старый оверлей новым
+    map.geoObjects.remove(rasterOverlay);
+    rasterOverlay = newPolygonOverlay;
+    map.geoObjects.add(rasterOverlay);
+}
 
 
 function copyFilteredCadnums() {
@@ -18083,198 +18850,7 @@ function copyFilteredCadnums() {
 }
 
 
-async function createRasterMapType(imageBlob) {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = (event) => {
-            const imageUrl = event.target.result;
 
-            cleanupRaster(); // Удаляем старый растр, если он есть
-            
-            // Сохраняем текущий тип карты для возврата
-            previousMapType = map.getType();
-
-            // Создаем новый кастомный слой через фабрику
-            const CustomRasterLayer = ymaps.templateLayoutFactory.createClass(
-                '<img src="{{ options.src }}" style="position: absolute; left: 50%; top: 50%; width: 80%; height: auto; transform: translate(-50%, -50%) scale(1); transform-origin: center center;">',
-                {
-                    build: function () {
-                        CustomRasterLayer.superclass.build.call(this);
-                        // Сохраняем ссылку на <img> элемент для дальнейшего управления
-                        this.imgElement = this.getElement().querySelector('img');
-                    },
-                    clear: function () {
-                        CustomRasterLayer.superclass.clear.call(this);
-                        this.imgElement = null;
-                    }
-                }
-            );
-
-            // Создаем слой на основе нашего шаблона
-            rasterLayer = new ymaps.Layer(
-                ymaps.templateLayoutFactory.createClass(''), // Пустой шаблон для самого слоя
-                {
-                    pane: 'ground', // Помещаем слой под геообъекты
-                    template: CustomRasterLayer,
-                    templateOptions: {
-                        src: imageUrl
-                    }
-                }
-            );
-
-            // Регистрируем новый тип карты
-            ymaps.mapType.storage.add('my#raster', new ymaps.MapType('Растр', [rasterLayer]));
-
-            // Переключаем карту на наш новый тип
-            map.setType('my#raster');
-
-            createRasterControls();
-            resolve();
-        };
-        reader.onerror = reject;
-        reader.readAsDataURL(imageBlob);
-    });
-}
-
-
-// Фабрика для создания кастомного слоя, который будет содержать наше изображение
-function createCustomRasterLayer(imgHref) {
-    // Создаем пустой слой. Он будет служить контейнером для <img>
-    const CustomRasterLayer = function () {
-        const layer = new ymaps.Layer('', {
-            // Указываем проекцию, чтобы слой корректно работал с картой
-            projection: ymaps.projection.sphericalMercator
-        });
-        
-        let imgElement;
-
-        // Метод, который вызывается при добавлении слоя на карту
-        layer.onAdd = function (map) {
-            this.setMap(map);
-            imgElement = document.createElement('img');
-            imgElement.src = imgHref;
-            // Стилизуем изображение, чтобы оно позиционировалось относительно центра
-            imgElement.style.position = 'absolute';
-            imgElement.style.transformOrigin = 'center center';
-
-            // Помещаем его в центр контейнера карты при добавлении
-            const mapSize = map.container.getSize();
-            const initialWidth = mapSize[0] * 0.8; // Начальная ширина 80% от карты
-            imgElement.style.width = initialWidth + 'px';
-            imgElement.style.height = 'auto'; // Сохраняем пропорции
-            imgElement.style.left = (mapSize[0] / 2) + 'px';
-            imgElement.style.top = (mapSize[1] / 2) + 'px';
-            imgElement.style.transform = 'translate(-50%, -50%) scale(1)';
-
-            // Добавляем <img> в специальную панель карты для оверлеев
-            this.getMap().panes.get('ground').getElement().appendChild(imgElement);
-            // Сохраняем ссылку на элемент для доступа извне
-            this._img = imgElement;
-        };
-
-        // Метод, который вызывается при удалении слоя с карты
-        layer.onRemove = function () {
-            if (imgElement && imgElement.parentNode) {
-                imgElement.parentNode.removeChild(imgElement);
-            }
-            this.setMap(null);
-        };
-
-        return layer;
-    };
-
-    return new CustomRasterLayer();
-}
-
-// Функция создания панели управления (без ползунка прозрачности)
-function createRasterControls() {
-    rasterControlsPanel = document.createElement('div');
-    rasterControlsPanel.className = 'raster-controls-panel';
-    rasterControlsPanel.innerHTML = `
-        <h4>Растр</h4>
-        <button class="close-btn" title="Удалить растр">&times;</button>
-        <div class="control-group">
-            <div></div><button id="raster-up"><i class="fas fa-arrow-up"></i></button><div></div>
-        </div>
-        <div class="control-group">
-            <button id="raster-left"><i class="fas fa-arrow-left"></i></button>
-            <div></div>
-            <button id="raster-right"><i class="fas fa-arrow-right"></i></button>
-        </div>
-        <div class="control-group">
-            <div></div><button id="raster-down"><i class="fas fa-arrow-down"></i></button><div></div>
-        </div>
-        <input type="range" id="raster-zoom" min="10" max="500" value="100" title="Масштаб">
-    `;
-    document.body.appendChild(rasterControlsPanel);
-
-    rasterControlsPanel.querySelector('#raster-up').addEventListener('click', (e) => { e.stopPropagation(); moveRaster(0, -1); });
-    rasterControlsPanel.querySelector('#raster-down').addEventListener('click', (e) => { e.stopPropagation(); moveRaster(0, 1); });
-    rasterControlsPanel.querySelector('#raster-left').addEventListener('click', (e) => { e.stopPropagation(); moveRaster(-1, 0); });
-    rasterControlsPanel.querySelector('#raster-right').addEventListener('click', (e) => { e.stopPropagation(); moveRaster(1, 0); });
-    rasterControlsPanel.querySelector('#raster-zoom').addEventListener('input', (e) => { e.stopPropagation(); zoomRaster(parseFloat(e.target.value) / 100); });
-    rasterControlsPanel.querySelector('.close-btn').addEventListener('click', (e) => { e.stopPropagation(); cleanupRaster(); });
-
-    // Логика перетаскивания панели
-    let isDraggingPanel = false, panelDragStartX, panelDragStartY;
-    rasterControlsPanel.addEventListener('mousedown', (e) => {
-        if (e.target.tagName === 'BUTTON' || e.target.tagName === 'INPUT' || e.target.tagName === 'I') return;
-        isDraggingPanel = true;
-        panelDragStartX = e.clientX - rasterControlsPanel.offsetLeft;
-        panelDragStartY = e.clientY - rasterControlsPanel.offsetTop;
-    });
-    document.addEventListener('mousemove', (e) => {
-        if (!isDraggingPanel) return;
-        rasterControlsPanel.style.left = `${e.clientX - panelDragStartX}px`;
-        rasterControlsPanel.style.top = `${e.clientY - panelDragStartY}px`;
-    });
-    document.addEventListener('mouseup', () => { isDraggingPanel = false; });
-}
-
-// Функция перемещения растра (изменяет top/left у <img>)
-function moveRaster(dx, dy) {
-    if (!rasterLayer) return;
-    const layout = rasterLayer.getLayoutSync();
-    if (!layout || !layout.imgElement) return;
-
-    const img = layout.imgElement;
-    const moveStep = 2; // Шаг в пикселях
-    const currentLeft = parseFloat(img.style.left) || 0;
-    const currentTop = parseFloat(img.style.top) || 0;
-    img.style.left = `${currentLeft + dx * moveStep}px`;
-    img.style.top = `${currentTop + dy * moveStep}px`;
-}
-
-// Функция масштабирования растра (изменяет CSS transform: scale)
-function zoomRaster(scale) {
-    if (!rasterLayer) return;
-    const layout = rasterLayer.getLayoutSync();
-    if (!layout || !layout.imgElement) return;
-
-    const img = layout.imgElement;
-    // Получаем текущее смещение, чтобы не сбросить его
-    const currentTransform = img.style.transform;
-    const translateMatch = currentTransform.match(/translate\(([^)]+)\)/);
-    const translatePart = translateMatch ? translateMatch[0] : 'translate(-50%, -50%)';
-    
-    img.style.transform = `${translatePart} scale(${scale})`;
-}
-
-// Функция для полной очистки растра
-function cleanupRaster() {
-    if (rasterLayer) {
-        // Проверяем, существует ли тип карты, прежде чем его удалять
-        if (ymaps.mapType.storage.get('my#raster')) {
-            map.setType(previousMapType); // Возвращаемся к предыдущему типу карты
-            ymaps.mapType.storage.remove('my#raster');
-        }
-        rasterLayer = null;
-    }
-    if (rasterControlsPanel) {
-        document.body.removeChild(rasterControlsPanel);
-        rasterControlsPanel = null;
-    }
-}
 
 
 
