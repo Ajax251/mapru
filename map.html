@@ -3983,7 +3983,7 @@ function dataURLToBlob(dataURL) {
 
 
 // Функция для экспорта настроек
-async function exportRasterSettings() {
+async function exportRasterSettingsToFile() {
     if (!rasterOverlay) {
         showNotification('Нет растра для экспорта настроек', 'warning');
         return;
@@ -4064,12 +4064,200 @@ async function pasteRasterFromClipboard() {
     }
 }
 
+async function exportRasterToCloud() {
+    if (!rasterOverlay) {
+        showNotification('Нет растра для экспорта в облако', 'warning');
+        return;
+    }
+
+    // Запрашиваем у пользователя номер квартала
+    const quarterNumber = await promptForQuarterNumber(currentQuarterNumber);
+    if (!quarterNumber) {
+        showNotification('Экспорт отменен', 'info');
+        return;
+    }
+
+    showLoader(`Экспорт растра для ${quarterNumber}...`);
+
+    try {
+        // Собираем данные для .rst архива
+        const corners = getRasterCorners();
+        const imageUrl = rasterOverlay.options.get('fillImageHref');
+        if (!corners || !imageUrl) throw new Error('Не удалось получить данные растра.');
+
+        const settings = {
+            type: "RasterBindingData", version: 1, imageSize: rasterImageSize,
+            opacity: rasterOverlay.options.get('opacity'), corners: corners
+        };
+        const imageBlob = dataURLToBlob(imageUrl);
+        const imageExtension = imageBlob.type.split('/')[1] || 'jpg';
+
+        const zip = new JSZip();
+        zip.file('raster-settings.json', JSON.stringify(settings, null, 2));
+        zip.file(`raster.${imageExtension}`, imageBlob);
+        const zipBlob = await zip.generateAsync({ type: "blob", compression: "DEFLATE", level: 9 });
+
+        const filename = quarterNumber.replace(/:/g, '_') + '.rst';
+        const formData = new FormData();
+        formData.append('file', new File([zipBlob], filename, { type: 'application/zip' }));
+
+        // Отправляем на тот же эндпоинт, что и для *.nspd
+        const response = await fetch(`${STORAGE_API_URL}/nspd/upload`, {
+            method: 'POST',
+            body: formData,
+        });
+
+        if (!response.ok) {
+            const errorData = await response.json().catch(() => ({ error: `Сервер ответил ошибкой: ${response.statusText}` }));
+            throw new Error(errorData.error);
+        }
+
+        showNotification(`Растр для квартала ${quarterNumber} успешно загружен`, 'success');
+    } catch (error) {
+        console.error("Ошибка экспорта растра в облако:", error);
+        showNotification(`Ошибка экспорта: ${error.message}`, 'error');
+    } finally {
+        hideLoader();
+    }
+}
+
+// Функция для импорта растра с сервера
+async function importRasterFromCloud() {
+    let quarterNumber = currentQuarterNumber;
+
+    if (!quarterNumber) {
+        quarterNumber = await promptForQuarterNumber();
+    }
+    
+    if (!quarterNumber) {
+        showNotification('Импорт отменен', 'info');
+        return;
+    }
+
+    showLoader(`Поиск растра для ${quarterNumber}...`);
+
+    try {
+        const filename = quarterNumber.replace(/:/g, '_') + '.rst';
+        // Запрашиваем файл с того же эндпоинта, что и для *.nspd
+        const response = await fetch(`${STORAGE_API_URL}/nspd/${filename}`);
+
+        if (!response.ok) {
+            if (response.status === 404) {
+                throw new Error(`Привязанный растр для квартала ${quarterNumber} не найден на сервере.`);
+            } else {
+                throw new Error(`Ошибка сервера: ${response.statusText}`);
+            }
+        }
+
+        const zipBlob = await response.blob();
+        
+        // Передаем blob в существующую логику импорта
+        await processImportedZipBlob(zipBlob);
+
+    } catch (error) {
+        console.error("Ошибка импорта растра из облака:", error);
+        showNotification(`Ошибка импорта: ${error.message}`, 'error');
+    } finally {
+        hideLoader();
+    }
+}
+
+// Новая вспомогательная функция для запроса номера квартала
+async function promptForQuarterNumber(defaultValue = '') {
+    return new Promise((resolve) => {
+        const modal = document.createElement('div');
+        modal.className = 'color-modal';
+        modal.style.width = '400px';
+        modal.innerHTML = `
+            <div class="color-modal-content">
+                <h3 style="margin-top:0;">Введите номер квартала</h3>
+                <input type="text" id="quarter-prompt-input" value="${defaultValue}" style="width: 80%; padding: 10px; border-radius: 8px; border: 1px solid #ccc; margin-bottom: 20px; text-align: center; font-size: 1rem;">
+                <div class="buttons">
+                    <button id="prompt-ok-btn" class="apply-btn"><i class="fas fa-check"></i> OK</button>
+                    <button id="prompt-cancel-btn" class="cancel-btn"><i class="fas fa-times"></i> Отмена</button>
+                </div>
+            </div>
+        `;
+        document.body.appendChild(modal);
+        modal.style.display = 'block';
+
+        const input = document.getElementById('quarter-prompt-input');
+        const okBtn = document.getElementById('prompt-ok-btn');
+        const cancelBtn = document.getElementById('prompt-cancel-btn');
+        input.focus();
+        input.select();
+
+        const close = (value) => {
+            document.body.removeChild(modal);
+            resolve(value);
+        };
+
+        okBtn.onclick = () => {
+            const value = input.value.trim();
+            if (value && isCadastralQuarter(value)) {
+                close(value);
+            } else {
+                showNotification('Введите корректный номер квартала (например, 16:56:010115)', 'warning');
+            }
+        };
+        cancelBtn.onclick = () => close(null);
+        modal.addEventListener('click', e => { if (e.target === modal) close(null); });
+        input.onkeydown = (e) => { if (e.key === 'Enter') okBtn.click(); if (e.key === 'Escape') cancelBtn.click(); };
+    });
+}
+
+
+async function processImportedZipBlob(zipBlob) {
+    const zip = await JSZip.loadAsync(zipBlob);
+    const settingsFile = zip.file('raster-settings.json');
+
+    let imageFile = zip.file(/^raster\.(?!json).+$/i)[0];
+  
+
+    if (!settingsFile || !imageFile) {
+        throw new Error('Архив не содержит необходимых файлов (settings.json и изображения).');
+    }
+
+    const settingsText = await settingsFile.async('string');
+    const imageBlob = await imageFile.async('blob');
+    const settings = JSON.parse(settingsText);
+
+    if (settings.type !== "RasterBindingData" || !settings.corners || settings.corners.length !== 4) {
+        throw new Error('Некорректный формат файла настроек.');
+    }
+
+    const imageReader = new FileReader();
+    imageReader.readAsDataURL(imageBlob);
+    await new Promise((resolve, reject) => {
+        imageReader.onload = (imgEvent) => {
+            const newPolygonOverlay = new ymaps.Polygon([settings.corners], {}, {
+                fillImageHref: imgEvent.target.result,
+                fillMethod: 'stretch',
+                stroke: false,
+                opacity: settings.opacity || 0.8,
+                interactivityModel: 'default#transparent'
+            });
+
+            if (rasterOverlay) map.geoObjects.remove(rasterOverlay);
+            if (!rasterControlsPanel) createRasterControls();
+
+            rasterOverlay = newPolygonOverlay;
+            rasterImageSize = settings.imageSize;
+            map.geoObjects.add(rasterOverlay);
+
+            rasterControlsPanel.querySelector('#raster-opacity').value = settings.opacity || 0.8;
+            showNotification('Растр и настройки успешно импортированы!', 'success');
+            resolve();
+        };
+        imageReader.onerror = () => reject(new Error('Не удалось прочитать файл изображения из архива.'));
+    });
+}
+
 // Функция для импорта настроек и изображения из ZIP
-function importRasterSettings() {
-    // <<< ИЗМЕНЕНИЕ: Проверка if (!rasterOverlay) удалена >>>
+function importRasterSettingsFromFile() {
     const input = document.createElement('input');
     input.type = 'file';
-     input.accept = '.rst';
+    input.accept = '.rst';
 
     input.onchange = e => {
         const file = e.target.files[0];
@@ -4079,71 +4267,17 @@ function importRasterSettings() {
         const reader = new FileReader();
         reader.onload = async (event) => {
             try {
-                const zip = await JSZip.loadAsync(event.target.result);
-
-                const settingsFile = zip.file('raster-settings.json');
-                let imageFile = zip.file(/raster\.(jpg|jpeg|png|gif|bmp)/i)[0];
-
-                if (!settingsFile || !imageFile) {
-                    throw new Error('Архив должен содержать raster-settings.json и файл изображения.');
-                }
-
-                const settingsText = await settingsFile.async('string');
-                const imageBlob = await imageFile.async('blob');
-                const settings = JSON.parse(settingsText);
-
-                // Валидация JSON
-                if (settings.type !== "RasterBindingData" || !settings.corners || settings.corners.length !== 4) {
-                    throw new Error('Некорректный формат файла настроек.');
-                }
-                
-                // Используем FileReader, чтобы получить Data URL из Blob для fillImageHref
-                const imageReader = new FileReader();
-                imageReader.onload = (imgEvent) => {
-                    // Создаем новый полигон с импортированными настройками и изображением
-                    const newPolygonOverlay = new ymaps.Polygon([settings.corners], {}, {
-                        fillImageHref: imgEvent.target.result,
-                        fillMethod: 'stretch',
-                        stroke: false,
-                        opacity: settings.opacity || 0.8,
-                        interactivityModel: 'default#transparent'
-                    });
-
-                    // Удаляем старый растр (если он есть)
-                    if (rasterOverlay) {
-                        map.geoObjects.remove(rasterOverlay);
-                    }
-                    
-                    // Если панели управления еще нет (маловероятно, но возможно), создаем ее
-                    if (!rasterControlsPanel) {
-                        createRasterControls();
-                    }
-
-                    // Устанавливаем новый растр
-                    rasterOverlay = newPolygonOverlay;
-                    rasterImageSize = settings.imageSize; // Восстанавливаем исходный размер
-                    map.geoObjects.add(rasterOverlay);
-                    
-                    // Обновляем ползунок прозрачности на существующей панели
-                    if (rasterControlsPanel) {
-                        rasterControlsPanel.querySelector('#raster-opacity').value = settings.opacity || 0.8;
-                    }
-                    
-                    showNotification('Растр успешно импортирован', 'success');
-                    hideLoader();
-                };
-                imageReader.onerror = () => { throw new Error('Не удалось прочитать файл изображения из архива.'); };
-                imageReader.readAsDataURL(imageBlob);
-
+                // Просто передаем blob в новую общую функцию
+                await processImportedZipBlob(new Blob([event.target.result]));
             } catch (error) {
-                console.error("Ошибка импорта настроек:", error);
+                console.error("Ошибка импорта настроек из файла:", error);
                 showNotification(`Ошибка импорта: ${error.message}`, 'error');
+            } finally {
                 hideLoader();
             }
         };
         reader.readAsArrayBuffer(file);
     };
-
     input.click();
 }
 
@@ -18475,7 +18609,6 @@ function createRasterControls() {
     rasterControlsPanel = document.createElement('div');
     rasterControlsPanel.className = 'raster-controls-panel';
     
-    // <<< ИЗМЕНЕНИЕ: Добавлена кнопка raster-paste-btn >>>
     rasterControlsPanel.innerHTML = `
         <h4>Растр</h4>
         <button class="close-btn" title="Удалить растр">&times;</button>
@@ -18491,16 +18624,20 @@ function createRasterControls() {
             <div></div><button id="raster-down"><i class="fas fa-arrow-down"></i></button><div></div>
         </div>
         <div class="control-group" style="justify-content: space-evenly; margin-top: 5px;">
-            <button id="raster-export-btn" title="Экспорт настроек растра"><i class="fas fa-download"></i></button>
-            <button id="raster-import-btn" title="Импорт настроек растра"><i class="fas fa-upload"></i></button>
+            <button id="raster-export-file-btn" title="Экспорт в файл"><i class="fas fa-download"></i></button>
+            <button id="raster-import-file-btn" title="Импорт из файла"><i class="fas fa-upload"></i></button>
             <button id="raster-paste-btn" title="Вставить из буфера обмена"><i class="fas fa-paste"></i></button>
+        </div>
+        <div class="control-group" style="justify-content: space-evenly; margin-top: 5px;">
+             <button id="raster-export-cloud-btn" title="Экспорт в облако"><i class="fas fa-cloud-upload-alt"></i></button>
+             <button id="raster-import-cloud-btn" title="Импорт из облака"><i class="fas fa-cloud-download-alt"></i></button>
         </div>
         <input type="range" id="raster-zoom" min="10" max="500" value="100" title="Масштаб">
         <input type="range" id="raster-opacity" min="0" max="1" step="0.05" value="0.8" title="Прозрачность">
     `;
     document.body.appendChild(rasterControlsPanel);
 
-    // Обработчики событий для кнопок и ползунков
+    // Обработчики событий
     rasterControlsPanel.querySelector('#raster-up').addEventListener('click', (e) => { e.stopPropagation(); moveRaster(0, -1); });
     rasterControlsPanel.querySelector('#raster-down').addEventListener('click', (e) => { e.stopPropagation(); moveRaster(0, 1); });
     rasterControlsPanel.querySelector('#raster-left').addEventListener('click', (e) => { e.stopPropagation(); moveRaster(-1, 0); });
@@ -18516,27 +18653,15 @@ function createRasterControls() {
         rasterControlsPanel = null;
     });
     
-    rasterControlsPanel.querySelector('#raster-bind-btn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        startBindingProcess();
-    });
+    rasterControlsPanel.querySelector('#raster-bind-btn').addEventListener('click', (e) => { e.stopPropagation(); startBindingProcess(); });
+    rasterControlsPanel.querySelector('#raster-export-file-btn').addEventListener('click', (e) => { e.stopPropagation(); exportRasterSettingsToFile(); });
+    rasterControlsPanel.querySelector('#raster-import-file-btn').addEventListener('click', (e) => { e.stopPropagation(); importRasterSettingsFromFile(); });
+    rasterControlsPanel.querySelector('#raster-paste-btn').addEventListener('click', (e) => { e.stopPropagation(); pasteRasterFromClipboard(); });
     
-    rasterControlsPanel.querySelector('#raster-export-btn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        exportRasterSettings();
-    });
+    // <<< НОВЫЕ ОБРАБОТЧИКИ >>>
+    rasterControlsPanel.querySelector('#raster-export-cloud-btn').addEventListener('click', (e) => { e.stopPropagation(); exportRasterToCloud(); });
+    rasterControlsPanel.querySelector('#raster-import-cloud-btn').addEventListener('click', (e) => { e.stopPropagation(); importRasterFromCloud(); });
 
-    rasterControlsPanel.querySelector('#raster-import-btn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        importRasterSettings();
-    });
-
-    // <<< ИЗМЕНЕНИЕ: Добавлен обработчик для новой кнопки "Вставить" >>>
-    rasterControlsPanel.querySelector('#raster-paste-btn').addEventListener('click', (e) => {
-        e.stopPropagation();
-        pasteRasterFromClipboard();
-    });
-    
     // Логика перетаскивания панели
     let isDraggingPanel = false;
     let panelDragStartX, panelDragStartY;
@@ -18551,9 +18676,7 @@ function createRasterControls() {
         rasterControlsPanel.style.left = `${e.clientX - panelDragStartX}px`;
         rasterControlsPanel.style.top = `${e.clientY - panelDragStartY}px`;
     });
-    document.addEventListener('mouseup', () => {
-        isDraggingPanel = false;
-    });
+    document.addEventListener('mouseup', () => { isDraggingPanel = false; });
 }
 
 
