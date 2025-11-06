@@ -538,6 +538,15 @@
     .btn-egrn:hover {
         background-color: #218838;
     }
+    
+    .btn-check {
+        background-color: #fd7e14; /* Оранжевый */
+        color: white;
+    }
+
+    .btn-check:hover {
+        background-color: #e86a00;
+    }
 
 
     </style>
@@ -567,6 +576,7 @@
             <button class="custom-button btn-copy" onclick="copyClickedCoords()"><i class="fas fa-copy icon"></i>Копировать</button>
             <button class="custom-button btn-csv" onclick="exportToCSV()"><i class="fas fa-file-excel icon"></i>Экспорт в CSV</button>
             <button class="custom-button" onclick="deleteSelectedLine()">Удалить строку</button>
+              <button class="custom-button btn-check" onclick="runVerification()">Проверить</button>
         </div>
     </div>
     <div id="notification"></div>
@@ -616,6 +626,8 @@
     
 <script>
 let clickedX, clickedY;
+let verificationContour = null; 
+let problematicPoint = null; 
 let highlightCircle = null;
 let pulseCircle = null;
 let hoveredPoint = null;
@@ -860,6 +872,158 @@ function drawContour(coords1, coords2) {
             }, 1000);
         }
     };
+    
+    
+    
+        if (verificationContour && verificationContour.length > 0) {
+        // Соединение линий нового контура
+        ctx.beginPath();
+        verificationContour.forEach(([x, y], index) => {
+            const [canvasX, canvasY] = transformCoords(x, y);
+            if (index === 0) ctx.moveTo(canvasX, canvasY);
+            else ctx.lineTo(canvasX, canvasY);
+        });
+        ctx.strokeStyle = 'orange';
+        ctx.lineWidth = 3; // Делаем линию жирной для наглядности
+        ctx.stroke();
+        
+        // Отрисовка точек нового контура
+        verificationContour.forEach(([x, y], index) => {
+            const [canvasX, canvasY] = transformCoords(x, y);
+            ctx.beginPath();
+            ctx.arc(canvasX, canvasY, 4, 0, 2 * Math.PI);
+            ctx.fillStyle = 'orange';
+            ctx.fill();
+        });
+
+        ctx.lineWidth = 1; // Возвращаем толщину линии по умолчанию
+    }
+    
+       if (problematicPoint) {
+        const [canvasX, canvasY] = transformCoords(problematicPoint.x, problematicPoint.y);
+        ctx.strokeStyle = 'red';
+        ctx.fillStyle = 'rgba(255, 0, 0, 0.2)';
+        ctx.lineWidth = 3;
+        
+        ctx.beginPath();
+        ctx.arc(canvasX, canvasY, 15, 0, 2 * Math.PI); // Большой круг
+        ctx.fill();
+        ctx.stroke();
+        
+        // Перекрестие для акцента
+        ctx.beginPath();
+        ctx.moveTo(canvasX - 10, canvasY);
+        ctx.lineTo(canvasX + 10, canvasY);
+        ctx.moveTo(canvasX, canvasY - 10);
+        ctx.lineTo(canvasX, canvasY + 10);
+        ctx.stroke();
+        
+        ctx.lineWidth = 1;
+    }
+    
+}
+
+
+function runVerification() {
+    // Сброс предыдущих результатов
+    verificationContour = null;
+    problematicPoint = null;
+
+    const initialCoordsText = document.getElementById('coordsInput2').value.trim();
+    const changesText = document.getElementById('clickedCoords').value.trim();
+
+    if (!initialCoordsText || !changesText) {
+        showNotification("Ошибка: Поля с исходным контуром и изменениями должны быть заполнены.", 4000);
+        return;
+    }
+
+    const initialPoints = initialCoordsText.split('\n').map(line => {
+        const parts = line.split('\t');
+        const x = parseFloat(parts[0].replace(',', '.'));
+        const y = parseFloat(parts[1].replace(',', '.'));
+        return (!isNaN(x) && !isNaN(y)) ? { x, y } : null;
+    }).filter(Boolean);
+
+    // ШАГ 1: Парсим таблицу изменений на ДВА списка: новый сегмент и явно удаленные точки.
+    const newSegmentPoints = [];
+    const explicitlyDeletedPoints = [];
+    changesText.split('\n').forEach(line => {
+        const parts = line.split('\t');
+        if (parts.length < 5) return;
+
+        const oldX = parseFloat(parts[parts.length - 4].replace(',', '.'));
+        const oldY = parseFloat(parts[parts.length - 3].replace(',', '.'));
+        const newXStr = parts[parts.length - 2].trim().toLowerCase();
+        const newYStr = parts[parts.length - 1].trim().toLowerCase();
+
+        if (newXStr === 'л' || newYStr === 'л') {
+            if (!isNaN(oldX) && !isNaN(oldY)) explicitlyDeletedPoints.push({ x: oldX, y: oldY });
+            return; // Точка удалена, в новый контур не идет
+        }
+        
+        let x, y;
+        const newX = parseFloat(newXStr.replace(',', '.'));
+        const newY = parseFloat(newYStr.replace(',', '.'));
+        if (!isNaN(newX) && !isNaN(newY)) { x = newX; y = newY; } 
+        else if (!isNaN(oldX) && !isNaN(oldY)) { x = oldX; y = oldY; }
+        
+        if (x !== undefined) newSegmentPoints.push({ x, y });
+    });
+
+    if (newSegmentPoints.length < 2) {
+        showNotification("Ошибка: Для проверки нужно как минимум 2 точки в итоговой границе.", 4000);
+        return;
+    }
+    
+    // ШАГ 2: Находим узловые точки и СТАРЫЙ сегмент
+    const findPointIndex = (p, arr) => arr.findIndex(item => Math.abs(item.x - p.x) < 0.01 && Math.abs(item.y - p.y) < 0.01);
+    
+    const startIndex = findPointIndex(newSegmentPoints[0], initialPoints);
+    const endIndex = findPointIndex(newSegmentPoints[newSegmentPoints.length - 1], initialPoints);
+
+    if (startIndex === -1 || endIndex === -1) {
+        showNotification("КРИТИЧЕСКАЯ ОШИБКА: Начальная и/или конечная точка нового сегмента не найдены в исходном контуре!", 6000);
+        return;
+    }
+
+    // ШАГ 3: Главная проверка. Находим все точки старого сегмента, которые должны были быть обработаны.
+    const oldSegmentInternalPoints = (startIndex < endIndex) 
+        ? initialPoints.slice(startIndex + 1, endIndex) 
+        : initialPoints.slice(endIndex + 1, startIndex);
+
+    for (const internalPoint of oldSegmentInternalPoints) {
+        // Проверяем, была ли эта точка явно удалена
+        const wasDeleted = findPointIndex(internalPoint, explicitlyDeletedPoints) !== -1;
+        // Проверяем, была ли эта точка переопределена (т.е. присутствует в новом сегменте)
+        const wasRedefined = findPointIndex(internalPoint, newSegmentPoints) !== -1;
+
+        if (!wasDeleted && !wasRedefined) {
+            // ОШИБКА! Найдена "забытая" точка
+            problematicPoint = internalPoint;
+            showNotification(`ОШИБКА: Точка с коорд. ${internalPoint.x.toFixed(2)}, ${internalPoint.y.toFixed(2)} не была удалена или переопределена!`, 7000);
+            drawContour(initialCoordsText.split('\n'), initialCoordsText.split('\n')); // Перерисовываем для отображения ошибки
+            return;
+        }
+    }
+    
+    // ШАГ 4: Если все проверки пройдены, строим новый контур
+    let newContourPoints = [];
+    if (startIndex < endIndex) {
+        newContourPoints.push(...initialPoints.slice(0, startIndex), ...newSegmentPoints, ...initialPoints.slice(endIndex + 1));
+    } else {
+        newContourPoints.push(...newSegmentPoints, ...initialPoints.slice(endIndex + 1, startIndex));
+    }
+
+    // Проверка на замкнутость
+    const first = newContourPoints[0], last = newContourPoints[newContourPoints.length - 1];
+    if (Math.abs(first.x - last.x) > 0.01 || Math.abs(first.y - last.y) > 0.01) {
+        showNotification("ВНИМАНИЕ: Итоговый контур (оранжевый) не замкнут!", 6000);
+    } else {
+        showNotification("Проверка выполнена. Новый контур отрисован оранжевым.", 3000);
+    }
+
+    verificationContour = newContourPoints.map(p => [p.x, p.y]);
+    drawContour(document.getElementById('coordsInput1').value.split('\n'), initialCoordsText.split('\n'));
 }
 
 function startDragging(e) {
@@ -1046,6 +1210,8 @@ function parseMIFCoordinates(content) {
 }
 
 function handleInput() {
+       verificationContour = null;
+         problematicPoint = null; 
     const input1 = document.getElementById('coordsInput1').value.trim();
     const input2 = document.getElementById('coordsInput2').value.trim();
     const coords1 = input1.split('\n').filter(line => line.trim() !== '');
