@@ -1,0 +1,516 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Обработчик Единых Землепользований (ЕЗ)</title>
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, 'Helvetica Neue', Arial, sans-serif;
+            margin: 20px;
+            background-color: #f4f7f6;
+            color: #333;
+        }
+        .container {
+            background-color: #fff;
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 4px 12px rgba(0,0,0,0.1);
+            max-width: 800px;
+            margin: auto;
+        }
+        h1 {
+            text-align: center;
+            color: #2c3e50;
+            border-bottom: 2px solid #3498db;
+            padding-bottom: 10px;
+            margin-top: 0;
+        }
+        textarea {
+            width: calc(100% - 22px);
+            height: 150px;
+            padding: 10px;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            margin-bottom: 10px;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 14px;
+        }
+        .controls {
+            margin-bottom: 20px;
+            display: flex;
+            gap: 10px;
+            flex-wrap: wrap;
+        }
+        .controls button {
+            padding: 12px 18px;
+            border: none;
+            border-radius: 5px;
+            cursor: pointer;
+            font-size: 16px;
+            font-weight: 500;
+            transition: all 0.2s ease;
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        .controls button:hover:not(:disabled) {
+            transform: translateY(-2px);
+            box-shadow: 0 4px 8px rgba(0,0,0,0.15);
+        }
+        .controls button:active:not(:disabled) {
+            transform: translateY(0);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+        #processEzButton { background-color: #8e44ad; color: white; }
+        #processEzButton:hover:not(:disabled) { background-color: #732d91; }
+        
+        #pauseResumeButton { background-color: #f39c12; color: white; }
+        #pauseResumeButton:hover:not(:disabled) { background-color: #d35400; }
+
+        #stopButton { background-color: #e74c3c; color: white; }
+        #stopButton:hover:not(:disabled) { background-color: #c0392b; }
+
+        button:disabled {
+            background-color: #bdc3c7;
+            cursor: not-allowed;
+            transform: none;
+            box-shadow: none;
+        }
+
+        .progress-container {
+            width: 100%;
+            background-color: #e0e0e0;
+            border-radius: 5px;
+            margin-top: 20px;
+            overflow: hidden;
+            box-shadow: inset 0 1px 3px rgba(0,0,0,0.1);
+        }
+        .progress-bar {
+            width: 0%;
+            height: 30px;
+            background: linear-gradient(45deg, #3498db, #2980b9);
+            text-align: center;
+            line-height: 30px;
+            color: white;
+            font-weight: bold;
+            transition: width 0.4s ease;
+        }
+        #statusLog {
+            margin-top: 20px;
+            padding: 15px;
+            border: 1px solid #ddd;
+            border-radius: 4px;
+            height: 250px;
+            overflow-y: auto;
+            background-color: #fdfdfd;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 13px;
+            line-height: 1.6;
+        }
+        .log-entry {
+            padding: 3px 0;
+            border-bottom: 1px solid #f0f0f0;
+        }
+        .log-entry:last-child { border-bottom: none; }
+        .log-error { color: #c0392b; font-weight: bold; }
+        .log-success { color: #27ae60; font-weight: bold; }
+        .log-info { color: #2980b9; }
+        .log-warning { color: #d35400; }
+
+        #failedItemsOutput { display: none; } /* Скрываем, так как обрабатываем только один ЕЗ */
+        label[for="failedItemsOutput"] { display: none; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Обработчик Единых Землепользований (ЕЗ)</h1>
+
+        <label for="numberListInput">Кадастровый номер ЕЗ:</label>
+        <textarea id="numberListInput" placeholder="Введите один кадастровый номер ЕЗ, например: 16:05:000000:55"></textarea>
+
+        <div class="controls">
+            <button id="processEzButton">Обработать ЕЗ и загрузить архив</button>
+            <button id="pauseResumeButton" disabled>Пауза</button>
+            <button id="stopButton" disabled>Стоп</button>
+        </div>
+
+        <div class="progress-container">
+            <div class="progress-bar" id="progressBar">0%</div>
+        </div>
+
+        <div id="statusLog"></div>
+        <textarea id="failedItemsOutput" readonly></textarea>
+    </div>
+
+    <script>
+        // --- DOM Elements ---
+        const numberListInput = document.getElementById('numberListInput');
+        const processEzButton = document.getElementById('processEzButton');
+        const pauseResumeButton = document.getElementById('pauseResumeButton');
+        const stopButton = document.getElementById('stopButton');
+        const progressBar = document.getElementById('progressBar');
+        const statusLog = document.getElementById('statusLog');
+        const failedItemsOutput = document.getElementById('failedItemsOutput');
+
+        // --- State Variables ---
+        let currentEzNumber = '';
+        let isPaused = false;
+        let isProcessingStopped = false;
+        let processStartTime;
+        
+        let zuListForCurrentEz = [];
+        let quartersGrouped = new Map();
+        let quarterProcessingQueue = [];
+        let currentQuarterIndex = 0;
+        let aggregatedParcelsForCurrentEz = [];
+        let failedQuarters = new Set();
+
+        // --- Utility Functions ---
+        function logMessage(message, type = 'info') {
+            const entry = document.createElement('div');
+            entry.className = `log-entry log-${type}`;
+            const timestamp = new Date().toLocaleTimeString();
+            entry.textContent = `[${timestamp}] ${message}`;
+            statusLog.appendChild(entry);
+            statusLog.scrollTop = statusLog.scrollHeight;
+        }
+
+        function updateProgressBar() {
+            const totalQuarters = quarterProcessingQueue.length;
+            if (totalQuarters === 0) {
+                 progressBar.style.width = `0%`;
+                 progressBar.textContent = `0%`;
+                 return;
+            }
+            const progress = (currentQuarterIndex / totalQuarters) * 100;
+            progressBar.style.width = `${progress}%`;
+            progressBar.textContent = `${Math.round(progress)}% (Квартал ${currentQuarterIndex}/${totalQuarters})`;
+        }
+
+        function delay(ms) {
+            return new Promise(resolve => setTimeout(resolve, ms));
+        }
+
+        function resetUIAndState() {
+            processEzButton.disabled = false;
+            pauseResumeButton.disabled = true;
+            pauseResumeButton.textContent = 'Пауза';
+            stopButton.disabled = true;
+
+            isPaused = false;
+            isProcessingStopped = false;
+            currentEzNumber = '';
+            processStartTime = null;
+            
+            zuListForCurrentEz = [];
+            quartersGrouped.clear();
+            quarterProcessingQueue = [];
+            currentQuarterIndex = 0;
+            aggregatedParcelsForCurrentEz = [];
+            failedQuarters.clear();
+
+            updateProgressBar();
+        }
+
+        function disableActionButtons() {
+            processEzButton.disabled = true;
+            pauseResumeButton.disabled = false;
+            stopButton.disabled = false;
+        }
+        
+        // --- NSPDRU API Functions ---
+        
+        async function getZuListForEzFromNspd(ezNumber) {
+            logMessage(`NSPDRU: Запрос состава ЕЗ ${ezNumber}...`, 'info');
+            try {
+                // Step 1: Get object info to find its ID and registersId
+                const searchUrl = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?query=${encodeURIComponent(ezNumber)}&thematicSearchId=1`;
+                const searchResponse = await fetch(searchUrl);
+                if (!searchResponse.ok) throw new Error(`Ошибка ${searchResponse.status} при поиске объекта ЕЗ`);
+                
+                const searchData = await searchResponse.json();
+                const feature = searchData?.data?.features?.[0];
+                if (!feature) throw new Error('Объект ЕЗ не найден в НСПД.');
+                
+                const objdocId = feature.id;
+                const registersId = feature.properties?.options?.registersId;
+                if (!objdocId || !registersId) throw new Error('Не удалось получить ID для запроса состава ЕЗ.');
+                
+                // Step 2: Get the list of constituent parcels (ZU)
+                const compositionUrl = `https://nspd.gov.ru/api/geoportal/v1/tab-values-data?tabClass=compositionLand&objdocId=${objdocId}&registersId=${registersId}`;
+                const compositionResponse = await fetch(compositionUrl);
+                if (!compositionResponse.ok) throw new Error(`Ошибка ${compositionResponse.status} при запросе состава ЕЗ`);
+
+                const compositionData = await compositionResponse.json();
+                const zuList = compositionData?.value;
+                if (!zuList || !Array.isArray(zuList) || zuList.length === 0) {
+                     throw new Error('Не удалось получить список участков (пустой ответ).');
+                }
+
+                logMessage(`NSPDRU: Для ЕЗ ${ezNumber} найдено ${zuList.length} входящих участков.`, 'success');
+                return zuList;
+
+            } catch(error) {
+                logMessage(`NSPDRU: ${error.message}`, 'error');
+                console.error(error);
+                return null;
+            }
+        }
+        
+        async function fetchParcelDataForQuarter(quarterNumber) {
+            try {
+                const quarterGeomUrl = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=2&query=${quarterNumber}`;
+                const quarterResponse = await fetch(quarterGeomUrl);
+                if (!quarterResponse.ok) throw new Error(`HTTP ${quarterResponse.status} при запросе геометрии`);
+
+                const quarterData = await quarterResponse.json();
+                if (!quarterData?.data?.features?.length || !quarterData.data.features[0]?.geometry) {
+                    throw new Error('Геометрия квартала не найдена.');
+                }
+                const quarterFeature = quarterData.data.features[0];
+
+                const requestBody = {
+                    "geom": { "type": "FeatureCollection", "features": [{ "type": "Feature", "geometry": quarterFeature.geometry, "properties": {} }] },
+                    "categories": [{ "id": 36368 }]
+                };
+                const parcelsUrl = 'https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject';
+                const parcelsResponse = await fetch(parcelsUrl, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody) });
+                if (!parcelsResponse.ok) throw new Error(`HTTP ${parcelsResponse.status} при запросе участков`);
+
+                const parcelsData = await parcelsResponse.json();
+                return parcelsData.features || [];
+            } catch (error) {
+                logMessage(`NSPDRU: Ошибка при полной загрузке квартала ${quarterNumber}: ${error.message}`, 'error');
+                console.error(error);
+                failedQuarters.add(quarterNumber);
+                return null;
+            }
+        }
+
+        async function fetchSingleParcelData(cadastralNumber) {
+            try {
+                const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?query=${encodeURIComponent(cadastralNumber)}&thematicSearchId=1`;
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(`HTTP ${response.status}`);
+
+                const data = await response.json();
+                const feature = data?.data?.features?.[0];
+                if (!feature) throw new Error('Объект не найден.');
+                
+                return feature;
+            } catch (error) {
+                logMessage(`NSPDRU: Ошибка при загрузке участка ${cadastralNumber}: ${error.message}`, 'error');
+                console.error(error);
+                return null;
+            }
+        }
+
+        // --- Data Grouping and Logic Functions ---
+        
+        function groupZusByQuarter(zuList) {
+            const groups = new Map();
+            zuList.forEach(zu => {
+                const parts = zu.split(':');
+                if (parts.length >= 3) {
+                    const quarter = parts.slice(0, 3).join(':');
+                    if (!groups.has(quarter)) {
+                        groups.set(quarter, []);
+                    }
+                    groups.get(quarter).push(zu);
+                }
+            });
+            return groups;
+        }
+
+        // --- ZIP and Upload Functions ---
+        
+        async function generateZipBlob(features, internalJsonFilename) {
+            if (!features || features.length === 0) throw new Error("Нет данных для создания ZIP.");
+            const jsonData = JSON.stringify(features); // Убрал форматирование для компактности
+            const zip = new JSZip();
+            zip.file(internalJsonFilename, jsonData);
+            return await zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 9 } });
+        }
+
+        async function uploadEzFileToServer(zipBlob, zipFilename) {
+            // *** ИСПРАВЛЕНО: Указана правильная папка 'EZ' ***
+            const UPLOAD_URL = 'https://mapruapp.ru/storage/EZ/upload';
+            logMessage(`Загрузка архива ${zipFilename} на сервер...`, 'info');
+            try {
+                const formData = new FormData();
+                formData.append('file', new File([zipBlob], zipFilename, { type: 'application/zip' }));
+                
+                const response = await fetch(UPLOAD_URL, {
+                    method: 'POST',
+                    body: formData,
+                });
+
+                if (!response.ok) {
+                    const errorData = await response.json().catch(() => ({ error: `Сервер ответил ошибкой: ${response.statusText}` }));
+                    throw new Error(errorData.error);
+                }
+                
+                const responseData = await response.json();
+                logMessage(`Архив ${zipFilename} успешно загружен!`, 'success');
+                console.log('Ответ сервера:', responseData);
+                return true;
+            } catch (error) {
+                logMessage(`Ошибка загрузки архива: ${error.message}`, 'error');
+                console.error(error);
+                return false;
+            }
+        }
+
+        // --- Main Processing Logic ---
+
+        async function processNextQuarter() {
+            if (isProcessingStopped) {
+                logMessage("Обработка остановлена.", 'warning');
+                finalizeProcessing();
+                return;
+            }
+            if (isPaused) {
+                logMessage("Обработка на паузе.", 'info');
+                return;
+            }
+
+            if (currentQuarterIndex >= quarterProcessingQueue.length) {
+                await finalizeProcessing();
+                return;
+            }
+
+            updateProgressBar();
+            const quarter = quarterProcessingQueue[currentQuarterIndex];
+            const zusInQuarter = quartersGrouped.get(quarter);
+            const parcelCount = zusInQuarter.length;
+
+            logMessage(`Обработка квартала ${quarter} (${parcelCount} участков)...`, 'info');
+
+            if (parcelCount > 10) {
+                // Bulk fetch
+                logMessage(`Метод: Полная загрузка квартала (участков > 10).`, 'info');
+                const allParcelsInQuarter = await fetchParcelDataForQuarter(quarter);
+                if (allParcelsInQuarter) {
+                    const targetZuSet = new Set(zusInQuarter);
+                    const filteredParcels = allParcelsInQuarter.filter(f => targetZuSet.has(f.properties?.descr));
+                    aggregatedParcelsForCurrentEz.push(...filteredParcels);
+                    logMessage(`Из квартала ${quarter} отфильтровано и добавлено ${filteredParcels.length} из ${zusInQuarter.length} целевых участков.`, 'success');
+                } else {
+                    logMessage(`Не удалось загрузить квартал ${quarter}. Участки из него не будут добавлены.`, 'error');
+                }
+            } else {
+                // Individual fetch
+                logMessage(`Метод: Поштучная загрузка участков (участков <= 10).`, 'info');
+                for (const zu of zusInQuarter) {
+                     if (isProcessingStopped || isPaused) break; // Check before each fetch
+                     logMessage(`Загрузка участка ${zu}...`, 'info');
+                     const parcelFeature = await fetchSingleParcelData(zu);
+                     if (parcelFeature) {
+                         aggregatedParcelsForCurrentEz.push(parcelFeature);
+                     }
+                     await delay(1000); // Delay between individual requests
+                }
+            }
+            
+            if (isProcessingStopped || isPaused) {
+                 if(isPaused) logMessage("Обработка на паузе.", 'info');
+                 else finalizeProcessing();
+                 return;
+            }
+
+            currentQuarterIndex++;
+            await delay(3000); // Delay between quarters
+            processNextQuarter();
+        }
+
+        async function finalizeProcessing() {
+            if (isProcessingStopped) {
+                logMessage("Обработка была прервана.", 'warning');
+            } else {
+                updateProgressBar(); // To show 100%
+                const totalTime = ((new Date() - processStartTime) / 1000).toFixed(1);
+                logMessage(`Сбор данных завершен за ${totalTime} сек. Всего собрано ${aggregatedParcelsForCurrentEz.length} участков.`, 'success');
+
+                if (aggregatedParcelsForCurrentEz.length > 0) {
+                    const ezNameSafe = currentEzNumber.replace(/:/g, '_');
+                    const today = new Date();
+                    const dateString = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+                    const zipFilename = `${ezNameSafe}.nspd`;
+                    const internalJsonFilename = `${ezNameSafe} ${dateString}.json`;
+
+                    try {
+                        const zipBlob = await generateZipBlob(aggregatedParcelsForCurrentEz, internalJsonFilename);
+                        await uploadEzFileToServer(zipBlob, zipFilename);
+                    } catch (zipError) {
+                        logMessage(`Ошибка создания архива: ${zipError.message}`, 'error');
+                    }
+                } else {
+                    logMessage('Нет данных для создания архива.', 'warning');
+                }
+            }
+            resetUIAndState();
+        }
+        
+        async function startProcessing() {
+            const rawInput = numberListInput.value.trim();
+            const ezNumbers = rawInput.split('\n').map(s => s.trim()).filter(Boolean);
+
+            if (ezNumbers.length !== 1 || !/^\d{2}:\d{2}:\d{6,7}:\d+$/.test(ezNumbers[0])) {
+                logMessage("Ошибка: Введите один корректный кадастровый номер Единого землепользования.", 'error');
+                return;
+            }
+
+            // Reset state for new processing run
+            resetUIAndState();
+            statusLog.innerHTML = '';
+            currentEzNumber = ezNumbers[0];
+
+            logMessage(`Начинаем обработку ЕЗ: ${currentEzNumber}`, 'info');
+            disableActionButtons();
+            processStartTime = new Date();
+
+            zuListForCurrentEz = await getZuListForEzFromNspd(currentEzNumber);
+
+            if (!zuListForCurrentEz) {
+                logMessage("Не удалось получить список участков. Обработка остановлена.", "error");
+                resetUIAndState();
+                return;
+            }
+            
+            quartersGrouped = groupZusByQuarter(zuListForCurrentEz);
+            quarterProcessingQueue = Array.from(quartersGrouped.keys()).sort();
+            
+            if (quarterProcessingQueue.length === 0) {
+                logMessage("Не удалось извлечь кварталы из списка участков. Обработка остановлена.", "error");
+                resetUIAndState();
+                return;
+            }
+            
+            logMessage(`Найдено ${quarterProcessingQueue.length} уникальных кварталов для обработки.`, 'info');
+            processNextQuarter();
+        }
+
+        // --- Event Listeners ---
+        processEzButton.addEventListener('click', startProcessing);
+
+        pauseResumeButton.addEventListener('click', () => {
+            isPaused = !isPaused;
+            if (isPaused) {
+                pauseResumeButton.textContent = 'Возобновить';
+                logMessage("Обработка приостановлена.", 'info');
+            } else {
+                pauseResumeButton.textContent = 'Пауза';
+                logMessage("Обработка возобновлена.", 'info');
+                processNextQuarter();
+            }
+        });
+
+        stopButton.addEventListener('click', () => {
+            isProcessingStopped = true;
+            logMessage("Получена команда Стоп. Завершение после текущей операции...", 'warning');
+        });
+        
+        // Initial UI setup
+        resetUIAndState();
+    </script>
+</body>
+</html>
