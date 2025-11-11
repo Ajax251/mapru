@@ -1614,7 +1614,7 @@ async function checkClipboardForObjects() {
     }
 
     // `contoursData` is expected to be an array of contours (array of arrays of points)
-function addObjectInternal(contoursData, name, objectType, isMultiPart = false, subType = null) {
+    function addObjectInternal(contoursData, name, objectType, isMultiPart = false) {
          if (!contoursData || contoursData.length === 0 || contoursData.every(c => !c || c.length === 0)) {
              if (!isMultiPart) showNotification("Не удалось добавить объект: нет контуров или они пусты.", "error", "exclamation-circle");
              return null;
@@ -1636,7 +1636,7 @@ function addObjectInternal(contoursData, name, objectType, isMultiPart = false, 
                 }
             }
             return validPoints;
-         }).filter(c => c !== null && c.length > 0); 
+         }).filter(c => c !== null && c.length > 0); // Remove null or empty contours
 
          if (processedContours.length === 0) {
             if (!isMultiPart) showNotification("Не удалось добавить объект: нет валидных координат в контурах.", "error", "exclamation-circle");
@@ -1644,12 +1644,14 @@ function addObjectInternal(contoursData, name, objectType, isMultiPart = false, 
          }
 
          let finalObjectType = objectType;
+         // Determine object type based on the first valid contour if not explicitly point/line with too few points
          const firstValidContour = processedContours[0];
          if (firstValidContour.length < 3 && objectType === 'polygon') {
              finalObjectType = firstValidContour.length === 2 ? 'line' : 'point';
          } else if (firstValidContour.length < 2 && objectType === 'line') {
              finalObjectType = 'point';
          }
+         // If after processing, an object intended as line/polygon only has one point in its primary contour, make it a point.
          if ((finalObjectType === 'line' || finalObjectType === 'polygon') && firstValidContour.length === 1) {
             finalObjectType = 'point';
          }
@@ -1662,13 +1664,12 @@ function addObjectInternal(contoursData, name, objectType, isMultiPart = false, 
              id: newId,
              name,
              type: finalObjectType,
-             subType: subType, // Сохраняем subType
-             contours: processedContours, 
+             contours: processedContours, // Store all valid, processed contours
              color: newColor,
              area: 0,
              perimeter: 0
          };
-         updateObjectMetrics(newObject); 
+         updateObjectMetrics(newObject); // This will also handle closing polygon contours within it
 
          userObjects.push(newObject);
          const newIndex = userObjects.length - 1;
@@ -2615,23 +2616,15 @@ function doBoundingBoxesIntersect(box1, box2) {
         return { isCoincident: isCoincidentWithOther, isInsideOther: isInsideOtherPolygon };
     }
 
- function drawObjects(ctx) {
+    function drawObjects(ctx) {
         userObjects.forEach((obj, index) => {
             if (!obj || !obj.contours) return;
             const isSelected = (index === selectedObjectIndex);
             const isBeingEdited = (isGeometryEditMode && index === editingObjectIndex);
 
-            // --- НАЧАЛО ИЗМЕНЕНИЯ ---
-            let applyFill = (obj.type === 'polygon');
-            // Если это сооружение (construction_record), НЕ ПРИМЕНЯЕМ заливку
-            if (obj.subType === 'construction_record') {
-                applyFill = false;
-            }
-            const fillColor = applyFill ? hexToRgba(obj.color || '#000000', (isSelected || isBeingEdited) ? 0.3 : 0.15) : 'transparent';
-            // --- КОНЕЦ ИЗМЕНЕНИЯ ---
-
             ctx.strokeStyle = obj.color || '#000000';
             ctx.lineWidth = (isSelected || isBeingEdited) ? 2.5 : 1.5;
+            const fillColor = (obj.type === 'polygon') ? hexToRgba(obj.color || '#000000', (isSelected || isBeingEdited) ? 0.3 : 0.15) : 'transparent';
             ctx.fillStyle = fillColor;
 
             obj.contours.forEach((contour, cIdx) => {
@@ -2647,16 +2640,14 @@ function doBoundingBoxesIntersect(box1, box2) {
                 });
                 if (firstPoint) return;
 
-                const objectType = obj.type;
+                const objectType = obj.type; // Use stored type
 
                 switch (objectType) {
                     case 'polygon':
-                        ctx.closePath();
-                        // --- НАЧАЛО ИЗМЕНЕНИЯ ---
-                        if (applyFill) {
-                            ctx.fill();
-                        }
-                        // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+                        // Path is already built, it will be closed if points were added correctly.
+                        // The `updateObjectMetrics` should ensure first and last points are same for polygons.
+                        ctx.closePath(); // This is important for fill and stroke of polygon
+                        ctx.fill();
                         ctx.stroke();
                         break;
                     case 'line': ctx.stroke(); break;
@@ -2731,8 +2722,6 @@ function doBoundingBoxesIntersect(box1, box2) {
             }
         });
     }
-    
-    
     function drawActiveDrawingPreview(ctx) {
         if (!isDrawingActive || currentDrawingPoints.length === 0) return;
         ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
@@ -4094,25 +4083,25 @@ async function fetchParcelCoordinatesFromStorage(cadNumber) {
         
         let foundRecordNode = null;
 
-        const allRecords = xmlDoc.querySelectorAll('land_record, build_record, construction_record');
+        // --- НАЧАЛО ИЗМЕНЕНИЯ: ПОИСК ПО ВСЕМ ТИПАМ ОБЪЕКТОВ ---
+        const allRecords = xmlDoc.querySelectorAll('land_record, build_records build_record, construction_records construction_record');
         
         for (const record of allRecords) {
             const cnElem = record.querySelector('object > common_data > cad_number');
             if (cnElem && cnElem.textContent.trim() === cadNumber) {
                 foundRecordNode = record;
-                break; 
+                break; // Нашли нужный объект, выходим из цикла
             }
         }
+        // --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
         if (!foundRecordNode) {
             throw new Error(`Объект ${cadNumber} не найден в XML файле ${latestFile.name}.`);
         }
         
         const extractedContours = extractCoordinatesFromXMLNode(foundRecordNode);
-        const objectType = foundRecordNode.tagName.toLowerCase(); // 'land_record', 'build_record', 'construction_record'
-        
-        console.log(`[StorageAPI] Извлечено контуров для ${cadNumber}: ${extractedContours.length}, тип: ${objectType}`);
-        return { contours: extractedContours, type: objectType }; // Возвращаем объект с контурами и типом
+        console.log(`[StorageAPI] Извлечено контуров для ${cadNumber}: ${extractedContours.length}`);
+        return extractedContours;
 
     } catch (error) {
         console.error(`[StorageAPI] Общая ошибка для КН ${cadNumber}:`, error);
@@ -4131,7 +4120,7 @@ async function fetchParcelCoordinatesFromStorage(cadNumber) {
         }
     }
 
-  async function handleImportFromCadNumbers(cadNumbers) {
+    async function handleImportFromCadNumbers(cadNumbers) {
        if (!STORAGE_API_URL) {
     showNotification("URL хранилища не задан. Невозможно загрузить по КН.", "error", "server");
     return;
@@ -4151,14 +4140,14 @@ async function fetchParcelCoordinatesFromStorage(cadNumber) {
             console.log(`[BatchImport] Начинаем обработку ${cn} (${currentProcessed}/${totalCadNumbers})`);
             showLoader(true, `Загрузка ${currentProcessed}/${totalCadNumbers}: ${cn}`);
 
-           const result = await fetchParcelCoordinatesFromStorage(cn); // Получаем объект {contours, type}
+           const contoursData = await fetchParcelCoordinatesFromStorage(cn);
 
             showLoader(false);
 
-            if (result && result.contours && result.contours.length > 0) {
+            if (contoursData && contoursData.length > 0) {
                 console.log(`[BatchImport] Контуры для ${cn} получены. Добавление объекта...`);
-                // Передаем тип объекта (result.type) как subType
-                const newObj = addObjectInternal(result.contours, cn, "polygon", true, result.type);
+                // addObjectInternal ожидает массив контуров
+                const newObj = addObjectInternal(contoursData, cn, "polygon", true);
                 if (newObj) {
                     addedObjects.push(newObj);
                     console.log(`[BatchImport] Объект ${cn} добавлен.`);
