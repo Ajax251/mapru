@@ -2422,8 +2422,8 @@ const sevenDigitsRegions = [
         };
 
         let isMobile = window.innerWidth <= 768;
-        let isSearching = false
-        let isEzProcessingAborted = false;
+        let isSearching = false;
+
         let currentCity = '';
         let map;
         let polygons = [];
@@ -18564,6 +18564,7 @@ async function handleEzUpdateWorkflow() {
     logMessage(`Запущена проверка актуальности для ЕЗ: ${ezNumber}`, 'info');
 
     try {
+        // Параллельно запускаем оба запроса
         const archivePromise = fetchZipFromLocalServer('EZ', ezNumber.replace(/:/g, '_') + '.nspd');
         const nspdPromise = getZuListForEzFromNspd(ezNumber);
 
@@ -18586,42 +18587,42 @@ async function handleEzUpdateWorkflow() {
         
         logMessage(`В ЕГРН найдено ${nspdZuList.length} участков.`, 'info');
 
-        const archiveSet = new Set(archiveZuList);
-        const nspdSet = new Set(nspdZuList);
-        const setsAreEqual = archiveSet.size === nspdSet.size && [...archiveSet].every(value => nspdSet.has(value));
-
-        if (setsAreEqual) {
-            logMessage('Данные в архиве актуальны. Загрузка из локального архива...', 'success');
-            showNotification('Данные в архиве актуальны. Обновление не требуется.', 'success');
-            if (archiveBlob) {
-                const { features, date } = await loadAndParseZipBlob(archiveBlob);
-                clearMapAndResetTheme();
-                await processAndDrawParcels(features, 'quarter');
-                populateSidebarWithParcels(features, date);
-                document.getElementById('city-name-display').innerHTML = `ЕЗ (данные от ${date}):<br>${ezNumber}`;
-            }
-        } else {
-            const today = new Date();
-            const todayString = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-
-            if (archiveDate === todayString) {
-                showNotification('Дата архива актуальная, обновление не будет выполнено.', 'warning', 7000);
-                logMessage('Архив уже обновлялся сегодня, но расхождение в данных сохраняется. Обновление отменено.', 'warning');
-                return;
-            }
-
+        // Сравниваем
+        if (archiveZuList.length !== nspdZuList.length) {
             hideLoader();
-            const message = archiveZuList.length !== nspdZuList.length
-                ? `Количество участков отличается (${archiveZuList.length} в архиве, ${nspdZuList.length} в ЕГРН).`
-                : `Количество участков совпадает, но состав отличается.`;
-            
-            const confirmed = confirm(`${message}\n\nОбновить архив?`);
-            
+            const confirmed = confirm(`Количество участков отличается (${archiveZuList.length} в архиве, ${nspdZuList.length} в ЕГРН).\n\nОбновить архив ?`);
             if (confirmed) {
                 logMessage('Пользователь подтвердил обновление. Запуск полной обработки...', 'info');
                 await processEzFromNspdAndUpload(ezNumber);
             } else {
                 logMessage('Обновление отменено пользователем.', 'info');
+            }
+        } else {
+            // Если количество совпадает, сравниваем содержимое
+            const archiveSet = new Set(archiveZuList);
+            const nspdSet = new Set(nspdZuList);
+            let setsAreEqual = archiveSet.size === nspdSet.size && [...archiveSet].every(value => nspdSet.has(value));
+
+            if (setsAreEqual) {
+                logMessage('Данные в архиве актуальны. Загрузка из локального архива...', 'success');
+                
+                 showNotification('Данные в архиве актуальны. Обновление не требуется.', 'success');
+                if (archiveBlob) {
+                    const { features, date } = await loadAndParseZipBlob(archiveBlob);
+                    clearMapAndResetTheme();
+                    await processAndDrawParcels(features, 'quarter');
+                    populateSidebarWithParcels(features, date);
+                    document.getElementById('city-name-display').innerHTML = `ЕЗ (данные от ${date}):<br>${ezNumber}`;
+                }
+            } else {
+                hideLoader();
+                const confirmed = confirm(`Количество участков совпадает, но состав отличается.\n\nОбновить архив?`);
+                if (confirmed) {
+                    logMessage('Пользователь подтвердил обновление состава. Запуск полной обработки...', 'info');
+                    await processEzFromNspdAndUpload(ezNumber);
+                } else {
+                    logMessage('Обновление отменено пользователем.', 'info');
+                }
             }
         }
     } catch (error) {
@@ -18745,127 +18746,77 @@ async function handleEzWorkflow(ezNumber) {
 }
 
 async function processEzFromNspdAndUpload(ezNumber) {
-    isEzProcessingAborted = false;
+    showLoader(`Запрос состава ЕЗ: ${ezNumber}...`);
+    const zuList = await getZuListForEzFromNspd(ezNumber);
 
-    const loaderContainer = document.getElementById('loaderContainer');
-    let cancelButton = null;
+    if (!zuList) {
+        throw new Error("Не удалось получить список входящих участков.");
+    }
 
-    try {
-        showLoader(`Запрос состава ЕЗ: ${ezNumber}...`);
-        const zuList = await getZuListForEzFromNspd(ezNumber);
+    const quartersGrouped = groupZusByQuarter(zuList);
+    const quarterQueue = Array.from(quartersGrouped.keys()).sort();
+    
+    if (quarterQueue.length === 0) {
+        logMessage("В списке участков ЕЗ не найдено кадастровых кварталов.", "warning");
+        return;
+    }
 
-        if (!zuList) {
-            throw new Error("Не удалось получить список входящих участков.");
-        }
+    logMessage(`Найдено ${quarterQueue.length} уникальных кварталов для обработки.`, 'info');
+    
+    let aggregatedParcels = [];
+    let quarterIndex = 0;
 
-        const quartersGrouped = groupZusByQuarter(zuList);
-        const quarterQueue = Array.from(quartersGrouped.keys()).sort();
+    for (const quarter of quarterQueue) {
+        quarterIndex++;
+        const zusInQuarter = quartersGrouped.get(quarter);
+        const parcelCount = zusInQuarter.length;
+        
+        showLoader(`Обработка квартала ${quarterIndex}/${quarterQueue.length}: ${quarter} (${parcelCount} ЗУ)`);
 
-        if (quarterQueue.length === 0) {
-            showNotification("В составе ЕЗ не найдено участков с корректными номерами кварталов.", "warning");
-            return;
-        }
-
-        let totalRequests = 0;
-        quartersGrouped.forEach(zusInQuarter => {
-            totalRequests += (zusInQuarter.length > 5) ? 1 : zusInQuarter.length;
-        });
-
-        if (totalRequests > 30) {
-            hideLoader();
-            const confirmed = confirm(`ЕЗ имеет большое количество участков (${totalRequests} запросов). Загрузка в архив будет выполнена один раз. Продолжить?`);
-            if (!confirmed) {
-                showNotification('Загрузка отменена пользователем.', 'info');
-                return;
+        
+        if (parcelCount > 5) {
+      
+            const allParcelsInQuarter = await fetchParcelDataForQuarter(quarter);
+            if (allParcelsInQuarter) {
+                const targetZuSet = new Set(zusInQuarter);
+                const filteredParcels = allParcelsInQuarter.filter(f => targetZuSet.has(f.properties?.descr));
+                aggregatedParcels.push(...filteredParcels);
+              
             }
-        }
-
-        cancelButton = document.createElement('button');
-        cancelButton.textContent = 'Отменить';
-        Object.assign(cancelButton.style, {
-            marginTop: '20px',
-            padding: '8px 16px',
-            border: 'none',
-            borderRadius: '5px',
-            backgroundColor: '#dc3545',
-            color: 'white',
-            cursor: 'pointer',
-            fontSize: '14px'
-        });
-        cancelButton.onclick = () => {
-            isEzProcessingAborted = true;
-            showNotification('Отмена операции...', 'warning');
-            if (cancelButton) cancelButton.disabled = true;
-        };
-        if (loaderContainer) {
-            loaderContainer.appendChild(cancelButton);
-        }
-
-        let aggregatedParcels = [];
-        let requestCounter = 0;
-
-        for (const quarter of quarterQueue) {
-            if (isEzProcessingAborted) break;
-
-            const zusInQuarter = quartersGrouped.get(quarter);
-            const parcelCount = zusInQuarter.length;
-
-            if (parcelCount > 5) {
-                requestCounter++;
-                showLoader(`Обработка ${requestCounter}/${totalRequests}: ${quarter}`);
-                const allParcelsInQuarter = await fetchParcelDataForQuarter(quarter);
-                if (allParcelsInQuarter) {
-                    const targetZuSet = new Set(zusInQuarter);
-                    const filteredParcels = allParcelsInQuarter.filter(f => targetZuSet.has(f.properties?.descr));
-                    aggregatedParcels.push(...filteredParcels);
-                }
-            } else {
-                for (const zu of zusInQuarter) {
-                    if (isEzProcessingAborted) break;
-                    requestCounter++;
-                    showLoader(`Обработка ${requestCounter}/${totalRequests}: ${zu}`);
-                    const parcelFeature = await fetchSingleParcelData(zu);
-                    if (parcelFeature) {
-                        aggregatedParcels.push(parcelFeature);
-                    }
-                    await delay(1000);
-                }
-            }
-            if (!isEzProcessingAborted) await delay(2000);
-        }
-
-        if (isEzProcessingAborted) {
-            showNotification('Загрузка данных была отменена.', 'info');
-            return;
-        }
-
-        if (aggregatedParcels.length > 0) {
-            showLoader('Создание архива...');
-            const ezNameSafe = ezNumber.replace(/:/g, '_');
-            const today = new Date();
-            const dateString = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
-            const zipFilename = `${ezNameSafe}.nspd`;
-            const internalJsonFilename = `${ezNameSafe} ${dateString}.json`;
-
-            const zipBlob = await generateZipBlob(aggregatedParcels, internalJsonFilename);
-            
-            showLoader('Загрузка архива на сервер...');
-            await uploadEzFileToServer(zipBlob, zipFilename);
-            
-            clearMapAndResetTheme();
-            await processAndDrawParcels(aggregatedParcels, 'quarter');
-            populateSidebarWithParcels(aggregatedParcels, dateString);
-            document.getElementById('city-name-display').innerHTML = `ЕЗ (Данные от ${dateString}):<br>${ezNumber}`;
-            showNotification(`Обработка ЕЗ завершена. Найдено ${aggregatedParcels.length} участков.`, 'success');
         } else {
-            showNotification('Не удалось загрузить данные для участков ЕЗ.', 'warning');
+        
+            for (const zu of zusInQuarter) {
+                 showLoader(`Загрузка ЗУ: ${zu}`);
+                 const parcelFeature = await fetchSingleParcelData(zu);
+                 if (parcelFeature) {
+                     aggregatedParcels.push(parcelFeature);
+                 }
+                 await delay(1000);
+            }
         }
+        await delay(2000);
+    }
 
-    } finally {
-        if (cancelButton && cancelButton.parentNode) {
-            cancelButton.parentNode.removeChild(cancelButton);
-        }
-        hideLoader();
+  
+    if (aggregatedParcels.length > 0) {
+        showLoader('Создание архива...');
+        const ezNameSafe = ezNumber.replace(/:/g, '_');
+        const today = new Date();
+        const dateString = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+        const zipFilename = `${ezNameSafe}.nspd`;
+        const internalJsonFilename = `${ezNameSafe} ${dateString}.json`;
+
+        const zipBlob = await generateZipBlob(aggregatedParcels, internalJsonFilename);
+        
+        showLoader('Загрузка ...');
+        await uploadEzFileToServer(zipBlob, zipFilename);
+        
+        clearMapAndResetTheme();
+        await processAndDrawParcels(aggregatedParcels, 'quarter');
+        populateSidebarWithParcels(aggregatedParcels, dateString);
+          document.getElementById('city-name-display').innerHTML = `ЕЗ (Данные от ${dateString}):<br>${ezNumber}`;
+    } else {
+        logMessage('Нет данных для создания архива и отрисовки.', 'warning');
     }
 }
 
