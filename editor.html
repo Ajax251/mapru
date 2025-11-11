@@ -898,49 +898,42 @@ const BUCKET_NAME = 'kpt';
         return parseFloat(value.toFixed(2));
     }
 
-    function updateObjectMetrics(obj) {
-        if (!obj || !obj.contours || obj.contours.length === 0) {
-            obj.area = 0;
-            obj.perimeter = 0;
-            return;
-        }
-        // Ensure all points in contours are rounded and contours are closed if polygon
-        obj.contours.forEach((contour, cIdx) => {
-            if (contour) {
-                for(let i=0; i < contour.length; i++) {
-                    if(contour[i]) {
-                        contour[i].x = roundCoord(contour[i].x);
-                        contour[i].y = roundCoord(contour[i].y);
-                    }
-                }
-                // Auto-close polygon contours if not already closed
-                if (obj.type === 'polygon' && contour.length >= 3) {
-                    const firstPt = contour[0];
-                    const lastPt = contour[contour.length - 1];
-                    const PRECISION_THRESHOLD = 0.001;
-                    if (!(Math.abs(firstPt.x - lastPt.x) < PRECISION_THRESHOLD && Math.abs(firstPt.y - lastPt.y) < PRECISION_THRESHOLD)) {
-                        contour.push({ x: firstPt.x, y: firstPt.y });
-                    }
-                }
-            }
-        });
-
-        const isPolygon = obj.type === 'polygon';
-        // For simplicity, calculate area/perimeter based on the first contour.
-        // Proper multi-contour area would subtract inner holes.
-        obj.area = isPolygon && obj.contours[0] ? calculatePolygonArea(obj.contours[0]) : 0;
-        obj.perimeter = obj.contours[0] ? calculatePolygonPerimeter(obj.contours[0], isPolygon) : 0;
-
-        // If multi-contour, sum perimeters (approximation for non-nested)
-        if (obj.contours.length > 1) {
-            obj.perimeter = 0;
-            obj.contours.forEach(c => {
-                obj.perimeter += calculatePolygonPerimeter(c, isPolygon);
-            });
-            obj.perimeter = roundCoord(obj.perimeter);
-        }
+function updateObjectMetrics(obj) {
+    if (!obj || !obj.contours || obj.contours.length === 0) {
+        obj.area = 0;
+        obj.perimeter = 0;
+        return;
     }
 
+    obj.contours.forEach((contour, cIdx) => {
+        if (contour) {
+            for(let i=0; i < contour.length; i++) {
+                if(contour[i]) {
+                    contour[i].x = roundCoord(contour[i].x);
+                    contour[i].y = roundCoord(contour[i].y);
+                }
+            }
+            
+            if (obj.type === 'polygon' && obj.subType !== 'construction_record' && contour.length >= 3) {
+                const firstPt = contour[0];
+                const lastPt = contour[contour.length - 1];
+                const PRECISION_THRESHOLD = 0.001;
+                if (!(Math.abs(firstPt.x - lastPt.x) < PRECISION_THRESHOLD && Math.abs(firstPt.y - lastPt.y) < PRECISION_THRESHOLD)) {
+                    contour.push({ x: firstPt.x, y: firstPt.y });
+                }
+            }
+        }
+    });
+
+    const isConsideredPolygonForCalc = obj.type === 'polygon' && obj.subType !== 'construction_record';
+    obj.area = isConsideredPolygonForCalc && obj.contours[0] ? calculatePolygonArea(obj.contours[0]) : 0;
+    
+    let totalPerimeter = 0;
+    obj.contours.forEach(c => {
+        totalPerimeter += calculatePolygonPerimeter(c, isConsideredPolygonForCalc);
+    });
+    obj.perimeter = roundCoord(totalPerimeter);
+}
 
     function deepCloneContours(contours) {
         if (!contours) return [];
@@ -1613,77 +1606,66 @@ async function checkClipboardForObjects() {
         }
     }
 
-    // `contoursData` is expected to be an array of contours (array of arrays of points)
 function addObjectInternal(contoursData, name, objectType, isMultiPart = false, subType = null) {
-         if (!contoursData || contoursData.length === 0 || contoursData.every(c => !c || c.length === 0)) {
-             if (!isMultiPart) showNotification("Не удалось добавить объект: нет контуров или они пусты.", "error", "exclamation-circle");
-             return null;
-         }
-
-         const processedContours = contoursData.map(contour => {
-             if (!contour || contour.length === 0) return null;
-             const roundedContour = contour.map(p => ({ x: roundCoord(p.x), y: roundCoord(p.y) }));
-             const validPoints = roundedContour.filter(p => p && isFinite(p.x) && isFinite(p.y));
-             if (validPoints.length === 0) return null;
-
-             // Auto-close polygon contours
-             if (objectType === 'polygon' && validPoints.length >= 3) {
-                const firstPt = validPoints[0];
-                const lastPt = validPoints[validPoints.length - 1];
-                const PRECISION_THRESHOLD = 0.001;
-                if (!(Math.abs(firstPt.x - lastPt.x) < PRECISION_THRESHOLD && Math.abs(firstPt.y - lastPt.y) < PRECISION_THRESHOLD)) {
-                    validPoints.push({ x: firstPt.x, y: firstPt.y });
-                }
-            }
-            return validPoints;
-         }).filter(c => c !== null && c.length > 0); 
-
-         if (processedContours.length === 0) {
-            if (!isMultiPart) showNotification("Не удалось добавить объект: нет валидных координат в контурах.", "error", "exclamation-circle");
-            return null;
-         }
-
-         let finalObjectType = objectType;
-         const firstValidContour = processedContours[0];
-         if (firstValidContour.length < 3 && objectType === 'polygon') {
-             finalObjectType = firstValidContour.length === 2 ? 'line' : 'point';
-         } else if (firstValidContour.length < 2 && objectType === 'line') {
-             finalObjectType = 'point';
-         }
-         if ((finalObjectType === 'line' || finalObjectType === 'polygon') && firstValidContour.length === 1) {
-            finalObjectType = 'point';
-         }
-
-
-         const newId = nextObjectId++;
-         const newColor = objectColors[nextColorIndex % objectColors.length]; nextColorIndex++;
-
-         const newObject = {
-             id: newId,
-             name,
-             type: finalObjectType,
-             subType: subType, // Сохраняем subType
-             contours: processedContours, 
-             color: newColor,
-             area: 0,
-             perimeter: 0
-         };
-         updateObjectMetrics(newObject); 
-
-         userObjects.push(newObject);
-         const newIndex = userObjects.length - 1;
-
-         if (!isMultiPart) {
-             updateObjectList();
-             selectedObjectIndex = newIndex;
-             calculateBounds();
-             displayObjectInfo(selectedObjectIndex);
-             setTimeout(() => { centerOnObject(newIndex, true); }, 50);
-             saveState();
-             redraw(true);
-         }
-         return newObject;
+    if (!contoursData || contoursData.length === 0 || contoursData.every(c => !c || c.length === 0)) {
+        if (!isMultiPart) showNotification("Не удалось добавить объект: нет контуров или они пусты.", "error", "exclamation-circle");
+        return null;
     }
+
+    const processedContours = contoursData.map(contour => {
+        if (!contour || contour.length === 0) return null;
+        const roundedContour = contour.map(p => ({ x: roundCoord(p.x), y: roundCoord(p.y) }));
+        const validPoints = roundedContour.filter(p => p && isFinite(p.x) && isFinite(p.y));
+        if (validPoints.length === 0) return null;
+        return validPoints;
+    }).filter(c => c !== null && c.length > 0);
+
+    if (processedContours.length === 0) {
+        if (!isMultiPart) showNotification("Не удалось добавить объект: нет валидных координат в контурах.", "error", "exclamation-circle");
+        return null;
+    }
+
+    let finalObjectType = objectType;
+    const firstValidContour = processedContours[0];
+    if (firstValidContour.length < 3 && objectType === 'polygon') {
+        finalObjectType = firstValidContour.length === 2 ? 'line' : 'point';
+    } else if (firstValidContour.length < 2 && objectType === 'line') {
+        finalObjectType = 'point';
+    }
+    if ((finalObjectType === 'line' || finalObjectType === 'polygon') && firstValidContour.length === 1) {
+        finalObjectType = 'point';
+    }
+
+    const newId = nextObjectId++;
+    const newColor = objectColors[nextColorIndex % objectColors.length]; nextColorIndex++;
+
+    const newObject = {
+        id: newId,
+        name,
+        type: finalObjectType,
+        subType: subType,
+        contours: processedContours,
+        color: newColor,
+        area: 0,
+        perimeter: 0
+    };
+    
+    updateObjectMetrics(newObject);
+
+    userObjects.push(newObject);
+    const newIndex = userObjects.length - 1;
+
+    if (!isMultiPart) {
+        updateObjectList();
+        selectedObjectIndex = newIndex;
+        calculateBounds();
+        displayObjectInfo(selectedObjectIndex);
+        setTimeout(() => { centerOnObject(newIndex, true); }, 50);
+        saveState();
+        redraw(true);
+    }
+    return newObject;
+}
 
     function deleteObject(index) {
         if (index < 0 || index >= userObjects.length || !userObjects[index]) return;
@@ -1799,19 +1781,15 @@ async function handleImportFromNspdAndConvertToMsk(cadNumbers, destScId) {
     let addedObjects = [];
     let errors = 0;
     
-    // --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    isNspdLoadCancelled = false; // Сбрасываем флаг перед началом новой операции
-    // --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
+    isNspdLoadCancelled = false; 
+    
     showLoader(true, `Подготовка к загрузке ${cadNumbers.length} участков...`);
 
     for (let i = 0; i < cadNumbers.length; i++) {
-        // --- НАЧАЛО ИЗМЕНЕНИЙ ---
         if (isNspdLoadCancelled) {
             console.log("Загрузка прервана пользователем.");
-            break; // Выходим из цикла, если пользователь нажал Escape
+            break; 
         }
-        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         const kn = cadNumbers[i];
         showLoader(true, `Загрузка ${i + 1}/${cadNumbers.length}: ${kn}`);
@@ -1821,6 +1799,20 @@ async function handleImportFromNspdAndConvertToMsk(cadNumbers, destScId) {
             if (!feature.geometry || !feature.geometry.coordinates) {
                 throw new Error('У объекта нет координат в ЕГРН.');
             }
+
+            // --- НАЧАЛО КЛЮЧЕВОГО ИЗМЕНЕНИЯ ---
+            // Определяем subType на основе категории из ответа НСПД
+            const categoryId = feature.properties.category;
+            let subType = null;
+            if (categoryId === 36368) { // ID для Земельных участков
+                subType = 'land_record';
+            } else if (categoryId === 36369) { // ID для Зданий
+                subType = 'build_record';
+            } else if (categoryId === 36383) { // ID для Сооружений
+                subType = 'construction_record';
+            }
+            console.log(`[handleImportFromNspd] Для КН ${kn} определен subType: ${subType} (ID категории: ${categoryId})`);
+            // --- КОНЕЦ КЛЮЧЕВОГО ИЗМЕНЕНИЯ ---
             
             const geometryType = feature.geometry.type;
             const polygonsData = geometryType === 'MultiPolygon' ? feature.geometry.coordinates : [feature.geometry.coordinates];
@@ -1842,7 +1834,10 @@ async function handleImportFromNspdAndConvertToMsk(cadNumbers, destScId) {
             });
 
             if (objectMskContours.length > 0) {
-                const newObj = addObjectInternal(objectMskContours, kn, "polygon", true);
+                // --- НАЧАЛО КЛЮЧЕВОГО ИЗМЕНЕНИЯ ---
+                // Передаем определенный subType в функцию создания объекта
+                const newObj = addObjectInternal(objectMskContours, kn, "polygon", true, subType);
+                // --- КОНЕЦ КЛЮЧЕВОГО ИЗМЕНЕНИЯ ---
                 if (newObj) {
                     addedObjects.push(newObj);
                 }
@@ -1865,7 +1860,7 @@ async function handleImportFromNspdAndConvertToMsk(cadNumbers, destScId) {
     if (addedObjects.length > 0) {
         finalizeBatchAdd(addedObjects);
         showNotification(`Загружено ${addedObjects.length} участков. ${errors > 0 ? errors + ' с ошибками.' : ''}`, "success", "check-circle");
-    } else if (errors > 0 && !isNspdLoadCancelled) { // Не показываем ошибку, если просто отменили
+    } else if (errors > 0 && !isNspdLoadCancelled) {
         showNotification(`Не удалось загрузить участки. Ошибок: ${errors}.`, "error", "exclamation-triangle");
     }
 }
@@ -1918,38 +1913,64 @@ async function handleImportFromNspdAndConvertToMsk(cadNumbers, destScId) {
     
 
 async function handleUniversalImport() {
-        const inputText = coordsInput.value.trim();
-        if (!inputText) {
-            showNotification("Поле ввода пустое.", "warning", "exclamation-triangle");
-            return;
-        }
+    const inputText = coordsInput.value.trim();
+    if (!inputText) {
+        showNotification("Поле ввода пустое.", "warning", "exclamation-triangle");
+        return;
+    }
 
-        const lines = inputText.split('\n').map(line => line.trim()).filter(line => line);
-        const isSingleLine = lines.length === 1;
-        const isKnList = lines.length > 0 && lines.every(line => isValidCadastralNumberFormat(line));
-        const isSingleQuarter = isSingleLine && isQuarterFormat(lines[0]);
+    const lines = inputText.split('\n').map(line => line.trim()).filter(line => line);
+    const isSingleLine = lines.length === 1;
+    const isKnList = lines.length > 0 && lines.every(line => isValidCadastralNumberFormat(line));
+    const isSingleQuarter = isSingleLine && isQuarterFormat(lines[0]);
 
-        // <-- НАЧАЛО ИЗМЕНЕНИЙ
-        if (isSingleQuarter) {
-            closeCoordsDialog();
-            showQuarterLoadOptionsDialog(lines[0]);
-            return; // Прерываем выполнение, ждем выбора пользователя
-        }
-        // КОНЕЦ ИЗМЕНЕНИЙ -->
-
-        const importMode = document.getElementById('importModeSelect').value;
-
-        if (isKnList) {
-            if (importMode === 'xml') {
-                await handleImportFromCadNumbers(lines);
-            } else {
-                await handleImportFromNspdAndConvertToMsk(lines, importMode);
+    // --- НАЧАЛО КЛЮЧЕВОГО ИЗМЕНЕНИЯ ---
+    // Проверяем, является ли первая строка КН, а остальные - координатами.
+    // Это как раз ваш случай: КН сооружения + его координаты.
+    if (lines.length > 1 && isValidCadastralNumberFormat(lines[0])) {
+        const cadNumber = lines[0];
+        const coordinatesText = lines.slice(1).join('\n');
+        
+        console.log(`[handleUniversalImport] Обнаружен блок с КН (${cadNumber}) и координатами. Обработка как сооружение.`);
+        
+        // Закрываем диалог и вызываем специальную обработку
+        closeCoordsDialog();
+        
+        // Мы предполагаем, что если есть КН, то это может быть сооружение.
+        // Поэтому сразу передаем subType.
+        const parsedContours = parseCoordinatesFromText(coordinatesText);
+        if (parsedContours && parsedContours.length > 0) {
+            const newObj = addObjectInternal(parsedContours, cadNumber, "polygon", true, 'construction_record');
+            if (newObj) {
+                finalizeBatchAdd([newObj]);
             }
         } else {
-            await handleImportFromTextareaCoordinates(inputText);
+            showNotification("Не удалось распознать координаты после кадастрового номера.", "error");
         }
+        return; // Завершаем выполнение
     }
-    
+    // --- КОНЕЦ КЛЮЧЕВОГО ИЗМЕНЕНИЯ ---
+
+    if (isSingleQuarter) {
+        closeCoordsDialog();
+        showQuarterLoadOptionsDialog(lines[0]);
+        return; 
+    }
+
+    const importMode = document.getElementById('importModeSelect').value;
+
+    if (isKnList) {
+        if (importMode === 'xml') {
+            await handleImportFromCadNumbers(lines);
+        } else {
+            await handleImportFromNspdAndConvertToMsk(lines, importMode);
+        }
+    } else {
+        await handleImportFromTextareaCoordinates(inputText);
+    }
+}
+
+
 async function processQuarterLoad(quarterNumber, filterType) {
     closeQuarterLoadOptionsDialog();
 
@@ -2085,33 +2106,47 @@ async function handleImportQuarterFromNspdAndConvertToMsk(quarterNumber, filterT
                     continue;
                 }
 
-                // --- НАЧАЛО ИЗМЕНЕНИЯ ---
                 const categoryId = feature.properties.category;
                 const categoryInfo = categories.find(c => c.id === categoryId);
                 const subType = categoryInfo ? categoryInfo.name : null;
-                // --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
                 const geometryType = feature.geometry.type;
-                const polygonsData = geometryType === 'MultiPolygon' ? feature.geometry.coordinates : [feature.geometry.coordinates];
+                const coordinatesArray = feature.geometry.coordinates;
+
+                // --- НАЧАЛО ИЗМЕНЕНИЙ ---
+                // Логика обработки координат для разных типов геометрии
+                let rings = [];
+                if (geometryType === "Polygon") {
+                    // coordinates для Polygon это [ [ [x,y],... ], [ [x,y],... ] ] (внешний и дырки)
+                    // Мы берем все эти массивы как отдельные контуры.
+                    rings = coordinatesArray;
+                } else if (geometryType === "MultiPolygon") {
+                    // coordinates для MultiPolygon это [ [ [ [x,y],... ] ] , [ [ [ [x,y],... ] ] ] ]
+                    // Уплощаем до уровня отдельных контуров
+                    rings = coordinatesArray.flat(1);
+                } else {
+                    console.warn(`Неподдерживаемый тип геометрии "${geometryType}" для объекта ${cadNumber}`);
+                    continue;
+                }
 
                 const objectMskContours = [];
-                polygonsData.forEach(polygonRings => {
-                    polygonRings.forEach(ring => {
-                        const mskPoints = ring.map(coord_3857 => {
-                            const wgs84 = proj4('EPSG:3857', 'EPSG:4326', coord_3857);
-                            const msk = proj4('EPSG:4326', destSystem.value, wgs84);
-                            const finalX = msk[1] + (destSystem.offsetX || 0);
-                            const finalY = msk[0] + (destSystem.offsetY || 0);
-                            return { x: roundCoord(finalX), y: roundCoord(finalY) };
-                        });
-                        objectMskContours.push(mskPoints);
+                rings.forEach(ring => {
+                    if (!ring || ring.length === 0) return;
+                    const mskPoints = ring.map(coord_3857 => {
+                        const wgs84 = proj4('EPSG:3857', 'EPSG:4326', coord_3857);
+                        const msk = proj4('EPSG:4326', destSystem.value, wgs84);
+                        const finalX = msk[1] + (destSystem.offsetX || 0);
+                        const finalY = msk[0] + (destSystem.offsetY || 0);
+                        return { x: roundCoord(finalX), y: roundCoord(finalY) };
                     });
+                    if (mskPoints.length > 0) {
+                        objectMskContours.push(mskPoints);
+                    }
                 });
+                // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
                 if (objectMskContours.length > 0) {
-                    // --- НАЧАЛО ИЗМЕНЕНИЯ ---
                     const newObj = addObjectInternal(objectMskContours, cadNumber, "polygon", true, subType);
-                    // --- КОНЕЦ ИЗМЕНЕНИЯ ---
                     if (newObj) {
                         addedObjectsBatch.push(newObj);
                     }
@@ -2622,123 +2657,132 @@ function doBoundingBoxesIntersect(box1, box2) {
         return { isCoincident: isCoincidentWithOther, isInsideOther: isInsideOtherPolygon };
     }
 
- function drawObjects(ctx) {
-        userObjects.forEach((obj, index) => {
-            if (!obj || !obj.contours) return;
-            const isSelected = (index === selectedObjectIndex);
-            const isBeingEdited = (isGeometryEditMode && index === editingObjectIndex);
 
-            // --- НАЧАЛО ИЗМЕНЕНИЯ ---
-            let applyFill = (obj.type === 'polygon');
-            // Если это сооружение (construction_record), НЕ ПРИМЕНЯЕМ заливку
-            if (obj.subType === 'construction_record') {
-                applyFill = false;
-            }
-            const fillColor = applyFill ? hexToRgba(obj.color || '#000000', (isSelected || isBeingEdited) ? 0.3 : 0.15) : 'transparent';
-            // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+function drawObjects(ctx) {
+    userObjects.forEach((obj, index) => {
+        if (!obj || !obj.contours) return;
+        const isSelected = (index === selectedObjectIndex);
+        const isBeingEdited = (isGeometryEditMode && index === editingObjectIndex);
 
-            ctx.strokeStyle = obj.color || '#000000';
-            ctx.lineWidth = (isSelected || isBeingEdited) ? 2.5 : 1.5;
+        ctx.strokeStyle = obj.color || '#000000';
+        ctx.lineWidth = (isSelected || isBeingEdited) ? 2.5 : 1.5;
+        
+        // Логика отрисовки в зависимости от типа
+        if (obj.subType === 'construction_record') {
+            // Для сооружений - всегда только обводка каждого контура
+            obj.contours.forEach(contour => {
+                if (!contour || contour.length < 1) return;
+                ctx.beginPath();
+                contour.forEach((point, pIdx) => {
+                    const [canvasX, canvasY] = transformCoord(point.x, point.y);
+                    if (pIdx === 0) {
+                        ctx.moveTo(canvasX, canvasY);
+                    } else {
+                        ctx.lineTo(canvasX, canvasY);
+                    }
+                });
+                ctx.stroke(); // НЕ используем closePath() и fill()
+            });
+        } else {
+            // Стандартная логика для всех остальных объектов (ЗУ, Здания и т.д.)
+            const fillColor = (obj.type === 'polygon') ? hexToRgba(obj.color || '#000000', (isSelected || isBeingEdited) ? 0.3 : 0.15) : 'transparent';
             ctx.fillStyle = fillColor;
 
-            obj.contours.forEach((contour, cIdx) => {
+            obj.contours.forEach((contour) => {
                 if (!contour || contour.length === 0) return;
                 ctx.beginPath();
-                let firstPoint = true;
-                contour.forEach((point) => {
-                    if (!point || !isFinite(point.x) || !isFinite(point.y)) return;
+                contour.forEach((point, pIdx) => {
                     const [canvasX, canvasY] = transformCoord(point.x, point.y);
-                    if (!isFinite(canvasX) || !isFinite(canvasY)) return;
-                    if (firstPoint) { ctx.moveTo(canvasX, canvasY); firstPoint = false; }
-                    else { ctx.lineTo(canvasX, canvasY); }
+                    if (pIdx === 0) ctx.moveTo(canvasX, canvasY);
+                    else ctx.lineTo(canvasX, canvasY);
                 });
-                if (firstPoint) return;
 
-                const objectType = obj.type;
-
-                switch (objectType) {
-                    case 'polygon':
-                        ctx.closePath();
-                        // --- НАЧАЛО ИЗМЕНЕНИЯ ---
-                        if (applyFill) {
-                            ctx.fill();
-                        }
-                        // --- КОНЕЦ ИЗМЕНЕНИЯ ---
-                        ctx.stroke();
-                        break;
-                    case 'line': ctx.stroke(); break;
-                    case 'point': default:
-                        if (contour[0] && isFinite(contour[0].x) && isFinite(contour[0].y)){
-                            const [cx,cy]=transformCoord(contour[0].x, contour[0].y);
-                            if(isFinite(cx) && isFinite(cy)){
-                                ctx.save(); ctx.setTransform(1,0,0,1,0,0);
-                                ctx.fillStyle=obj.color||'#000000';
-                                ctx.beginPath(); ctx.arc(cx,cy,(isSelected || isBeingEdited)?5:3.5,0,Math.PI*2); ctx.closePath(); ctx.fill();
-                                ctx.strokeStyle='white'; ctx.lineWidth=1; ctx.stroke();
-                                ctx.restore();
-                            }
-                        }
-                        break;
-                }
-
-                if (showPoints && contour.length > 0 && objectType !== 'point') {
-                    contour.forEach((point, pIdx) => {
-                        if (!point || !isFinite(point.x) || !isFinite(point.y)) return;
-                        const [px, py] = transformCoord(point.x, point.y);
-                        if (!isFinite(px) || !isFinite(py)) return;
-
-                        const pointState = getPointState(point, index);
-                        ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
-                        ctx.lineWidth = 1;
-                        const isCurrentMovingPoint = isMovingPoint && movedPointInfo?.objectIndex === index && movedPointInfo?.contourIndex === cIdx && movedPointInfo?.pointIndex === pIdx;
-                        const highlightRadius = (isSelected || isBeingEdited || isCurrentMovingPoint ? 4 : 3) + 2.5;
-
-                        if (pointState.isCoincident && !isCurrentMovingPoint) {
-                            ctx.strokeStyle = 'rgba(0, 200, 0, 0.9)';
-                            ctx.beginPath(); ctx.arc(px, py, highlightRadius, 0, Math.PI * 2); ctx.stroke();
-                        } else if (pointState.isInsideOther && !isCurrentMovingPoint) {
-                            ctx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
-                            ctx.beginPath(); ctx.arc(px, py, highlightRadius, 0, Math.PI * 2); ctx.stroke();
-                        }
-                        ctx.restore();
-
-                        ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
-                        let pointFill = isSelected || isBeingEdited ? hexToRgba(obj.color, 0.9) : hexToRgba(obj.color, 0.7);
-                        let pointRadius = isSelected || isBeingEdited ? 4 : 3;
-                        if(isCurrentMovingPoint){
-                            pointFill = 'yellow'; pointRadius = 5;
-                        }
-
-                        ctx.fillStyle = pointFill;
-                        ctx.beginPath(); ctx.arc(px, py, pointRadius, 0, Math.PI * 2); ctx.closePath(); ctx.fill();
-                        ctx.strokeStyle = 'white'; ctx.lineWidth = 0.5; ctx.stroke();
-                        ctx.restore();
-                    });
-                }
-            });
-
-            if (scale > 0.005 && obj.contours.length > 0 && obj.contours[0] && obj.contours[0].length > 0) {
-                const firstContour = obj.contours[0];
-                if (firstContour.every(p => p && isFinite(p.x) && isFinite(p.y))) {
-                    const labelPos = getContourCentroid(firstContour);
-                    if (labelPos && isFinite(labelPos.x) && isFinite(labelPos.y)) {
-                        const [labelX, labelY] = transformCoord(labelPos.x, labelPos.y);
-                        if (isFinite(labelX) && isFinite(labelY)) {
-                            ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
-                            ctx.font = "bold 11px Arial";
-                            ctx.fillStyle = obj.color || '#000000';
-                            ctx.strokeStyle = 'white'; ctx.lineWidth = 2.5;
-                            ctx.textAlign = "center"; ctx.textBaseline = "bottom";
-                            ctx.strokeText(obj.name || `Объект ${obj.id}`, labelX, labelY - 5);
-                            ctx.fillText(obj.name || `Объект ${obj.id}`, labelX, labelY - 5);
+                if (obj.type === 'polygon') {
+                    ctx.closePath();
+                    ctx.fill();
+                    ctx.stroke();
+                } else if (obj.type === 'line') {
+                    ctx.stroke();
+                } else if (obj.type === 'point') {
+                    if (contour[0] && isFinite(contour[0].x) && isFinite(contour[0].y)){
+                        const [cx,cy]=transformCoord(contour[0].x, contour[0].y);
+                        if(isFinite(cx) && isFinite(cy)){
+                            ctx.save(); ctx.setTransform(1,0,0,1,0,0);
+                            ctx.fillStyle=obj.color||'#000000';
+                            ctx.beginPath(); ctx.arc(cx,cy,(isSelected || isBeingEdited)?5:3.5,0,Math.PI*2); ctx.closePath(); ctx.fill();
+                            ctx.strokeStyle='white'; ctx.lineWidth=1; ctx.stroke();
                             ctx.restore();
                         }
                     }
                 }
+            });
+        }
+
+        // --- НАЧАЛО ИСПРАВЛЕНИЯ: ЭТОТ БЛОК ТЕПЕРЬ СНАРУЖИ IF/ELSE ---
+        // Отрисовка точек (включая зеленые кружки) для ВСЕХ объектов
+        if (showPoints && obj.contours.some(c => c && c.length > 0) && obj.type !== 'point') {
+            obj.contours.forEach((contour, cIdx) => {
+                if (!contour) return;
+                contour.forEach((point, pIdx) => {
+                    if (!point || !isFinite(point.x) || !isFinite(point.y)) return;
+                    const [px, py] = transformCoord(point.x, point.y);
+                    if (!isFinite(px) || !isFinite(py)) return;
+
+                    const pointState = getPointState(point, index);
+                    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+                    ctx.lineWidth = 1;
+                    const isCurrentMovingPoint = isMovingPoint && movedPointInfo?.objectIndex === index && movedPointInfo?.contourIndex === cIdx && movedPointInfo?.pointIndex === pIdx;
+                    const highlightRadius = (isSelected || isBeingEdited || isCurrentMovingPoint ? 4 : 3) + 2.5;
+
+                    if (pointState.isCoincident && !isCurrentMovingPoint) {
+                        ctx.strokeStyle = 'rgba(0, 200, 0, 0.9)';
+                        ctx.beginPath(); ctx.arc(px, py, highlightRadius, 0, Math.PI * 2); ctx.stroke();
+                    } else if (pointState.isInsideOther && !isCurrentMovingPoint) {
+                        ctx.strokeStyle = 'rgba(255, 0, 0, 0.8)';
+                        ctx.beginPath(); ctx.arc(px, py, highlightRadius, 0, Math.PI * 2); ctx.stroke();
+                    }
+                    ctx.restore();
+
+                    ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+                    let pointFill = isSelected || isBeingEdited ? hexToRgba(obj.color, 0.9) : hexToRgba(obj.color, 0.7);
+                    let pointRadius = isSelected || isBeingEdited ? 4 : 3;
+                    if(isCurrentMovingPoint){
+                        pointFill = 'yellow'; pointRadius = 5;
+                    }
+
+                    ctx.fillStyle = pointFill;
+                    ctx.beginPath(); ctx.arc(px, py, pointRadius, 0, Math.PI * 2); ctx.closePath(); ctx.fill();
+                    ctx.strokeStyle = 'white'; ctx.lineWidth = 0.5; ctx.stroke();
+                    ctx.restore();
+                });
+            });
+        }
+        // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
+        // Отрисовка подписей (без изменений)
+        if (scale > 0.005 && obj.contours.length > 0 && obj.contours[0] && obj.contours[0].length > 0) {
+            const firstContour = obj.contours[0];
+            if (firstContour.every(p => p && isFinite(p.x) && isFinite(p.y))) {
+                const labelPos = getContourCentroid(firstContour);
+                if (labelPos && isFinite(labelPos.x) && isFinite(labelPos.y)) {
+                    const [labelX, labelY] = transformCoord(labelPos.x, labelPos.y);
+                    if (isFinite(labelX) && isFinite(labelY)) {
+                        ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
+                        ctx.font = "bold 11px Arial";
+                        ctx.fillStyle = obj.color || '#000000';
+                        ctx.strokeStyle = 'white'; ctx.lineWidth = 2.5;
+                        ctx.textAlign = "center"; ctx.textBaseline = "bottom";
+                        ctx.strokeText(obj.name || `Объект ${obj.id}`, labelX, labelY - 5);
+                        ctx.fillText(obj.name || `Объект ${obj.id}`, labelX, labelY - 5);
+                        ctx.restore();
+                    }
+                }
             }
-        });
-    }
-    
+        }
+    });
+}
+
+
     
     function drawActiveDrawingPreview(ctx) {
         if (!isDrawingActive || currentDrawingPoints.length === 0) return;
@@ -4004,27 +4048,26 @@ async function fetchNspd(url) {
         return currentElement.textContent.trim();
     }
 
+
 function extractCoordinatesFromXMLNode(recordNode) {
     const allContoursData = [];
 
-    // Универсальный селектор, который найдет все узлы <contour> внутри переданной записи,
-    // независимо от того, вложены ли они в <contours_location> или нет.
-    const contourNodes = recordNode.querySelectorAll('contour');
+    // Находим все теги <contour> непосредственно внутри записи
+    const contourNodes = recordNode.querySelectorAll(':scope > contours > contour, :scope > contour');
 
     if (contourNodes.length === 0) {
-        // Добавим лог, чтобы видеть, если контуры не найдены в принципе
         const cadNumberElem = recordNode.querySelector('object > common_data > cad_number');
         const cadNumber = cadNumberElem ? cadNumberElem.textContent.trim() : 'ID неизвестен';
-        console.warn(`[CoordExtractor] Внутри записи объекта ${cadNumber} не найдено ни одного тега <contour>.`);
-        return []; // Возвращаем пустой массив, если контуров нет
+        console.warn(`[CoordExtractor] Внутри записи объекта ${cadNumber} не найдено тегов <contour>.`);
+        return [];
     }
 
     contourNodes.forEach(contourNode => {
-        // Дальнейшая логика извлечения координат из <entity_spatial> остается той же,
-        // так как она одинакова для всех типов объектов.
         const entitySpatialNode = contourNode.querySelector("entity_spatial");
-        if (!entitySpatialNode) return; // Переходим к следующему <contour>, если в этом нет геометрии
+        if (!entitySpatialNode) return;
 
+        // ВАЖНО: для каждого <contour> мы создаем свой массив контуров,
+        // так как один <contour> может содержать несколько <spatial_element> (например, полигон с дыркой)
         const spatialElementNodes = entitySpatialNode.querySelectorAll("spatials_elements > spatial_element");
 
         spatialElementNodes.forEach(spatialElementNode => {
@@ -4044,6 +4087,7 @@ function extractCoordinatesFromXMLNode(recordNode) {
                     }
                 });
                 if (currentContourPoints.length > 0) {
+                    // Каждый <spatial_element> добавляется как отдельный контур
                     allContoursData.push(currentContourPoints);
                 }
             }
