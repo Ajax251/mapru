@@ -6010,6 +6010,10 @@ contextMenu.innerHTML = `
             <div class="custom-context-menu-item" id="export-current-polygon-to-kml-menu-item">
                 <i class="fas fa-file-export"></i> Планета Земля KML
             </div>
+            
+            <div class="custom-context-menu-item" id="arbitrary-response-menu-item">
+<i class="fas fa-paste"></i>Произвольный Response
+</div>
         </div>
     </div>
     
@@ -6148,6 +6152,11 @@ contextMenu.addEventListener('click', async function (event) {
         generateLinearObjectReport(targetObject); // Если нашли конкретную, отчет для нее
     }
 }
+
+     if (event.target.id === 'arbitrary-response-menu-item') {
+            contextMenu.style.display = 'none';
+            showArbitraryResponseModal(); // Вызываем новую функцию для показа окна
+        }
 
 
 if (event.target.id === 'raster-menu-item') {
@@ -15044,6 +15053,193 @@ function doLinesIntersect(p1, p2, p3, p4) {
     
     return ccw(p1, p3, p4) !== ccw(p2, p3, p4) && ccw(p1, p2, p3) !== ccw(p1, p2, p4);
 }
+
+
+// Функция №1: Показывает модальное окно для вставки JSON
+function showArbitraryResponseModal() {
+    const existingModal = document.getElementById('arbitrary-response-modal');
+    if (existingModal) {
+        existingModal.remove();
+    }
+
+    const modal = document.createElement('div');
+    modal.id = 'arbitrary-response-modal';
+    modal.className = 'color-modal';
+    modal.style.width = '600px';
+    modal.style.maxWidth = '90vw';
+
+    // --- НАЧАЛО ИЗМЕНЕНИЙ: Добавлен HTML для чекбокса ---
+    modal.innerHTML = `
+        <div class="color-modal-content" style="gap: 15px;">
+            <h3 style="margin-top: 5px;">Вставка произвольного Response (JSON)</h3>
+            <textarea id="arbitrary-json-input" 
+                      style="width: 100%; height: 300px; font-family: monospace; resize: vertical; border-radius: 6px; border: 1px solid #ccc; padding: 10px;"
+                      placeholder="Вставьте сюда JSON ответ из консоли браузера на сайте НСПД (вкладка Network)..."></textarea>
+            
+            <div style="display: flex; align-items: center; justify-content: center; width: 100%;">
+                <input type="checkbox" id="hide-labels-checkbox" style="margin-right: 8px;">
+                <label for="hide-labels-checkbox" style="cursor: pointer;">Скрыть метки</label>
+            </div>
+
+            <div class="buttons">
+                <button id="arbitrary-json-apply" class="apply-btn" style="width: auto; min-width: 120px;"><i class="fas fa-check"></i> Отобразить</button>
+                <button id="arbitrary-json-cancel" class="cancel-btn" style="width: auto; min-width: 120px;"><i class="fas fa-times"></i> Отмена</button>
+            </div>
+        </div>
+    `;
+    // --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+    document.body.appendChild(modal);
+    modal.style.display = 'block';
+
+    const textArea = document.getElementById('arbitrary-json-input');
+    const hideLabelsCheckbox = document.getElementById('hide-labels-checkbox'); // Находим новый чекбокс
+    
+    navigator.clipboard.readText().then(text => {
+        if (text && text.trim().startsWith('{')) {
+            textArea.value = text;
+        }
+    }).catch(err => {
+        console.log('Не удалось прочитать буфер обмена для модального окна.');
+    });
+
+    const applyBtn = document.getElementById('arbitrary-json-apply');
+    const cancelBtn = document.getElementById('arbitrary-json-cancel');
+
+    applyBtn.addEventListener('click', () => {
+        const jsonText = textArea.value;
+        const hideLabels = hideLabelsCheckbox.checked; // Получаем состояние чекбокса
+        if (!jsonText.trim()) {
+            showNotification('Поле ввода пустое', 'warning');
+            return;
+        }
+        try {
+            const data = JSON.parse(jsonText);
+            processAndDrawArbitraryFeatures(data, hideLabels); // Передаем состояние в функцию обработки
+            document.body.removeChild(modal);
+        } catch (e) {
+            showNotification('Ошибка парсинга JSON: ' + e.message, 'error');
+        }
+    });
+
+    const closeModal = () => {
+        document.body.removeChild(modal);
+    };
+
+    cancelBtn.addEventListener('click', closeModal);
+    modal.addEventListener('click', (e) => {
+        if (e.target === modal) closeModal();
+    });
+    
+    textArea.focus();
+}
+
+// Функция №2: Основная логика обработки и отрисовки данных из модального окна
+async function processAndDrawArbitraryFeatures(data, hideLabels) { // Добавлен второй аргумент
+    let features = null;
+
+    // --- НАЧАЛО ИЗМЕНЕНИЙ: Умный поиск массива features ---
+    if (data && Array.isArray(data.features)) {
+        // Случай 1: features находится на верхнем уровне
+        features = data.features;
+    } else if (data && data.data && Array.isArray(data.data.features)) {
+        // Случай 2: features вложен в объект "data"
+        features = data.data.features;
+    }
+    // --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+    if (!features || features.length === 0) {
+        showNotification('JSON не содержит массива "features" или он пуст', 'error');
+        return;
+    }
+
+    showLoader('Отрисовка произвольных объектов...');
+    let combinedBounds = null;
+    let featuresDrawn = 0;
+
+    for (const feature of features) {
+        try {
+            if (!feature.geometry || !feature.geometry.coordinates) continue;
+
+            const strokeColor = '#00BFFF'; // DeepSkyBlue для произвольных объектов
+            const labelPreset = 'islands#darkblueStretchyIcon';
+            // Улучшенное формирование метки
+            const labelContent = `${feature.properties?.label || ''} - ${feature.properties?.descr || 'Произвольный объект'}`.replace(/^- | -$/, '').trim();
+
+            const isMultiPolygon = feature.geometry.type === 'MultiPolygon';
+            const polygonsCoords = isMultiPolygon ? feature.geometry.coordinates : [feature.geometry.coordinates];
+
+            for (const singlePolygonRings of polygonsCoords) {
+                if (!Array.isArray(singlePolygonRings) || singlePolygonRings.length === 0) continue;
+
+                const allProcessedRings = singlePolygonRings.map(contour => {
+                    if (!Array.isArray(contour) || contour.length < 3) return null;
+                    const coords = contour.map(coord => {
+                        const point = proj4('EPSG:3857', 'EPSG:4326', coord);
+                        return [point[1], point[0]];
+                    });
+                    return coords.map(c => [c[0] - mapOffsetY * 0.000008983, c[1] - mapOffsetX * 0.000008983]);
+                }).filter(r => r !== null);
+
+                if (allProcessedRings.length === 0) continue;
+                
+                featuresDrawn++;
+
+                const polygonObj = new ymaps.Polygon(allProcessedRings, {}, {
+                   strokeColor: strokeColor,
+                   fillColor: `${strokeColor}4D`,
+                   strokeWidth: polygonStyle.width,
+                   strokeOpacity: 0.9,
+                   hintContent: labelContent,
+                });
+
+               map.geoObjects.add(polygonObj);
+               polygons.push(polygonObj);
+
+               const bounds = polygonObj.geometry.getBounds();
+               if (bounds) {
+                   if (!combinedBounds) {
+                       combinedBounds = [[...bounds[0]], [...bounds[1]]];
+                   } else {
+                       combinedBounds[0][0] = Math.min(combinedBounds[0][0], bounds[0][0]);
+                       combinedBounds[0][1] = Math.min(combinedBounds[0][1], bounds[0][1]);
+                       combinedBounds[1][0] = Math.max(combinedBounds[1][0], bounds[1][0]);
+                       combinedBounds[1][1] = Math.max(combinedBounds[1][1], bounds[1][1]);
+                   }
+                   
+                   // --- НАЧАЛО ИЗМЕНЕНИЙ: Проверяем флаг hideLabels ---
+                   if (!hideLabels) {
+                       const centerGeo = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
+                       const textPlacemark = new ymaps.Placemark(centerGeo, {
+                            iconContent: labelContent,
+                            hintContent: labelContent
+                       }, {
+                            preset: labelPreset,
+                            draggable: true
+                       });
+                       map.geoObjects.add(textPlacemark);
+                       polygons.push(textPlacemark);
+                   }
+                   // --- КОНЕЦ ИЗМЕНЕНИЙ ---
+               }
+            }
+        } catch (e) {
+            console.error("Ошибка при отрисовке произвольного объекта:", e, feature);
+        }
+    }
+
+    if (combinedBounds) {
+         map.setBounds(combinedBounds, { checkZoomRange: true, duration: 300 });
+    }
+
+    hideLoader();
+    if (featuresDrawn > 0) {
+        showNotification(`Отображено ${featuresDrawn} объектов из JSON`, 'success');
+    } else {
+        showNotification('Не найдено корректных геометрий для отображения в JSON', 'warning');
+    }
+}
+
 
 function highlightIntersectingParcels(parcels) {
     for (const parcel of parcels) {
