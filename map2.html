@@ -2516,6 +2516,7 @@ let selectedVriFromLegend = null; // Tracks the VRI selected in the legend, null
        let lastVercelBlockTime = 0;
        
        let rasterOverlay = null;
+      let manualObjectOpacity = parseFloat(localStorage.getItem('manualObjectOpacity')) || 0.8;
 let rasterControlsPanel = null;
 let rasterImageSize = { width: 0, height: 0 };
 
@@ -2529,40 +2530,42 @@ const vercelProxyUrl = 'https://nsp-two.vercel.app/';
 
 
 async function fetchNspd(url, options = {}) {
-    
-
-    const fetchViaVercel = async () => {
-        if (isVercelProxyBlocked) {
-            return new Response(JSON.stringify({ error: "Vercel proxy is blocked" }), {
-                status: 403,
-                statusText: "Forbidden (Proxy Blocked)",
-                headers: { 'Content-Type': 'application/json' }
-            });
+    if (!useVercelProxyFeature) {
+        try {
+            return await fetch(url, options);
+        } catch (directError) {
+            console.error("Direct fetch failed (mobile mode is off):", directError);
+            throw directError;
         }
-        
-        const urlObject = new URL(url);
-        const targetPath = `${urlObject.pathname}${urlObject.search}`;
-        const proxyRequestUrl = `${vercelProxyUrl}?target=${encodeURIComponent(targetPath)}`;
-        
-        const newHeaders = new Headers(options.headers);
-        newHeaders.append('Referer', 'https://nspd.gov.ru/');
+    }
 
-        const proxyOptions = {
-            ...options,
-            headers: newHeaders
-        };
-       
+    if (isVercelProxyBlocked) {
+        return new Response(JSON.stringify({ error: "Vercel proxy is blocked" }), {
+            status: 403,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
+    
+    const urlObject = new URL(url);
+    const targetPath = `${urlObject.pathname}${urlObject.search}`;
+    
+    const refererParam = encodeURIComponent('https://nspd.gov.ru/map');
+    const originParam = encodeURIComponent('https://nspd.gov.ru');
+    const proxyRequestUrl = `${vercelProxyUrl}?target=${encodeURIComponent(targetPath)}&referer=${refererParam}&origin=${originParam}`;
+   
+    const proxyOptions = { ...options };
+   
+    try {
         const response = await fetch(proxyRequestUrl, proxyOptions); 
 
         if (!response.ok && response.status === 403) {
             isVercelProxyBlocked = true;
             const currentTime = Date.now();
             if (currentTime - lastVercelBlockTime > 30000) {
-            
                 lastVercelBlockTime = currentTime;
             }
         }
-
+        
         if (response.ok) {
             const clonedResponse = response.clone(); 
             try {
@@ -2574,18 +2577,44 @@ async function fetchNspd(url, options = {}) {
               
             }
         }
+        
         return response; 
-    };
 
-  
-    if (useVercelProxyFeature) {
-     
-        return await fetchViaVercel();
-    } else {
-     
-        return await fetch(url, options);
+    } catch (error) {
+        console.error("Fetch via Vercel proxy failed:", error);
+        return new Response(JSON.stringify({ error: `Proxy request failed: ${error.message}` }), {
+            status: 502,
+            headers: { 'Content-Type': 'application/json' }
+        });
     }
- 
+}
+
+
+
+function setManualObjectOpacity(opacity) {
+    manualObjectOpacity = opacity; // Обновляем глобальное значение
+    localStorage.setItem('manualObjectOpacity', opacity); // Сохраняем в localStorage
+
+    // Делаем заливку более прозрачной, чем контур
+    const fillOpacity = opacity * 0.4;
+
+    // Проходим по всем объектам на карте
+    map.geoObjects.each(function(geoObject) {
+        if (geoObject instanceof ymaps.Polygon || geoObject instanceof ymaps.Polyline) {
+            const props = geoObject.properties;
+            // Проверяем, есть ли у объекта один из наших "ручных" флагов
+            if (props.get('isManuallyDrawn') || props.get('isAreaMeasurement') || props.get('isDrawableLine') || props.get('isSearchShape')) {
+                geoObject.options.set('strokeOpacity', opacity);
+
+                // Меняем прозрачность заливки, только если она не полностью прозрачная
+                const currentFill = geoObject.options.get('fillColor');
+                if (currentFill && currentFill !== '#00000000') {
+                    // Установка fillOpacity работает для цветных заливок
+                    geoObject.options.set('fillOpacity', fillOpacity);
+                }
+            }
+        }
+    });
 }
 
 
@@ -3922,7 +3951,8 @@ function performRasterBinding() {
             fillMethod: 'stretch',
             stroke: false,
             opacity: rasterOverlay.options.get('opacity'),
-            interactivityModel: 'default#transparent' // Возвращаем в неинтерактивное состояние
+           interactivityModel: 'default#transparent', // Возвращаем в неинтерактивное состояние
+zIndex: 400
         });
         
         // 7. Заменяем старый оверлей новым
@@ -4235,7 +4265,8 @@ async function processImportedZipBlob(zipBlob) {
                 fillMethod: 'stretch',
                 stroke: false,
                 opacity: settings.opacity || 0.8,
-                interactivityModel: 'default#transparent'
+               interactivityModel: 'default#transparent',
+zIndex: 400
             });
 
             if (rasterOverlay) map.geoObjects.remove(rasterOverlay);
@@ -4530,8 +4561,9 @@ async function drawFeatures(geoCoordinates) {
                 }, {
                     strokeColor: polygonStyle.color,
                     strokeWidth: polygonStyle.width,
-                    strokeOpacity: 0.8,
-                    fillColor: '#00000000'
+                    strokeOpacity: manualObjectOpacity, 
+                    fillColor: '#00000000',
+                      zIndex: 900 
                 });
 
                 map.geoObjects.add(polygonObj);
@@ -4546,7 +4578,8 @@ async function drawFeatures(geoCoordinates) {
         strokeColor: polygonStyle.color,
         strokeWidth: polygonStyle.width,
         strokeOpacity: 0.8,
-        interactivityModel: 'default#geoObject' // <<< И ЭТО ТОЖЕ
+        interactivityModel: 'default#geoObject',
+         zIndex: 900 
     });
     map.geoObjects.add(polyline);
     polygons.push(polyline);
@@ -7215,92 +7248,113 @@ if (event.target.id === 'change-color-menu-item') {
         showNotification(`Отображено ${displayCount} точек полигона`, 'success', 'check-circle');
     });
 
-    showNumberedPointsBtn.addEventListener('click', () => {
+   showNumberedPointsBtn.addEventListener('click', () => {
         const pointsToRemove = [];
         polygons.forEach(p => {
             if (p instanceof ymaps.Placemark && p.properties.get('isVertexPoint') === true && p.properties.get('relatedPolygon') === targetPolygon) {
                 pointsToRemove.push(p);
             }
         });
-        pointsToRemove.forEach(p => {
-            if (map.geoObjects.indexOf(p) !== -1) { map.geoObjects.remove(p); }
-            polygons = polygons.filter(poly => poly !== p);
-        });
 
-        let coordinates = [];
-        if (targetPolygon instanceof ymaps.Polygon && targetPolygon.geometry.getCoordinates().length > 0) {
-            coordinates = targetPolygon.geometry.getCoordinates()[0];
-        } else {
-            showNotification('Не удалось получить координаты полигона', 'error');
+        // Проверяем, были ли точки уже добавлены для этого полигона
+        const arePointsVisible = targetPolygon.properties.get('numberedPointsVisible');
+
+        if (arePointsVisible) {
+            // --- ЛОГИКА УДАЛЕНИЯ ТОЧЕК ---
+            pointsToRemove.forEach(p => {
+                if (map.geoObjects.indexOf(p) !== -1) { map.geoObjects.remove(p); }
+                polygons = polygons.filter(poly => poly !== p);
+            });
+            // Сбрасываем флаг
+            targetPolygon.properties.set('numberedPointsVisible', false);
             document.body.removeChild(modal);
-            return;
-        }
-        const isClosed = coordinates.length > 1 &&
-            Math.abs(coordinates[0][0] - coordinates[coordinates.length - 1][0]) < 1e-7 &&
-            Math.abs(coordinates[0][1] - coordinates[coordinates.length - 1][1]) < 1e-7;
-        
-        const pointsToAdd = [];
-        const numPoints = isClosed ? coordinates.length - 1 : coordinates.length;
-        if (numPoints < 1) return;
-        for (let i = 0; i < numPoints; i++) {
-            const currentCoord = coordinates[i];
-            const prevIndex = (i - 1 + numPoints) % numPoints;
-            const nextIndex = (i + 1) % numPoints;
-            const prevCoord = coordinates[prevIndex];
-            const nextCoord = coordinates[nextIndex];
-            const projection = map.options.get('projection');
-            const zoom = map.getZoom();
-            const currentPx = projection.toGlobalPixels(currentCoord, zoom);
-            const prevPx = projection.toGlobalPixels(prevCoord, zoom);
-            const nextPx = projection.toGlobalPixels(nextCoord, zoom);
-            const v1 = [prevPx[0] - currentPx[0], prevPx[1] - currentPx[1]];
-            const v2 = [nextPx[0] - currentPx[0], nextPx[1] - currentPx[1]];
-            const mag1 = Math.sqrt(v1[0] * v1[0] + v1[1] * v1[1]);
-            const u1 = mag1 > 0 ? [v1[0] / mag1, v1[1] / mag1] : [0, 0];
-            const mag2 = Math.sqrt(v2[0] * v2[0] + v2[1] * v2[1]);
-            const u2 = mag2 > 0 ? [v2[0] / mag2, v2[1] / mag2] : [0, 0];
-            const bisector = [u1[0] + u2[0], u1[1] + u2[1]];
-            const outwardBisector = [-bisector[0], -bisector[1]];
-            const magOut = Math.sqrt(outwardBisector[0] * outwardBisector[0] + outwardBisector[1] * outwardBisector[1]);
-            const finalDirection = magOut > 0 ? [outwardBisector[0] / magOut, outwardBisector[1] / magOut] : [1, 0];
-            const offsetDistance = 30; 
-            const finalOffset = [
-                Math.round(finalDirection[0] * offsetDistance),
-                Math.round(finalDirection[1] * offsetDistance)
-            ];
+            showNotification('Нумерованные точки удалены', 'success', 'check-circle');
+        } else {
+            // --- ЛОГИКА ДОБАВЛЕНИЯ ТОЧЕК (существующая логика) ---
+            
+            // На всякий случай удаляем старые точки (например, простые точки от другой кнопки)
+            pointsToRemove.forEach(p => {
+                if (map.geoObjects.indexOf(p) !== -1) { map.geoObjects.remove(p); }
+                polygons = polygons.filter(poly => poly !== p);
+            });
 
-            const placemarkLabel = `н${i + 1}`;
+            let coordinates = [];
+            if (targetPolygon instanceof ymaps.Polygon && targetPolygon.geometry.getCoordinates().length > 0) {
+                coordinates = targetPolygon.geometry.getCoordinates()[0];
+            } else {
+                showNotification('Не удалось получить координаты полигона', 'error');
+                document.body.removeChild(modal);
+                return;
+            }
+            const isClosed = coordinates.length > 1 &&
+                Math.abs(coordinates[0][0] - coordinates[coordinates.length - 1][0]) < 1e-7 &&
+                Math.abs(coordinates[0][1] - coordinates[coordinates.length - 1][1]) < 1e-7;
             
-            const halfSize = numberedDotSize / 2;
-            const redDotMarker = new ymaps.Placemark(currentCoord, {
-                dotSize: numberedDotSize
-            }, {
-                iconLayout: redDotLayout,
-                iconOffset: [-halfSize, -halfSize],
-                iconShape: { type: 'Rectangle', coordinates: [[-halfSize, -halfSize], [halfSize, halfSize]] },
-                zIndex: 1140
+            const pointsToAdd = [];
+            const numPoints = isClosed ? coordinates.length - 1 : coordinates.length;
+            if (numPoints < 1) return;
+            for (let i = 0; i < numPoints; i++) {
+                const currentCoord = coordinates[i];
+                const prevIndex = (i - 1 + numPoints) % numPoints;
+                const nextIndex = (i + 1) % numPoints;
+                const prevCoord = coordinates[prevIndex];
+                const nextCoord = coordinates[nextIndex];
+                const projection = map.options.get('projection');
+                const zoom = map.getZoom();
+                const currentPx = projection.toGlobalPixels(currentCoord, zoom);
+                const prevPx = projection.toGlobalPixels(prevCoord, zoom);
+                const nextPx = projection.toGlobalPixels(nextCoord, zoom);
+                const v1 = [prevPx[0] - currentPx[0], prevPx[1] - currentPx[1]];
+                const v2 = [nextPx[0] - currentPx[0], nextPx[1] - currentPx[1]];
+                const mag1 = Math.sqrt(v1[0] * v1[0] + v1[1] * v1[1]);
+                const u1 = mag1 > 0 ? [v1[0] / mag1, v1[1] / mag1] : [0, 0];
+                const mag2 = Math.sqrt(v2[0] * v2[0] + v2[1] * v2[1]);
+                const u2 = mag2 > 0 ? [v2[0] / mag2, v2[1] / mag2] : [0, 0];
+                const bisector = [u1[0] + u2[0], u1[1] + u2[1]];
+                const outwardBisector = [-bisector[0], -bisector[1]];
+                const magOut = Math.sqrt(outwardBisector[0] * outwardBisector[0] + outwardBisector[1] * outwardBisector[1]);
+                const finalDirection = magOut > 0 ? [outwardBisector[0] / magOut, outwardBisector[1] / magOut] : [1, 0];
+                const offsetDistance = 30; 
+                const finalOffset = [
+                    Math.round(finalDirection[0] * offsetDistance),
+                    Math.round(finalDirection[1] * offsetDistance)
+                ];
+
+                const placemarkLabel = `н${i + 1}`;
+                
+                const halfSize = numberedDotSize / 2;
+                const redDotMarker = new ymaps.Placemark(currentCoord, {
+                    dotSize: numberedDotSize
+                }, {
+                    iconLayout: redDotLayout,
+                    iconOffset: [-halfSize, -halfSize],
+                    iconShape: { type: 'Rectangle', coordinates: [[-halfSize, -halfSize], [halfSize, halfSize]] },
+                    zIndex: 1140
+                });
+                redDotMarker.properties.set({ 'isVertexPoint': true, 'relatedPolygon': targetPolygon });
+                pointsToAdd.push(redDotMarker);
+                
+                const textLabelMarker = new ymaps.Placemark(currentCoord, {
+                    iconContent: placemarkLabel,
+                    hintContent: `Точка ${placemarkLabel}`,
+                    fontSize: numberedPointSize
+                }, {
+                    iconLayout: numberedPointLayout,
+                    iconOffset: finalOffset,
+                    zIndex: 1150
+                });
+                textLabelMarker.properties.set({ 'isVertexPoint': true, 'relatedPolygon': targetPolygon });
+                pointsToAdd.push(textLabelMarker);
+            }
+            pointsToAdd.forEach(pm => {
+                map.geoObjects.add(pm);
+                polygons.push(pm);
             });
-            redDotMarker.properties.set({ 'isVertexPoint': true, 'relatedPolygon': targetPolygon });
-            pointsToAdd.push(redDotMarker);
-            
-            const textLabelMarker = new ymaps.Placemark(currentCoord, {
-                iconContent: placemarkLabel,
-                hintContent: `Точка ${placemarkLabel}`,
-                fontSize: numberedPointSize
-            }, {
-                iconLayout: numberedPointLayout,
-                iconOffset: finalOffset,
-                zIndex: 1150
-            });
-            textLabelMarker.properties.set({ 'isVertexPoint': true, 'relatedPolygon': targetPolygon });
-            pointsToAdd.push(textLabelMarker);
+            // Устанавливаем флаг, что точки добавлены
+            targetPolygon.properties.set('numberedPointsVisible', true);
+            document.body.removeChild(modal);
+            showNotification(`Отображено ${numPoints} нумерованных точек`, 'success', 'check-circle');
         }
-        pointsToAdd.forEach(pm => {
-            map.geoObjects.add(pm);
-            polygons.push(pm);
-        });
-        document.body.removeChild(modal);
-        showNotification(`Отображено ${numPoints} нумерованных точек`, 'success', 'check-circle');
     });
 
     modal.addEventListener('click', (e) => {
@@ -7390,7 +7444,8 @@ function updateCurrentLine() {
     currentLine = new ymaps.Polyline(linePoints, {}, {
         strokeColor: currentLineColor,
         strokeWidth: currentLineWidth,
-        strokeOpacity: 0.8
+       strokeOpacity: manualObjectOpacity, 
+        zIndex: 900 
     });
 
     map.geoObjects.add(currentLine);
@@ -7593,15 +7648,18 @@ function copyPolygonWithMap(originalPolygon, strokeColor, opacityHex) {
     const originalStrokeOpacity = originalPolygon.options.get('strokeOpacity') || 0.8;
 
     // Создаем копию полигона с текущими стилями или новыми из модального окна
-    const copiedPolygon = new ymaps.Polygon([originalCoords], {}, {
+  const copiedPolygon = new ymaps.Polygon([originalCoords], {
+        isManuallyDrawn: true // <--- ДОБАВЛЕНО
+    }, {
         strokeColor: strokeColor, // Новый цвет линии из модального окна
         strokeWidth: originalStrokeWidth, // Сохраняем толщину линии
-        strokeOpacity: originalStrokeOpacity, // Сохраняем прозрачность линии
+       strokeOpacity: manualObjectOpacity, // Сохраняем прозрачность линии
         fillColor: originalFillColor, // Сохраняем заливку (если была)
         hintEnabled: false,
         hasBalloon: false,
         interactivityModel: 'default#transparent',
-        draggable: true // Делаем полигон перетаскиваемым
+        draggable: true, // Делаем полигон перетаскиваемым
+        zIndex: 900 // <--- ДОБАВЛЕНО
     });
 
     // Добавляем копию полигона на карту
@@ -14396,11 +14454,13 @@ function updateAreaPolygon() {
         areaPolygon = new ymaps.Polygon([areaPoints], {}, {
             strokeColor: '#0000FF',
             strokeWidth: 3,
-            strokeOpacity: 0.8,
+           strokeOpacity: manualObjectOpacity, 
+fillOpacity: manualObjectOpacity * 0.4, 
             fillColor: '#00000000', // Заливка отключена по умолчанию
             hintEnabled: false,
             hasBalloon: false,
-            interactivityModel: 'default#transparent'
+             interactivityModel: 'default#transparent',
+            zIndex: 900
         });
         map.geoObjects.add(areaPolygon);
         areaObjects.push(areaPolygon);
@@ -17562,12 +17622,14 @@ function drawSearchObject(geoCoordGroups) {
             if (isClosedPolygon) {
                 // Полигон (первая и последняя точки совпадают)
                 const polygon = new ymaps.Polygon([offsetCoordinates], {
-                    hintContent: 'Поисковый полигон'
+                    hintContent: 'Поисковый полигон',
+                    isSearchShape: true
                 }, {
                     strokeColor: '#FF0000',
                     strokeWidth: 4,
-                    strokeOpacity: 0.8,
-                    fillColor: '#FF000033', // Полупрозрачная заливка
+                    strokeOpacity: manualObjectOpacity,
+                  fillColor: '#FF0000', // Цвет остается красным
+fillOpacity: manualObjectOpacity * 0.4, // Управляем прозрачностью
                     zIndex: 900
                 });
                 
@@ -17578,7 +17640,8 @@ function drawSearchObject(geoCoordGroups) {
             } else {
                 // Линия
                 const polyline = new ymaps.Polyline(offsetCoordinates, {
-                    hintContent: 'Поисковая линия'
+                    hintContent: 'Поисковая линия',
+                    isSearchShape: true 
                 }, {
                     strokeColor: '#FF0000',
                     strokeWidth: 4,
@@ -18755,7 +18818,8 @@ async function createRasterOverlay(imageBlob) {
                     fillMethod: 'stretch',
                     stroke: false,
                     opacity: 0.8,
-                    interactivityModel: 'default#transparent'
+                  interactivityModel: 'default#transparent',
+zIndex: 400
                 });
 
                 map.geoObjects.add(rasterOverlay);
@@ -19212,9 +19276,16 @@ function createRasterControls() {
              <button id="raster-import-cloud-btn" title="Импорт из облака"><i class="fas fa-cloud-download-alt"></i></button>
         </div>
         <input type="range" id="raster-zoom" min="10" max="500" value="100" title="Масштаб">
-        <input type="range" id="raster-opacity" min="0" max="1" step="0.05" value="0.8" title="Прозрачность">
+             <label for="raster-opacity" style="font-size: 0.9em; text-align: center; margin-top: 5px; display: block;">Растр</label>
+        <input type="range" id="raster-opacity" min="0" max="1" step="0.05" value="0.8" title="Прозрачность растра">
+        
+        <label for="contour-opacity" style="font-size: 0.9em; text-align: center; margin-top: 5px; display: block;">Контуры</label>
+        <input type="range" id="contour-opacity" min="0" max="1" step="0.05" value="0.8" title="Прозрачность контуров">
     `;
     document.body.appendChild(rasterControlsPanel);
+     rasterControlsPanel.querySelector('#contour-opacity').value = manualObjectOpacity;
+    // Добавляем обработчик для нового слайдера
+    rasterControlsPanel.querySelector('#contour-opacity').addEventListener('input', (e) => { e.stopPropagation(); setManualObjectOpacity(parseFloat(e.target.value)); });
 
     // Обработчики событий
     rasterControlsPanel.querySelector('#raster-up').addEventListener('click', (e) => { e.stopPropagation(); moveRaster(0, -1); });
@@ -19290,7 +19361,8 @@ function moveRaster(dx, dy) {
         fillMethod: 'stretch',
         stroke: false,
         opacity: rasterOverlay.options.get('opacity'),
-        interactivityModel: 'default#transparent'
+      interactivityModel: 'default#transparent',
+zIndex: 400
     });
     
     map.geoObjects.remove(rasterOverlay);
@@ -19356,7 +19428,8 @@ function zoomRaster(scale) {
         fillMethod: 'stretch',
         stroke: false,
         opacity: rasterOverlay.options.get('opacity'),
-        interactivityModel: 'default#transparent'
+     interactivityModel: 'default#transparent',
+zIndex: 400
     });
     
     // Заменяем старый оверлей новым
