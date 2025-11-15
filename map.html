@@ -2590,39 +2590,50 @@ async function fetchNspd(url, options = {}) {
     }
 }
 
-
-/**
- * Устанавливает прозрачность для всех ЗАГРУЖЕННЫХ объектов (ЗУ, ОКС, ЗОУИТ).
- * Не затрагивает нарисованные вручную контуры.
- */
 function setLoadedObjectOpacity(opacity) {
     loadedObjectOpacity = opacity; // Обновляем глобальное значение
     localStorage.setItem('loadedObjectOpacity', opacity); // Сохраняем в localStorage
 
+    // Базовый уровень непрозрачности, который задают темы (например, 'E6' в hex = 230, ~90%)
+    const baseThemeAlpha = 230; 
+
     // Проходим по всем гео-объектам на карте
     map.geoObjects.each(function(geoObject) {
-        // Применяем только к полигонам и линиям, которые являются загруженными объектами
-        if ((geoObject instanceof ymaps.Polygon || geoObject instanceof ymaps.Polyline)) {
+        // Проверяем, что это полигон или линия и у него есть свойства
+        if (geoObject.properties && (geoObject instanceof ymaps.Polygon || geoObject instanceof ymaps.Polyline)) {
             const props = geoObject.properties;
             
-            // Флаги, указывающие на то, что объект загружен, а не нарисован
-            const isLoadedObject = props.get('isParcelInQuarter') ||
-                                   props.get('isFoundInArea') ||
-                                   props.get('isBuilding') ||
-                                   props.get('isStructure') ||
-                                   props.get('isZouit') ||
-                                   props.get('isParcelFromSingleSearch');
+            // Определяем, является ли объект "загруженным"
+            const isLoadedObject =
+                props.get('isParcelInQuarter') ||
+                props.get('isFoundInArea') ||
+                props.get('isBuilding') ||
+                props.get('isStructure') ||
+                props.get('isZouit') ||
+                props.get('isParcelFromSingleSearch');
 
             if (isLoadedObject) {
-                // Устанавливаем прозрачность контура
+                // 1. Применяем прозрачность к КОНТУРУ (обводке). Это работает для всех.
                 geoObject.options.set('strokeOpacity', opacity);
 
-                // Меняем прозрачность заливки, если она есть
-                const currentFill = geoObject.options.get('fillColor');
-                if (currentFill && currentFill !== '#00000000') {
-                    // fillOpacity работает как множитель для цвета с альфа-каналом,
-                    // поэтому это безопасно для тематической раскраски.
-                    geoObject.options.set('fillOpacity', opacity);
+                // 2. Применяем прозрачность к ЗАЛИВКЕ (только для полигонов)
+                if (geoObject instanceof ymaps.Polygon) {
+                    const currentFill = geoObject.options.get('fillColor');
+
+                    // Если у полигона есть цвет заливки (не полностью прозрачный)
+                    if (currentFill && currentFill !== '#00000000') {
+                        // Отделяем RGB часть цвета (первые 7 символов, включая #)
+                        const rgbPart = currentFill.substring(0, 7);
+                        
+                        // Вычисляем новый альфа-канал, умножая базовый на значение слайдера
+                        const newAlphaDecimal = Math.round(baseThemeAlpha * opacity);
+                        
+                        // Преобразуем в двухзначное шестнадцатеричное число (00, 0F, FF и т.д.)
+                        const newAlphaHex = newAlphaDecimal.toString(16).padStart(2, '0');
+                        
+                        // Собираем новый цвет и устанавливаем его
+                        geoObject.options.set('fillColor', `${rgbPart}${newAlphaHex}`);
+                    }
                 }
             }
         }
@@ -3832,6 +3843,7 @@ function findAndConvert() {
 
 
 function startBindingProcess() {
+    
     if (!rasterOverlay) {
         showNotification('Сначала добавьте растровое изображение', 'warning');
         return;
@@ -19184,7 +19196,7 @@ async function processEzFromNspdAndUpload(ezNumber) {
 
             const zipBlob = await generateZipBlob(aggregatedParcels, internalJsonFilename);
             
-            showLoader('Загрузка архива в облако...');
+            showLoader('Загрузка архива на сервер...');
             await uploadEzFileToServer(zipBlob, zipFilename);
             
             clearMapAndResetTheme();
@@ -19291,7 +19303,51 @@ async function fetchSingleParcelData(cadastralNumber) {
 
 // --- КОНЕЦ БЛОКА ФУНКЦИЙ ДЛЯ ОБРАБОТКИ ЕЗ ---
 
+function disableMapInteractivity() {
+    if (!map) return;
+    
+    // Принудительно закрываем любую открытую подсказку или балун.
+    if (map.hints) map.hints.close(true);
+    if (map.balloon) map.balloon.close();
+    console.log("Принудительно закрыты все активные подсказки и балуны.");
+
+    let processedCount = 0;
+    map.geoObjects.each(function(geoObject) {
+        if (geoObject.options) {
+            // Сохраняем исходную модель интерактивности, чтобы потом ее восстановить.
+            // Если она не была задана, по умолчанию используется 'default#geoObject'.
+            geoObject.originalInteractivityModel = geoObject.options.get('interactivityModel', 'default#geoObject');
+            
+            // Устанавливаем "тихую" модель. Объект перестает реагировать на любые события мыши.
+            geoObject.options.set('interactivityModel', 'default#silent');
+            processedCount++;
+        }
+    });
+    console.log(`Интерактивность отключена для ${processedCount} объектов на время работы с растром.`);
+}
+
+/**
+ * Восстанавливает исходную интерактивность для всех объектов на карте.
+ */
+function restoreMapInteractivity() {
+    if (!map) return;
+
+    let processedCount = 0;
+    map.geoObjects.each(function(geoObject) {
+        if (geoObject.options && typeof geoObject.originalInteractivityModel !== 'undefined') {
+            // Восстанавливаем сохраненную модель интерактивности.
+            geoObject.options.set('interactivityModel', geoObject.originalInteractivityModel);
+            
+            // Удаляем временное свойство, чтобы не мешать в будущем.
+            delete geoObject.originalInteractivityModel;
+            processedCount++;
+        }
+    });
+    console.log(`Интерактивность восстановлена для ${processedCount} объектов.`);
+}
+
 function createRasterControls() {
+        disableMapInteractivity();
     rasterControlsPanel = document.createElement('div');
     rasterControlsPanel.className = 'raster-controls-panel';
     
@@ -19364,6 +19420,7 @@ function createRasterControls() {
         if (rasterControlsPanel) document.body.removeChild(rasterControlsPanel);
         rasterOverlay = null;
         rasterControlsPanel = null;
+           restoreMapInteractivity();
     });
     
     rasterControlsPanel.querySelector('#raster-bind-btn').addEventListener('click', (e) => { e.stopPropagation(); startBindingProcess(); });
