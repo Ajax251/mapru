@@ -31,7 +31,7 @@
 
                 setTimeout(() => {
                     window.location.href = 'https://nspd.gov.ru';
-                }, 10);
+                }, 1);
             }
         })
         .catch(error => {
