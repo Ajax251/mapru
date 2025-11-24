@@ -30,7 +30,7 @@
                 document.body.appendChild(msg);
 
                 setTimeout(() => {
-                    window.location.href = 'https://google.com';
+                    window.location.href = 'https://nspd.gov.ru';
                 }, 10);
             }
         })
