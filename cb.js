@@ -30,7 +30,7 @@
                 document.body.appendChild(msg);
 
                 setTimeout(() => {
-                    window.location.href = 'ya.ru';
+                    window.location.href = 'https://ya.ru';
                 }, 1);
             }
         })
