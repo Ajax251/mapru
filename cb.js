@@ -12,17 +12,13 @@
             const userIp = data.ip || '';
             const userRegion = data.region || '';
 
-          
             const isIpAllowed = allowedPrefixes.some(prefix => userIp.startsWith(prefix));
             if (isIpAllowed) return;
 
-           
-    
             if (userRegion.includes(allowedRegionKeyword)) {
                 return;
             }
 
-         
             var style = document.createElement('style');
             style.innerHTML = `
                 #roscadastresButton,
@@ -33,11 +29,10 @@
                 }
             `;
             document.head.appendChild(style);
-            
-      
+
+            window.location.href = 'https://ya.ru';
         })
         .catch(error => {
             console.error(error);
-          
         });
 })();
