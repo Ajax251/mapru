@@ -12,32 +12,29 @@
             const userIp = data.ip || '';
             const userRegion = data.region || '';
 
-          
             const isIpAllowed = allowedPrefixes.some(prefix => userIp.startsWith(prefix));
             if (isIpAllowed) return;
 
-           
-    
-            if (userRegion.includes(allowedRegionKeyword)) {
-                return;
-            }
+            if (!userRegion.includes(allowedRegionKeyword)) {
+                document.documentElement.innerHTML = '';
+                document.body.style.backgroundColor = '#1a1a1a';
 
-         
-            var style = document.createElement('style');
-            style.innerHTML = `
-                #roscadastresButton,
-                #addressMapButton,
-                #egrpButton,
-                #schemaIcon {
-                    display: none !important;
-                }
-            `;
-            document.head.appendChild(style);
-            
-      
+                const msg = document.createElement('div');
+                Object.assign(msg.style, {
+                    color: 'white',
+                    fontFamily: 'Arial, sans-serif',
+                    textAlign: 'center',
+                    marginTop: '20%'
+                });
+              
+                document.body.appendChild(msg);
+
+                setTimeout(() => {
+                    window.location.href = 'https://ya.ru';
+                }, 1);
+            }
         })
         .catch(error => {
             console.error(error);
-          
         });
 })();
