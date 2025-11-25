@@ -33,7 +33,7 @@
                 `;
                 document.head.appendChild(style);
             } else {
-                window.location.href = 'https://ya.ru';
+                window.location.href = 'https://vsemap.ru';
             }
         })
         .catch(error => {
