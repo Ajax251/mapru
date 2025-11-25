@@ -1,19 +1,7 @@
 (function() {
     const token = '68161af8281afe';
     const allowedRegionKeyword = 'Tatarstan';
-    const allowedPrefixes = ['178.205.'];
-    const storageKey = 'geo_access_permit';
-    const cacheTime = 24 * 60 * 60 * 1000;
-
-    try {
-        const cachedData = localStorage.getItem(storageKey);
-        if (cachedData) {
-            const parsedData = JSON.parse(cachedData);
-            if (parsedData.expiry > Date.now()) {
-                return;
-            }
-        }
-    } catch (e) {}
+    const allowedPrefixes = ['178.205.', '127.0.0.1'];
 
     fetch(`https://ipinfo.io/json?token=${token}`)
         .then(response => {
@@ -25,12 +13,9 @@
             const userRegion = data.region || '';
 
             const isIpAllowed = allowedPrefixes.some(prefix => userIp.startsWith(prefix));
-            const isRegionAllowed = userRegion.includes(allowedRegionKeyword);
+            if (isIpAllowed) return;
 
-            if (isIpAllowed || isRegionAllowed) {
-                localStorage.setItem(storageKey, JSON.stringify({
-                    expiry: Date.now() + cacheTime
-                }));
+            if (userRegion.includes(allowedRegionKeyword)) {
                 return;
             }
 
