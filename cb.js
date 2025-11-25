@@ -1,7 +1,7 @@
 (function() {
     const token = '68161af8281afe';
     const allowedRegionKeyword = 'Tatarstan';
-    const allowedPrefixes = ['178.205.'];
+    // const allowedPrefixes = ['1..']; 
     const storageKey = 'geo_access_permit';
     const cacheTime = 24 * 60 * 60 * 1000;
 
@@ -24,10 +24,13 @@
             const userIp = data.ip || '';
             const userRegion = data.region || '';
 
-            const isIpAllowed = allowedPrefixes.some(prefix => userIp.startsWith(prefix));
+         
+            // const isIpAllowed = allowedPrefixes.some(prefix => userIp.startsWith(prefix));
+            
             const isRegionAllowed = userRegion.includes(allowedRegionKeyword);
 
-            if (isIpAllowed || isRegionAllowed) {
+        
+            if (/* isIpAllowed || */ isRegionAllowed) {
                 localStorage.setItem(storageKey, JSON.stringify({
                     expiry: Date.now() + cacheTime
                 }));
