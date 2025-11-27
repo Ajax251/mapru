@@ -1343,10 +1343,46 @@ function runValidation(xmlDoc, xmlText) {
         if (generalWorksEl) { const cadWorkDate = A(generalWorksEl, 'DateCadastral'); if (cadWorkDate && cadWorkDate !== currentDateString) { messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>Предупреждение:</strong> Дата кадастровых работ (${cadWorkDate}) не является текущей датой.</div>`); } }
         const allDocuments = All(xmlDoc, 'InputData Documents Document');
         for (const doc of allDocuments) { if (T(doc, 'Name') === 'Сведения о геодезической основе') { const docDate = T(doc, 'Date'); if (docDate && docDate !== currentDateString) { messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>Предупреждение:</strong> Дата в документе "Сведения о геодезической основе" (${docDate}) не является текущей датой.</div>`); } break; } }
+        
+        // Проверка дат геодезической основы
         const geoBasePoints = All(xmlDoc, 'GeodesicBases GeodesicBase ConditionPoint');
         let geoDateMismatch = false;
         for (const point of geoBasePoints) { const pointDate = A(point, 'AsOfDate'); if (pointDate && pointDate !== currentDateString) { geoDateMismatch = true; break; } }
         if (geoDateMismatch) { messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>Предупреждение:</strong> Одна или несколько дат состояния пунктов геодезической основы не являются текущей датой.</div>`); }
+        
+        // === НОВАЯ ЛОГИКА: ПРОВЕРКА МЕТОДА КООРДИНАТ И НАЛИЧИЯ ДАТ ===
+        // 1. Определяем, какие методы использованы в документе
+        let usedAnalytical = false;
+        let usedSatellite = false;
+        const allOrdinates = All(xmlDoc, 'Ordinate');
+        for (const ord of allOrdinates) {
+            const m = A(ord, 'GeopointOpred');
+            if (m === '692006000000') usedAnalytical = true;
+            if (m === '692005000000') usedSatellite = true;
+        }
+
+        // 2. Определяем, есть ли заполненные даты обследования пунктов
+        let hasGeoBaseDates = false;
+        for (const point of geoBasePoints) { 
+            const d = A(point, 'AsOfDate');
+            if (d && d !== '—') {
+                hasGeoBaseDates = true;
+                break;
+            } 
+        }
+
+        // 3. Условие: Если Спутниковый метод (692005000000), даты ОБЯЗАНЫ быть
+        if (usedSatellite && !hasGeoBaseDates) {
+             messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>Ошибка метода:</strong> Использован "Метод спутниковых геодезических измерений", но отсутствуют сведения о дате состояния пунктов геодезической основы (AsOfDate).</div>`);
+        }
+
+        // 4. Условие: Если только Аналитический метод (692006000000), дат быть НЕ ДОЛЖНО (предупреждение)
+        // Мы проверяем !usedSatellite, чтобы не ругаться в комбинированных случаях (когда часть точек снята спутником, а часть аналитически)
+        if (usedAnalytical && !usedSatellite && hasGeoBaseDates) {
+             messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>Предупреждение:</strong> Использован только "Аналитический метод", но заполнены даты состояния пунктов геодезической основы. При аналитическом методе пункты ГГС обычно не обследуются.</div>`);
+        }
+        // ==============================================================
+
         const dateWarnings = []; const foundDates = new Set(); const dateRegex = /(?:\b(\d{2})\.(\d{2})\.(\d{4})\b)|(?:\b(\d{4})-(\d{2})-(\d{2})\b)/g; const minDate = new Date(1990, 0, 1); const currentDate = new Date(); currentDate.setHours(23, 59, 59, 999); let match;
         while ((match = dateRegex.exec(xmlText)) !== null) {
             const fullMatch = match[0]; if (foundDates.has(fullMatch)) continue; foundDates.add(fullMatch);
@@ -1367,7 +1403,6 @@ function runValidation(xmlDoc, xmlText) {
             const categoryCode = A(E(mainParcel, 'Category'), 'Category'); 
             const requiredMt = accuracyStandards[categoryCode]; 
 
-            // ИЗМЕНЕНИЕ: Строгое определение площади текущего участка (прямой потомок), чтобы не брать площадь исходного
             let area = 0;
             let statedAreaInaccuracy = 0;
             const directAreaNode = Array.from(mainParcel.children).find(el => el.tagName === 'Area');
@@ -1375,12 +1410,10 @@ function runValidation(xmlDoc, xmlText) {
                 area = parseFloat(T(directAreaNode, 'Area'));
                 statedAreaInaccuracy = parseFloat(T(directAreaNode, 'Inaccuracy'));
             } else {
-                 // Fallback если структура совсем другая
                  area = parseFloat(T(mainParcel, 'Area > Area'));
                  statedAreaInaccuracy = parseFloat(T(mainParcel, 'Area > Inaccuracy'));
             }
 
-            // ИЗМЕНЕНИЕ: Уточненный селектор для ординат, чтобы не хватать лишние
             const ordinates = Array.from(All(mainParcel, 'EntitySpatial > SpatialElement > SpelementUnit > NewOrdinate, EntitySpatial > SpatialElement > SpelementUnit > Ordinate'));
             
             if (ordinates.length > 0) {
