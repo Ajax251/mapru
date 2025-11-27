@@ -11093,18 +11093,21 @@ function updateLoaderWithRadiusButtons(lat, lon) {
     const loaderContainer = document.getElementById('loaderContainer');
     const loadingText = document.querySelector('.loading-text');
     
+    // 1. Обновляем текст
     if (loadingText) {
         loadingText.innerHTML = `Поиск участков в радиусе <b>${currentSearchRadius}м</b>...`;
     }
 
+    // 2. Ищем или создаем контейнер для кнопок
     let buttonsContainer = loaderContainer.querySelector('.loader-radius-buttons');
     if (!buttonsContainer) {
         buttonsContainer = document.createElement('div');
         buttonsContainer.className = 'loader-radius-buttons';
-        const loaderInner = loaderContainer.querySelector('.loader');
-        if (loaderInner) loaderInner.appendChild(buttonsContainer);
+        // Вставляем после спиннера и текста (просто в конец лоадера)
+        loaderContainer.querySelector('.loader').appendChild(buttonsContainer);
     }
     
+    // 3. Очищаем и перерисовываем кнопки
     buttonsContainer.innerHTML = '';
     const radii = [50, 100, 200, 300,500];
 
@@ -11113,16 +11116,24 @@ function updateLoaderWithRadiusButtons(lat, lon) {
         btn.className = 'radius-btn';
         btn.textContent = `${r}м`;
         
+        // Выделяем текущий радиус
         if (r === currentSearchRadius) {
             btn.classList.add('active');
         }
 
+        // Обработчик клика
         btn.onclick = (e) => {
-            e.stopPropagation();
+            e.stopPropagation(); // Чтобы клик не ушел на карту (если вдруг)
             
+            // Если нажали на уже активный радиус - ничего не делаем
             if (r === currentSearchRadius) return;
 
+            // Если нажали новый радиус
+            console.log(`Переключение радиуса с ${currentSearchRadius}м на ${r}м`);
             currentSearchRadius = r;
+            localStorage.setItem('nearbySearchRadius', r); // Сохраняем в память
+            
+            // Перезапускаем поиск с новыми параметрами
             getParcelsNearby(lat, lon); 
         };
 
@@ -11130,52 +11141,64 @@ function updateLoaderWithRadiusButtons(lat, lon) {
     });
 }
 
+// --- Основная функция поиска (ОБНОВЛЕННАЯ) ---
 async function getParcelsNearby(lat, lon) {
+    // Генерируем новый ID для этого запуска. 
+    // Если пользователь нажмет кнопку и запустит эту функцию снова, ID изменится.
     const thisSessionId = Date.now();
     nearbySearchSessionId = thisSessionId;
 
-    showLoader(); 
-    updateLoaderWithRadiusButtons(lat, lon); 
+    // Показываем лоадер с кнопками
+    showLoader(); // Базовый показ
+    updateLoaderWithRadiusButtons(lat, lon); // Добавляем кнопки и правильный текст
 
     try {
+        // 1. Конвертируем точку клика в EPSG:3857
         const centerPoint = toEPSG3857(lat, lon);
         const centerX = centerPoint.x;
         const centerY = centerPoint.y;
 
+        // 2. Формируем координаты квадрата поиска на основе currentSearchRadius
         const halfSize = currentSearchRadius; 
         const squareCoordsEPSG3857 = [
-            [centerX - halfSize, centerY - halfSize],
-            [centerX + halfSize, centerY - halfSize],
-            [centerX + halfSize, centerY + halfSize],
-            [centerX - halfSize, centerY + halfSize],
-            [centerX - halfSize, centerY - halfSize]
+            [centerX - halfSize, centerY - halfSize], // Нижний левый
+            [centerX + halfSize, centerY - halfSize], // Нижний правый
+            [centerX + halfSize, centerY + halfSize], // Верхний правый
+            [centerX - halfSize, centerY + halfSize], // Верхний левый
+            [centerX - halfSize, centerY - halfSize]  // Замыкаем
         ];
 
+        // 3. Используем существующую функцию поиска по области
+        // ВАЖНО: searchParcelsByArea делает запрос к API
         const foundFeatures = await searchParcelsByArea(squareCoordsEPSG3857);
 
+        // --- ПРОВЕРКА ОТМЕНЫ ---
+        // Если пока мы ждали ответ от сервера, пользователь нажал другую кнопку,
+        // nearbySearchSessionId изменился. Значит, этот результат нам больше не нужен.
         if (thisSessionId !== nearbySearchSessionId) {
+            console.log(`Поиск для радиуса ${halfSize}м отменен (устарел).`);
             return; 
         }
 
         if (!foundFeatures || foundFeatures.length === 0) {
             showNotification(`Земельные участки в радиусе ${currentSearchRadius}м не найдены`, 'warning');
-            cleanUpLoaderButtons();
+            cleanUpLoaderButtons(); // Убираем кнопки перед закрытием
             hideLoader();
             return;
         }
 
+        // 4. Отрисовываем найденное
         await drawFoundParcels(foundFeatures, true);
 
+        // --- ПРОВЕРКА ОТМЕНЫ (на всякий случай перед UI) ---
         if (thisSessionId !== nearbySearchSessionId) return;
 
+        // 5. Обновляем боковую панель
         await populateSidebarWithFoundObjects(foundFeatures, `ЗУ (рядом ${currentSearchRadius}м)`);
         
-        const p1 = proj4("EPSG:3857", "EPSG:4326", [centerX - halfSize, centerY - halfSize]);
-        const p2 = proj4("EPSG:3857", "EPSG:4326", [centerX + halfSize, centerY + halfSize]);
-        
+        // 6. Рисуем рамку области поиска
         const searchRect = new ymaps.Rectangle([
-            [p1[1], p1[0]], 
-            [p2[1], p2[0]] 
+            [lat, lon], [lat, lon] // Временные, сейчас обновим
         ], {}, {
             strokeColor: '#FF0000',
             strokeWidth: 1,
@@ -11183,6 +11206,15 @@ async function getParcelsNearby(lat, lon) {
             fillOpacity: 0,
             strokeStyle: 'dash'
         });
+
+        // Конвертируем углы обратно в WGS84 для точной отрисовки рамки
+        const p1 = proj4("EPSG:3857", "EPSG:4326", [centerX - halfSize, centerY - halfSize]);
+        const p2 = proj4("EPSG:3857", "EPSG:4326", [centerX + halfSize, centerY + halfSize]);
+        
+        searchRect.geometry.setCoordinates([
+            [p1[1], p1[0]], 
+            [p2[1], p2[0]] 
+        ]);
         
         map.geoObjects.add(searchRect);
         setTimeout(() => map.geoObjects.remove(searchRect), 3000);
@@ -11195,6 +11227,7 @@ async function getParcelsNearby(lat, lon) {
             showNotification(`Ошибка поиска: ${error.message}`, 'error');
         }
     } finally {
+        // Скрываем лоадер только если это была актуальная сессия
         if (thisSessionId === nearbySearchSessionId) {
             cleanUpLoaderButtons();
             hideLoader();
@@ -11202,18 +11235,17 @@ async function getParcelsNearby(lat, lon) {
     }
 }
 
+// Функция очистки кнопок (вызываем при закрытии лоадера)
 function cleanUpLoaderButtons() {
     const loaderContainer = document.getElementById('loaderContainer');
     const buttonsContainer = loaderContainer.querySelector('.loader-radius-buttons');
     if (buttonsContainer) {
         buttonsContainer.remove();
     }
+    // Сбрасываем текст лоадера на дефолтный
     const loadingText = document.querySelector('.loading-text');
     if (loadingText) loadingText.textContent = "Загрузка...";
 }
-
-
-
 async function copyTextWithFeedback(text, element) {
     try {
         await navigator.clipboard.writeText(text);
