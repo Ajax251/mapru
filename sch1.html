@@ -360,7 +360,7 @@
     
     <div class="context-menu" id="textContextMenu">
         <div class="context-menu-item" onclick="editText()"><i class="fas fa-pencil-alt"></i>Редактировать</div>
-        <div class="context-menu-item" onclick="deleteSelectedObject()"><i class="fas fa-trash-alt"></i>Удалить</div>
+        <div class="context-menu-item" onclick="deleteSelectedText()"><i class="fas fa-trash-alt"></i>Удалить</div>
     </div>
     
 <div class="modal-backdrop" id="cadastralModal">
@@ -388,7 +388,6 @@ let isDrawingArrow = false, currentArrowStart = {};
 let isDrawingLine = false, currentLineStart = {};
 let historyStack = [], redoStack = [];
 let selectedTextId = null, textModalCallback = null;
-let selectedGeodeticId = null;
 let isDraggingText = false, isRotatingText = false, textDragOffset = {};
 let externalParcels = []; // Для хранения загруженных ЗУ
 
@@ -872,32 +871,6 @@ function setupEventListeners() {
             e.currentTarget.classList.toggle('active');
         });
     });
-    
-    
-    document.getElementById('annotationColorPicker').addEventListener('input', (e) => {
-        const newColor = e.target.value;
-        localStorage.setItem('annotationColor', newColor);
-        
-        // Если выбран текст
-        if (selectedTextId) {
-            const text = texts.find(t => t.id === selectedTextId);
-            if (text) {
-                text.color = newColor;
-                redrawAnnotations();
-            }
-        }
-        
-        // ЕСЛИ ВЫБРАНА СХЕМА (ДОБАВЛЕНО)
-        if (selectedGeodeticId) {
-            const geo = geodeticConstructions.find(g => g.id === selectedGeodeticId);
-            if (geo) {
-                geo.color = newColor; // Меняем цвет только у выбранной схемы
-                saveStateToHistory(); // Сохраняем в историю для Undo
-                redrawAnnotations();
-            }
-        }
-    });
-    
 
     document.getElementById('modalOkBtn').onclick = () => {
         if (textModalCallback) {
@@ -1018,8 +991,6 @@ function activateGeodeticMode() {
 
 function handleGeodeticClick(dataSpacePos) {
     const snapThreshold = 15;
-    const currentColor = document.getElementById('annotationColorPicker').value; // Получаем текущий цвет
-
     switch (geodeticConstructionState) {
         case 'waiting_first':
             const nearestFirst = findNearestPoint(dataSpacePos, snapThreshold);
@@ -1040,16 +1011,11 @@ function handleGeodeticClick(dataSpacePos) {
             const nearestThird = findNearestPoint(dataSpacePos, snapThreshold);
             if (nearestThird) {
                 geodeticConstructionPoints.push(nearestThird);
-                
-                // СОХРАНЯЕМ ОБЪЕКТ С ЦВЕТОМ И ID
                 geodeticConstructions.push({
-                    id: Date.now(),
                     p1: geodeticConstructionPoints[0],
                     center: geodeticConstructionPoints[1],
-                    p3: geodeticConstructionPoints[2],
-                    color: currentColor // Запекаем цвет
+                    p3: geodeticConstructionPoints[2]
                 });
-                
                 saveStateToHistory();
                 geodeticConstructionState = 'inactive';
                 geodeticConstructionPoints = [];
@@ -1102,43 +1068,20 @@ function drawCrosshairSymbol(ctx, point, color) {
     ctx.stroke();
 }
 
-function drawGeodeticConstruction(ctx, construction, isSelected = false) {
+function drawGeodeticConstruction(ctx, construction, color) {
     const { toDrawingSpace } = getCoordinateTransformers();
     const p1 = toDrawingSpace(construction.p1);
     const center = toDrawingSpace(construction.center);
     const p3 = toDrawingSpace(construction.p3);
-    
-    // Используем сохраненный цвет или черный по умолчанию
-    const color = construction.color || '#000000';
-
-    // Если объект выделен, рисуем подсветку (ореол)
-    if (isSelected) {
-        ctx.save();
-        ctx.shadowColor = "rgba(0, 0, 0, 0.5)";
-        ctx.shadowBlur = 10;
-        ctx.strokeStyle = "rgba(33, 150, 243, 0.5)"; // Голубая подсветка
-        ctx.lineWidth = 6 / zoomLevel;
-        
-        // Подсветка кружка
-        const radius = 12 / zoomLevel;
-        ctx.beginPath();
-        ctx.arc(center.x, center.y, radius, 0, 2 * Math.PI);
-        ctx.stroke();
-        ctx.restore();
-    }
-
     drawCrosshairSymbol(ctx, center, color);
-    
     ctx.save();
     ctx.strokeStyle = color;
     ctx.lineWidth = 1.5 / zoomLevel;
     ctx.setLineDash([8 / zoomLevel, 8 / zoomLevel]);
-    
     ctx.beginPath();
     ctx.moveTo(p1.x, p1.y);
     ctx.lineTo(center.x, center.y);
     ctx.stroke();
-    
     ctx.beginPath();
     ctx.moveTo(center.x, center.y);
     ctx.lineTo(p3.x, p3.y);
@@ -1419,11 +1362,7 @@ function redrawAnnotations(tempObject = null) {
     arrows.forEach(a => drawArrow(annotationCtx, toDrawingSpace(a.start), toDrawingSpace(a.end), a.color, a.thickness));
     lines.forEach(l => drawLine(annotationCtx, toDrawingSpace(l.start), toDrawingSpace(l.end), l.color, l.thickness));
     texts.forEach(t => drawText(annotationCtx, { ...t, ...toDrawingSpace(t) }));
-    geodeticConstructions.forEach(gc => {
-        // Проверяем, совпадает ли ID с выделенным
-        const isSelected = (selectedGeodeticId === gc.id);
-        drawGeodeticConstruction(annotationCtx, gc, isSelected);
-    });
+    geodeticConstructions.forEach(gc => drawGeodeticConstruction(annotationCtx, gc, currentColor));
     if (geodeticConstructionState !== 'inactive' && geodeticConstructionPoints.length > 0) {
         const tempP1 = toDrawingSpace(geodeticConstructionPoints[0]);
         annotationCtx.save();
@@ -1467,25 +1406,6 @@ function redrawAnnotations(tempObject = null) {
         annotationCtx.strokeRect(x, y, width, height);
         annotationCtx.restore();
     }
-}
-
-
-function checkGeodeticInteraction(mouseDrawingPos) {
-    const { toDrawingSpace } = getCoordinateTransformers();
-    const hitRadius = 15 / zoomLevel; // Радиус чувствительности
-
-    for (let i = geodeticConstructions.length - 1; i >= 0; i--) {
-        const gc = geodeticConstructions[i];
-        const centerScreen = toDrawingSpace(gc.center);
-        
-        // Проверяем расстояние от мыши до центра схемы
-        const dist = Math.hypot(mouseDrawingPos.x - centerScreen.x, mouseDrawingPos.y - centerScreen.y);
-        
-        if (dist <= hitRadius) {
-            return { isOver: true, id: gc.id, obj: gc };
-        }
-    }
-    return { isOver: false, id: null, obj: null };
 }
 
 
@@ -1555,7 +1475,7 @@ function drawTextSelectionHandles(ctx, t) { ctx.font = `${t.size / zoomLevel}px 
 // --- ЛОГИКА МЫШИ ДЛЯ АННОТАЦИЙ ---
 function setupCanvasMouseEvents(wrapper) {
     wrapper.addEventListener('mousedown', e => {
-        if (!isAnnotationModeActive || e.button !== 0 || (savedContours.length === 0 && externalParcels.length === 0)) return;
+        if (!isAnnotationModeActive || e.button !== 0 || (savedContours.length === 0 && externalParcels.length === 0) ) return;
         const pos = screenToDataSpace(e);
         if (!pos) return;
         
@@ -1564,13 +1484,9 @@ function setupCanvasMouseEvents(wrapper) {
             return;
         }
 
-        const drawingPos = screenToDrawingSpace(e);
-
-        // 1. Сначала проверяем текст
-        const textHit = checkTextInteraction(drawingPos);
+        const textHit = checkTextInteraction(screenToDrawingSpace(e));
         if (textHit.isOver) {
             e.preventDefault();
-            selectedGeodeticId = null; // Сбрасываем выделение схемы
             if (selectedTextId !== textHit.id) { selectedTextId = textHit.id; updateControlsForSelectedText(); }
             isRotatingText = textHit.onRotateHandle;
             isDraggingText = !isRotatingText;
@@ -1579,25 +1495,7 @@ function setupCanvasMouseEvents(wrapper) {
             return;
         }
         
-        // 2. Если не текст, проверяем геодезические построения
-        const geoHit = checkGeodeticInteraction(drawingPos);
-        if (geoHit.isOver) {
-            e.preventDefault();
-            selectedTextId = null; // Сбрасываем выделение текста
-            selectedGeodeticId = geoHit.id;
-            
-            // Обновляем пипетку цветом выбранной схемы
-            document.getElementById('annotationColorPicker').value = geoHit.obj.color || '#000000';
-            redrawAll();
-            return;
-        }
-
-        // Клик в пустоту - сбрасываем всё
-        if (selectedTextId || selectedGeodeticId) { 
-            selectedTextId = null; 
-            selectedGeodeticId = null;
-            redrawAll(); 
-        }
+        if (selectedTextId) { selectedTextId = null; redrawAll(); }
         
         if (activeMode) {
             e.preventDefault();
@@ -1647,39 +1545,14 @@ function setupCanvasMouseEvents(wrapper) {
         redrawAnnotations();
     });
     
- canvasWrapper.addEventListener('contextmenu', e => {
+    canvasWrapper.addEventListener('contextmenu', e => {
         if (!isAnnotationModeActive) return;
         e.preventDefault();
         const drawingPos = screenToDrawingSpace(e); if(!drawingPos) return;
-        
         const textHit = checkTextInteraction(drawingPos);
-        const geoHit = checkGeodeticInteraction(drawingPos);
-
         if (textHit.isOver) {
             if (selectedTextId !== textHit.id) { selectedTextId = textHit.id; updateControlsForSelectedText(); redrawAll(); }
-            // Показываем меню
-            const menu = document.getElementById('textContextMenu');
-            menu.style.display = 'block';
-            menu.style.left = `${e.clientX + 5}px`;
-            menu.style.top = `${e.clientY + 5}px`;
-            
-            // Настраиваем пункты для текста
-            menu.innerHTML = `
-                <div class="context-menu-item" onclick="editText()"><i class="fas fa-pencil-alt"></i>Редактировать</div>
-                <div class="context-menu-item" onclick="deleteSelectedObject()"><i class="fas fa-trash-alt"></i>Удалить</div>
-            `;
-        } else if (geoHit.isOver) {
-             if (selectedGeodeticId !== geoHit.id) { selectedGeodeticId = geoHit.id; redrawAll(); }
-             // Показываем меню для схемы
-            const menu = document.getElementById('textContextMenu');
-            menu.style.display = 'block';
-            menu.style.left = `${e.clientX + 5}px`;
-            menu.style.top = `${e.clientY + 5}px`;
-            
-            // Только удаление для схемы (редактирование цвета через палитру)
-            menu.innerHTML = `
-                <div class="context-menu-item" onclick="deleteSelectedObject()"><i class="fas fa-trash-alt"></i>Удалить</div>
-            `;
+            Object.assign(textContextMenu.style, { display: 'block', left: `${e.clientX + 5}px`, top: `${e.clientY + 5}px` });
         }
     });
 }
@@ -1800,32 +1673,8 @@ function showTextModal(textObject, callback) {
     textModalCallback = callback;
 }
 
-function editText() { const text = texts.find(t => t.id === selectedTextId); if(text) { showTextModal(text, ns => { if (ns.text) { Object.assign(text, ns); saveStateToHistory(); } else deleteSelectedObject(); redrawAll(); }); } }
-function deleteSelectedObject() {
-    let changed = false;
-    
-    // Удаление текста
-    if (selectedTextId) {
-        texts = texts.filter(t => t.id !== selectedTextId);
-        selectedTextId = null;
-        changed = true;
-    }
-    
-    // Удаление схемы
-    if (selectedGeodeticId) {
-        geodeticConstructions = geodeticConstructions.filter(g => g.id !== selectedGeodeticId);
-        selectedGeodeticId = null;
-        changed = true;
-    }
-
-    if (changed) {
-        saveStateToHistory();
-        redrawAll();
-    }
-    
-    // Скрываем меню
-    document.getElementById('textContextMenu').style.display = 'none';
-}
+function editText() { const text = texts.find(t => t.id === selectedTextId); if(text) { showTextModal(text, ns => { if (ns.text) { Object.assign(text, ns); saveStateToHistory(); } else deleteSelectedText(); redrawAll(); }); } }
+function deleteSelectedText() { if (selectedTextId) { texts = texts.filter(t => t.id !== selectedTextId); selectedTextId = null; saveStateToHistory(); redrawAll(); } }
 function updateControlsForSelectedText() { const text = texts.find(t => t.id === selectedTextId); if (!text) return; document.getElementById('annotationColorPicker').value = text.color; document.getElementById('fontSizeInput').value = text.size; document.getElementById('fontFamilySelect').value = text.family; document.getElementById('textRotationInput').value = text.rotation; }
 
 // --- УТИЛИТЫ КООРДИНАТ И ВЗАИМОДЕЙСТВИЙ ---
