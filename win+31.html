@@ -527,37 +527,31 @@
             document.getElementById('ctxMenu').style.display = 'none';
         }
 
-        async function fsPaste() {
+         async function fsPaste() {
             document.getElementById('ctxMenu').style.display = 'none';
             if(!appClipboard || !appClipboard.items.length) return;
 
             const targetFolder = currentPath;
 
             if (appClipboard.op === 'cut') {
-                // MOVE: Просто меняем parent_id
                 for(let item of appClipboard.items) {
                     await sb.from('files').update({ parent_id: targetFolder }).eq('id', item.id);
                 }
-                appClipboard = null; // Clear after cut/paste
+                appClipboard = null;
             } else {
-                // COPY: Создаем дубликаты файлов
+                // COPY
                 for(let item of appClipboard.items) {
-                    // Генерируем новое имя (копия)
                     const newName = "Копия - " + item.name;
-                    
+                    // При копировании переносим и размер (item.size)
                     if (item.content) {
-                        // Текст
                         await sb.from('files').insert({
                             name: newName, type: item.type, parent_id: targetFolder, 
-                            content: item.content, user_id: currentUser.id
+                            content: item.content, size: item.size, user_id: currentUser.id
                         });
                     } else if (item.storage_path) {
-                        // Файл в хранилище. Supabase не имеет простого 'copy' API для storage.
-                        // Для простоты создаем новую запись в БД, указывающую НА ТОТ ЖЕ файл в хранилище.
-                        // (В идеале нужно копировать и файл, но это требует скачивания и загрузки).
                         await sb.from('files').insert({
                             name: newName, type: item.type, parent_id: targetFolder,
-                            storage_path: item.storage_path, user_id: currentUser.id
+                            storage_path: item.storage_path, size: item.size, user_id: currentUser.id
                         });
                     }
                 }
@@ -583,7 +577,7 @@
             document.getElementById('folder-modal').style.display = 'none';
         }
 
-        async function uploadFiles(e) {
+           async function uploadFiles(e) {
             const upFiles = Array.from(e.target.files);
             if(!upFiles.length) return;
 
@@ -605,9 +599,12 @@
                     storagePath = path;
                 }
 
+                // ДОБАВЛЕНО: поле size
                 await sb.from('files').insert({
                     name: safeName, type: type, parent_id: currentPath,
-                    content: content, storage_path: storagePath, user_id: currentUser.id
+                    content: content, storage_path: storagePath, 
+                    size: file.size, // Сохраняем размер в байтах
+                    user_id: currentUser.id
                 });
             }
             e.target.value = '';
@@ -711,16 +708,24 @@
         }
 
         // --- Вспомогательная функция для размера (можно доработать) ---
-        function getSize(f) {
+          function getSize(f) {
             if (f.type === 'folder') return '';
-            if (f.content) {
-                // Считаем размер текста
-                const size = new Blob([f.content]).size;
-                return (size / 1024).toFixed(1) + ' Кб';
+            
+            let bytes = 0;
+            // Если есть сохраненный размер в БД (новые файлы)
+            if (f.size) {
+                bytes = f.size;
+            } 
+            // Фоллбэк для старых текстовых файлов
+            else if (f.content) {
+                bytes = new Blob([f.content]).size;
+            } else {
+                return '-';
             }
-            // Для файлов из Storage мы пока не храним размер в БД,
-            // поэтому пока ставим прочерк (или можно доработать uploadFiles для сохранения size)
-            return '-'; 
+
+            if (bytes < 1024) return bytes + ' Б';
+            if (bytes < 1024 * 1024) return (bytes / 1024).toFixed(1) + ' Кб';
+            return (bytes / (1024 * 1024)).toFixed(2) + ' Мб';
         }
 
         // --- ОБНОВЛЕННАЯ функция рендеринга ---
@@ -836,15 +841,20 @@
         function maxWindow(id) { document.getElementById(id).classList.toggle('maximized'); }
         function focusWin(id) { document.getElementById(id).style.zIndex = ++zIndex; }
 
-        function saveNotepad() {
+              async function saveNotepad() {
             const val = document.getElementById('np-text').value;
+            // Считаем размер строки в байтах
+            const blobSize = new Blob([val]).size;
+
             if(openFileId) {
-                sb.from('files').update({ content: val }).eq('id', openFileId).then(loadFiles);
+                await sb.from('files').update({ content: val, size: blobSize }).eq('id', openFileId);
             } else {
-                sb.from('files').insert({
-                    name: 'New.txt', type: 'txt', parent_id: 'desktop', content: val, user_id: currentUser.id
-                }).then(loadFiles);
+                await sb.from('files').insert({
+                    name: 'New.txt', type: 'txt', parent_id: 'desktop', 
+                    content: val, size: blobSize, user_id: currentUser.id
+                });
             }
+            loadFiles();
             alert('Сохранено');
         }
 
