@@ -7,7 +7,6 @@
     <script src="webfonts/proj4.js"></script>
     <script src="webfonts/jszip.min.js"></script>
     <script src="webfonts/turf.min.js"></script>
-    <script src="webfonts/supabase-js@2.js"></script>
 
     <link rel="icon" href="img/xml.png" type="image/png">
     <script src="sk.js"></script>
@@ -214,12 +213,6 @@
                 <div class="modal-checkbox-item">
                     <label for="include-zu-checkbox"><input type="checkbox" id="include-zu-checkbox">Земельные участки</label>
                 </div>
-                      <div class="modal-checkbox-item" style="margin-left: 20px; background: #fff5e6; border-color: #ffe0b2;">
-                    <label for="include-ez-checkbox" title="Поиск родительского ЕЗ в базе данных">
-                        <input type="checkbox" id="include-ez-checkbox">
-                        <span style="font-size: 0.9em;">↳ Искать Единое землепользование (Supabase)</span>
-                    </label>
-                </div>
                 <div class="modal-checkbox-item">
                     <label for="include-oks-checkbox"><input type="checkbox" id="include-oks-checkbox">ОКС (Здания, Сооружения)</label>
                 </div>
@@ -271,53 +264,6 @@
             ZOUIT: 36940, TERR_ZONES: 36315, SETTLEMENTS: 36281, MUNICIPAL: 36278
         };
 
-
-     const SUPABASE_URL = 'https://vznsatvyikahngdfvqho.supabase.co';
-        const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ6bnNhdHZ5aWthaG5nZGZ2cWhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDU0MjM3MDMsImV4cCI6MjA2MDk5OTcwM30.FJmk0lgIjqvcdV7p6C0riaxqS9QWKAuIHDZtkMYMJe4';
-        const { createClient } = supabase;
-        const supabaseClient = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
-
-        // Функция пакетной загрузки ЕЗ
-        async function fetchEzDataBatch(cadNumbers) {
-            // Фильтруем: убираем пустые и те, где квартал состоит из 6 или 7 нулей (это сами ЕЗ или кварталы)
-            const targets = cadNumbers.filter(cn => {
-                if (!cn) return false;
-                const parts = cn.split(':');
-                return parts.length > 2 && !/^0{6,7}$/.test(parts[2]);
-            });
-
-            if (targets.length === 0) return new Map();
-
-            // Разбиваем на пачки по 500 штук (ограничение URL Supabase)
-            const chunkSize = 500;
-            const chunks = [];
-            for (let i = 0; i < targets.length; i += chunkSize) {
-                chunks.push(targets.slice(i, i + chunkSize));
-            }
-
-            const resultMap = new Map();
-
-            // Выполняем запросы последовательно или параллельно
-            for (const chunk of chunks) {
-                const { data, error } = await supabaseClient
-                    .from('EZ')
-                    .select('EZ, ZU')
-                    .in('ZU', chunk);
-
-                if (error) {
-                    console.error('Ошибка Supabase:', error);
-                    continue; // Пропускаем пачку с ошибкой, но не ломаем весь процесс
-                }
-
-                if (data) {
-                    data.forEach(row => {
-                        resultMap.set(row.ZU, row.EZ);
-                    });
-                }
-            }
-            return resultMap;
-        }
-        
         const LOCAL_STORAGE_CHOICES_KEY = 'kptXmlGeneratorChoices';
 
         const delay = ms => new Promise(res => setTimeout(res, ms));
@@ -355,7 +301,7 @@
             }
         }
         
-     async function handleGetXml() {
+        async function handleGetXml() {
             const quarterNumber = quarterInput.value.trim();
             if (!validateQuarterNumber(quarterNumber)) return;
             
@@ -363,7 +309,6 @@
             setStatus('1/2: Получение геометрии квартала...', true);
 
             try {
-                // 1. Получаем геометрию квартала из НСПД
                 const quarterGeomUrl = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=2&query=${quarterNumber}`;
                 const quarterResponse = await fetch(quarterGeomUrl);
                 if (!quarterResponse.ok) throw new Error(`Ошибка сети (геометрия): ${quarterResponse.status}`);
@@ -371,8 +316,8 @@
                 const quarterFeature = quarterData?.data?.features?.[0];
                 if (!quarterFeature?.geometry) throw new Error('Не удалось получить геометрию квартала. Проверьте номер.');
                 
-                // 2. Спрашиваем пользователя, что включать
                 setStatus('Ожидание выбора пользователя...', true);
+                
                 const userChoices = await showObjectSelectionModal(quarterNumber);
                 if (!userChoices) {
                     setStatus('Операция отменена.');
@@ -380,7 +325,6 @@
                     return;
                 }
                 
-                // 3. Формируем список запросов к НСПД
                 const allData = {};
                 const requestsToMake = [];
                 if (userChoices.zu) requestsToMake.push({ key: 'zu', catId: CATEGORY_IDS.ZU, name: 'ЗУ' });
@@ -394,7 +338,6 @@
                 if (userChoices.municipal) requestsToMake.push({ key: 'municipal', catId: CATEGORY_IDS.MUNICIPAL, name: 'МО', method: 'wms' });
                 if (userChoices.quarterBounds) allData.quarter = quarterData.data;
 
-                // 4. Выполняем запросы к НСПД
                 for (let i = 0; i < requestsToMake.length; i++) {
                     const req = requestsToMake[i];
                     setStatus(`Загрузка... (${req.name}) [${i+1}/${requestsToMake.length}]`, true);
@@ -405,45 +348,13 @@
                     }
                     await delay(500);
                 }
-
-                // 5. ЛОГИКА ЕЗ (SUPABASE)
-                let ezMap = new Map();
-                // Проверяем: выбраны ли ЗУ, включена ли опция ЕЗ и есть ли загруженные участки
-                if (userChoices.zu && userChoices.ez && allData.zu?.features?.length > 0) {
-                    setStatus('Доп. загрузка: поиск Единых землепользований...', true);
-                    
-                    // Извлекаем все кадастровые номера
-                    const allZuNumbers = allData.zu.features.map(f => f.properties.options?.cad_num).filter(Boolean);
-                    
-                    try {
-                        // Вызываем функцию пакетной загрузки (определенную ранее)
-                        ezMap = await fetchEzDataBatch(allZuNumbers);
-                        if (ezMap.size > 0) {
-                            console.log(`Найдено ${ezMap.size} родительских ЕЗ`);
-                        }
-                    } catch (e) {
-                        console.error("Ошибка при загрузке данных о ЕЗ:", e);
-                        // Не выбрасываем ошибку, чтобы процесс продолжился, просто XML будет без ЕЗ
-                    }
-                }
                 
-                // 6. Формирование XML и скачивание
                 setStatus('2/2: Формирование XML и архива...', true);
 
-                // Передаем ezMap в конвертер
-                const { xmlContent, filenameBase } = convertJsonToXml(allData, quarterNumber, userChoices, ezMap);
+                const { xmlContent, filenameBase } = convertJsonToXml(allData, quarterNumber, userChoices);
                 await createAndDownloadZip(xmlContent, filenameBase);
                 
-                // 7. Итоговая статистика
-                const totalObjects = (allData.zu?.features?.length || 0) + 
-                                     (allData.buildings?.features?.length || 0) + 
-                                     (allData.constructions?.features?.length || 0) + 
-                                     (allData.zouit?.features?.length || 0) + 
-                                     (allData.terrZones?.features?.length || 0) + 
-                                     (allData.settlements?.features?.length || 0) + 
-                                     (allData.municipal?.features?.length || 0) + 
-                                     (userChoices.quarterBounds ? (allData.quarter?.features?.length || 0) : 0);
-                                     
+                const totalObjects = (allData.zu?.features?.length || 0) + (allData.buildings?.features?.length || 0) + (allData.constructions?.features?.length || 0) + (allData.zouit?.features?.length || 0) + (allData.terrZones?.features?.length || 0) + (allData.settlements?.features?.length || 0) + (allData.municipal?.features?.length || 0) + (userChoices.quarterBounds ? (allData.quarter?.features?.length || 0) : 0);
                 setStatus(`Готово! Обработано ${totalObjects} объектов`, false, false, true);
                 setTimeout(() => setStatus(''), 5000);
 
@@ -454,8 +365,7 @@
                 getXmlButton.disabled = false;
             }
         }
-        
-        
+
         async function fetchObjectsByGeom(geometry, categoryId) {
             const url = 'https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject';
             const body = { geom: { type: "FeatureCollection", features: [{ type: "Feature", geometry, properties: {} }] }, categories: [{ "id": categoryId }] };
@@ -479,28 +389,18 @@
             } catch (e) { console.warn(`WMS Ошибка сети для слоя ${layerId}:`, e); return { features: [] }; }
         }
         
-      function showObjectSelectionModal(quarterNumber) {
+        function showObjectSelectionModal(quarterNumber) {
             return new Promise(resolve => {
                 modalQuarterNumber.textContent = `Квартал: ${quarterNumber}`;
                 
                 const savedChoices = JSON.parse(localStorage.getItem(LOCAL_STORAGE_CHOICES_KEY));
                 const defaultChoices = {
-                    zu: true, ez: false, oks: false, zouit: false, terrZones: false, // Добавлено ez: false
+                    zu: true, oks: false, zouit: false, terrZones: false,
                     quarterBounds: true, settlements: false, municipal: false
                 };
                 const choices = savedChoices || defaultChoices;
 
                 document.getElementById('include-zu-checkbox').checked = choices.zu;
-                // --- Добавлено ---
-                const ezCheckbox = document.getElementById('include-ez-checkbox');
-                ezCheckbox.checked = choices.ez || false;
-                // Логика зависимсоти: нельзя искать ЕЗ, если не выбраны ЗУ
-                ezCheckbox.disabled = !choices.zu;
-                document.getElementById('include-zu-checkbox').addEventListener('change', (e) => {
-                    ezCheckbox.disabled = !e.target.checked;
-                    if (!e.target.checked) ezCheckbox.checked = false;
-                });
-                // -----------------
                 document.getElementById('include-oks-checkbox').checked = choices.oks;
                 document.getElementById('include-zouit-checkbox').checked = choices.zouit;
                 document.getElementById('include-terr-zones-checkbox').checked = choices.terrZones;
@@ -511,7 +411,6 @@
                 const onConfirm = () => {
                     const currentChoices = {
                         zu: document.getElementById('include-zu-checkbox').checked,
-                        ez: document.getElementById('include-ez-checkbox').checked, // Сохраняем выбор
                         oks: document.getElementById('include-oks-checkbox').checked,
                         zouit: document.getElementById('include-zouit-checkbox').checked,
                         terrZones: document.getElementById('include-terr-zones-checkbox').checked,
@@ -523,7 +422,6 @@
                     cleanup();
                     resolve(currentChoices);
                 };
-     
                 const onCancel = () => { cleanup(); resolve(null); };
                 const cleanup = () => { modalConfirmBtn.removeEventListener('click', onConfirm); modalCancelBtn.removeEventListener('click', onCancel); objectSelectionModal.classList.remove('visible'); };
 
@@ -533,7 +431,7 @@
             });
         }
 
-        function convertJsonToXml(allData, quarterNumber, choices, ezMap = new Map()) {
+        function convertJsonToXml(allData, quarterNumber, choices) {
             const targetCS_value = destScSelect.value;
             const targetCS_text = destScSelect.options[destScSelect.selectedIndex].text;
             const offsetX = parseFloat(offsetXInput.value) || 0;
@@ -587,79 +485,12 @@
                 }).join('');
             };
             
-            // --- ОБНОВЛЕННАЯ ФУНКЦИЯ ДЛЯ ЗЕМЕЛЬНЫХ УЧАСТКОВ ---
-              const generateLandRecordXml = (f) => {
+            const generateLandRecordXml = (f) => {
                 const p = f.properties.options || {};
                 const areaVal = p.specified_area || p.land_record_area_verified || p.declared_area || p.land_record_area_declaration || p.land_record_area;
                 const areaBlock = (p.specified_area || p.land_record_area_verified) ? `<area><value>${escapeXml(areaVal)}</value><inaccuracy>0</inaccuracy></area>` : `<area><value>${escapeXml(areaVal)}</value></area>`;
-                
-                // Проверяем наличие родительского ЕЗ в карте
-                const parentEz = ezMap.get(p.cad_num);
-                let subtypeBlock = '';
-                let cadLinksBlock = '';
-                
-                // По умолчанию тип - Земельный участок
-                let objectTypeValue = 'Земельный участок';
-
-                // Если есть родительское ЕЗ, меняем тип и формируем блоки subtype и cad_links
-                if (parentEz) {
-                    objectTypeValue = 'Обособленный участок'; // <--- ИЗМЕНЕНИЕ ЗДЕСЬ
-
-                    subtypeBlock = `
-                  <subtype>
-                    <code>03</code>
-                    <value>Обособленный участок</value>
-                  </subtype>`;
-                    
-                    cadLinksBlock = `
-                <cad_links>
-                  <common_land>
-                    <common_land_cad_number>
-                      <cad_number>${escapeXml(parentEz)}</cad_number>
-                    </common_land_cad_number>
-                  </common_land>
-                </cad_links>`;
-                }
-
-                return `<land_record>
-                <object>
-                  <common_data>
-                    <type>
-                      <code>002001001000</code>
-                      <value>${objectTypeValue}</value>
-                    </type>
-                    <cad_number>${escapeXml(p.cad_num)}</cad_number>
-                  </common_data>${subtypeBlock}
-                </object>${cadLinksBlock}
-                <params>
-                  ${areaBlock}
-                  <category>
-                    <type>
-                      <code>-</code>
-                      <value>${escapeXml(p.land_record_category_type)}</value>
-                    </type>
-                  </category>
-                  <permitted_use>
-                    <permitted_use_established>
-                      <by_document>${escapeXml(p.permitted_use_established_by_document)}</by_document>
-                    </permitted_use_established>
-                  </permitted_use>
-                </params>
-                <address_location>
-                  <address>
-                    <readable_address>${escapeXml(p.readable_address)}</readable_address>
-                  </address>
-                </address_location>
-                <cost>
-                  <value>${escapeXml(p.cost_value)}</value>
-                </cost>
-                <contours_location>
-                  <contours>${generateContoursXml(f.geometry)}</contours>
-                </contours_location>
-              </land_record>`;
+                return `<land_record><object><common_data><type><code>002001001000</code><value>Земельный участок</value></type><cad_number>${escapeXml(p.cad_num)}</cad_number></common_data></object><params>${areaBlock}<category><type><code>-</code><value>${escapeXml(p.land_record_category_type)}</value></type></category><permitted_use><permitted_use_established><by_document>${escapeXml(p.permitted_use_established_by_document)}</by_document></permitted_use_established></permitted_use></params><address_location><address><readable_address>${escapeXml(p.readable_address)}</readable_address></address></address_location><cost><value>${escapeXml(p.cost_value)}</value></cost><contours_location><contours>${generateContoursXml(f.geometry)}</contours></contours_location></land_record>`;
             };
-            // ---------------------------------------------------
-
             const generateBuildRecordXml = (f) => {
                  const p = f.properties.options || {};
                  return `<build_record><object><common_data><type><code>002001002000</code><value>Здание</value></type><cad_number>${escapeXml(p.cad_num)}</cad_number></common_data></object><params><area>${escapeXml(p.build_record_area)}</area><purpose><code>-</code><value>${escapeXml(p.purpose)}</value></purpose></params><address_location><address><readable_address>${escapeXml(p.readable_address)}</readable_address></address></address_location><cost><value>${escapeXml(p.cost_value)}</value></cost><contours>${generateContoursXml(f.geometry)}</contours></build_record>`;
