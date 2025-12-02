@@ -856,34 +856,6 @@
     </button>
 </div>
 
-
-<!-- Диалог выбора действия при пересечении -->
-<div id="intersectionOptionsDialog" style="display: none; position: fixed; top: 40%; left: 50%; transform: translate(-50%, -50%); width: 450px; background-color: white; border-radius: 10px; box-shadow: 0 5px 20px rgba(0, 0, 0, 0.25); z-index: 3000; padding: 25px; box-sizing: border-box; text-align: center;">
-    <h3 style="margin: 0 0 15px; font-size: 1.2em; color: #333; font-weight: 600;">Пересечение найдено</h3>
-    <p id="intersectionCountText" style="margin-bottom: 20px; color: #666;">Найдено точек: 0</p>
-    
-    <div style="display: flex; flex-direction: column; gap: 10px;">
-        <button onclick="applyIntersectionChoice('create_only')" class="panel-button" style="background-color: #3498db; margin: 0;">
-            <i class="fas fa-map-marker-alt"></i> 1. Создать только точки (новые объекты)
-        </button>
-        <button onclick="applyIntersectionChoice('modify_both')" class="panel-button" style="background-color: #8e44ad; margin: 0;">
-            <i class="fas fa-vector-square"></i> 2. Создать точки в обоих полигонах
-        </button>
-        <button onclick="applyIntersectionChoice('modify_first')" class="panel-button" style="background-color: #e67e22; margin: 0;">
-            <i class="fas fa-draw-polygon"></i> 3. Создать точки только в объекте №1
-        </button>
-        <button onclick="applyIntersectionChoice('modify_second')" class="panel-button" style="background-color: #2ecc71; margin: 0;">
-            <i class="fas fa-draw-polygon"></i> 4. Создать точки только в объекте №2
-        </button>
-    </div>
-    
-    <button onclick="closeIntersectionDialog()" class="panel-button" style="background-color: #6c757d; margin-top: 20px;">
-        <i class="fas fa-times"></i> Отмена
-    </button>
-</div>
-
-
-
   <script src="cb.js"></script> 
   <script src="webfonts/proj4.js"></script>
 <script src="sk.js"></script>
@@ -928,8 +900,6 @@
     
     let isIntersectToolActive = false;
 let intersectTargetIndex = -1;
-
- let pendingIntersectionData = null
     
     const MAX_GEOMETRY_HISTORY = 10;
 
@@ -4488,16 +4458,18 @@ async function fetchParcelCoordinatesFromStorage(cadNumber) {
         redraw(true);
     }
 
-
     function handleIntersectSelection(point) {
         let clickedIdx = -1;
         // Ищем объект под курсором
         for (let i = userObjects.length - 1; i >= 0; i--) {
             const obj = userObjects[i];
             if (obj && obj.contours) {
+                // Проверяем попадание в любой из контуров (для полигонов)
                 if (obj.type === 'polygon' && obj.contours.some(c => isPointInPolygonRobust(point, c))) {
                     clickedIdx = i; break;
                 }
+                // Для линий можно добавить проверку расстояния, но пока используем bbox/полигоны для простоты
+                // или если вы кликаете точно в линию, логика selectObjectByPoint может быть полезна, но тут у нас свои правила.
             }
         }
 
@@ -4506,254 +4478,79 @@ async function fetchParcelCoordinatesFromStorage(cadNumber) {
         if (intersectTargetIndex === -1) {
             intersectTargetIndex = clickedIdx;
             const objName = userObjects[clickedIdx].name || `Объект ${userObjects[clickedIdx].id}`;
-            showNotification(`Выбран №1: "${objName}". Выберите ВТОРОЙ объект.`, "warning", "hand-pointer");
+            showNotification(`Выбран: "${objName}". Выберите ВТОРОЙ объект.`, "warning", "hand-pointer");
         } else {
-            if (clickedIdx === intersectTargetIndex) {
-                 showNotification("Выберите другой объект.", "error");
-                 return; 
-            }
+            if (clickedIdx === intersectTargetIndex) return; // Тот же самый
 
             const obj2Name = userObjects[clickedIdx].name || `Объект ${userObjects[clickedIdx].id}`;
-            showNotification(`Второй: "${obj2Name}". Расчет пересечений...`, "info", "cog");
+            showNotification(`Второй: "${obj2Name}". Ищу пересечения...`, "info", "cog");
             
-            // Вместо создания сразу, запускаем расчет и открываем диалог
-            prepareIntersectionOptions(intersectTargetIndex, clickedIdx);
+            createIntersectionPoints(intersectTargetIndex, clickedIdx);
+            
+            // Сбрасываем выбор, но оставляем инструмент активным для следующих пар
+            intersectTargetIndex = -1;
+            showNotification("Готово. Выберите следующий объект или отключите инструмент.", "success", "check");
         }
     }
 
-    // НОВАЯ ФУНКЦИЯ: Расчет точек и открытие диалога
-    function prepareIntersectionOptions(idx1, idx2) {
-        const points = calculateIntersectionCoordinates(idx1, idx2);
-        
-        if (points.length === 0) {
-            showNotification("Пересечений не найдено.", "warning");
-            intersectTargetIndex = -1; // Сброс
-            return;
-        }
-
-        // Сохраняем данные для выбора пользователя
-        pendingIntersectionData = {
-            points: points,
-            idx1: idx1,
-            idx2: idx2
-        };
-
-        // Открываем диалог
-        const dialog = document.getElementById('intersectionOptionsDialog');
-        const overlay = document.getElementById('dialogOverlay');
-        document.getElementById('intersectionCountText').textContent = `Найдено точек пересечения: ${points.length}`;
-        
-        dialog.style.display = 'block';
-        overlay.classList.add('show');
-        overlay.style.display = 'block';
-    }
-
-    // НОВАЯ ФУНКЦИЯ: Расчет координат (вынесена из старой createIntersectionPoints)
-    function calculateIntersectionCoordinates(idx1, idx2) {
+    function createIntersectionPoints(idx1, idx2) {
         const obj1 = userObjects[idx1];
         const obj2 = userObjects[idx2];
-        if (!obj1 || !obj2) return [];
+        if (!obj1 || !obj2) return;
 
+        // Собираем все сегменты обоих объектов
         const segs1 = getAllSegments(obj1);
         const segs2 = getAllSegments(obj2);
+
         let foundPoints = [];
 
+        console.log(`[INT-TOOL] Проверка пересечений между ${segs1.length} и ${segs2.length} сегментами.`);
+
+        // Брутфорс проверка всех со всеми
         for (let s1 of segs1) {
             for (let s2 of segs2) {
                 const pt = getSegmentIntersection(s1.p1, s1.p2, s2.p1, s2.p2);
                 if (pt) {
+                    // Округляем до 2 знаков для исключения микро-дублей
                     const roundedX = Math.round(pt.x * 100) / 100;
                     const roundedY = Math.round(pt.y * 100) / 100;
                     
+                    // Проверяем, не нашли ли мы эту точку уже в этом проходе
                     const exists = foundPoints.some(fp => 
                         Math.abs(fp.x - roundedX) < 1e-4 && Math.abs(fp.y - roundedY) < 1e-4
                     );
 
                     if (!exists) {
                         foundPoints.push({ x: roundedX, y: roundedY });
+                        console.log(`[INT-TOOL] Найдена точка: ${roundedX}, ${roundedY}`);
                     }
                 }
             }
         }
-        return foundPoints;
-    }
 
-    // НОВАЯ ФУНКЦИЯ: Закрытие диалога
-    function closeIntersectionDialog() {
-        const dialog = document.getElementById('intersectionOptionsDialog');
-        const overlay = document.getElementById('dialogOverlay');
-        dialog.style.display = 'none';
-        overlay.classList.remove('show');
-        setTimeout(() => { overlay.style.display = 'none'; }, 300);
-        
-        // Сбрасываем выбор инструмента
-        intersectTargetIndex = -1;
-        pendingIntersectionData = null;
-        redraw(true);
-    }
-
-    // НОВАЯ ФУНКЦИЯ: Применение выбора пользователя
-    function applyIntersectionChoice(mode) {
-        if (!pendingIntersectionData) return;
-
-        const { points, idx1, idx2 } = pendingIntersectionData;
-        let msg = "";
-
-        // 1. Просто создать новые точки (как раньше)
-        if (mode === 'create_only') {
-            createIndependentPoints(points);
-            msg = "Созданы новые объекты-точки.";
+        if (foundPoints.length === 0) {
+            showNotification("Пересечений не найдено.", "warning");
+        } else {
+            // Создаем объекты-точки
+            let addedCount = 0;
+            foundPoints.forEach(pt => {
+                // Добавляем точку как новый объект
+                const name = `Точка ${nextObjectId}`;
+                // Используем вашу функцию добавления
+                // Контур для точки - это массив из одной точки [[{x,y}]]
+                const newObj = addObjectInternal(
+                    [[{ x: pt.x, y: pt.y }]], 
+                    name, 
+                    'point', 
+                    true // isMultiPart (чтобы не центрировать камеру на каждой)
+                );
+                if (newObj) addedCount++;
+            });
+            
+            showNotification(`Создано ${addedCount} точек пересечения.`, "success", "map-marker-alt");
+            updateObjectList();
+            redraw(true);
         }
-        
-        // 2. Внедрить в оба объекта
-        else if (mode === 'modify_both') {
-            let count1 = insertPointsIntoObjectGeometry(idx1, points);
-            let count2 = insertPointsIntoObjectGeometry(idx2, points);
-            msg = `Точки добавлены: в Объект 1 (${count1}), в Объект 2 (${count2}).`;
-            // Также обновляем метрики, так как геометрия изменилась
-            updateObjectMetrics(userObjects[idx1]);
-            updateObjectMetrics(userObjects[idx2]);
-        }
-
-        // 3. Внедрить только в первый
-        else if (mode === 'modify_first') {
-            let count = insertPointsIntoObjectGeometry(idx1, points);
-            msg = `Точки добавлены в Объект 1 (${count} шт).`;
-            updateObjectMetrics(userObjects[idx1]);
-        }
-
-        // 4. Внедрить только во второй
-        else if (mode === 'modify_second') {
-            let count = insertPointsIntoObjectGeometry(idx2, points);
-            msg = `Точки добавлены в Объект 2 (${count} шт).`;
-            updateObjectMetrics(userObjects[idx2]);
-        }
-
-        showNotification(msg, "success", "check-circle");
-        
-        // Если меняли геометрию, нужно сохранить историю для Undo (если бы мы были в режиме редактирования конкретного объекта, но тут глобальная операция)
-        saveState();
-        closeIntersectionDialog();
-    }
-
-    // Вспомогательная: Создать независимые точки
-    function createIndependentPoints(points) {
-        points.forEach(pt => {
-            const name = `Точка ${nextObjectId}`;
-            addObjectInternal([[{ x: pt.x, y: pt.y }]], name, 'point', true);
-        });
-        updateObjectList();
-    }
-
-    // Вспомогательная: Внедрение массива точек в геометрию объекта
-   function insertPointsIntoObjectGeometry(objIndex, points) {
-        const obj = userObjects[objIndex];
-        if (!obj || !obj.contours) return 0;
-
-        let totalInserted = 0;
-        const tolerance = 0.01; // Допуск расстояния (в единицах карты)
-
-        // Проходим по каждому контуру объекта
-        for (let cIdx = 0; cIdx < obj.contours.length; cIdx++) {
-            const oldContour = obj.contours[cIdx];
-            if (!oldContour || oldContour.length < 2) continue;
-
-            const newContour = [];
-            const len = oldContour.length;
-            // Определяем количество сегментов (для полигона замыкаем, для линии нет)
-            const segmentCount = (obj.type === 'polygon') ? len : len - 1;
-
-            for (let i = 0; i < segmentCount; i++) {
-                const p1 = oldContour[i];
-                const p2 = oldContour[(i + 1) % len]; // Следующая точка (с замыканием)
-
-                // 1. Добавляем начало сегмента в новый контур
-                newContour.push({ x: p1.x, y: p1.y });
-
-                // 2. Ищем все точки пересечения, которые лежат на этом сегменте
-                const pointsOnSegment = [];
-
-                points.forEach(pt => {
-                    // Проверка: лежит ли точка на отрезке p1-p2
-                    if (isPointOnSegmentRobust(pt, p1, p2, tolerance)) {
-                        // Проверка: не является ли точка дубликатом p1 или p2
-                        const distToP1 = (pt.x - p1.x)**2 + (pt.y - p1.y)**2;
-                        const distToP2 = (pt.x - p2.x)**2 + (pt.y - p2.y)**2;
-                        
-                        // Если точка достаточно далеко от краев, считаем её новой
-                        if (distToP1 > tolerance && distToP2 > tolerance) {
-                             // Проверяем, не добавили ли мы её уже в этот список (защита от дублей)
-                            const alreadyAdded = pointsOnSegment.some(existing => 
-                                (existing.x - pt.x)**2 + (existing.y - pt.y)**2 < 0.000001
-                            );
-                            if (!alreadyAdded) {
-                                pointsOnSegment.push({ x: pt.x, y: pt.y });
-                            }
-                        }
-                    }
-                });
-
-                // 3. Если нашли точки, их нужно отсортировать по удаленности от p1,
-                // чтобы вставить в правильном порядке
-                if (pointsOnSegment.length > 0) {
-                    pointsOnSegment.sort((a, b) => {
-                        const distA = (a.x - p1.x)**2 + (a.y - p1.y)**2;
-                        const distB = (b.x - p1.x)**2 + (b.y - p1.y)**2;
-                        return distA - distB;
-                    });
-
-                    // Добавляем отсортированные точки в новый контур
-                    pointsOnSegment.forEach(pt => {
-                        newContour.push(pt);
-                        totalInserted++;
-                    });
-                }
-            }
-
-            // Для линии нужно добавить самую последнюю точку, так как цикл шел до len-1
-            if (obj.type !== 'polygon') {
-                const lastPt = oldContour[len - 1];
-                newContour.push({ x: lastPt.x, y: lastPt.y });
-            }
-
-            // Заменяем старый контур на новый, обогащенный точками
-            obj.contours[cIdx] = newContour;
-        }
-
-        return totalInserted;
-    }
-
-    // Вспомогательная: Надежная проверка попадания точки на отрезок
-    function isPointOnSegmentRobust(p, a, b, tolerance) {
-        // 1. Проверка по Bounding Box (грубая отсечка)
-        const minX = Math.min(a.x, b.x) - tolerance;
-        const maxX = Math.max(a.x, b.x) + tolerance;
-        const minY = Math.min(a.y, b.y) - tolerance;
-        const maxY = Math.max(a.y, b.y) + tolerance;
-
-        if (p.x < minX || p.x > maxX || p.y < minY || p.y > maxY) {
-            return false;
-        }
-
-        // 2. Расстояние от точки до прямой
-        const distSq = pointLineDistSq(p.x, p.y, a.x, a.y, b.x, b.y);
-        
-        // Если расстояние меньше квадрата допуска, считаем, что попали
-        return distSq < (tolerance * tolerance);
-    }
-
-    // Вспомогательная: лежит ли точка на сегменте (с допуском)
-    function isPointOnSegment(p, a, b) {
-        const crossProduct = (p.y - a.y) * (b.x - a.x) - (p.x - a.x) * (b.y - a.y);
-        if (Math.abs(crossProduct) > 0.01) return false; // Не на одной прямой
-
-        const dotProduct = (p.x - a.x) * (b.x - a.x) + (p.y - a.y) * (b.y - a.y);
-        if (dotProduct < 0) return false; // За точкой a
-
-        const squaredLengthBA = (b.x - a.x)*(b.x - a.x) + (b.y - a.y)*(b.y - a.y);
-        if (dotProduct > squaredLengthBA) return false; // За точкой b
-
-        return true;
     }
 
     // Получить плоский список сегментов для объекта
