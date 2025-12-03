@@ -2693,43 +2693,99 @@ function handleJsonImport(e) {
     e.target.value = null;
 }
 
-// --- ЛОГИКА СОХРАНЕНИЯ В PDF (МЕЖЕВОЙ ПЛАН) ---
+// --- ЛОГИКА СОХРАНЕНИЯ В PDF (УНИВЕРСАЛЬНАЯ: ЧЗУ + СГП) ---
 
-document.getElementById('printPlanBtn').addEventListener('click', saveMezhevoyPlanPdf);
+document.addEventListener('DOMContentLoaded', createPrintModal);
+document.getElementById('printPlanBtn').addEventListener('click', openPrintSettings);
 
-// --- ЛОГИКА СОХРАНЕНИЯ В PDF (ТОЧНЫЙ МАСШТАБ + ОБРЕЗКА) ---
+let currentCropData = null; 
+let currentPrintMode = 'CHZU'; // 'CHZU' (Чертеж) или 'SGP' (Схема геодезии)
 
-document.getElementById('printPlanBtn').addEventListener('click', saveMezhevoyPlanPdf);
+// 1. Создание модального окна (один раз при загрузке)
+function createPrintModal() {
+    if (document.getElementById('printSettingsModal')) return;
 
-function saveMezhevoyPlanPdf() {
-    // --- ШАГ 1: Подготовка данных и расчет размеров ---
+    const modalHtml = `
+    <div class="modal-backdrop" id="printSettingsModal" style="display: none; z-index: 3000;">
+        <div class="modal-content" style="max-width: 400px; text-align: center;">
+            <h3 id="printModalTitle">Настройки печати</h3>
+            <p id="printModalSubtitle" style="color: #666; margin-bottom: 20px; font-size: 0.9em;"></p>
+            
+            <div id="printControlsArea" style="margin: 20px 0; text-align: left;">
+                <label class="modal-checkbox-label" style="justify-content: center; margin-bottom: 15px;">
+                    <input type="checkbox" id="printAutoCheck" checked>
+                    <span style="font-weight: bold; font-size: 1.1em;">Авто-размер (на весь лист)</span>
+                </label>
+
+                <div id="printManualContainer" style="opacity: 0.5; pointer-events: none; transition: all 0.3s; background: #f8f9fa; padding: 15px; border-radius: 10px; border: 1px solid #dee2e6;">
+                    <label style="display: block; margin-bottom: 5px; color: #666;">Ручной масштаб 1 : X</label>
+                    <div style="display: flex; align-items: center; justify-content: center; gap: 10px;">
+                        <span style="font-size: 1.2em; font-weight: bold;">1 :</span>
+                        <input type="number" id="printScaleInput" value="500" step="10" style="width: 100px; padding: 8px; font-size: 1.1em; border-radius: 6px; border: 1px solid #ccc;">
+                    </div>
+                </div>
+            </div>
+
+            <div class="modal-buttons" style="justify-content: center; gap: 15px;">
+                <button class="modal-btn" id="printCancelBtn" style="background: #e9ecef; color: #333;">Отмена</button>
+                <button class="modal-btn" id="printConfirmBtn" style="background: var(--accent-color); color: white; padding: 10px 30px;">Скачать PDF</button>
+            </div>
+        </div>
+    </div>`;
+
+    document.body.insertAdjacentHTML('beforeend', modalHtml);
+
+    // Логика UI
+    const checkbox = document.getElementById('printAutoCheck');
+    const manualContainer = document.getElementById('printManualContainer');
     
-    // Получаем все точки для определения границ участка в метрах
+    checkbox.addEventListener('change', (e) => {
+        if (e.target.checked) {
+            manualContainer.style.opacity = '0.5';
+            manualContainer.style.pointerEvents = 'none';
+        } else {
+            manualContainer.style.opacity = '1';
+            manualContainer.style.pointerEvents = 'auto';
+            document.getElementById('printScaleInput').focus();
+        }
+    });
+
+    document.getElementById('printCancelBtn').addEventListener('click', () => {
+        document.getElementById('printSettingsModal').style.display = 'none';
+    });
+    
+    document.getElementById('printConfirmBtn').addEventListener('click', () => {
+        const isAuto = document.getElementById('printAutoCheck').checked;
+        const manualVal = parseInt(document.getElementById('printScaleInput').value);
+        document.getElementById('printSettingsModal').style.display = 'none';
+        generateFinalPdf(isAuto ? null : manualVal);
+    });
+}
+
+// 2. Подготовка данных и открытие окна
+function openPrintSettings() {
+    // ОПРЕДЕЛЕНИЕ РЕЖИМА
+    // Если есть геодезические построения (массив не пуст) -> режим СГП
+    if (geodeticConstructions && geodeticConstructions.length > 0) {
+        currentPrintMode = 'SGP';
+        document.getElementById('printModalTitle').textContent = 'Печать СГП';
+        document.getElementById('printModalSubtitle').textContent = 'Обнаружена схема геодезических построений';
+        // Для СГП масштаб обычно не важен, но оставим возможность авто-подгонки
+    } else {
+        currentPrintMode = 'CHZU';
+        document.getElementById('printModalTitle').textContent = 'Печать Чертежа';
+        document.getElementById('printModalSubtitle').textContent = 'Чертеж земельных участков';
+    }
+
+    // --- СБОР ДАННЫХ И ОБРЕЗКА (CROP) ---
     const allPoints = getAllPoints().map(p => ({ x: p[0], y: p[1] }));
     if (allPoints.length === 0) {
         showNotification("Нет данных для чертежа");
         return;
     }
 
-    // Границы в МЕТРАХ (Data Space)
-    const minX_data = Math.min(...allPoints.map(p => p.x));
-    const maxX_data = Math.max(...allPoints.map(p => p.x));
-    const minY_data = Math.min(...allPoints.map(p => p.y));
-    const maxY_data = Math.max(...allPoints.map(p => p.y));
-    
-    // Реальная ширина и высота объекта в метрах
-    // (Учитываем, что в геодезии X и Y могут быть перевернуты, берем дельты)
-    const geoWidthMeters = Math.abs(maxY_data - minY_data); 
-    const geoHeightMeters = Math.abs(maxX_data - minX_data);
-    
-    // Берем максимальное измерение для надежности (чтобы понять охват)
-    // Но для масштабирования картинки нам важна ширина именно с точки зрения проекции на экран.
-    // Поэтому давайте найдем границы на ЭКРАНЕ (Canvas), чтобы правильно обрезать картинку.
-
+    // 1. Границы данных
     const { toDrawingSpace } = getCoordinateTransformers();
-    
-    // Собираем ВСЕ объекты, которые есть на чертеже, чтобы найти их экранные границы
-    // (Контуры, Тексты, Линии, Стрелки, ОМЗ)
     let screenMinX = Infinity, screenMinY = Infinity;
     let screenMaxX = -Infinity, screenMaxY = -Infinity;
 
@@ -2740,18 +2796,20 @@ function saveMezhevoyPlanPdf() {
         if (p.y > screenMaxY) screenMaxY = p.y;
     }
 
-    // Проверяем контуры
+    // Сканируем всё, включая удаленные станции ОМЗ
     allPoints.forEach(p => checkPoint(toDrawingSpace(p)));
-    
-    // Проверяем тексты (они могут торчать за пределы контура)
     texts.forEach(t => checkPoint(toDrawingSpace({x: t.x, y: t.y})));
-    
-    // Проверяем линии/стрелки
     lines.forEach(l => { checkPoint(toDrawingSpace(l.start)); checkPoint(toDrawingSpace(l.end)); });
     arrows.forEach(a => { checkPoint(toDrawingSpace(a.start)); checkPoint(toDrawingSpace(a.end)); });
+    
+    // ВАЖНО: Сканируем геодезические построения (центры станций)
+    geodeticConstructions.forEach(g => {
+        checkPoint(toDrawingSpace(g.p1));
+        checkPoint(toDrawingSpace(g.center)); // Станция
+        checkPoint(toDrawingSpace(g.p3));
+    });
 
-    // Добавляем отступы (padding) в пикселях, чтобы надписи не срезались
-    const padding = 30; 
+    const padding = 40; 
     screenMinX = Math.max(0, screenMinX - padding);
     screenMinY = Math.max(0, screenMinY - padding);
     screenMaxX = Math.min(canvas.width, screenMaxX + padding);
@@ -2760,84 +2818,123 @@ function saveMezhevoyPlanPdf() {
     const cropWidth = screenMaxX - screenMinX;
     const cropHeight = screenMaxY - screenMinY;
 
-    // --- ШАГ 2: Создание обрезанного изображения (CROP) ---
-    
+    // 2. Создаем картинку
     const cropCanvas = document.createElement('canvas');
     cropCanvas.width = cropWidth;
     cropCanvas.height = cropHeight;
     const cCtx = cropCanvas.getContext('2d');
-
-    // Заливаем белым
     cCtx.fillStyle = '#FFFFFF';
     cCtx.fillRect(0, 0, cropWidth, cropHeight);
-
-    // Рисуем кусок основного канваса
-    if (canvas.style.display !== 'none') {
-        cCtx.drawImage(canvas, screenMinX, screenMinY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
-    }
-    // Рисуем кусок аннотаций
-    if (annotationCanvas.style.display !== 'none') {
-        cCtx.drawImage(annotationCanvas, screenMinX, screenMinY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
-    }
+    
+    if (canvas.style.display !== 'none') cCtx.drawImage(canvas, screenMinX, screenMinY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
+    if (annotationCanvas.style.display !== 'none') cCtx.drawImage(annotationCanvas, screenMinX, screenMinY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
 
     const imgData = cropCanvas.toDataURL('image/jpeg', 1.0);
 
-    // --- ШАГ 3: Расчет масштаба ---
+    // 3. Расчет масштаба для FIT (чтобы влезло в лист)
+    // Реальные размеры в метрах не так важны для СГП, как просто пропорции
+    // Но мы используем тот же алгоритм для унификации
+    const p1_scr = toDrawingSpace({x: 0, y: 0}); // Просто для масштаба px/m
+    const p2_scr = toDrawingSpace({x: 10, y: 0});
+    const distPx = Math.hypot(p2_scr.x - p1_scr.x, p2_scr.y - p1_scr.y);
+    const metersPerPixel = 10 / distPx;
+    
+    const realW_m = cropWidth * metersPerPixel;
+    const realH_m = cropHeight * metersPerPixel;
 
-    // Нам нужно соотнести ширину обрезанной картинки (cropWidth) с реальными метрами.
-    // Мы знаем координаты в метрах. Но cropWidth включает отступы.
-    // Хитрость: мы знаем масштаб "пиксель/метр" на текущем экране.
-    // 1 пиксель на экране = val метров.
-    
-    // Возьмем две точки на экране и их реальное расстояние.
-    const p1 = toDrawingSpace({x: minX_data, y: minY_data});
-    const p2 = toDrawingSpace({x: maxX_data, y: maxY_data});
-    // Дистанция на экране в пикселях
-    const distPx = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-    // Дистанция в реальности в метрах
-    const distMeters = Math.hypot(maxX_data - minX_data, maxY_data - minY_data);
-    
-    // Сколько метров в 1 пикселе текущей картинки
-    const metersPerPixel = distMeters / distPx;
+    // Место на листе (мм)
+    const availWidthMM = 180;
+    const availHeightMM = 190; // Меньше 297, т.к. шапка и легенда
 
-    // Реальная ширина всей обрезанной картинки в метрах (включая паддинги)
-    const realImageWidthMeters = cropWidth * metersPerPixel;
+    const scaleToFitWidth = (realW_m * 1000) / availWidthMM;
+    const scaleToFitHeight = (realH_m * 1000) / availHeightMM;
+    let autoScale = Math.max(scaleToFitWidth, scaleToFitHeight);
+    
+    if (autoScale < 100) autoScale = Math.ceil(autoScale / 10) * 10;
+    else autoScale = Math.ceil(autoScale / 50) * 50;
 
-    // Авто-расчет масштаба для предложения пользователю (чтобы влезло в 18см)
-    let calculatedScale = Math.round((realImageWidthMeters * 1000) / 180); // 180мм ширина рабочей зоны
-    // Округляем
-    if (calculatedScale < 100) calculatedScale = Math.ceil(calculatedScale / 10) * 10;
-    else calculatedScale = Math.ceil(calculatedScale / 50) * 50;
+    currentCropData = { imgData, realWidthMeters: realW_m, autoScale };
+
+    // Обновляем UI
+    document.getElementById('printScaleInput').value = autoScale;
+    const autoCheck = document.getElementById('printAutoCheck');
+    autoCheck.checked = true;
+    autoCheck.dispatchEvent(new Event('change'));
+
+    document.getElementById('printSettingsModal').style.display = 'flex';
+}
+
+// 3. Генерация HTML и PDF
+function generateFinalPdf(manualScale) {
+    if (!currentCropData) return;
+
+    const finalScale = manualScale || currentCropData.autoScale;
+    // Ширина картинки (мм)
+    const imageWidthMM = (currentCropData.realWidthMeters * 1000) / finalScale;
+
+    // --- НАСТРОЙКИ ШАБЛОНА ---
+    let titleText = "Чертеж земельных участков и их частей";
+    let filenamePrefix = "ЧЗУ";
+    let showScaleText = true;
     
-    // --- ШАГ 4: Запрос масштаба ---
-    
-    let userScale = prompt(`Введите желаемый масштаб (например, ${calculatedScale}):`, calculatedScale);
-    if (userScale === null) return;
-    userScale = parseInt(userScale.replace(/\D/g, '')); // Оставляем только цифры
-    
-    if (!userScale || userScale <= 0) {
-        showNotification("Некорректный масштаб");
-        return;
+    // Переменные для Легенды
+    let legendContent = "";
+
+    if (currentPrintMode === 'SGP') {
+        // --- ШАБЛОН СГП ---
+        titleText = "Схема геодезических построений";
+        filenamePrefix = "СГП";
+        showScaleText = false; // Масштаб не пишем
+
+        legendContent = `
+        <div class="legend-item">
+            <div class="legend-symbol">
+                <div class="symbol-station"></div>
+            </div>
+            <div class="legend-text">- базовая станция при спутниковых наблюдениях (GPS или ГЛОНАСС)</div>
+        </div>
+        <div class="legend-item">
+            <div class="legend-symbol">
+                <div class="symbol-dashed-line"></div>
+            </div>
+            <div class="legend-text">линии визирования на измеряемые точки</div>
+        </div>
+        <div class="legend-item">
+            <div class="legend-symbol"><div class="symbol-line"></div></div>
+            <div class="legend-text">- вновь образованная часть границы, сведения о которой достаточны для определения ее местоположения</div>
+        </div>
+        <div class="legend-item">
+            <div class="legend-symbol"><span class="symbol-text-red">:ЗУ1</span></div>
+            <div class="legend-text">- обозначение земельного участка, образуемого путем перераспределения или из земель, находящихся в государственной или муниципальной собственности</div>
+        </div>
+        <div class="legend-item">
+            <div class="legend-symbol"><span class="symbol-text-red" style="font-size: 0.9em;">ОМЗ №...</span></div>
+            <div class="legend-text">- название базовой станции при спутниковых наблюдениях</div>
+        </div>
+        `;
+
+    } else {
+        // --- ШАБЛОН ЧЗУ (Стандартный) ---
+        titleText = "Чертеж земельных участков и их частей";
+        filenamePrefix = "ЧЗУ";
+        showScaleText = true;
+
+        legendContent = `
+        <div class="legend-item">
+            <div class="legend-symbol"><div class="symbol-line"></div></div>
+            <div class="legend-text">- вновь образованная часть границы, сведения о которой достаточны для определения ее местоположения</div>
+        </div>
+        <div class="legend-item">
+            <div class="legend-symbol"><div class="symbol-point-group"><div class="symbol-dot"></div><span class="pink-highlight">н3</span></div></div>
+            <div class="legend-text">- обозначение характерной точки вновь образованной части границы, сведения о которой достаточны для определения ее местоположения</div>
+        </div>
+        <div class="legend-item">
+            <div class="legend-symbol"><span class="symbol-text-red">:ЗУ1</span></div>
+            <div class="legend-text">- обозначение земельного участка, образуемого путем перераспределения или из земель, находящихся в государственной или муниципальной собственности</div>
+        </div>
+        `;
     }
 
-    // --- ШАГ 5: Финальный расчет ширины для PDF ---
-    
-    // Формула: Ширина на бумаге (мм) = (Реальная ширина (м) * 1000) / Масштаб
-    const finalImageWidthMM = (realImageWidthMeters * 1000) / userScale;
-    
-    // Проверка на влезание в лист А4 (ширина рабочей зоны ~190мм)
-    const maxPageWidthMM = 190;
-    let cssWidth = `${finalImageWidthMM}mm`;
-    let warningMsg = "";
-    
-    if (finalImageWidthMM > maxPageWidthMM) {
-        // Если картинка шире листа, она обрежется или уйдет за край.
-        // Мы все равно зададим этот размер, так как пользователь "попросил" этот масштаб,
-        // но можно добавить предупреждение в консоль или визуально
-        warningMsg = `<div style="color:red; font-size:10pt; text-align:center; margin-top:5px;">Внимание: При масштабе 1:${userScale} чертеж шире страницы (${Math.round(finalImageWidthMM)} мм). Часть может быть обрезана.</div>`;
-    }
-
-    // --- ШАГ 6: Генерация HTML ---
 
     const element = document.createElement('div');
     element.innerHTML = `
@@ -2853,7 +2950,7 @@ function saveMezhevoyPlanPdf() {
                 flex-direction: column;
                 height: 275mm;
                 position: relative;
-                overflow: hidden; /* Важно, чтобы не ломало верстку */
+                overflow: hidden;
             }
             .header-table { width: 100%; border-collapse: collapse; border-bottom: 2px solid #000; flex-shrink: 0; }
             .header-table td { text-align: center; padding: 8px; }
@@ -2866,64 +2963,68 @@ function saveMezhevoyPlanPdf() {
                 align-items: center;
                 justify-content: center;
                 padding: 10px;
-                overflow: hidden; /* Обрезаем, если вылезает */
+                overflow: hidden;
                 position: relative;
             }
-            
-            /* ГЛАВНОЕ ИЗМЕНЕНИЕ: Ширина картинки задается жестко в миллиметрах */
-            .drawing-img {
-                width: ${cssWidth}; 
-                /* max-width убираем, чтобы масштаб был честным, даже если вылезает */
-                /* border: 1px dotted #ccc; - для отладки границ */
-            }
+            .drawing-img { width: ${imageWidthMM}mm; }
 
             .scale-label { text-align: center; font-weight: bold; font-size: 12pt; padding: 5px 0; flex-shrink: 0;}
-            .legend-section { padding: 10px 20px 20px 20px; font-size: 11pt; border-top: 1px solid transparent; flex-shrink: 0;}
-            .legend-title { font-weight: bold; margin-bottom: 10px; text-decoration: underline; }
-            .legend-item { display: flex; margin-bottom: 10px; align-items: flex-start; }
-            .legend-symbol { width: 50px; min-width: 50px; display: flex; align-items: center; justify-content: center; margin-right: 15px; padding-top: 3px; }
+            
+            .legend-section { padding: 10px 20px 10px 20px; font-size: 11pt; border-top: 1px solid transparent; flex-shrink: 0;}
+            .legend-title { font-weight: bold; margin-bottom: 8px; text-decoration: underline; }
+            .legend-item { display: flex; margin-bottom: 8px; align-items: flex-start; }
+            .legend-symbol { width: 60px; min-width: 60px; display: flex; align-items: center; justify-content: center; margin-right: 10px; padding-top: 2px; }
             .legend-text { flex: 1; line-height: 1.1; text-align: justify; }
             
+            /* Стили ЧЗУ */
             .symbol-line { width: 100%; height: 2px; background-color: #FF0000; }
             .symbol-point-group { display: flex; align-items: center; gap: 5px; }
             .symbol-dot { width: 5px; height: 5px; background-color: #FF0000; border-radius: 50%; }
             .pink-highlight { color: #FF0000; font-weight: bold; }
             .symbol-text-red { color: #FF0000; font-size: 12pt; }
+
+            /* Стили СГП */
+            .symbol-station {
+                width: 14px; height: 14px;
+                border: 1px solid #FF0000;
+                border-radius: 50%;
+                position: relative;
+            }
+            /* Перекрестие станции */
+            .symbol-station::after {
+                content: ''; position: absolute; top: -3px; left: 6px; width: 1px; height: 18px; background: #FF0000;
+            }
+            .symbol-station::before {
+                content: ''; position: absolute; top: 6px; left: -3px; width: 18px; height: 1px; background: #FF0000;
+            }
+            
+            .symbol-dashed-line {
+                width: 100%; height: 1px;
+                border-bottom: 1px dashed #FF0000;
+            }
+
         </style>
 
         <table class="header-table">
             <tr><td><div class="title-main">МЕЖЕВОЙ ПЛАН</div></td></tr>
-            <tr><td style="border-top: 1px solid #000;"><div class="title-sub">Чертеж земельных участков и их частей</div></td></tr>
+            <tr><td style="border-top: 1px solid #000;"><div class="title-sub">${titleText}</div></td></tr>
         </table>
 
         <div class="drawing-area">
-            <img src="${imgData}" class="drawing-img">
+            <img src="${currentCropData.imgData}" class="drawing-img">
         </div>
 
-        <div class="scale-label">Масштаб 1 : ${userScale}</div>
-        ${warningMsg}
+        ${showScaleText ? `<div class="scale-label">Масштаб 1 : ${finalScale}</div>` : ''}
 
         <div class="legend-section">
             <div class="legend-title">Условные обозначения:</div>
-            <div class="legend-item">
-                <div class="legend-symbol"><div class="symbol-line"></div></div>
-                <div class="legend-text">- вновь образованная часть границы, сведения о которой достаточны для определения ее местоположения</div>
-            </div>
-            <div class="legend-item">
-                <div class="legend-symbol"><div class="symbol-point-group"><div class="symbol-dot"></div><span class="pink-highlight">н3</span></div></div>
-                <div class="legend-text">- обозначение характерной точки вновь образованной части границы, сведения о которой достаточны для определения ее местоположения</div>
-            </div>
-            <div class="legend-item">
-                <div class="legend-symbol"><span class="symbol-text-red">:ЗУ1</span></div>
-                <div class="legend-text">- обозначение земельного участка, образуемого путем перераспределения или из земель, находящихся в государственной или муниципальной собственности</div>
-            </div>
+            ${legendContent}
         </div>
     </div>`;
 
-    // 7. Сохранение
     const opt = {
         margin:       10,
-        filename:     `Mezhevoy_Plan_1_${userScale}.pdf`,
+        filename:     `${filenamePrefix}.pdf`, // Имя файла: ЧЗУ.pdf или СГП.pdf
         image:        { type: 'jpeg', quality: 0.98 },
         html2canvas:  { scale: 2, useCORS: true },
         jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' }
