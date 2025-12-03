@@ -10,6 +10,8 @@
     <script src="webfonts//proj4.js"></script>
     <script src="sk.js"></script>
     <script src="msk.js"></script>
+    
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2pdf.js/0.10.1/html2pdf.bundle.min.js"></script>
     <style>
         :root {
             --bg-main: #f0f2f5;
@@ -398,6 +400,11 @@
                 <button id="cropModeBtn" class="sidebar-btn" title="Выделить область для сохранения"><i class="fas fa-crop-alt"></i></button>
             <button id="savePngBtn" class="sidebar-btn" onclick="saveAsPNG()" title="Сохранить как PNG"><i class="fas fa-save"></i></button>
 <button id="saveJpgBtn" class="sidebar-btn" onclick="saveAsJPG()" title="Сохранить как JPG"><i class="fas fa-file-image"></i></button>
+
+<div class="sidebar-separator"></div>
+<button id="printPlanBtn" class="sidebar-btn" title="Печать Межевого плана"><i class="fas fa-print"></i></button>
+
+
                 <div class="sidebar-separator"></div>
                 <button class="sidebar-btn" onclick="exportAnnotationsAsJSON()" id="exportAnnotationsBtn" title="Экспорт аннотаций"><i class="fas fa-file-export"></i></button>
                 <button class="sidebar-btn" onclick="importAnnotationsFromJSON()" id="importAnnotationsBtn" title="Импорт аннотаций"><i class="fas fa-file-import"></i></button>
@@ -2684,6 +2691,237 @@ function handleJsonImport(e) {
     };
     reader.readAsText(file);
     e.target.value = null;
+}
+
+// --- ЛОГИКА СОХРАНЕНИЯ В PDF (МЕЖЕВОЙ ПЛАН) ---
+
+document.getElementById('printPlanBtn').addEventListener('click', saveMezhevoyPlanPdf);
+
+function saveMezhevoyPlanPdf() {
+    // 1. Создаем скриншот чертежа
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = canvas.width;
+    tempCanvas.height = canvas.height;
+    const tCtx = tempCanvas.getContext('2d');
+
+    // Белый фон
+    tCtx.fillStyle = '#FFFFFF';
+    tCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
+
+    // Рисуем слои
+    if (canvas.style.display !== 'none') tCtx.drawImage(canvas, 0, 0);
+    if (annotationCanvas.style.display !== 'none') tCtx.drawImage(annotationCanvas, 0, 0);
+
+    const imgData = tempCanvas.toDataURL('image/jpeg', 1.0);
+
+    // 2. Расчет автоматического масштаба
+    const { toDataSpace } = getCoordinateTransformers();
+    const leftPoint = toDataSpace({ x: 0, y: 0 });
+    const rightPoint = toDataSpace({ x: canvas.width, y: 0 });
+    const widthInMeters = Math.abs(rightPoint.y - leftPoint.y);
+    
+    // Расчет: (Метры * 100 см) / 18 см (ширина печати)
+    let calculatedScale = Math.round((widthInMeters * 100) / 18);
+    // Округление до красивых чисел
+    if (calculatedScale < 75) calculatedScale = 50;
+    else if (calculatedScale < 150) calculatedScale = 100;
+    else if (calculatedScale < 350) calculatedScale = 200;
+    else if (calculatedScale < 750) calculatedScale = 500;
+    else calculatedScale = Math.round(calculatedScale / 100) * 100;
+
+    // 3. ЗАПРОС ПОЛЬЗОВАТЕЛЯ (Ввод масштаба)
+    // Пользователь видит рассчитанный масштаб и может его поменять
+    let userScale = prompt("Введите масштаб (число после двоеточия):", calculatedScale);
+
+    // Если нажали "Отмена", прекращаем сохранение
+    if (userScale === null) return; 
+    
+    // Убираем "1:" если пользователь вдруг ввел полный формат "1:500"
+    userScale = userScale.replace('1:', '').trim();
+
+
+    // 4. Формируем HTML для PDF
+    const element = document.createElement('div');
+    
+    element.innerHTML = `
+    <div class="pdf-container">
+        <style>
+            .pdf-container {
+                font-family: "Times New Roman", Times, serif;
+                color: #000;
+                width: 100%;
+                box-sizing: border-box;
+                border: 2px solid #000;
+                display: flex;
+                flex-direction: column;
+                height: 275mm; /* Высота под А4 с учетом отступов */
+                position: relative;
+            }
+            
+            .header-table {
+                width: 100%;
+                border-collapse: collapse;
+                border-bottom: 2px solid #000;
+            }
+            .header-table td {
+                text-align: center;
+                padding: 8px;
+            }
+            .title-main {
+                font-weight: bold;
+                font-size: 16pt;
+                text-transform: uppercase;
+                margin-bottom: 5px;
+            }
+            .title-sub {
+                font-weight: bold;
+                font-size: 14pt;
+            }
+
+            .drawing-area {
+                flex: 1;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                padding: 10px;
+                overflow: hidden;
+                position: relative;
+            }
+            .drawing-area img {
+                max-width: 98%;
+                max-height: 98%;
+                object-fit: contain;
+            }
+
+            .scale-label {
+                text-align: center;
+                font-weight: bold;
+                font-size: 12pt;
+                padding: 10px 0;
+            }
+
+            .legend-section {
+                padding: 10px 20px 20px 20px;
+                font-size: 11pt;
+                border-top: 1px solid transparent;
+            }
+            .legend-title {
+                font-weight: bold;
+                margin-bottom: 10px;
+                text-decoration: underline;
+            }
+            .legend-item {
+                display: flex;
+                margin-bottom: 10px;
+                align-items: flex-start;
+            }
+            .legend-symbol {
+                width: 50px;
+                min-width: 50px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                margin-right: 15px;
+                padding-top: 3px;
+            }
+            .legend-text {
+                flex: 1;
+                line-height: 1.1;
+                text-align: justify;
+            }
+
+            /* --- ЦВЕТОВЫЕ СТИЛИ (КРАСНЫЙ) --- */
+            .symbol-line { 
+                width: 100%; 
+                height: 2px; 
+                background-color: #FF0000; 
+            }
+            .symbol-point-group { 
+                display: flex; 
+                align-items: center; 
+                gap: 5px; 
+            }
+            .symbol-dot { 
+                width: 5px; 
+                height: 5px; 
+                background-color: #FF0000; /* Точка теперь красная */
+                border-radius: 50%; 
+            }
+            .pink-highlight { 
+                color: #FF0000; /* Текст н3 теперь красный */
+                font-weight: bold; 
+            }
+            .symbol-text-red { 
+                color: #FF0000; 
+                font-size: 12pt; 
+            }
+        </style>
+
+        <table class="header-table">
+            <tr>
+                <td><div class="title-main">МЕЖЕВОЙ ПЛАН</div></td>
+            </tr>
+            <tr>
+                <td style="border-top: 1px solid #000;"><div class="title-sub">Чертеж земельных участков и их частей</div></td>
+            </tr>
+        </table>
+
+        <div class="drawing-area">
+            <img src="${imgData}">
+        </div>
+
+        <!-- Подставляем масштаб, введенный пользователем -->
+        <div class="scale-label">Масштаб 1 : ${userScale}</div>
+
+        <div class="legend-section">
+            <div class="legend-title">Условные обозначения:</div>
+            
+            <div class="legend-item">
+                <div class="legend-symbol"><div class="symbol-line"></div></div>
+                <div class="legend-text">
+                    - вновь образованная часть границы, сведения о которой достаточны для определения ее местоположения
+                </div>
+            </div>
+
+            <div class="legend-item">
+                <div class="legend-symbol">
+                     <div class="symbol-point-group">
+                        <div class="symbol-dot"></div>
+                        <span class="pink-highlight">н3</span>
+                     </div>
+                </div>
+                <div class="legend-text">
+                    - обозначение характерной точки вновь образованной части границы, сведения о которой достаточны для определения ее местоположения
+                </div>
+            </div>
+
+            <div class="legend-item">
+                <div class="legend-symbol"><span class="symbol-text-red">:ЗУ1</span></div>
+                <div class="legend-text">
+                    - обозначение земельного участка, образуемого путем перераспределения или из земель, находящихся в государственной или муниципальной собственности
+                </div>
+            </div>
+        </div>
+    </div>
+    `;
+
+    // 5. Настройки для PDF
+    const opt = {
+        margin:       10, 
+        filename:     `Mezhevoy_Plan_${new Date().toLocaleDateString()}.pdf`,
+        image:        { type: 'jpeg', quality: 0.98 },
+        html2canvas:  { scale: 2, useCORS: true },
+        jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' }
+    };
+
+    // 6. Генерация
+    showNotification('Генерация PDF...');
+    html2pdf().set(opt).from(element).save().then(() => {
+        showNotification('PDF файл скачан');
+    }).catch(err => {
+        console.error(err);
+        showNotification('Ошибка создания PDF');
+    });
 }
 
 </script>
