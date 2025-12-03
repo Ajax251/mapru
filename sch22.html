@@ -2693,196 +2693,56 @@ function handleJsonImport(e) {
     e.target.value = null;
 }
 
-// --- ЛОГИКА СОХРАНЕНИЯ В PDF (КРАСИВОЕ ОКНО + АВТОМАСШТАБ) ---
+// --- ЛОГИКА СОХРАНЕНИЯ В PDF (МЕЖЕВОЙ ПЛАН) ---
 
-// 1. Инициализация модального окна при загрузке
-document.addEventListener('DOMContentLoaded', createPrintModal);
-document.getElementById('printPlanBtn').addEventListener('click', openPrintSettings);
+document.getElementById('printPlanBtn').addEventListener('click', saveMezhevoyPlanPdf);
 
-let currentCropData = null; // Для хранения подготовленных данных между этапами
+function saveMezhevoyPlanPdf() {
+    // 1. Создаем скриншот чертежа
+    const tempCanvas = document.createElement('canvas');
+    tempCanvas.width = canvas.width;
+    tempCanvas.height = canvas.height;
+    const tCtx = tempCanvas.getContext('2d');
 
-// Функция создания HTML модального окна
-function createPrintModal() {
-    if (document.getElementById('printSettingsModal')) return;
+    // Белый фон
+    tCtx.fillStyle = '#FFFFFF';
+    tCtx.fillRect(0, 0, tempCanvas.width, tempCanvas.height);
 
-    const modalHtml = `
-    <div class="modal-backdrop" id="printSettingsModal" style="display: none; z-index: 3000;">
-        <div class="modal-content" style="max-width: 400px; text-align: center;">
-            <h3>Настройки печати</h3>
-            
-            <div style="margin: 20px 0; text-align: left;">
-                <label class="modal-checkbox-label" style="justify-content: center; margin-bottom: 15px;">
-                    <input type="checkbox" id="printAutoCheck" checked>
-                    <span style="font-weight: bold; font-size: 1.1em;">Авто-масштаб (по размеру листа)</span>
-                </label>
+    // Рисуем слои
+    if (canvas.style.display !== 'none') tCtx.drawImage(canvas, 0, 0);
+    if (annotationCanvas.style.display !== 'none') tCtx.drawImage(annotationCanvas, 0, 0);
 
-                <div id="printManualContainer" style="opacity: 0.5; pointer-events: none; transition: all 0.3s; background: #f8f9fa; padding: 15px; border-radius: 10px; border: 1px solid #dee2e6;">
-                    <label style="display: block; margin-bottom: 5px; color: #666;">Ручной масштаб 1 : X</label>
-                    <div style="display: flex; align-items: center; justify-content: center; gap: 10px;">
-                        <span style="font-size: 1.2em; font-weight: bold;">1 :</span>
-                        <input type="number" id="printScaleInput" value="500" step="10" style="width: 100px; padding: 8px; font-size: 1.1em; border-radius: 6px; border: 1px solid #ccc;">
-                    </div>
-                    <div style="font-size: 0.85em; color: #999; margin-top: 5px; text-align: center;">Чем меньше число, тем крупнее чертеж</div>
-                </div>
-            </div>
+    const imgData = tempCanvas.toDataURL('image/jpeg', 1.0);
 
-            <div class="modal-buttons" style="justify-content: center; gap: 15px;">
-                <button class="modal-btn" id="printCancelBtn" style="background: #e9ecef; color: #333;">Отмена</button>
-                <button class="modal-btn" id="printConfirmBtn" style="background: var(--accent-color); color: white; padding: 10px 30px;">Скачать PDF</button>
-            </div>
-        </div>
-    </div>`;
-
-    document.body.insertAdjacentHTML('beforeend', modalHtml);
-
-    // Логика переключения галочки
-    const checkbox = document.getElementById('printAutoCheck');
-    const manualContainer = document.getElementById('printManualContainer');
+    // 2. Расчет автоматического масштаба
+    const { toDataSpace } = getCoordinateTransformers();
+    const leftPoint = toDataSpace({ x: 0, y: 0 });
+    const rightPoint = toDataSpace({ x: canvas.width, y: 0 });
+    const widthInMeters = Math.abs(rightPoint.y - leftPoint.y);
     
-    checkbox.addEventListener('change', (e) => {
-        if (e.target.checked) {
-            manualContainer.style.opacity = '0.5';
-            manualContainer.style.pointerEvents = 'none';
-        } else {
-            manualContainer.style.opacity = '1';
-            manualContainer.style.pointerEvents = 'auto';
-            document.getElementById('printScaleInput').focus();
-        }
-    });
+    // Расчет: (Метры * 100 см) / 18 см (ширина печати)
+    let calculatedScale = Math.round((widthInMeters * 100) / 18);
+    // Округление до красивых чисел
+    if (calculatedScale < 75) calculatedScale = 50;
+    else if (calculatedScale < 150) calculatedScale = 100;
+    else if (calculatedScale < 350) calculatedScale = 200;
+    else if (calculatedScale < 750) calculatedScale = 500;
+    else calculatedScale = Math.round(calculatedScale / 100) * 100;
 
-    // Кнопки
-    document.getElementById('printCancelBtn').addEventListener('click', () => {
-        document.getElementById('printSettingsModal').style.display = 'none';
-    });
+    // 3. ЗАПРОС ПОЛЬЗОВАТЕЛЯ (Ввод масштаба)
+    // Пользователь видит рассчитанный масштаб и может его поменять
+    let userScale = prompt("Введите масштаб (число после двоеточия):", calculatedScale);
+
+    // Если нажали "Отмена", прекращаем сохранение
+    if (userScale === null) return; 
     
-    document.getElementById('printConfirmBtn').addEventListener('click', () => {
-        const isAuto = document.getElementById('printAutoCheck').checked;
-        const manualVal = parseInt(document.getElementById('printScaleInput').value);
-        
-        document.getElementById('printSettingsModal').style.display = 'none';
-        
-        // Запуск генерации с выбранными параметрами
-        generateFinalPdf(isAuto ? null : manualVal);
-    });
-}
+    // Убираем "1:" если пользователь вдруг ввел полный формат "1:500"
+    userScale = userScale.replace('1:', '').trim();
 
-// 2. Функция открытия окна (подготовка данных)
-function openPrintSettings() {
-    // --- ШАГ 1: Сбор данных и обрезка (Crop) ---
-    // Копируем логику обрезки, чтобы найти реальные размеры
-    const allPoints = getAllPoints().map(p => ({ x: p[0], y: p[1] }));
-    if (allPoints.length === 0) {
-        showNotification("Нет данных для чертежа");
-        return;
-    }
 
-    // 1.1 Находим границы в метрах
-    const minX_data = Math.min(...allPoints.map(p => p.x));
-    const maxX_data = Math.max(...allPoints.map(p => p.x));
-    const minY_data = Math.min(...allPoints.map(p => p.y));
-    const maxY_data = Math.max(...allPoints.map(p => p.y));
-    
-    // 1.2 Находим границы на экране для вырезания картинки
-    const { toDrawingSpace } = getCoordinateTransformers();
-    let screenMinX = Infinity, screenMinY = Infinity;
-    let screenMaxX = -Infinity, screenMaxY = -Infinity;
-
-    function checkPoint(p) {
-        if (p.x < screenMinX) screenMinX = p.x;
-        if (p.x > screenMaxX) screenMaxX = p.x;
-        if (p.y < screenMinY) screenMinY = p.y;
-        if (p.y > screenMaxY) screenMaxY = p.y;
-    }
-
-    allPoints.forEach(p => checkPoint(toDrawingSpace(p)));
-    texts.forEach(t => checkPoint(toDrawingSpace({x: t.x, y: t.y})));
-    lines.forEach(l => { checkPoint(toDrawingSpace(l.start)); checkPoint(toDrawingSpace(l.end)); });
-    arrows.forEach(a => { checkPoint(toDrawingSpace(a.start)); checkPoint(toDrawingSpace(a.end)); });
-
-    // Паддинг 30px
-    const padding = 30; 
-    screenMinX = Math.max(0, screenMinX - padding);
-    screenMinY = Math.max(0, screenMinY - padding);
-    screenMaxX = Math.min(canvas.width, screenMaxX + padding);
-    screenMaxY = Math.min(canvas.height, screenMaxY + padding);
-
-    const cropWidth = screenMaxX - screenMinX;
-    const cropHeight = screenMaxY - screenMinY;
-
-    // 1.3 Создаем изображение
-    const cropCanvas = document.createElement('canvas');
-    cropCanvas.width = cropWidth;
-    cropCanvas.height = cropHeight;
-    const cCtx = cropCanvas.getContext('2d');
-    cCtx.fillStyle = '#FFFFFF';
-    cCtx.fillRect(0, 0, cropWidth, cropHeight);
-    
-    if (canvas.style.display !== 'none') cCtx.drawImage(canvas, screenMinX, screenMinY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
-    if (annotationCanvas.style.display !== 'none') cCtx.drawImage(annotationCanvas, screenMinX, screenMinY, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
-
-    const imgData = cropCanvas.toDataURL('image/jpeg', 1.0);
-
-    // 1.4 Считаем метры
-    // Расстояние между крайними точками в метрах и пикселях
-    const p1 = toDrawingSpace({x: minX_data, y: minY_data});
-    const p2 = toDrawingSpace({x: maxX_data, y: maxY_data});
-    const distPx = Math.hypot(p2.x - p1.x, p2.y - p1.y);
-    const distMeters = Math.hypot(maxX_data - minX_data, maxY_data - minY_data);
-    const metersPerPixel = distMeters / distPx;
-    
-    // Реальные размеры обрезанной картинки в метрах
-    const realW_m = cropWidth * metersPerPixel;
-    const realH_m = cropHeight * metersPerPixel;
-
-    // 1.5 Расчет "Идеального" масштаба (Auto)
-    // Доступное место на А4: Ширина ~180мм, Высота ~190мм (оставляем место под шапку и легенду)
-    const availWidthMM = 180;
-    const availHeightMM = 190;
-
-    // Scale = (Meters * 1000) / Millimeters
-    const scaleToFitWidth = (realW_m * 1000) / availWidthMM;
-    const scaleToFitHeight = (realH_m * 1000) / availHeightMM;
-
-    // Берем больший делитель (чтобы влезло всё)
-    let autoScale = Math.max(scaleToFitWidth, scaleToFitHeight);
-    
-    // Округляем до красивого значения в большую сторону (чтобы точно влезло)
-    if (autoScale < 100) autoScale = Math.ceil(autoScale / 10) * 10;
-    else autoScale = Math.ceil(autoScale / 50) * 50;
-
-    // Сохраняем данные для следующего шага
-    currentCropData = {
-        imgData: imgData,
-        realWidthMeters: realW_m,
-        autoScale: autoScale
-    };
-
-    // Обновляем UI модального окна
-    const scaleInput = document.getElementById('printScaleInput');
-    scaleInput.value = autoScale; // Предлагаем рассчитанный масштаб
-    
-    // Сбрасываем чекбокс в "Авто"
-    const checkbox = document.getElementById('printAutoCheck');
-    checkbox.checked = true;
-    checkbox.dispatchEvent(new Event('change')); // Триггер для обновления UI
-
-    // Показываем окно
-    document.getElementById('printSettingsModal').style.display = 'flex';
-}
-
-// 3. Финальная генерация PDF
-function generateFinalPdf(manualScale) {
-    if (!currentCropData) return;
-
-    // Если передан manualScale, используем его, иначе авто
-    const finalScale = manualScale || currentCropData.autoScale;
-
-    // Рассчитываем ширину картинки в CSS (мм)
-    // Ширина (мм) = (Ширина (м) * 1000) / Масштаб
-    const imageWidthMM = (currentCropData.realWidthMeters * 1000) / finalScale;
-    
-    // Формируем HTML
+    // 4. Формируем HTML для PDF
     const element = document.createElement('div');
+    
     element.innerHTML = `
     <div class="pdf-container">
         <style>
@@ -2894,14 +2754,29 @@ function generateFinalPdf(manualScale) {
                 border: 2px solid #000;
                 display: flex;
                 flex-direction: column;
-                height: 275mm;
+                height: 275mm; /* Высота под А4 с учетом отступов */
                 position: relative;
-                overflow: hidden;
             }
-            .header-table { width: 100%; border-collapse: collapse; border-bottom: 2px solid #000; flex-shrink: 0; }
-            .header-table td { text-align: center; padding: 8px; }
-            .title-main { font-weight: bold; font-size: 16pt; text-transform: uppercase; margin-bottom: 5px; }
-            .title-sub { font-weight: bold; font-size: 14pt; }
+            
+            .header-table {
+                width: 100%;
+                border-collapse: collapse;
+                border-bottom: 2px solid #000;
+            }
+            .header-table td {
+                text-align: center;
+                padding: 8px;
+            }
+            .title-main {
+                font-weight: bold;
+                font-size: 16pt;
+                text-transform: uppercase;
+                margin-bottom: 5px;
+            }
+            .title-sub {
+                font-weight: bold;
+                font-size: 14pt;
+            }
 
             .drawing-area {
                 flex: 1;
@@ -2912,62 +2787,134 @@ function generateFinalPdf(manualScale) {
                 overflow: hidden;
                 position: relative;
             }
-            
-            /* КЛЮЧЕВОЙ МОМЕНТ: Задаем точный размер картинке */
-            .drawing-img {
-                width: ${imageWidthMM}mm;
+            .drawing-area img {
+                max-width: 98%;
+                max-height: 98%;
+                object-fit: contain;
             }
 
-            .scale-label { text-align: center; font-weight: bold; font-size: 12pt; padding: 5px 0; flex-shrink: 0;}
-            .legend-section { padding: 10px 20px 20px 20px; font-size: 11pt; border-top: 1px solid transparent; flex-shrink: 0;}
-            .legend-title { font-weight: bold; margin-bottom: 10px; text-decoration: underline; }
-            .legend-item { display: flex; margin-bottom: 10px; align-items: flex-start; }
-            .legend-symbol { width: 50px; min-width: 50px; display: flex; align-items: center; justify-content: center; margin-right: 15px; padding-top: 3px; }
-            .legend-text { flex: 1; line-height: 1.1; text-align: justify; }
-            
-            .symbol-line { width: 100%; height: 2px; background-color: #FF0000; }
-            .symbol-point-group { display: flex; align-items: center; gap: 5px; }
-            .symbol-dot { width: 5px; height: 5px; background-color: #FF0000; border-radius: 50%; }
-            .pink-highlight { color: #FF0000; font-weight: bold; }
-            .symbol-text-red { color: #FF0000; font-size: 12pt; }
+            .scale-label {
+                text-align: center;
+                font-weight: bold;
+                font-size: 12pt;
+                padding: 10px 0;
+            }
+
+            .legend-section {
+                padding: 10px 20px 20px 20px;
+                font-size: 11pt;
+                border-top: 1px solid transparent;
+            }
+            .legend-title {
+                font-weight: bold;
+                margin-bottom: 10px;
+                text-decoration: underline;
+            }
+            .legend-item {
+                display: flex;
+                margin-bottom: 10px;
+                align-items: flex-start;
+            }
+            .legend-symbol {
+                width: 50px;
+                min-width: 50px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+                margin-right: 15px;
+                padding-top: 3px;
+            }
+            .legend-text {
+                flex: 1;
+                line-height: 1.1;
+                text-align: justify;
+            }
+
+            /* --- ЦВЕТОВЫЕ СТИЛИ (КРАСНЫЙ) --- */
+            .symbol-line { 
+                width: 100%; 
+                height: 2px; 
+                background-color: #FF0000; 
+            }
+            .symbol-point-group { 
+                display: flex; 
+                align-items: center; 
+                gap: 5px; 
+            }
+            .symbol-dot { 
+                width: 5px; 
+                height: 5px; 
+                background-color: #FF0000; /* Точка теперь красная */
+                border-radius: 50%; 
+            }
+            .pink-highlight { 
+                color: #FF0000; /* Текст н3 теперь красный */
+                font-weight: bold; 
+            }
+            .symbol-text-red { 
+                color: #FF0000; 
+                font-size: 12pt; 
+            }
         </style>
 
         <table class="header-table">
-            <tr><td><div class="title-main">МЕЖЕВОЙ ПЛАН</div></td></tr>
-            <tr><td style="border-top: 1px solid #000;"><div class="title-sub">Чертеж земельных участков и их частей</div></td></tr>
+            <tr>
+                <td><div class="title-main">МЕЖЕВОЙ ПЛАН</div></td>
+            </tr>
+            <tr>
+                <td style="border-top: 1px solid #000;"><div class="title-sub">Чертеж земельных участков и их частей</div></td>
+            </tr>
         </table>
 
         <div class="drawing-area">
-            <img src="${currentCropData.imgData}" class="drawing-img">
+            <img src="${imgData}">
         </div>
 
-        <div class="scale-label">Масштаб 1 : ${finalScale}</div>
+        <!-- Подставляем масштаб, введенный пользователем -->
+        <div class="scale-label">Масштаб 1 : ${userScale}</div>
 
         <div class="legend-section">
             <div class="legend-title">Условные обозначения:</div>
+            
             <div class="legend-item">
                 <div class="legend-symbol"><div class="symbol-line"></div></div>
-                <div class="legend-text">- вновь образованная часть границы, сведения о которой достаточны для определения ее местоположения</div>
+                <div class="legend-text">
+                    - вновь образованная часть границы, сведения о которой достаточны для определения ее местоположения
+                </div>
             </div>
+
             <div class="legend-item">
-                <div class="legend-symbol"><div class="symbol-point-group"><div class="symbol-dot"></div><span class="pink-highlight">н3</span></div></div>
-                <div class="legend-text">- обозначение характерной точки вновь образованной части границы, сведения о которой достаточны для определения ее местоположения</div>
+                <div class="legend-symbol">
+                     <div class="symbol-point-group">
+                        <div class="symbol-dot"></div>
+                        <span class="pink-highlight">н3</span>
+                     </div>
+                </div>
+                <div class="legend-text">
+                    - обозначение характерной точки вновь образованной части границы, сведения о которой достаточны для определения ее местоположения
+                </div>
             </div>
+
             <div class="legend-item">
                 <div class="legend-symbol"><span class="symbol-text-red">:ЗУ1</span></div>
-                <div class="legend-text">- обозначение земельного участка, образуемого путем перераспределения или из земель, находящихся в государственной или муниципальной собственности</div>
+                <div class="legend-text">
+                    - обозначение земельного участка, образуемого путем перераспределения или из земель, находящихся в государственной или муниципальной собственности
+                </div>
             </div>
         </div>
-    </div>`;
+    </div>
+    `;
 
+    // 5. Настройки для PDF
     const opt = {
-        margin:       10,
-        filename:     `Mezhevoy_Plan_1_${finalScale}.pdf`,
+        margin:       10, 
+        filename:     `Mezhevoy_Plan_${new Date().toLocaleDateString()}.pdf`,
         image:        { type: 'jpeg', quality: 0.98 },
         html2canvas:  { scale: 2, useCORS: true },
         jsPDF:        { unit: 'mm', format: 'a4', orientation: 'portrait' }
     };
 
+    // 6. Генерация
     showNotification('Генерация PDF...');
     html2pdf().set(opt).from(element).save().then(() => {
         showNotification('PDF файл скачан');
