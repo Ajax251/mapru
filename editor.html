@@ -825,8 +825,11 @@
     <div class="spinner-ring"></div>
   </div>
   <div class="loading-text">Загрузка...</div>
+  <!-- Добавлена кнопка отмены -->
+  <button id="cancelLoadBtn" style="margin-top: 20px; padding: 8px 20px; background: #e74c3c; color: white; border: none; border-radius: 4px; cursor: pointer; font-size: 14px; display: none;">
+      <i class="fas fa-times"></i> Отменить
+  </button>
 </div>
-
 
 <div id="namePromptOverlay"></div>
 <div id="namePromptDialog">
@@ -1614,6 +1617,8 @@ async function checkClipboardForObjects() {
         drawObjectBtn.addEventListener('click', () => toggleMode('draw'));
           document.getElementById('cutObjectBtn').addEventListener('click', toggleCutTool);
           
+          
+          
             document.getElementById('intersectPointsBtn').addEventListener('click', toggleIntersectTool); 
 
         finishDrawingBtn.addEventListener('click', finishDrawingAsLineOrPoint);
@@ -1648,6 +1653,13 @@ async function checkClipboardForObjects() {
     if (isGeometryEditMode && e.key === 'Escape') {
         deactivateGeometryEditMode();
     }
+      document.getElementById('cancelLoadBtn').addEventListener('click', () => {
+        isNspdLoadCancelled = true;
+        showNotification("Отмена загрузки...", "warning");
+        // Кнопку скрываем сразу, чтобы не жмакали много раз
+        document.getElementById('cancelLoadBtn').style.display = 'none';
+        loaderTextElement.textContent = "Остановка...";
+    });
 });
            document.getElementById('deleteAllObjectsBtn').addEventListener('click', deleteAllObjects);
            
@@ -2063,23 +2075,22 @@ async function handleUniversalImport() {
 
     const lines = inputText.split('\n').map(line => line.trim()).filter(line => line);
     const isSingleLine = lines.length === 1;
+    
+    // Проверяем, являются ли ВСЕ строки кадастровыми номерами
     const isKnList = lines.length > 0 && lines.every(line => isValidCadastralNumberFormat(line));
+    
     const isSingleQuarter = isSingleLine && isQuarterFormat(lines[0]);
 
-    // --- НАЧАЛО КЛЮЧЕВОГО ИЗМЕНЕНИЯ ---
-    // Проверяем, является ли первая строка КН, а остальные - координатами.
-    // Это как раз ваш случай: КН сооружения + его координаты.
-    if (lines.length > 1 && isValidCadastralNumberFormat(lines[0])) {
+    // Логика для "КН + Координаты" (Сооружение).
+    // Срабатывает ТОЛЬКО если первая строка КН, строк > 1, И вторая строка НЕ КН (значит координаты)
+    if (lines.length > 1 && isValidCadastralNumberFormat(lines[0]) && !isValidCadastralNumberFormat(lines[1])) {
         const cadNumber = lines[0];
         const coordinatesText = lines.slice(1).join('\n');
         
-        console.log(`[handleUniversalImport] Обнаружен блок с КН (${cadNumber}) и координатами. Обработка как сооружение.`);
+        console.log(`[handleUniversalImport] Обнаружен блок с КН (${cadNumber}) и координатами.`);
         
-        // Закрываем диалог и вызываем специальную обработку
         closeCoordsDialog();
         
-        // Мы предполагаем, что если есть КН, то это может быть сооружение.
-        // Поэтому сразу передаем subType.
         const parsedContours = parseCoordinatesFromText(coordinatesText);
         if (parsedContours && parsedContours.length > 0) {
             const newObj = addObjectInternal(parsedContours, cadNumber, "polygon", true, 'construction_record');
@@ -2089,9 +2100,8 @@ async function handleUniversalImport() {
         } else {
             showNotification("Не удалось распознать координаты после кадастрового номера.", "error");
         }
-        return; // Завершаем выполнение
+        return;
     }
-    // --- КОНЕЦ КЛЮЧЕВОГО ИЗМЕНЕНИЯ ---
 
     if (isSingleQuarter) {
         closeCoordsDialog();
@@ -2099,15 +2109,20 @@ async function handleUniversalImport() {
         return; 
     }
 
-    const importMode = document.getElementById('importModeSelect').value;
-
+    // Если это список КН (один или много)
     if (isKnList) {
+        const importMode = document.getElementById('importModeSelect').value;
         if (importMode === 'xml') {
             await handleImportFromCadNumbers(lines);
         } else {
+            // Лимит можно проверить здесь, если нужно
+            if (lines.length > 20) {
+                 if(!confirm(`В списке ${lines.length} объектов. Загрузка может занять время. Продолжить?`)) return;
+            }
             await handleImportFromNspdAndConvertToMsk(lines, importMode);
         }
     } else {
+        // Иначе пытаемся парсить просто как текст координат
         await handleImportFromTextareaCoordinates(inputText);
     }
 }
@@ -4258,47 +4273,73 @@ async function fetchNspd(url) {
 function extractCoordinatesFromXMLNode(recordNode) {
     const allContoursData = [];
 
-    // Находим все теги <contour> непосредственно внутри записи
-    const contourNodes = recordNode.querySelectorAll(':scope > contours > contour, :scope > contour');
-
-    if (contourNodes.length === 0) {
-        const cadNumberElem = recordNode.querySelector('object > common_data > cad_number');
-        const cadNumber = cadNumberElem ? cadNumberElem.textContent.trim() : 'ID неизвестен';
-        console.warn(`[CoordExtractor] Внутри записи объекта ${cadNumber} не найдено тегов <contour>.`);
-        return [];
-    }
-
-    contourNodes.forEach(contourNode => {
-        const entitySpatialNode = contourNode.querySelector("entity_spatial");
-        if (!entitySpatialNode) return;
-
-        // ВАЖНО: для каждого <contour> мы создаем свой массив контуров,
-        // так как один <contour> может содержать несколько <spatial_element> (например, полигон с дыркой)
-        const spatialElementNodes = entitySpatialNode.querySelectorAll("spatials_elements > spatial_element");
-
-        spatialElementNodes.forEach(spatialElementNode => {
-            const ordinatesNode = spatialElementNode.querySelector("ordinates");
-            if (ordinatesNode) {
-                const currentContourPoints = [];
-                const ordinateNodes = ordinatesNode.querySelectorAll("ordinate");
-                ordinateNodes.forEach(ordNode => {
-                    const xVal = getElementValueFromNode(ordNode, "x");
-                    const yVal = getElementValueFromNode(ordNode, "y");
-                    if (xVal && yVal) {
-                        const x = parseFloat(xVal);
-                        const y = parseFloat(yVal);
-                        if (!isNaN(x) && !isNaN(y)) {
-                            currentContourPoints.push({ x: roundCoord(x), y: roundCoord(y) });
-                        }
+    // Вспомогательная функция для извлечения точек из контейнера (entity_spatial или spatials_elements)
+    const processSpatialNode = (container) => {
+        if (!container) return;
+        
+        // В KPT координаты лежат в spatial_element.
+        // querySelectorAll найдет их даже если они вложены в spatials_elements
+        const spatialElements = container.querySelectorAll("spatial_element");
+        
+        spatialElements.forEach(spEl => {
+            const ordinates = spEl.querySelectorAll("ordinates > ordinate");
+            const currentContourPoints = [];
+            
+            ordinates.forEach(ord => {
+                // Используем простые селекторы для скорости и надежности
+                const xNode = ord.querySelector("x");
+                const yNode = ord.querySelector("y");
+                
+                if (xNode && yNode) {
+                    const x = parseFloat(xNode.textContent);
+                    const y = parseFloat(yNode.textContent);
+                    
+                    if (isFinite(x) && isFinite(y)) {
+                        currentContourPoints.push({ x: roundCoord(x), y: roundCoord(y) });
                     }
-                });
-                if (currentContourPoints.length > 0) {
-                    // Каждый <spatial_element> добавляется как отдельный контур
-                    allContoursData.push(currentContourPoints);
                 }
+            });
+
+            if (currentContourPoints.length > 0) {
+                allContoursData.push(currentContourPoints);
             }
         });
-    });
+    };
+
+    // 1. Сценарий для Земельных участков (land_record) в КПТ: ищем contours_location
+    const contoursLocation = recordNode.querySelector("contours_location");
+    
+    if (contoursLocation) {
+        // Внутри могут быть contours -> contour
+        const contours = contoursLocation.querySelectorAll("contours > contour");
+        
+        if (contours.length > 0) {
+            contours.forEach(c => {
+                // Ищем entity_spatial внутри контура
+                processSpatialNode(c.querySelector("entity_spatial"));
+            });
+        } else {
+            // Иногда entity_spatial лежит сразу в contours_location (без contour)
+            processSpatialNode(contoursLocation.querySelector("entity_spatial"));
+        }
+    } 
+    // 2. Сценарий для ОКС (build_record), Сооружений и выписок КВЗУ: ищем entity_spatial напрямую в корне объекта
+    else {
+        const entitySpatial = recordNode.querySelector("entity_spatial");
+        if (entitySpatial) {
+            processSpatialNode(entitySpatial);
+        } else {
+            // Фолбэк: пробуем найти contours напрямую, если это старый формат или специфическая выписка
+            const directContours = recordNode.querySelectorAll("contours > contour");
+            directContours.forEach(c => processSpatialNode(c.querySelector("entity_spatial")));
+        }
+    }
+
+    if (allContoursData.length === 0) {
+        const cadNumberElem = recordNode.querySelector('common_data > cad_number');
+        const cadNumber = cadNumberElem ? cadNumberElem.textContent.trim() : 'Неизвестный';
+        // console.warn(`[CoordExtractor] Не удалось извлечь координаты для ${cadNumber}. Проверьте структуру XML.`);
+    }
 
     return allContoursData;
 }
@@ -4379,70 +4420,142 @@ async function fetchParcelCoordinatesFromStorage(cadNumber) {
 }
 
 
-    function showLoader(show, text = "Загрузка...") {
-        if (show) {
-            loaderTextElement.textContent = text;
-            loaderContainer.style.display = 'flex';
-        } else {
-            loaderContainer.style.display = 'none';
-        }
+function showLoader(show, text = "Загрузка...") {
+    const btn = document.getElementById('cancelLoadBtn');
+    if (show) {
+        loaderTextElement.textContent = text;
+        loaderContainer.style.display = 'flex';
+        // Показываем кнопку отмены
+        if (btn) btn.style.display = 'block';
+    } else {
+        loaderContainer.style.display = 'none';
+        if (btn) btn.style.display = 'none';
     }
-
- async function handleImportFromCadNumbers(cadNumbers) {
-       if (!STORAGE_API_URL) {
-    showNotification("URL хранилища не задан. Невозможно загрузить по КН.", "error", "server");
-    return;
 }
-        closeCoordsDialog();
 
-        let addedObjects = [];
-        let errors = 0;
-        let currentProcessed = 0;
-        const totalCadNumbers = cadNumbers.length;
+async function handleImportFromCadNumbers(cadNumbers) {
+    if (!STORAGE_API_URL) {
+        showNotification("URL хранилища не задан.", "error", "server");
+        return;
+    }
+    closeCoordsDialog();
 
-        showLoader(true, `Подготовка к загрузке ${totalCadNumbers} участков...`);
+    let addedObjects = [];
+    let errors = 0;
+    
+    // Сбрасываем флаг отмены перед началом
+    isNspdLoadCancelled = false;
 
-        for (let i = 0; i < totalCadNumbers; i++) {
-            const cn = cadNumbers[i];
-            currentProcessed++;
-            console.log(`[BatchImport] Начинаем обработку ${cn} (${currentProcessed}/${totalCadNumbers})`);
-            showLoader(true, `Загрузка ${currentProcessed}/${totalCadNumbers}: ${cn}`);
-
-           const result = await fetchParcelCoordinatesFromStorage(cn);
-
-            showLoader(false);
-
-            if (result && result.contours && result.contours.length > 0) {
-                console.log(`[BatchImport] Контуры для ${cn} получены. Добавление объекта...`);
-                // --- НАЧАЛО ИЗМЕНЕНИЯ ---
-                // Передаем дополнительный параметр result.type в функцию addObjectInternal
-                const newObj = addObjectInternal(result.contours, cn, "polygon", true, result.type);
-                // --- КОНЕЦ ИЗМЕНЕНИЯ ---
-                if (newObj) {
-                    addedObjects.push(newObj);
-                    console.log(`[BatchImport] Объект ${cn} добавлен.`);
-                } else {
-                    errors++;
-                    console.warn(`[BatchImport] Не удалось создать объект для ${cn} после получения координат.`);
-                }
-            } else {
-                errors++;
-                console.warn(`[BatchImport] Не удалось получить координаты или контуры для ${cn}.`);
+    // 1. Группируем кадастровые номера по кварталам
+    const tasksByQuarter = {};
+    
+    cadNumbers.forEach(cn => {
+        const parts = cn.split(':');
+        if (parts.length >= 3) {
+            // Получаем квартал (например, 16:56:010130)
+            const quarter = parts.slice(0, 3).join(':');
+            if (!tasksByQuarter[quarter]) {
+                tasksByQuarter[quarter] = [];
             }
-            if (currentProcessed < totalCadNumbers) {
-                 showLoader(true, `Подготовка к загрузке следующего участка...`);
-            }
+            tasksByQuarter[quarter].push(cn);
+        } else {
+            console.warn(`Неверный формат КН: ${cn}`);
+            errors++;
+        }
+    });
+
+    const quartersToProcess = Object.keys(tasksByQuarter);
+    showLoader(true, `Обработка ${quartersToProcess.length} кварталов...`);
+
+    // 2. Проходим по каждому кварталу
+    for (let i = 0; i < quartersToProcess.length; i++) {
+        if (isNspdLoadCancelled) {
+            console.log("Загрузка прервана пользователем.");
+            break;
         }
 
-        showLoader(false);
+        const quarter = quartersToProcess[i];
+        const cnsInQuarter = tasksByQuarter[quarter];
+        
+        showLoader(true, `Загрузка квартала ${quarter} (${i + 1}/${quartersToProcess.length})...`);
 
-        if (addedObjects.length > 0) {
-            finalizeBatchAdd(addedObjects);
-            showNotification(`Загружено ${addedObjects.length} участков. ${errors > 0 ? errors + ' с ошибками.' : ''}`, "success", "check-circle");
-        } else {
-            showNotification(`Не удалось загрузить участки. Ошибок: ${errors}.`, "error", "exclamation-triangle");
+        try {
+            // Скачиваем XML один раз для всего квартала
+            const xmlContent = await fetchKptXmlContent(quarter);
+            
+            if (!xmlContent) {
+                throw new Error("Файл пуст или не найден");
+            }
+
+            // Парсим XML один раз
+            const parser = new DOMParser();
+            const xmlDoc = parser.parseFromString(xmlContent, "text/xml");
+
+            // Создаем карту (Map) всех объектов в XML для быстрого поиска
+            // Ключ: Кадастровый номер, Значение: XML-узел
+            const recordsMap = new Map();
+            const allRecords = xmlDoc.querySelectorAll('land_record, build_record, construction_record');
+            
+            allRecords.forEach(record => {
+                const cnNode = record.querySelector('common_data > cad_number');
+                if (cnNode) {
+                    recordsMap.set(cnNode.textContent.trim(), record);
+                }
+            });
+
+            // 3. Извлекаем нужные объекты из этого XML
+            cnsInQuarter.forEach(cn => {
+                const recordNode = recordsMap.get(cn);
+                
+                if (recordNode) {
+                    const contours = extractCoordinatesFromXMLNode(recordNode);
+                    const objectType = recordNode.tagName.toLowerCase(); // 'land_record' и т.д.
+                    
+                    if (contours && contours.length > 0) {
+                        const newObj = addObjectInternal(contours, cn, "polygon", true, objectType);
+                        if (newObj) {
+                            addedObjects.push(newObj);
+                        } else {
+                            errors++;
+                        }
+                    } else {
+                        console.warn(`Контуры не найдены для ${cn}`);
+                        errors++;
+                    }
+                } else {
+                    console.warn(`Объект ${cn} не найден в файле квартала.`);
+                    errors++;
+                }
+            });
+
+        } catch (err) {
+            console.error(`Ошибка обработки квартала ${quarter}:`, err);
+            // Если ошибка загрузки квартала, помечаем все КН в нем как ошибочные
+            errors += cnsInQuarter.length;
+            showNotification(`Ошибка загрузки квартала ${quarter}: ${err.message}`, "error");
         }
     }
+
+    showLoader(false);
+
+    // Добавляем на карту то, что успели загрузить
+    if (addedObjects.length > 0) {
+        finalizeBatchAdd(addedObjects);
+        const msg = isNspdLoadCancelled 
+            ? `Загрузка прервана. Успешно загружено: ${addedObjects.length}.`
+            : `Загружено ${addedObjects.length} объектов.`;
+        
+        showNotification(msg, isNspdLoadCancelled ? "warning" : "success");
+    } else {
+        if (isNspdLoadCancelled) {
+            showNotification("Загрузка отменена. Объектов не добавлено.", "info");
+        } else if (errors > 0) {
+            showNotification(`Не удалось загрузить объекты. Ошибок: ${errors}.`, "error");
+        } else {
+            showNotification("Объекты не найдены.", "warning");
+        }
+    }
+}
 
     function finalizeBatchAdd(addedObjectsArray) {
         if (addedObjectsArray.length === 0) return;
