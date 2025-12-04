@@ -1550,6 +1550,88 @@ button:active::after {
 }
 
 
+/* Стили для лоадера */
+    .loading-overlay {
+        display: none;
+        position: fixed;
+        top: 0;
+        left: 0;
+        width: 100%;
+        height: 100%;
+        background: rgba(255, 255, 255, 0.8);
+        z-index: 2000;
+        justify-content: center;
+        align-items: center;
+        backdrop-filter: blur(2px);
+        animation: fadeIn 0.3s ease-out;
+    }
+
+    .loader-content {
+        background: white;
+        padding: 30px;
+        border-radius: 15px;
+        box-shadow: 0 10px 25px rgba(0,0,0,0.15);
+        text-align: center;
+        display: flex;
+        flex-direction: column;
+        align-items: center;
+        gap: 20px;
+        min-width: 250px;
+    }
+
+    .spinner-circle {
+        width: 50px;
+        height: 50px;
+        border: 4px solid #f3f3f3;
+        border-top: 4px solid var(--primary-color);
+        border-radius: 50%;
+        animation: spin 1s linear infinite;
+    }
+
+    .loader-text {
+        font-size: 18px;
+        font-weight: 500;
+        color: #333;
+    }
+
+   .btn-cancel-search {
+      
+        width: auto !important; 
+        height: auto !important;
+        border-radius: 8px !important; 
+        
+        /* Дизайн кнопки */
+        background: linear-gradient(145deg, #FF5252, #F44336);
+        color: white;
+        border: none;
+        padding: 10px 30px; 
+        margin-top: 15px;
+        cursor: pointer;
+        font-size: 16px;
+        font-weight: 500;
+        display: inline-flex;
+        align-items: center;
+        justify-content: center;
+        gap: 8px;
+        box-shadow: 0 4px 6px rgba(0,0,0,0.2);
+        transition: all 0.2s ease;
+    }
+
+    .btn-cancel-search:hover {
+        background: linear-gradient(145deg, #F44336, #D32F2F);
+        transform: translateY(-2px);
+        box-shadow: 0 6px 12px rgba(244, 67, 54, 0.3);
+    }
+
+    .btn-cancel-search:active {
+        transform: translateY(0);
+    }
+
+    @keyframes spin {
+        0% { transform: rotate(0deg); }
+        100% { transform: rotate(360deg); }
+    }
+
 
 </style>
 
@@ -1791,7 +1873,7 @@ button:active::after {
                 <i class="fas fa-filter"></i>
             </button>
             
-            <button class="tool-btn" onclick="copyRawJson()" title="Копировать JSON ответ">
+            <button class="tool-btn" onclick="copyRawJson()" title="Копировать JSON">
                 <i class="fas fa-code"></i>
             </button>
             
@@ -1834,6 +1916,16 @@ button:active::after {
     </div>
 </div>
 
+<div id="loadingOverlay" class="loading-overlay">
+    <div class="loader-content">
+        <div class="spinner-circle"></div>
+        <div id="loaderText" class="loader-text">Поиск данных...</div>
+        <button class="btn-cancel-search" onclick="cancelCurrentSearch()">
+            <i class="fas fa-times"></i> Отмена
+        </button>
+    </div>
+</div>
+
     <div id="notification-container"></div>
 
       
@@ -1857,7 +1949,8 @@ let isAddressIconAnimationDisabled = false;
 const isProxyFallbackEnabled = false;
 let lastRawJsonResponse = null; 
 let originalAddressSearchResults = []; 
-let isRefineFilterActive = false;     
+let isRefineFilterActive = false;   
+let searchAbortController = null;
 // Список регионов с 7 знаками после второго двоеточия
 //const sevenDigitsRegions = ['24','63', '66', '77', '78','91'];
 
@@ -1876,6 +1969,39 @@ function isValidCadastralNumber(text) {
     // Регулярное выражение для проверки кадастрового номера
     const pattern = new RegExp(`^\\d{2}:\\d{2}:\\d{${digitsAfterSecondColon}}:\\d+$`);
     return pattern.test(text);
+}
+
+function showLoader(text = 'Поиск данных...') {
+    const overlay = document.getElementById('loadingOverlay');
+    const textEl = document.getElementById('loaderText');
+    if (overlay && textEl) {
+        textEl.textContent = text;
+        overlay.style.display = 'flex';
+    }
+    
+    // Создаем новый контроллер для отмены
+    if (searchAbortController) {
+        searchAbortController.abort(); // Отменяем предыдущий, если завис
+    }
+    searchAbortController = new AbortController();
+    return searchAbortController.signal;
+}
+
+function hideLoader() {
+    const overlay = document.getElementById('loadingOverlay');
+    if (overlay) {
+        overlay.style.display = 'none';
+    }
+    searchAbortController = null;
+}
+
+function cancelCurrentSearch() {
+    if (searchAbortController) {
+        searchAbortController.abort();
+        searchAbortController = null;
+        hideLoader();
+        showNotification('Поиск отменен пользователем', 'info');
+    }
 }
 
 
@@ -3216,7 +3342,6 @@ async function fetchData() {
         return;
     }
     
-    // Защита от слишком длинного ввода (увеличили лимит, так как адрес может быть длинным)
     if (inputValue.length > 200) {
         showNotification('Слишком длинный запрос', 'error');
         return; 
@@ -3228,11 +3353,14 @@ async function fetchData() {
         // 1. ЭТО КАДАСТРОВЫЙ НОМЕР
         document.title = `${inputValue}`;
         
+        // ЗАПУСК ЛОАДЕРА
+        const signal = showLoader(`Поиск объекта: ${inputValue}`);
+        
         const initialPath = `/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(inputValue)}`;
 
         try {
-
-            const response = await fetchWithFallback(initialPath);
+            // Передаем signal в fetchWithFallback
+            const response = await fetchWithFallback(initialPath, { signal });
 
             if (!response.ok) {
                 const errorData = await response.json().catch(() => ({}));
@@ -3243,15 +3371,27 @@ async function fetchData() {
             handleSuccessfulResponse(data);
 
         } catch (finalError) {
+            // Если ошибка вызвана отменой пользователя - не показываем ошибку архива
+            if (finalError.name === 'AbortError') {
+                return; // Просто выходим
+            }
+
             // Если API недоступен, пробуем загрузить из локального архива (только для КН)
             console.warn("API error, trying archive...", finalError);
             showNotification('Основные сервисы недоступны. Попытка загрузить из архива...', 'warning');
-            fetchDataFromArchive();
+            
+            // Здесь лоадер можно не скрывать, так как fetchDataFromArchive его обновит или скроет
+            await fetchDataFromArchive(); 
+            return; // fetchDataFromArchive сама скроет лоадер
+        } finally {
+             // Скрываем лоадер только если не пошли в архив (там своя обработка)
+             // Проверка currentCoords нужна, чтобы понять, нашли что-то или нет, но проще скрыть здесь, 
+             // а fetchDataFromArchive запустит свой лоадер если нужно.
+             hideLoader();
         }
 
     } else {
-        // 2. ЭТО АДРЕС (или другой текст)
-        // Логика архива здесь не применятся, так как архив работает по номерам кварталов
+        // 2. ЭТО АДРЕС
         searchByAddress(inputValue);
     }
 }
@@ -5009,10 +5149,9 @@ async function fetchDataFromArchive() {
     const targetCadastralNumber = cadastralNumberInput.value.trim();
     const archiveInfoDiv = document.getElementById('archiveInfo');
 
-   
     if (archiveInfoDiv) {
         archiveInfoDiv.style.display = 'none';
-        archiveInfoDiv.innerHTML = ''; // Очищаем содержимое
+        archiveInfoDiv.innerHTML = ''; 
     }
 
     if (!isValidCadastralNumber(targetCadastralNumber)) {
@@ -5020,19 +5159,31 @@ async function fetchDataFromArchive() {
         return;
     }
 
-    showNotification(`Поиск ${targetCadastralNumber} в архиве КПТ...`, 'info');
+    // ЗАПУСК ЛОАДЕРА
+    showLoader(`Загрузка из архива: ${targetCadastralNumber}`);
 
     try {
         const quarterNumber = targetCadastralNumber.split(':').slice(0, 3).join(':');
         const filename = quarterNumber.replace(/:/g, '_') + '.nspd';
 
+        // Проверяем searchAbortController внутри долгих операций, если нужно,
+        // но так как fetchZipFromLocalServer использует fetch, можно передать сигнал туда, если переписать её.
+        // Для простоты оставим проверку перед обработкой.
+
         const zipBlob = await fetchZipFromLocalServer('nspd', filename);
+        
+        // Проверка на отмену после скачивания
+        if (searchAbortController && searchAbortController.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+
         if (!zipBlob) {
             showNotification(`Архив для квартала ${quarterNumber} не найден. Попробуйте обычный поиск.`, 'warning');
             return;
         }
 
         const { features, date: archiveDate } = await loadAndParseZipBlob(zipBlob);
+
+        // Еще проверка
+        if (searchAbortController && searchAbortController.signal.aborted) throw new DOMException('Aborted', 'AbortError');
 
         const targetFeature = features.find(f => f.properties && f.properties.descr === targetCadastralNumber);
 
@@ -5041,14 +5192,13 @@ async function fetchDataFromArchive() {
             return;
         }
 
-        console.log("Найден участок в архиве:", targetFeature);
-
+        // ... код обработки свойств ...
         const properties = targetFeature.properties;
         const options = targetFeature.properties ? targetFeature.properties.options : {};
         const geometry = targetFeature.geometry;
         
         document.title = `${targetCadastralNumber}`;
-          updatePropertyData(options, properties, null, null, geometry);
+        updatePropertyData(options, properties, null, null, geometry);
 
         if (geometry && geometry.coordinates && geometry.type !== "Point") {
             currentCoords = geometry.coordinates;
@@ -5065,24 +5215,22 @@ async function fetchDataFromArchive() {
             showNotification(warningMsg, 'warning');
         }
         
-      
         let formattedDate = '';
         if (archiveDate) {
             const [year, month, day] = archiveDate.split('-');
             formattedDate = `${day}.${month}.${year}`;
         }
 
-   
-     if (archiveInfoDiv && formattedDate) {
-    archiveInfoDiv.innerHTML = `
-        <i class="fas fa-exclamation-triangle" style="margin-right: 8px; color: #ffa726;"></i>
-        <span style="font-size: 16px; font-weight: 500; color: #ef6c00;">
-            Данные из архива (актуальность: ${formattedDate})
-        </span>
-    `;
-    archiveInfoDiv.style.display = 'block';
-}
-        // Показываем уведомление (без изменений)
+        if (archiveInfoDiv && formattedDate) {
+            archiveInfoDiv.innerHTML = `
+                <i class="fas fa-exclamation-triangle" style="margin-right: 8px; color: #ffa726;"></i>
+                <span style="font-size: 16px; font-weight: 500; color: #ef6c00;">
+                    Данные из архива (актуальность: ${formattedDate})
+                </span>
+            `;
+            archiveInfoDiv.style.display = 'block';
+        }
+        
         const notificationMessage = formattedDate
             ? `Данные из архива КПТ загружены (на ${formattedDate})`
             : 'Данные из архива КПТ успешно загружены!';
@@ -5091,11 +5239,13 @@ async function fetchDataFromArchive() {
         document.getElementById('resultTable').style.display = 'table';
 
     } catch (error) {
+        if (error.name === 'AbortError') return;
         console.error("Ошибка при работе с архивом:", error);
         showNotification(`Ошибка: ${error.message}`, 'error');
+    } finally {
+        hideLoader(); // СКРЫВАЕМ ЛОАДЕР
     }
 }
-
 
 async function fetchZipFromLocalServer(bucketName, filePathInBucket) {
     try {
@@ -5140,7 +5290,9 @@ function triggerListIconAnimation() {
 }
 // Поиск по адресу
 async function searchByAddress(address) {
-    showNotification(`Поиск по адресу: ${address}`, 'info');
+    // ЗАПУСК ЛОАДЕРА
+    const signal = showLoader(`Поиск по адресу: ${address}`);
+    
     document.getElementById('addressListIcon').style.display = 'none';
 
     // Сбрасываем фильтры при новом поиске
@@ -5150,30 +5302,26 @@ async function searchByAddress(address) {
     const path = `/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(address)}`;
 
     try {
-        const response = await fetchWithFallback(path);
+        // Передаем signal
+        const response = await fetchWithFallback(path, { signal });
 
-        // --- ИСПРАВЛЕНИЕ 204 (Пустой ответ) ---
         if (response.status === 204) {
             showNotification('По вашему запросу ничего не найдено', 'warning');
             lastAddressSearchResults = [];
-            lastRawJsonResponse = { message: "No content (204)", query: address }; // Сохраняем инфо для JSON
-            return; // Прерываем выполнение, НЕ переходя на прокси
+            lastRawJsonResponse = { message: "No content (204)", query: address }; 
+            return; 
         }
 
         if (!response.ok) throw new Error('Ошибка поиска');
         
         const data = await response.json();
-        
-        // --- СОХРАНЕНИЕ JSON ---
         lastRawJsonResponse = data; 
 
        if (data && data.data && data.data.features && data.data.features.length > 0) {
             lastAddressSearchResults = data.data.features;
-            
-            // НОВОЕ: Сохраняем копию и сбрасываем состояние фильтра
             originalAddressSearchResults = [...data.data.features];
             isRefineFilterActive = false;
-            updateRefineButtonUI(); // Функция ниже
+            updateRefineButtonUI();
             
             openAddressModal();
             document.getElementById('addressListIcon').style.display = 'block'; 
@@ -5184,8 +5332,11 @@ async function searchByAddress(address) {
         }
 
     } catch (error) {
+        if (error.name === 'AbortError') return; // Игнорируем отмену
         console.error('Address search error:', error);
         showNotification('Ошибка при поиске адреса', 'error');
+    } finally {
+        hideLoader(); // СКРЫВАЕМ ЛОАДЕР
     }
 }
 
