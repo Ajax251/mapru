@@ -1668,6 +1668,56 @@ button:active::after {
     width: 95% !important;       
 }
 
+.print-container {
+    display: flex;
+    flex-direction: row;
+    width: 100%;
+    height: 100%;
+    font-family: 'Times New Roman', Times, serif;
+    font-size: 10pt;
+}
+
+.print-left-column {
+    flex: 0 0 45%;
+    padding-right: 15px;
+    box-sizing: border-box;
+}
+
+.print-right-column {
+    flex: 0 0 55%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+}
+
+.print-right-column img {
+    max-width: 100%;
+    max-height: 100%;
+    object-fit: contain;
+}
+
+.print-container table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 9pt;
+    box-shadow: none;
+    border: 1px solid #333;
+}
+
+.print-container th,
+.print-container td {
+    border: 1px solid #333;
+    padding: 4px 6px;
+    text-align: left;
+    vertical-align: top;
+    word-break: break-word;
+}
+
+.print-container td:first-child {
+    font-weight: bold;
+    width: 35%;
+}
+
 </style>
 
 </head>
@@ -4903,6 +4953,11 @@ document.getElementById('cadastralNumber').addEventListener('keydown', function(
                 toggleVirtualKeyboard();
             }
             
+               if (event.key === 'F8') {
+        event.preventDefault();
+        generatePrintLayout();
+    }
+            
                if (event.key === 'F10') {
                 event.preventDefault(); 
                 useVercelProxyMode = true; 
@@ -5770,6 +5825,496 @@ async function loadAndParseZipBlob(zipBlob) {
     }
 
     return { features: loadedFeatures, date: loadedDate, quarter: inferredQuarter };
+}
+
+function calculatePolygonCentroid(pts) {
+    let first = pts[0],
+        last = pts[pts.length - 1];
+    if (first[0] != last[0] || first[1] != last[1]) pts.push(first);
+    let twicearea = 0,
+        x = 0,
+        y = 0,
+        nPts = pts.length,
+        p1, p2, f;
+    for (let i = 0, j = nPts - 1; i < nPts; j = i++) {
+        p1 = pts[i];
+        p2 = pts[j];
+        f = p1[0] * p2[1] - p2[0] * p1[1];
+        twicearea += f;
+        x += (p1[0] + p2[0]) * f;
+        y += (p1[1] + p2[1]) * f;
+    }
+    f = twicearea * 3;
+    return {
+        x: x / f,
+        y: y / f
+    };
+}
+
+
+function getAllCoordsFromGeometry(geometry) {
+    if (!geometry || !geometry.coordinates) return [];
+    const {
+        type,
+        coordinates
+    } = geometry;
+    let allCoords = [];
+    if (type === "Polygon") {
+        coordinates.forEach(ring => allCoords.push(...ring));
+    } else if (type === "MultiPolygon") {
+        coordinates.forEach(polygon => polygon.forEach(ring => allCoords.push(...ring)));
+    } else if (type === "LineString") {
+        allCoords.push(...coordinates);
+    } else if (type === "MultiLineString") {
+        coordinates.forEach(line => allCoords.push(...line));
+    }
+    return allCoords;
+}
+
+function drawGeometryOnCanvas(ctx, geometry, color, params) {
+    if (!geometry || !geometry.coordinates) return;
+    const {
+        scale,
+        offsetX,
+        offsetY,
+        minX,
+        minY,
+        canvasHeight
+    } = params;
+    ctx.strokeStyle = color;
+    ctx.lineWidth = 3;
+    ctx.fillStyle = color.replace(')', ', 0.1)').replace('rgb', 'rgba');
+
+    const drawContour = (coords) => {
+        ctx.beginPath();
+        coords.forEach((coord, index) => {
+            const x = offsetX + (coord[0] - minX) * scale;
+            const y = canvasHeight - (offsetY + (coord[1] - minY) * scale);
+            if (index === 0) ctx.moveTo(x, y);
+            else ctx.lineTo(x, y);
+        });
+    };
+
+    const {
+        type,
+        coordinates
+    } = geometry;
+    if (type === "Polygon") {
+        coordinates.forEach(ring => {
+            drawContour(ring);
+            ctx.closePath();
+            ctx.stroke();
+            ctx.fill();
+        });
+    } else if (type === "MultiPolygon") {
+        coordinates.forEach(polygon => polygon.forEach(ring => {
+            drawContour(ring);
+            ctx.closePath();
+            ctx.stroke();
+            ctx.fill();
+        }));
+    } else if (type === "LineString") {
+        drawContour(coordinates);
+        ctx.stroke();
+    } else if (type === "MultiLineString") {
+        coordinates.forEach(line => {
+            drawContour(line);
+            ctx.stroke();
+        });
+    }
+}
+
+
+function drawCalloutLabel(ctx, feature, params) {
+    const geometry = feature.geometry;
+    if (!geometry || !geometry.coordinates || geometry.coordinates.length === 0) return;
+
+    let centroidPoint;
+    if (geometry.type === "Polygon" || geometry.type === "MultiPolygon") {
+        const primaryRing = geometry.type === "Polygon" ? geometry.coordinates[0] : geometry.coordinates[0][0];
+        const centroid = calculatePolygonCentroid(primaryRing);
+        centroidPoint = [centroid.x, centroid.y];
+    } else {
+        const coords = getAllCoordsFromGeometry(geometry);
+        const midIndex = Math.floor(coords.length / 2);
+        centroidPoint = coords[midIndex];
+    }
+
+    const {
+        scale,
+        offsetX,
+        offsetY,
+        minX,
+        minY,
+        canvasHeight
+    } = params;
+    const anchorX = offsetX + (centroidPoint[0] - minX) * scale;
+    const anchorY = canvasHeight - (offsetY + (centroidPoint[1] - minY) * scale);
+
+    const labelText = feature.properties.options.cad_num || "ID";
+    ctx.font = 'bold 24px Times New Roman';
+    const textMetrics = ctx.measureText(labelText);
+    const textWidth = textMetrics.width;
+    const textHeight = 24;
+
+    const labelX = anchorX > params.canvasWidth / 2 ? anchorX - textWidth - 25 : anchorX + 25;
+    const labelY = anchorY;
+
+    ctx.beginPath();
+    ctx.moveTo(anchorX, anchorY);
+    ctx.lineTo(labelX, labelY);
+    ctx.strokeStyle = '#333';
+    ctx.lineWidth = 1.5;
+    ctx.stroke();
+
+    ctx.fillStyle = 'white';
+    ctx.globalAlpha = 0.7;
+    ctx.fillRect(labelX - 5, labelY - textHeight, textWidth + 10, textHeight + 5);
+    ctx.globalAlpha = 1.0;
+
+    ctx.fillStyle = 'black';
+    ctx.textAlign = anchorX > params.canvasWidth / 2 ? 'right' : 'left';
+    ctx.fillText(labelText, labelX, labelY);
+}
+
+
+async function drawForPrint(mainGeometry, linkedFeatures) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 2000;
+    canvas.height = 1414;
+    const ctx = canvas.getContext('2d');
+    ctx.fillStyle = 'white';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    let allCoords = getAllCoordsFromGeometry(mainGeometry);
+    linkedFeatures.forEach(feature => {
+        allCoords = allCoords.concat(getAllCoordsFromGeometry(feature.geometry));
+    });
+
+    if (allCoords.length === 0) return canvas.toDataURL();
+
+    const minX = Math.min(...allCoords.map(p => p[0]));
+    const maxX = Math.max(...allCoords.map(p => p[0]));
+    const minY = Math.min(...allCoords.map(p => p[1]));
+    const maxY = Math.max(...allCoords.map(p => p[1]));
+
+    const width = maxX - minX;
+    const height = maxY - minY;
+    const padding = 50;
+
+    const scaleX = (canvas.width - padding * 2) / width;
+    const scaleY = (canvas.height - padding * 2) / height;
+    const scale = Math.min(scaleX, scaleY);
+
+    const offsetX = (canvas.width - width * scale) / 2;
+    const offsetY = (canvas.height - height * scale) / 2;
+
+    const params = {
+        scale,
+        offsetX,
+        offsetY,
+        minX,
+        minY,
+        canvasWidth: canvas.width,
+        canvasHeight: canvas.height
+    };
+
+    const drawPointsAndLabelsForPrint = (geometry, color, labelPrefix = '') => {
+        const allRings = [];
+        if (geometry.type === 'Polygon') {
+            allRings.push(...geometry.coordinates);
+        } else if (geometry.type === 'MultiPolygon') {
+            geometry.coordinates.forEach(poly => allRings.push(...poly));
+        } else {
+            allRings.push(getAllCoordsFromGeometry(geometry));
+        }
+        
+        if (allRings.length === 0) return;
+        
+        const labelOffset = 18;
+        ctx.font = '28px Times New Roman';
+        let pointCounter = 1;
+
+        allRings.forEach(coords => {
+             if (coords.length === 0) return;
+            
+             const coordsToDraw = (coords[0][0] === coords[coords.length - 1][0] && coords[0][1] === coords[coords.length - 1][1]) 
+                ? coords.slice(0, -1) 
+                : coords;
+
+            coordsToDraw.forEach((coord) => {
+                const x = offsetX + (coord[0] - minX) * scale;
+                const y = canvas.height - (offsetY + (coord[1] - minY) * scale);
+                
+                ctx.beginPath();
+                ctx.arc(x, y, 5, 0, Math.PI * 2);
+                ctx.fillStyle = color;
+                ctx.fill();
+                
+                ctx.fillStyle = '#333';
+                ctx.fillText(labelPrefix + (pointCounter++), x + labelOffset, y - labelOffset);
+            });
+        });
+    };
+
+    linkedFeatures.forEach(feature => {
+        drawGeometryOnCanvas(ctx, feature.geometry, 'rgb(255, 87, 34)', params);
+    });
+    
+    drawGeometryOnCanvas(ctx, mainGeometry, 'rgb(33, 150, 243)', params);
+
+    drawPointsAndLabelsForPrint(mainGeometry, '#FF4081');
+
+    linkedFeatures.forEach(feature => {
+        drawCalloutLabel(ctx, feature, params);
+    });
+
+    return canvas.toDataURL('image/png');
+}
+
+function parseLinkedCadNumbers() {
+    const numbers = new Set();
+    const links = document.querySelectorAll('#resultTable span[onclick^="copyAndOpen"]');
+    links.forEach(link => {
+        const match = link.getAttribute('onclick').match(/'([^']+)'/);
+        if (match && match[1]) {
+            numbers.add(match[1]);
+        }
+    });
+    return Array.from(numbers);
+}
+
+async function fetchAllLinkedGeometries(cadNumbers) {
+    if (!cadNumbers || cadNumbers.length === 0) return [];
+    const promises = cadNumbers.map(cn => {
+        const path = `/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(cn)}`;
+        return fetchWithFallback(path)
+            .then(res => res.ok ? res.json() : null)
+            .then(data => (data && data.data.features.length > 0) ? data.data.features[0] : null)
+            .catch(() => null);
+    });
+    const results = await Promise.all(promises);
+    return results.filter(r => r && r.geometry && r.geometry.coordinates && r.geometry.coordinates.length > 0);
+}
+
+function getGeometryType(coords) {
+    if (!coords || coords.length === 0) return null;
+    if (Array.isArray(coords[0][0])) {
+        if (Array.isArray(coords[0][0][0])) return "MultiPolygon";
+        return "Polygon";
+    }
+    return "LineString";
+}
+
+
+async function createPrintableHtml(tableHtml, mainGeometry, linkedFeatures) {
+    const drawingDataUrl = await drawForPrint(mainGeometry, linkedFeatures);
+    const printStyles = `
+        @page {
+            size: A4 landscape;
+            margin: 0;
+        }
+        * {
+            -webkit-print-color-adjust: exact;
+            print-color-adjust: exact;
+        }
+        html, body {
+            height: 100%;
+            margin: 0;
+            padding: 0;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+            font-size: 10pt;
+            color: #2c3e50;
+            background-color: #ffffff;
+        }
+        body {
+            display: flex;
+            justify-content: center;
+            align-items: center;
+        }
+        .report-container {
+            display: flex;
+            flex-direction: row;
+            width: 100%;
+            height: 100vh;
+            padding: 1.5cm;
+            box-sizing: border-box;
+            gap: 25px;
+            align-items: stretch;
+        }
+        .content-block {
+            flex: 1;
+            display: flex;
+            flex-direction: column;
+        }
+        .table-block {
+            overflow: hidden;
+        }
+        .table-block table {
+            width: 100%;
+            border-collapse: separate;
+            border-spacing: 0;
+            font-size: 9.5pt;
+            background-color: #fff;
+            border-radius: 8px;
+            overflow: hidden;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+        }
+        .table-block td {
+            padding: 10px 14px;
+            border-bottom: 1px solid #e8edf2;
+            line-height: 1.5;
+        }
+        .table-block tr:last-child td {
+            border-bottom: none;
+        }
+        .table-block td:first-child {
+            font-weight: 600;
+            background-color: #f8fafc;
+            color: #34495e;
+            width: 38%;
+            border-right: 1px solid #e8edf2;
+        }
+        .table-block td:last-child {
+            color: #2c3e50;
+        }
+        .table-block tr:hover td {
+            background-color: #f0f4f8;
+        }
+        .image-block {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background-color: #f8fafc;
+            border-radius: 8px;
+            padding: 15px;
+            box-shadow: 0 2px 8px rgba(0, 0, 0, 0.08);
+        }
+        .image-block img {
+            max-width: 100%;
+            max-height: 100%;
+            object-fit: contain;
+            border-radius: 4px;
+        }
+        .copy-icon-button, 
+        .fas.fa-link, 
+        img[onclick],
+        [class*="icon"],
+        [class*="button"] {
+            display: none !important;
+        }
+        @media print {
+            body {
+                margin: 0;
+                padding: 0;
+            }
+            .report-container {
+                page-break-inside: avoid;
+            }
+        }
+    `;
+    
+    return `
+        <!DOCTYPE html>
+        <html lang="ru">
+        <head>
+            <meta charset="UTF-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <style>${printStyles}</style>
+        </head>
+        <body>
+            <div class="report-container">
+                <div class="content-block table-block">
+                    ${tableHtml}
+                </div>
+                <div class="content-block image-block">
+                    <img src="${drawingDataUrl}" alt="">
+                </div>
+            </div>
+        </body>
+        </html>
+    `;
+}
+
+
+async function convertCoordsToMsk(coordsToConvert, cadastralNumber) {
+    if (!coordsToConvert || coordsToConvert.length === 0 || !cadastralNumber) {
+        return [];
+    }
+
+    try {
+        const mskCode = MskFinder.findMskCode(cadastralNumber);
+        if (!mskCode) throw new Error(`Не удалось определить МСК для ${cadastralNumber}`);
+
+        let targetSystem = COORDINATE_SYSTEMS.find(s => s.text.includes(`МСК-${mskCode}`) || s.text.includes(`МСК ${mskCode}`) || s.text.includes(mskCode));
+        if (!targetSystem) throw new Error(`Определение для МСК-${mskCode} не найдено.`);
+
+        proj4.defs(targetSystem.value, targetSystem.def);
+        const {
+            offsetX = 0, offsetY = 0
+        } = targetSystem;
+
+        const mskCoords = [];
+        const allPoints = getAllCoordsFromGeometry({
+            type: getGeometryType(coordsToConvert),
+            coordinates: coordsToConvert
+        });
+        
+        // Удаляем дублирующую последнюю точку, если контур замкнут
+        const uniquePoints = (allPoints[0][0] === allPoints[allPoints.length - 1][0] && allPoints[0][1] === allPoints[allPoints.length - 1][1])
+            ? allPoints.slice(0, -1)
+            : allPoints;
+
+        uniquePoints.forEach(point => {
+            const [lon, lat] = proj4('EPSG:3857', targetSystem.value, point);
+            mskCoords.push({
+                x: lat + offsetX,
+                y: lon + offsetY
+            });
+        });
+
+        return mskCoords;
+    } catch (error) {
+        console.error("Ошибка при конвертации координат в МСК:", error);
+        showNotification(error.message, 'error');
+        return [];
+    }
+}
+
+async function generatePrintLayout() {
+    const tableBody = document.querySelector('#resultTable tbody');
+    if (!tableBody || tableBody.children.length === 0 || !currentCoords) {
+        showNotification('Нет данных для печати', 'warning');
+        return;
+    }
+
+    showLoader('Подготовка отчета к печати...');
+
+    try {
+        const mainTableHtml = document.getElementById('resultTable').outerHTML;
+        const mainGeometry = {
+            type: getGeometryType(currentCoords),
+            coordinates: currentCoords
+        };
+        const linkedGeometries = await fetchAllLinkedGeometries(parseLinkedCadNumbers());
+
+        const printHtml = await createPrintableHtml(mainTableHtml, mainGeometry, linkedGeometries);
+
+        const printWindow = window.open('', '_blank');
+        printWindow.document.write(printHtml);
+        printWindow.document.close();
+        printWindow.focus();
+        
+        setTimeout(() => {
+             printWindow.print();
+        }, 500);
+
+    } catch (error) {
+        console.error("Ошибка при формировании отчета:", error);
+        showNotification('Ошибка при формировании отчета', 'error');
+    } finally {
+        hideLoader();
+    }
 }
 
 
