@@ -800,6 +800,11 @@ select {
         <label style="text-align:left; font-size:0.9rem; margin-bottom:5px;">Шаг точек (м):</label>
         <input type="number" id="ptpStep" value="1.0" step="0.01" min="0.01" style="width:100%; padding:10px; border-radius:10px; border:1px solid var(--input-border); margin-bottom:15px; text-align:center; background:var(--input-bg);">
     </div>
+    
+     <div id="ptpAngleContainer">
+        <label style="text-align:left; font-size:0.9rem; margin-bottom:5px;">Угол поворота (гр.):</label>
+        <input type="number" id="ptpAngle" value="0" step="0.1" style="width:100%; padding:10px; border-radius:10px; border:1px solid var(--input-border); margin-bottom:15px; text-align:center; background:var(--input-bg);">
+    </div>
 
     <div style="display:flex; justify-content:center; gap:10px; margin-top:10px;">
         <button id="applyPtp" class="action-btn" style="padding:10px 20px; min-width:auto; flex:1; background: linear-gradient(135deg, #4CAF50, #45a049); font-size:14px;">Создать</button>
@@ -2071,13 +2076,15 @@ async function generateAndDownloadXML() {
             document.getElementById('schemeMenu').classList.remove('is-active');
         });
     }
-
-    if (ptpShapeSelect) {
+    
+  if (ptpShapeSelect) {
         ptpShapeSelect.addEventListener('change', function() {
             if (this.value === 'circle') {
                 ptpStepContainer.style.display = 'block';
+                if(ptpAngleContainer) ptpAngleContainer.style.display = 'none'; // Скрываем угол для круга
             } else {
                 ptpStepContainer.style.display = 'none';
+                if(ptpAngleContainer) ptpAngleContainer.style.display = 'block'; // Показываем угол для квадрата
             }
         });
     }
@@ -6719,11 +6726,13 @@ async function handleTextareaPaste(event) {
 }
    
    
-   function generatePointToPoly() {
+  function generatePointToPoly() {
     const coordsStr = document.getElementById('ptpCoords').value.trim();
     const shapeType = document.getElementById('ptpShape').value;
     const radius = parseFloat(document.getElementById('ptpRadius').value);
     const step = parseFloat(document.getElementById('ptpStep').value);
+    // Получаем значение угла (если пусто, то 0)
+    const angleDeg = parseFloat(document.getElementById('ptpAngle').value) || 0;
     const dialog = document.getElementById('pointToPolyDialog');
 
     if (!coordsStr) {
@@ -6735,8 +6744,6 @@ async function handleTextareaPaste(event) {
         return;
     }
 
-    // Парсинг координат (поддержка пробелов, табов, точек с запятой)
-    // Заменяем запятые на точки, убираем лишнее, разделяем
     const cleanStr = coordsStr.replace(/,/g, '.').replace(/;/g, ' ');
     const parts = cleanStr.split(/\s+/).filter(p => p !== '');
     
@@ -6756,20 +6763,41 @@ async function handleTextareaPaste(event) {
     let resultPoints = [];
 
     if (shapeType === 'square') {
-        // Квадрат со стороной 2*R
-        // Порядок обхода: верх-лево -> верх-право -> низ-право -> низ-лево -> верх-лево (замкнуть)
-        // Геодезические координаты: X - вертикаль (Север), Y - горизонталь (Восток)
+        // Переводим градусы в радианы для Math.cos/sin
+        // Учтите: в геодезии направление углов может отличаться, 
+        // здесь используется стандартное тригонометрическое вращение против часовой стрелки.
+        // Если нужно по часовой - замените angleRad на -angleRad.
+        const angleRad = angleDeg * (Math.PI / 180);
         
-        // 1. X+R, Y-R (Верх-Лево)
-        resultPoints.push({ x: centerX + radius, y: centerY - radius });
-        // 2. X+R, Y+R (Верх-Право)
-        resultPoints.push({ x: centerX + radius, y: centerY + radius });
-        // 3. X-R, Y+R (Низ-Право)
-        resultPoints.push({ x: centerX - radius, y: centerY + radius });
-        // 4. X-R, Y-R (Низ-Лево)
-        resultPoints.push({ x: centerX - radius, y: centerY - radius });
-        // 5. Замыкаем
-        resultPoints.push({ x: centerX + radius, y: centerY - radius });
+        // Базовые смещения для неповёрнутого квадрата относительно центра (0,0)
+        // 1. Верх-Лево (+R, -R)
+        // 2. Верх-Право (+R, +R)
+        // 3. Низ-Право  (-R, +R)
+        // 4. Низ-Лево   (-R, -R)
+        const offsets = [
+            { dx: radius, dy: -radius },
+            { dx: radius, dy: radius },
+            { dx: -radius, dy: radius },
+            { dx: -radius, dy: -radius }
+        ];
+
+        // Применяем вращение и сдвиг к центру
+        for (let i = 0; i < 4; i++) {
+            const dx = offsets[i].dx;
+            const dy = offsets[i].dy;
+
+            // Формула поворота точки
+            const rotDx = dx * Math.cos(angleRad) - dy * Math.sin(angleRad);
+            const rotDy = dx * Math.sin(angleRad) + dy * Math.cos(angleRad);
+
+            resultPoints.push({ 
+                x: centerX + rotDx, 
+                y: centerY + rotDy 
+            });
+        }
+        
+        // Замыкаем квадрат (добавляем первую точку в конец)
+        resultPoints.push(resultPoints[0]);
 
     } else if (shapeType === 'circle') {
         if (isNaN(step) || step <= 0) {
@@ -6777,39 +6805,32 @@ async function handleTextareaPaste(event) {
             return;
         }
 
-        const circumference = 2 * Math.PI * radius; // Длина окружности
-        const count = Math.ceil(circumference / step); // Количество сегментов
-        
-        // Минимум 3 точки для треугольника, но для круга лучше больше
+        const circumference = 2 * Math.PI * radius; 
+        const count = Math.ceil(circumference / step); 
         const segments = Math.max(3, count); 
         const angleStep = (2 * Math.PI) / segments;
 
         for (let i = 0; i < segments; i++) {
             const angle = i * angleStep;
-            // X = Cx + R * cos(a), Y = Cy + R * sin(a)
             const px = centerX + radius * Math.cos(angle);
             const py = centerY + radius * Math.sin(angle);
             resultPoints.push({ x: px, y: py });
         }
-        // Замыкаем круг (добавляем первую точку в конец)
         resultPoints.push(resultPoints[0]);
     }
 
-    // Формируем строку для вставки
     const newCoordsString = resultPoints.map(p => `${p.x.toFixed(2)}\t${p.y.toFixed(2)}`).join('\n');
-
-    // Добавляем в textarea
+    
     const coordsInput = document.getElementById('coordsInput');
     const currentVal = coordsInput.value.trim();
     const separator = currentVal ? '\n\n' : '';
     
     coordsInput.value += separator + newCoordsString;
 
-    // Обновляем чертеж
     handleInput(true);
     showNotification('Объект успешно создан.');
     dialog.style.display = 'none';
-} 
+}
 
 
 // Функция для автоматического добавления разделителей между контурами
