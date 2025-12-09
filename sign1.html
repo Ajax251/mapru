@@ -1200,31 +1200,17 @@ window.onload = async function() {
     // === ПРОВЕРКА ===
     async function handleVerifyFilesSelect(files) {
         filesToVerify = Array.from(files);
-        const resultsSection = document.getElementById('verifyResults');
-        const resultsList = document.getElementById('verifyResultsList');
-
-        // Сценарий: Загружен ровно один файл и это ZIP
-        if (filesToVerify.length === 1 && filesToVerify[0].name.toLowerCase().endsWith('.zip')) {
-            // Очищаем интерфейс
-            renderFileList('verifyFileList', filesToVerify, 'verify');
-            updateVerifyButtonState();
-            
-            // Спрашиваем пользователя или сразу проверяем? 
-            // По логике задачи: если нет sig-файла рядом, лезем внутрь.
-            // Но пользователь мог загрузить zip, чтобы проверить его целостность, а не содержимое.
-            // Сделаем автоматическую проверку содержимого при нажатии кнопки "Проверить".
-            
-            // Чтобы кнопка сработала, привяжем специальный обработчик или изменим processVerification
-            // Для простоты изменим processVerification ниже.
-            return;
-        }
         
-        // Стандартная логика для обычных файлов (как было раньше)
+        // Если выбран только один файл и это НЕ .sig, пробуем найти .sig
         if (filesToVerify.length === 1) {
             const file = filesToVerify[0];
             const name = file.name.toLowerCase();
             
             if (!name.endsWith('.sig') && !name.endsWith('.sgn')) {
+                // Показываем подсказку и запрашиваем .sig файл автоматически
+                const sigName = file.name + '.sig';
+                
+                // Создаём скрытый input для выбора .sig файла
                 const sigInput = document.createElement('input');
                 sigInput.type = 'file';
                 sigInput.accept = '.sig,.sgn';
@@ -1241,8 +1227,9 @@ window.onload = async function() {
 
                 document.body.appendChild(sigInput);
                 
+                // Показываем диалог с просьбой выбрать .sig
                 setTimeout(() => {
-                    if (confirm(`Выбран файл "${file.name}".\n\nЭто не архив с документами. Выбрать файл подписи (.sig) отдельно?`)) {
+                    if (confirm(`Выбран файл "${file.name}".\n\nВыбрать файл подписи (.sig)?`)) {
                         sigInput.click();
                     } else {
                         sigInput.remove();
@@ -1255,20 +1242,14 @@ window.onload = async function() {
         updateVerifyButtonState();
     }
 
- async function processVerification() {
+    async function processVerification() {
         const resultsSection = document.getElementById('verifyResults');
         const resultsList = document.getElementById('verifyResultsList');
         
         resultsSection.classList.add('active');
-        resultsList.innerHTML = '<div class="empty-state"><i class="fas fa-spinner fa-spin"></i><p>Анализ файлов...</p></div>';
+        resultsList.innerHTML = '<div class="empty-state"><i class="fas fa-spinner fa-spin"></i><p>Проверка подписей...</p></div>';
 
-        // ПРОВЕРКА ZIP: Если файл один и это ZIP, и нет второго файла .sig
-        if (filesToVerify.length === 1 && filesToVerify[0].name.toLowerCase().endsWith('.zip')) {
-            await processZipInternalVerification(filesToVerify[0], resultsList);
-            return;
-        }
-
-        // ОБЫЧНАЯ ПРОВЕРКА (как было раньше)
+        // Группируем файлы
         const pairs = {};
         
         filesToVerify.forEach(f => {
@@ -1294,97 +1275,12 @@ window.onload = async function() {
 
         for (const name of names) {
             const pair = pairs[name];
+            
             if (pair.original && pair.sig) {
                 await verifyPair(pair.original, pair.sig, resultsList);
             } else if (pair.sig && !pair.original) {
                 appendResult(resultsList, pair.sigName || name + '.sig', 'warning', 'Не найден исходный файл', '', '');
-            } else if (pair.original && !pair.sig) {
-                 // Для одиночных файлов без подписи можно просто пропустить или вывести warning
-                 // appendResult(resultsList, pair.original.name, 'warning', 'Не найден файл подписи (.sig)', '', '');
             }
-        }
-    }
-    
-    
-        async function processZipInternalVerification(zipFile, container) {
-        container.innerHTML = '<div class="empty-state"><i class="fas fa-circle-notch fa-spin"></i><p>Распаковка и проверка архива...</p></div>';
-        
-        try {
-            const zip = new JSZip();
-            const content = await zip.loadAsync(zipFile);
-            
-            const pairs = [];
-            const filesInZip = Object.keys(content.files);
-            
-            // Проходим по всем файлам в архиве
-            filesInZip.forEach(filePath => {
-                const fileEntry = content.files[filePath];
-                if (fileEntry.dir) return; // Пропускаем папки
-
-                const lowerName = filePath.toLowerCase();
-                
-                // Ищем файлы подписей (.sig или .sgn)
-                if (lowerName.endsWith('.sig') || lowerName.endsWith('.sgn')) {
-                    // Предполагаемое имя оригинального файла (убираем расширение подписи)
-                    const originalPath = filePath.substring(0, filePath.lastIndexOf('.'));
-                    
-                    // Проверяем, есть ли такой файл в архиве
-                    if (content.files[originalPath]) {
-                        pairs.push({
-                            originalPath: originalPath,
-                            sigPath: filePath
-                        });
-                    } else {
-                        // Попытка найти файл без учета регистра, если точное совпадение не найдено
-                        // (иногда расширения меняют регистр: file.PDF -> file.pdf.sig)
-                        const caseInsensitiveMatch = filesInZip.find(f => f.toLowerCase() === originalPath.toLowerCase());
-                        if (caseInsensitiveMatch) {
-                             pairs.push({
-                                originalPath: caseInsensitiveMatch,
-                                sigPath: filePath
-                            });
-                        }
-                    }
-                }
-            });
-
-            container.innerHTML = ''; // Очищаем статус загрузки
-            
-            if (pairs.length === 0) {
-                container.innerHTML = `
-                    <div class="empty-state">
-                        <i class="fas fa-box-open"></i>
-                        <p>В архиве не найдено пар "Документ + Подпись"</p>
-                        <small style="display:block; margin-top:10px; color: var(--gray-400)">
-                            Убедитесь, что внутри лежат файлы вида:<br> документ.pdf и документ.pdf.sig
-                        </small>
-                    </div>`;
-                return;
-            }
-            
-            // Добавляем заголовок с информацией
-            const infoHeader = document.createElement('div');
-            infoHeader.style.marginBottom = '15px';
-            infoHeader.innerHTML = `<div class="section-label"><i class="fas fa-file-zipper"></i> Проверено внутри ${zipFile.name}: найдено ${pairs.length} пар</div>`;
-            container.appendChild(infoHeader);
-
-            // Перебираем найденные пары и проверяем
-            for (const pair of pairs) {
-                // Извлекаем файлы как Blob
-                const originalBlob = await content.files[pair.originalPath].async('blob');
-                const sigBlob = await content.files[pair.sigPath].async('blob');
-                
-                // Важно: Присваиваем имя Blob-объекту, чтобы verifyPair корректно отобразил название.
-                // Используем полный путь (с папками), чтобы различать файлы с одинаковыми именами в разных папках.
-                originalBlob.name = pair.originalPath; 
-                
-                // Вызываем существующую функцию проверки
-                await verifyPair(originalBlob, sigBlob, container);
-            }
-
-        } catch (e) {
-            console.error(e);
-            container.innerHTML = `<div class="empty-state" style="color:var(--danger)"><i class="fas fa-exclamation-triangle"></i><p>Ошибка чтения архива: ${e.message}</p></div>`;
         }
     }
 
