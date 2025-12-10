@@ -839,7 +839,7 @@
                 
                 <div class="hint-box">
                     <i class="fas fa-lightbulb"></i>
-                    <p>Загрузите документ и файл подписи (.sig). Если выбрать только документ, система автоматически попытается найти подпись с таким же именем в папке.</p>
+                    <p>Загрузите документ и файл подписи (.sig)</p>
                 </div>
 
                 <!-- Загрузка файлов для проверки -->
@@ -902,28 +902,37 @@
 
     // === ИНИЦИАЛИЗАЦИЯ ===
 window.onload = async function() {
-        // Восстановление настройки ZIP
-        const savedZipState = localStorage.getItem('cades_zip_enabled');
-        if (savedZipState !== null) {
-            document.getElementById('zipCheckbox').checked = (savedZipState === 'true');
-        } else {
-            // По умолчанию включено
-            document.getElementById('zipCheckbox').checked = true;
-        }
+    // Восстановление настройки ZIP
+    const savedZipState = localStorage.getItem('cades_zip_enabled');
+    if (savedZipState !== null) {
+        document.getElementById('zipCheckbox').checked = (savedZipState === 'true');
+    } else {
+        // По умолчанию включено
+        document.getElementById('zipCheckbox').checked = true;
+    }
 
-        setupDragAndDrop();
-        await initCryptoPro();
-    };
+    // Восстановление последнего выбранного режима
+    const savedMode = localStorage.getItem('cades_last_mode');
+    if (savedMode && (savedMode === 'sign' || savedMode === 'verify')) {
+        switchMode(savedMode);
+    }
+
+    setupDragAndDrop();
+    await initCryptoPro();
+};
 
     // Переключение режимов
-    function switchMode(mode) {
-        document.querySelectorAll('.mode-btn').forEach(btn => {
-            btn.classList.toggle('active', btn.dataset.mode === mode);
-        });
-        document.querySelectorAll('.mode-content').forEach(content => {
-            content.classList.toggle('active', content.id === mode + 'Mode');
-        });
-    }
+function switchMode(mode) {
+    document.querySelectorAll('.mode-btn').forEach(btn => {
+        btn.classList.toggle('active', btn.dataset.mode === mode);
+    });
+    document.querySelectorAll('.mode-content').forEach(content => {
+        content.classList.toggle('active', content.id === mode + 'Mode');
+    });
+    
+    // Сохраняем выбранный режим в localStorage
+    localStorage.setItem('cades_last_mode', mode);
+}
 
     // Настройка Drag & Drop
     function setupDragAndDrop() {
@@ -1310,105 +1319,156 @@ async function handleVerifyFilesSelect(files) {
     }
     
     
-        async function processZipInternalVerification(zipFile, container) {
-        container.innerHTML = '<div class="empty-state"><i class="fas fa-circle-notch fa-spin"></i><p>Распаковка и проверка архива...</p></div>';
+async function processZipInternalVerification(zipFile, container) {
+    container.innerHTML = '<div class="empty-state"><i class="fas fa-circle-notch fa-spin"></i><p>Распаковка и проверка архива...</p></div>';
+    
+    try {
+        const zip = new JSZip();
         
-        try {
-            const zip = new JSZip();
-            const content = await zip.loadAsync(zipFile);
-            
-            const pairs = [];
-            const filesInZip = Object.keys(content.files);
-            
-            // Проходим по всем файлам в архиве
-            filesInZip.forEach(filePath => {
-                const fileEntry = content.files[filePath];
-                if (fileEntry.dir) return; // Пропускаем папки
-
-                const lowerName = filePath.toLowerCase();
-                
-                // Ищем файлы подписей (.sig или .sgn)
-                if (lowerName.endsWith('.sig') || lowerName.endsWith('.sgn')) {
-                    // Предполагаемое имя оригинального файла (убираем расширение подписи)
-                    const originalPath = filePath.substring(0, filePath.lastIndexOf('.'));
-                    
-                    // Проверяем, есть ли такой файл в архиве
-                    if (content.files[originalPath]) {
-                        pairs.push({
-                            originalPath: originalPath,
-                            sigPath: filePath
-                        });
-                    } else {
-                        // Попытка найти файл без учета регистра, если точное совпадение не найдено
-                        // (иногда расширения меняют регистр: file.PDF -> file.pdf.sig)
-                        const caseInsensitiveMatch = filesInZip.find(f => f.toLowerCase() === originalPath.toLowerCase());
-                        if (caseInsensitiveMatch) {
-                             pairs.push({
-                                originalPath: caseInsensitiveMatch,
-                                sigPath: filePath
-                            });
-                        }
+        // Функция декодирования имён файлов из рабочей программы
+        const decodeFilename = (bytes) => {
+            try { 
+                return new TextDecoder("utf-8", { fatal: true }).decode(bytes); 
+            } catch (e) {
+                try { 
+                    return new TextDecoder("cp866", { fatal: true }).decode(bytes); 
+                } catch (e2) {
+                    try { 
+                        return new TextDecoder("windows-1251", { fatal: true }).decode(bytes); 
+                    } catch (e3) { 
+                        return new TextDecoder().decode(bytes); 
                     }
                 }
-            });
-
-            container.innerHTML = ''; // Очищаем статус загрузки
-            
-            if (pairs.length === 0) {
-                container.innerHTML = `
-                    <div class="empty-state">
-                        <i class="fas fa-box-open"></i>
-                        <p>В архиве не найдено пар "Документ + Подпись"</p>
-                        <small style="display:block; margin-top:10px; color: var(--gray-400)">
-                            Убедитесь, что внутри лежат файлы вида:<br> документ.pdf и документ.pdf.sig
-                        </small>
-                    </div>`;
-                return;
             }
-            
-            // Добавляем заголовок с информацией
-            const infoHeader = document.createElement('div');
-            infoHeader.style.marginBottom = '15px';
-            infoHeader.innerHTML = `<div class="section-label"><i class="fas fa-file-zipper"></i> Проверено внутри ${zipFile.name}: найдено ${pairs.length} пар</div>`;
-            container.appendChild(infoHeader);
+        };
 
-            // Перебираем найденные пары и проверяем
-            for (const pair of pairs) {
-                // Извлекаем файлы как Blob
-                const originalBlob = await content.files[pair.originalPath].async('blob');
-                const sigBlob = await content.files[pair.sigPath].async('blob');
-                
-                // Важно: Присваиваем имя Blob-объекту, чтобы verifyPair корректно отобразил название.
-                // Используем полный путь (с папками), чтобы различать файлы с одинаковыми именами в разных папках.
-                originalBlob.name = pair.originalPath; 
-                
-                // Вызываем существующую функцию проверки
-                await verifyPair(originalBlob, sigBlob, container);
+        // Читаем архив как ArrayBuffer
+        const arrayBuffer = await zipFile.arrayBuffer();
+        
+        // Загружаем ZIP с функцией декодирования
+        const loadedZip = await zip.loadAsync(arrayBuffer, { decodeFileName: decodeFilename });
+        
+        const pairs = [];
+        const filesInZip = [];
+        
+        // Собираем все файлы
+        loadedZip.forEach((relativePath, zipEntry) => {
+            if (!zipEntry.dir) {
+                filesInZip.push({
+                    path: relativePath,
+                    entry: zipEntry
+                });
             }
+        });
+        
+        // Проходим по всем файлам в архиве
+        filesInZip.forEach(file => {
+            const lowerName = file.path.toLowerCase();
+            
+            // Ищем файлы подписей (.sig или .sgn)
+            if (lowerName.endsWith('.sig') || lowerName.endsWith('.sgn')) {
+                // Предполагаемое имя оригинального файла (убираем расширение подписи)
+                const originalPath = file.path.substring(0, file.path.lastIndexOf('.'));
+                
+                // Проверяем, есть ли такой файл в архиве
+                const docFile = filesInZip.find(f => 
+                    f.path === originalPath || 
+                    f.path.toLowerCase() === originalPath.toLowerCase()
+                );
+                
+                if (docFile) {
+                    pairs.push({
+                        originalPath: docFile.path,
+                        originalEntry: docFile.entry,
+                        sigPath: file.path,
+                        sigEntry: file.entry
+                    });
+                }
+            }
+        });
 
-        } catch (e) {
-            console.error(e);
-            container.innerHTML = `<div class="empty-state" style="color:var(--danger)"><i class="fas fa-exclamation-triangle"></i><p>Ошибка чтения архива: ${e.message}</p></div>`;
+        container.innerHTML = ''; // Очищаем статус загрузки
+        
+        if (pairs.length === 0) {
+            container.innerHTML = `
+                <div class="empty-state">
+                    <i class="fas fa-box-open"></i>
+                    <p>В архиве не найдено пар "Документ + Подпись"</p>
+                    <small style="display:block; margin-top:10px; color: var(--gray-400)">
+                        Убедитесь, что внутри лежат файлы вида:<br> документ.pdf и документ.pdf.sig
+                    </small>
+                </div>`;
+            return;
         }
+        
+        // Добавляем заголовок с информацией
+        const infoHeader = document.createElement('div');
+        infoHeader.style.marginBottom = '15px';
+        infoHeader.innerHTML = `<div class="section-label"><i class="fas fa-file-zipper"></i> Проверено внутри ${zipFile.name}: найдено ${pairs.length} пар</div>`;
+        container.appendChild(infoHeader);
+
+        // Перебираем найденные пары и проверяем
+        for (const pair of pairs) {
+            // Извлекаем файлы как Blob
+            const originalBlob = await pair.originalEntry.async('blob');
+            const sigBlob = await pair.sigEntry.async('blob');
+            
+            // Извлекаем только имя файла без пути для корректного отображения
+            const displayName = pair.originalPath.split('/').pop();
+            originalBlob.name = displayName;
+            
+            // Вызываем существующую функцию проверки
+            await verifyPair(originalBlob, sigBlob, container);
+        }
+
+    } catch (e) {
+        console.error(e);
+        container.innerHTML = `<div class="empty-state" style="color:var(--danger)"><i class="fas fa-exclamation-triangle"></i><p>Ошибка чтения архива: ${e.message}</p></div>`;
     }
+}
 
-    async function verifyPair(fileOrig, fileSig, container) {
+async function verifyPair(fileOrig, fileSig, container) {
+    try {
+        const dataBase64 = await fileToBase64(fileOrig);
+        const sigText = await fileToText(fileSig);
+
+        const oSignedData = await cadesplugin.CreateObjectAsync("CAdESCOM.CadesSignedData");
+        await oSignedData.propset_ContentEncoding(cadesplugin.CADESCOM_BASE64_TO_BINARY);
+        await oSignedData.propset_Content(dataBase64);
+        
         try {
-            const dataBase64 = await fileToBase64(fileOrig);
-            const sigText = await fileToText(fileSig);
+            await oSignedData.VerifyCades(sigText, cadesplugin.CADESCOM_CADES_BES, true);
+            
+            const signers = await oSignedData.Signers;
+            const count = await signers.Count;
+            let signerName = 'Неизвестно';
+            let signDate = '—';
 
-            const oSignedData = await cadesplugin.CreateObjectAsync("CAdESCOM.CadesSignedData");
-            await oSignedData.propset_ContentEncoding(cadesplugin.CADESCOM_BASE64_TO_BINARY);
-            await oSignedData.propset_Content(dataBase64);
+            if (count > 0) {
+                const signer = await signers.Item(1);
+                const cert = await signer.Certificate;
+                const subject = await cert.SubjectName;
+                
+                const cnMatch = subject.match(/CN=([^,]+)/);
+                if (cnMatch) signerName = cnMatch[1];
+                
+                const date = await signer.SigningTime;
+                signDate = new Date(date).toLocaleString('ru-RU');
+            }
+
+            appendResult(container, fileOrig.name, 'valid', 'Подпись действительна', signerName, signDate);
+
+        } catch (verErr) {
+            console.error(verErr);
+            
+            // Попытка извлечь информацию о подписанте даже при недействительной подписи
+            let signerName = 'Неизвестно';
+            let signDate = '—';
             
             try {
-                await oSignedData.VerifyCades(sigText, cadesplugin.CADESCOM_CADES_BES, true);
-                
                 const signers = await oSignedData.Signers;
                 const count = await signers.Count;
-                let signerName = 'Неизвестно';
-                let signDate = '—';
-
+                
                 if (count > 0) {
                     const signer = await signers.Item(1);
                     const cert = await signer.Certificate;
@@ -1417,22 +1477,25 @@ async function handleVerifyFilesSelect(files) {
                     const cnMatch = subject.match(/CN=([^,]+)/);
                     if (cnMatch) signerName = cnMatch[1];
                     
-                    const date = await signer.SigningTime;
-                    signDate = new Date(date).toLocaleString('ru-RU');
+                    try {
+                        const date = await signer.SigningTime;
+                        signDate = new Date(date).toLocaleString('ru-RU');
+                    } catch (e) {
+                        // Если дата не доступна, оставляем "—"
+                    }
                 }
-
-                appendResult(container, fileOrig.name, 'valid', 'Подпись действительна', signerName, signDate);
-
-            } catch (verErr) {
-                console.error(verErr);
-                appendResult(container, fileOrig.name, 'invalid', 'Подпись недействительна', '', '');
+            } catch (signerError) {
+                console.warn('Не удалось извлечь информацию о подписанте:', signerError);
             }
-
-        } catch (err) {
-            console.error(err);
-            appendResult(container, fileOrig.name, 'warning', 'Ошибка: ' + err.message, '', '');
+            
+            appendResult(container, fileOrig.name, 'invalid', 'Подпись недействительна', signerName, signDate);
         }
+
+    } catch (err) {
+        console.error(err);
+        appendResult(container, fileOrig.name, 'warning', 'Ошибка: ' + err.message, '', '');
     }
+}
 
     function appendResult(container, fileName, status, message, signer, date) {
         const card = document.createElement('div');
