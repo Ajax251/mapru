@@ -539,8 +539,6 @@ let isExternalContourSolid = false;
 
 let savedOmzPoints = [];
 
-let selectedParcelId = null;
-
 
 let coordsInput, swapSourceBtn, copySourceBtn, vSwapSourceBtn, pasteBtn, importButton,
     drawInitialBtn, drawLandPlotsBtn, canvasWrapper, canvas, annotationCanvas,
@@ -940,8 +938,111 @@ function calculateAndSetActiveOmz(point) {
 
 // Изменяем существующую функцию redrawAnnotations, добавляя в конец вызов отрисовки ОМЗ
 const originalRedrawAnnotations = redrawAnnotations;
+function redrawAnnotations(tempObject = null) {
+    annotationCtx.clearRect(0, 0, annotationCanvas.width, annotationCanvas.height);
+    
+    // Если ничего нет, скрываем канвас
+    if (savedContours.length === 0 && externalParcels.length === 0) {
+        annotationCanvas.style.display = 'none';
+        return;
+    }
+    
+    annotationCanvas.style.display = 'block';
+    annotationCtx.save();
+    annotationCtx.translate(canvas.width / 2, canvas.height / 2);
+    annotationCtx.scale(zoomLevel, zoomLevel);
+    annotationCtx.translate(-canvas.width / 2 + panX, -canvas.height / 2 + panY);
+    
+    const { toDrawingSpace } = getCoordinateTransformers();
+    const currentColor = document.getElementById('annotationColorPicker').value;
 
+    // 1. Отрисовка внешних участков
+    externalParcels.forEach(parcel => {
+        annotationCtx.save();
+        annotationCtx.strokeStyle = externalContourColor;
+        annotationCtx.lineWidth = externalContourThickness / zoomLevel;
+        if (!isExternalContourSolid) {
+            annotationCtx.setLineDash([10 / zoomLevel, 10 / zoomLevel]);
+        }
+        parcel.contours.forEach(contour => {
+            if (contour.length === 0) return;
+            annotationCtx.beginPath();
+            contour.forEach((point, index) => {
+                const canvasPoint = toDrawingSpace(point);
+                if (index === 0) annotationCtx.moveTo(canvasPoint.x, canvasPoint.y);
+                else annotationCtx.lineTo(canvasPoint.x, canvasPoint.y);
+            });
+            if (contour.length > 2) {
+                const firstPoint = contour[0];
+                const lastPoint = contour[contour.length - 1];
+                if (Math.abs(firstPoint.x - lastPoint.x) < 0.01 && Math.abs(firstPoint.y - lastPoint.y) < 0.01) {
+                    annotationCtx.closePath();
+                }
+            }
+            annotationCtx.stroke();
+        });
+        annotationCtx.restore();
+    });
 
+    // 2. Отрисовка стандартных аннотаций
+    arrows.forEach(a => drawArrow(annotationCtx, toDrawingSpace(a.start), toDrawingSpace(a.end), a.color, a.thickness));
+    lines.forEach(l => drawLine(annotationCtx, toDrawingSpace(l.start), toDrawingSpace(l.end), l.color, l.thickness));
+    texts.forEach(t => drawText(annotationCtx, { ...t, ...toDrawingSpace(t) }));
+    
+    // 3. Отрисовка ГЕОДЕЗИЧЕСКИХ ПОСТРОЕНИЙ (Сюда теперь попадают и ОМЗ)
+    geodeticConstructions.forEach(gc => {
+        const isSelected = (selectedGeodeticId === gc.id);
+        drawGeodeticConstruction(annotationCtx, gc, isSelected);
+    });
+
+    // 4. Отрисовка процесса создания новой схемы (ручной режим)
+    if (geodeticConstructionState !== 'inactive' && geodeticConstructionPoints.length > 0) {
+        const tempP1 = toDrawingSpace(geodeticConstructionPoints[0]);
+        annotationCtx.save();
+        annotationCtx.strokeStyle = currentColor;
+        annotationCtx.lineWidth = 1.5 / zoomLevel;
+        annotationCtx.setLineDash([8 / zoomLevel, 8 / zoomLevel]);
+        if (geodeticConstructionPoints.length === 2) {
+            const tempCenter = toDrawingSpace(geodeticConstructionPoints[1]);
+            drawCrosshairSymbol(annotationCtx, tempCenter, currentColor);
+            annotationCtx.beginPath();
+            annotationCtx.moveTo(tempP1.x, tempP1.y);
+            annotationCtx.lineTo(tempCenter.x, tempCenter.y);
+            annotationCtx.stroke();
+        }
+        annotationCtx.restore();
+    }
+
+    // 5. Отрисовка выделения текста
+    if (selectedTextId) {
+        const text = texts.find(t => t.id === selectedTextId);
+        if (text) drawTextSelectionHandles(annotationCtx, { ...text, ...toDrawingSpace(text) });
+    }
+
+    // 6. Отрисовка временного объекта (при рисовании стрелки/линии)
+    if (tempObject) {
+        const color = document.getElementById('annotationColorPicker').value;
+        const thickness = parseInt(document.getElementById('arrowThicknessInput').value);
+        if (tempObject.type === 'arrow') drawArrow(annotationCtx, toDrawingSpace(tempObject.start), toDrawingSpace(tempObject.end), color, thickness);
+        else if (tempObject.type === 'line') drawLine(annotationCtx, toDrawingSpace(tempObject.start), toDrawingSpace(tempObject.end), color, thickness);
+    }
+    
+    annotationCtx.restore();
+
+    // 7. Рамка выделения (Crop Mode)
+    if (isCropModeActive && cropSelection) {
+        const { x, y, width, height } = cropSelection;
+        annotationCtx.save();
+        annotationCtx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
+        annotationCtx.lineWidth = 3;
+        annotationCtx.setLineDash([8, 6]);
+        annotationCtx.strokeRect(x, y, width, height);
+        annotationCtx.strokeStyle = 'rgba(0, 0, 0, 0.9)';
+        annotationCtx.lineWidth = 1;
+        annotationCtx.strokeRect(x, y, width, height);
+        annotationCtx.restore();
+    }
+}
 
 function drawActiveOmzScheme(ctx) {
     const { toDrawingSpace, toDataSpace } = getCoordinateTransformers();
@@ -1274,14 +1375,7 @@ async function processAddLandPlot() {
     try {
         const contours = await fetchEgrnCoordinates(cadNumber);
         if (contours && contours.length > 0) {
-            // ИЗМЕНЕНИЕ: Сохраняем объект с текущими стилями
-            externalParcels.push({ 
-                id: cadNumber, 
-                contours: contours,
-                color: externalContourColor, 
-                thickness: externalContourThickness,
-                isSolid: isExternalContourSolid
-            });
+            externalParcels.push({ id: cadNumber, contours: contours });
             saveStateToHistory();
             redrawAll();
             showNotification(`Участок ${cadNumber} успешно добавлен.`);
@@ -1428,62 +1522,23 @@ function setupEventListeners() {
         localStorage.setItem('mainContourThickness', mainContourThickness);
         redrawAll();
     });
-   document.getElementById('externalContourColorPicker').addEventListener('input', (e) => {
-        const newVal = e.target.value;
-        if (selectedParcelId) {
-            // Если выбран участок - меняем ТОЛЬКО его
-            const parcel = externalParcels.find(p => p.id === selectedParcelId);
-            if (parcel) {
-                parcel.color = newVal;
-                saveStateToHistory();
-                redrawAll();
-            }
-        } else {
-            // Иначе меняем глобальную настройку
-            externalContourColor = newVal;
-            localStorage.setItem('externalContourColor', externalContourColor);
-            redrawAll();
-        }
+    document.getElementById('externalContourColorPicker').addEventListener('input', (e) => {
+        externalContourColor = e.target.value;
+        localStorage.setItem('externalContourColor', externalContourColor);
+        redrawAll();
     });
-    
-    // Толщина доп. контуров
     document.getElementById('externalContourThicknessInput').addEventListener('input', (e) => {
-        const newVal = parseFloat(e.target.value);
-        if (selectedParcelId) {
-            const parcel = externalParcels.find(p => p.id === selectedParcelId);
-            if (parcel) {
-                parcel.thickness = newVal;
-                saveStateToHistory();
-                redrawAll();
-            }
-        } else {
-            externalContourThickness = newVal;
-            localStorage.setItem('externalContourThickness', externalContourThickness);
-            redrawAll();
-        }
+        externalContourThickness = parseFloat(e.target.value);
+        localStorage.setItem('externalContourThickness', externalContourThickness);
+        redrawAll();
     });
     
-    // Стиль линии (Штрих/Сплошная)
     document.getElementById('toggleExternalLineStyleBtn').addEventListener('click', (e) => {
-        if (selectedParcelId) {
-            // Меняем ТОЛЬКО для выбранного
-            const parcel = externalParcels.find(p => p.id === selectedParcelId);
-            if (parcel) {
-                parcel.isSolid = !parcel.isSolid; // Инверсия
-                // Обновляем вид кнопки
-                e.currentTarget.classList.toggle('active', parcel.isSolid);
-                saveStateToHistory();
-                redrawAll();
-            }
-        } else {
-            // Глобально
-            isExternalContourSolid = !isExternalContourSolid; 
-            e.currentTarget.classList.toggle('active', isExternalContourSolid); 
-            localStorage.setItem('isExternalContourSolid', isExternalContourSolid); 
-            redrawAll(); 
-        }
+        isExternalContourSolid = !isExternalContourSolid; // Переключаем состояние
+        e.currentTarget.classList.toggle('active', isExternalContourSolid); // Переключаем класс .active
+        localStorage.setItem('isExternalContourSolid', isExternalContourSolid); // Сохраняем состояние
+        redrawAll(); // Перерисовываем холст
     });
-
     
     document.getElementById('textStrokeCheckbox').addEventListener('change', (e) => {
         document.getElementById('strokeOptionsContainer').style.display = e.target.checked ? 'flex' : 'none';
@@ -1621,50 +1676,67 @@ function handleLayoutSchemeClick() {
 
 
 function handleCadastralPaste(e) {
+    // Получаем текст из буфера обмена
     const clipboardText = (e.clipboardData || window.clipboardData).getData('text');
     if (!clipboardText) return;
 
+    // Разбиваем на строки и убираем пустые
     const lines = clipboardText.trim().split('\n').filter(line => line.trim() !== '');
+
+    // Проверяем условие: минимум 4 строки
     if (lines.length < 4) return;
 
     const parsedPoints = [];
     let isValidCoords = true;
 
+    // Пробуем распарсить каждую строку как координатную пару
     for (let line of lines) {
+        // Заменяем запятые на точки, убираем лишние пробелы
+        // Разделители: табуляция, пробел, точка с запятой
         const parts = line.replace(/,/g, '.').trim().split(/[\t\s;]+/);
+
+        // Должно быть минимум 2 числа
         if (parts.length < 2) {
             isValidCoords = false;
             break;
         }
+
         const x = parseFloat(parts[0]);
         const y = parseFloat(parts[1]);
+
         if (isNaN(x) || isNaN(y)) {
             isValidCoords = false;
             break;
         }
+
         parsedPoints.push({ x, y });
     }
 
+    // Если валидация прошла успешно
     if (isValidCoords && parsedPoints.length >= 4) {
-        e.preventDefault(); 
+        e.preventDefault(); // Отменяем вставку текста в инпут
+
         const uniqueId = `Вставка ${externalParcels.length + 1}`;
         
-        // ИЗМЕНЕНИЕ: Сохраняем объект с текущими стилями
+        // Добавляем как внешний участок
         externalParcels.push({
             id: uniqueId,
-            contours: [parsedPoints],
-            color: externalContourColor, 
-            thickness: externalContourThickness,
-            isSolid: isExternalContourSolid
+            contours: [parsedPoints] // Оборачиваем точки в массив контуров
         });
 
+        // Сохраняем историю, перерисовываем и закрываем окно
         saveStateToHistory();
         redrawAll();
+        
+        // Авто-зум к новому объекту (опционально, для удобства)
         fitViewToContent(); 
+        
         document.getElementById('cadastralModal').style.display = 'none';
-        document.getElementById('cadastralInputModal').value = ''; 
+        document.getElementById('cadastralInputModal').value = ''; // Очищаем поле
+        
         showNotification(`Добавлен контур из буфера обмена (${parsedPoints.length} точек)`);
     }
+    // Если условия не выполнены — сработает стандартная вставка текста (для КН)
 }
 
 // --- УПРАВЛЕНИЕ РЕЖИМАМИ РАБОТЫ ---
@@ -2087,56 +2159,27 @@ function drawContour(contours) {
     ctx.restore();
 }
 
-
 function redrawAnnotations(tempObject = null) {
     annotationCtx.clearRect(0, 0, annotationCanvas.width, annotationCanvas.height);
-    
     if (savedContours.length === 0 && externalParcels.length === 0) {
         annotationCanvas.style.display = 'none';
         return;
     }
-    
     annotationCanvas.style.display = 'block';
     annotationCtx.save();
     annotationCtx.translate(canvas.width / 2, canvas.height / 2);
     annotationCtx.scale(zoomLevel, zoomLevel);
     annotationCtx.translate(-canvas.width / 2 + panX, -canvas.height / 2 + panY);
-    
     const { toDrawingSpace } = getCoordinateTransformers();
     const currentColor = document.getElementById('annotationColorPicker').value;
 
-    // --- ИСПРАВЛЕННАЯ ОТРИСОВКА ВНЕШНИХ УЧАСТКОВ ---
     externalParcels.forEach(parcel => {
         annotationCtx.save();
-        
-        // 1. Определяем свойства: берем из объекта участка, если нет - берем глобальные настройки
-        const pColor = parcel.color || externalContourColor;
-        const pThick = parcel.thickness || externalContourThickness;
-        const pSolid = (parcel.isSolid !== undefined) ? parcel.isSolid : isExternalContourSolid;
-
-        // 2. Настраиваем стиль линии
-        annotationCtx.strokeStyle = pColor; // Применяем конкретный цвет участка
-
-        // 3. Эффекты выделения
-        if (parcel.id === selectedParcelId) {
-            annotationCtx.shadowColor = "rgba(33, 150, 243, 0.7)"; // Голубое свечение
-            annotationCtx.shadowBlur = 15;
-            // При выделении делаем линию чуть толще визуально
-            annotationCtx.lineWidth = (pThick / zoomLevel) + (1 / zoomLevel);
-        } else {
-            annotationCtx.shadowColor = "transparent";
-            annotationCtx.shadowBlur = 0;
-            annotationCtx.lineWidth = pThick / zoomLevel;
-        }
-        
-        // 4. Тип линии (штрих или сплошная)
-        if (!pSolid) {
+        annotationCtx.strokeStyle = externalContourColor;
+        annotationCtx.lineWidth = externalContourThickness / zoomLevel;
+        if (!isExternalContourSolid) {
             annotationCtx.setLineDash([10 / zoomLevel, 10 / zoomLevel]);
-        } else {
-            annotationCtx.setLineDash([]);
         }
-
-        // 5. Рисуем контур
         parcel.contours.forEach(contour => {
             if (contour.length === 0) return;
             annotationCtx.beginPath();
@@ -2145,45 +2188,31 @@ function redrawAnnotations(tempObject = null) {
                 if (index === 0) annotationCtx.moveTo(canvasPoint.x, canvasPoint.y);
                 else annotationCtx.lineTo(canvasPoint.x, canvasPoint.y);
             });
-            // Визуально замыкаем, если точки совпадают
             if (contour.length > 2) {
                 const firstPoint = contour[0];
                 const lastPoint = contour[contour.length - 1];
-                // Простая проверка на замкнутость
                 if (Math.abs(firstPoint.x - lastPoint.x) < 0.01 && Math.abs(firstPoint.y - lastPoint.y) < 0.01) {
                     annotationCtx.closePath();
-                } else {
-                     annotationCtx.closePath(); // Принудительно замыкаем для заливки/красоты
                 }
             }
             annotationCtx.stroke();
         });
         annotationCtx.restore();
     });
-
-    // Отрисовка остальных элементов (Стрелки, Линии, Текст)
     arrows.forEach(a => drawArrow(annotationCtx, toDrawingSpace(a.start), toDrawingSpace(a.end), a.color, a.thickness));
     lines.forEach(l => drawLine(annotationCtx, toDrawingSpace(l.start), toDrawingSpace(l.end), l.color, l.thickness));
     texts.forEach(t => drawText(annotationCtx, { ...t, ...toDrawingSpace(t) }));
-    
-    // Отрисовка геодезических построений
     geodeticConstructions.forEach(gc => {
+        // Проверяем, совпадает ли ID с выделенным
         const isSelected = (selectedGeodeticId === gc.id);
         drawGeodeticConstruction(annotationCtx, gc, isSelected);
     });
-
-    // Отрисовка процесса создания геодезии
     if (geodeticConstructionState !== 'inactive' && geodeticConstructionPoints.length > 0) {
         const tempP1 = toDrawingSpace(geodeticConstructionPoints[0]);
         annotationCtx.save();
         annotationCtx.strokeStyle = currentColor;
         annotationCtx.lineWidth = 1.5 / zoomLevel;
         annotationCtx.setLineDash([8 / zoomLevel, 8 / zoomLevel]);
-        
-        if (geodeticConstructionPoints.length >= 1) {
-             // Рисуем точку под курсором или линию
-        }
-
         if (geodeticConstructionPoints.length === 2) {
             const tempCenter = toDrawingSpace(geodeticConstructionPoints[1]);
             drawCrosshairSymbol(annotationCtx, tempCenter, currentColor);
@@ -2194,31 +2223,28 @@ function redrawAnnotations(tempObject = null) {
         }
         annotationCtx.restore();
     }
-
-    // Выделение текста
     if (selectedTextId) {
         const text = texts.find(t => t.id === selectedTextId);
         if (text) drawTextSelectionHandles(annotationCtx, { ...text, ...toDrawingSpace(text) });
     }
-
-    // Временные объекты (рисование стрелки/линии в процессе)
     if (tempObject) {
         const color = document.getElementById('annotationColorPicker').value;
         const thickness = parseInt(document.getElementById('arrowThicknessInput').value);
         if (tempObject.type === 'arrow') drawArrow(annotationCtx, toDrawingSpace(tempObject.start), toDrawingSpace(tempObject.end), color, thickness);
         else if (tempObject.type === 'line') drawLine(annotationCtx, toDrawingSpace(tempObject.start), toDrawingSpace(tempObject.end), color, thickness);
     }
-    
     annotationCtx.restore();
 
-    // Рамка выделения (Crop Mode)
+    // Рисуем рамку выделения поверх всего, в координатах экрана
     if (isCropModeActive && cropSelection) {
         const { x, y, width, height } = cropSelection;
         annotationCtx.save();
+        // Белая обводка для контраста
         annotationCtx.strokeStyle = 'rgba(255, 255, 255, 0.9)';
         annotationCtx.lineWidth = 3;
         annotationCtx.setLineDash([8, 6]);
         annotationCtx.strokeRect(x, y, width, height);
+        // Черная основная линия
         annotationCtx.strokeStyle = 'rgba(0, 0, 0, 0.9)';
         annotationCtx.lineWidth = 1;
         annotationCtx.strokeRect(x, y, width, height);
@@ -2309,144 +2335,53 @@ function drawText(ctx, t) {
 
 function drawTextSelectionHandles(ctx, t) { ctx.font = `${t.size / zoomLevel}px ${t.family}`; const metrics = ctx.measureText(t.text); const w = metrics.width + 20/zoomLevel, h = t.size/zoomLevel + 10/zoomLevel, handleRadius = 8/zoomLevel, handleOffset = 20/zoomLevel; const accent = '#2196F3'; ctx.save(); ctx.translate(t.x, t.y); ctx.rotate(t.rotation * Math.PI / 180); ctx.strokeStyle = accent; ctx.lineWidth = 1/zoomLevel; ctx.setLineDash([6/zoomLevel, 3/zoomLevel]); ctx.strokeRect(-w/2, -h/2, w, h); ctx.beginPath(); ctx.arc(0, -h/2 - handleOffset, handleRadius, 0, 2 * Math.PI); ctx.fillStyle = accent; ctx.fill(); ctx.strokeStyle = '#fff'; ctx.lineWidth = 3/zoomLevel; ctx.stroke(); ctx.restore(); }
 
-// --- НОВЫЕ ФУНКЦИИ ДЛЯ РАБОТЫ С ПОЛИГОНАМИ ---
-
-function isPointInPolygon(point, vs) {
-    // Алгоритм Ray-casting (луч) для определения попадания точки в многоугольник
-    const x = point.x, y = point.y;
-    let inside = false;
-    for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
-        const xi = vs[i].x, yi = vs[i].y;
-        const xj = vs[j].x, yj = vs[j].y;
-        const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
-        if (intersect) inside = !inside;
-    }
-    return inside;
-}
-
-function checkParcelInteraction(dataPos) {
-    // Проверяем участки в обратном порядке (верхние слои первыми)
-    for (let i = externalParcels.length - 1; i >= 0; i--) {
-        const parcel = externalParcels[i];
-        for (const contour of parcel.contours) {
-            // contour - это массив объектов {x, y}
-            if (isPointInPolygon(dataPos, contour)) {
-                return parcel;
-            }
-        }
-    }
-    return null;
-}
-
-function updateControlsForSelectedParcel() {
-    const parcel = externalParcels.find(p => p.id === selectedParcelId);
-    if (!parcel) return;
-
-    // Обновляем значения в панели управления значениями выделенного объекта
-    document.getElementById('externalContourColorPicker').value = parcel.color || externalContourColor;
-    document.getElementById('externalContourThicknessInput').value = parcel.thickness || externalContourThickness;
-    
-    const isSolid = (parcel.isSolid !== undefined) ? parcel.isSolid : isExternalContourSolid;
-    const btn = document.getElementById('toggleExternalLineStyleBtn');
-    
-    // Визуально переключаем кнопку
-    if (isSolid) {
-        btn.classList.add('active');
-    } else {
-        btn.classList.remove('active');
-    }
-}
-
-
 // --- ЛОГИКА МЫШИ ДЛЯ АННОТАЦИЙ ---
 function setupCanvasMouseEvents(wrapper) {
     wrapper.addEventListener('mousedown', e => {
-        if (!isAnnotationModeActive || e.button !== 0) return;
-        
-        // Получаем координаты
-        const pos = screenToDataSpace(e); 
-        const drawingPos = screenToDrawingSpace(e);
-        
-        if (!pos || !drawingPos) return;
+        if (!isAnnotationModeActive || e.button !== 0 || (savedContours.length === 0 && externalParcels.length === 0)) return;
+        const pos = screenToDataSpace(e);
+        if (!pos) return;
         
         if (activeMode === 'geodetic') {
             handleGeodeticClick(pos);
             return;
         }
 
-        // --- ЛОГИКА ВЫДЕЛЕНИЯ ОБЪЕКТОВ ---
-        
-        // 1. Проверяем текст (приоритет 1 - маленькие ручки управления)
+        const drawingPos = screenToDrawingSpace(e);
+
+        // 1. Сначала проверяем текст
         const textHit = checkTextInteraction(drawingPos);
-        
-        // 2. Проверяем геодезические схемы (приоритет 2)
-        const geoHit = checkGeodeticInteraction(drawingPos);
-        
-        // 3. Проверяем полигоны/контуры (приоритет 3 - самый нижний слой)
-        const parcelHit = checkParcelInteraction(pos);
-
-        let selectionMade = false;
-
         if (textHit.isOver) {
             e.preventDefault();
-            // Сбрасываем другие выделения
-            selectedGeodeticId = null;
-            selectedParcelId = null;
-            
-            if (selectedTextId !== textHit.id) { 
-                selectedTextId = textHit.id; 
-                updateControlsForSelectedText(); 
-            }
+            selectedGeodeticId = null; // Сбрасываем выделение схемы
+            if (selectedTextId !== textHit.id) { selectedTextId = textHit.id; updateControlsForSelectedText(); }
             isRotatingText = textHit.onRotateHandle;
             isDraggingText = !isRotatingText;
             textDragOffset = { x: pos.x - textHit.obj.x, y: pos.y - textHit.obj.y };
-            selectionMade = true;
-        } 
-        else if (geoHit.isOver) {
-            e.preventDefault();
-            selectedTextId = null;
-            selectedParcelId = null;
-            
-            selectedGeodeticId = geoHit.id;
-            // Обновляем пипетку цветом выбранной схемы
-            document.getElementById('annotationColorPicker').value = geoHit.obj.color || '#000000';
-            selectionMade = true;
-        }
-        else if (parcelHit) {
-            // Клик по контуру участка
-            // НЕ делаем preventDefault, чтобы можно было начинать рисовать стрелки поверх участка
-            // Но если мы просто кликаем для выбора - обновляем состояние
-            
-            // Если мы НЕ в режиме рисования инструментов
-            if (!activeMode) {
-                selectedTextId = null;
-                selectedGeodeticId = null;
-                
-                if (selectedParcelId !== parcelHit.id) {
-                    selectedParcelId = parcelHit.id;
-                    updateControlsForSelectedParcel();
-                    showNotification(`Выбран контур: ${parcelHit.id}`);
-                }
-                selectionMade = true;
-            }
-        }
-
-        // Если кликнули в пустоту и не собираемся рисовать - сбрасываем все выделения
-        if (!selectionMade && !activeMode) {
-            if (selectedTextId || selectedGeodeticId || selectedParcelId) { 
-                selectedTextId = null; 
-                selectedGeodeticId = null;
-                selectedParcelId = null;
-                // Сбрасываем кнопку стиля линии в дефолтное состояние
-                const btn = document.getElementById('toggleExternalLineStyleBtn');
-                btn.classList.toggle('active', isExternalContourSolid);
-            }
+            redrawAll();
+            return;
         }
         
-        redrawAll();
-        if (selectionMade && !activeMode) return; // Если выбрали объект и не рисуем - выходим
+        // 2. Если не текст, проверяем геодезические построения
+        const geoHit = checkGeodeticInteraction(drawingPos);
+        if (geoHit.isOver) {
+            e.preventDefault();
+            selectedTextId = null; // Сбрасываем выделение текста
+            selectedGeodeticId = geoHit.id;
+            
+            // Обновляем пипетку цветом выбранной схемы
+            document.getElementById('annotationColorPicker').value = geoHit.obj.color || '#000000';
+            redrawAll();
+            return;
+        }
 
-        // Логика рисования новых объектов (Стрелки, Линии, Текст)
+        // Клик в пустоту - сбрасываем всё
+        if (selectedTextId || selectedGeodeticId) { 
+            selectedTextId = null; 
+            selectedGeodeticId = null;
+            redrawAll(); 
+        }
+        
         if (activeMode) {
             e.preventDefault();
             switch(activeMode) {
@@ -2458,7 +2393,7 @@ function setupCanvasMouseEvents(wrapper) {
     });
 
     window.addEventListener('mousemove', e => {
-        if (isCropModeActive) return;
+        if (isCropModeActive) return; // Не обрабатываем в режиме выделения
         if (!isAnnotationModeActive || (savedContours.length === 0 && externalParcels.length === 0)) return;
         
         if(isDraggingText || isRotatingText) {
@@ -2474,14 +2409,7 @@ function setupCanvasMouseEvents(wrapper) {
         const drawingPos = screenToDrawingSpace(e);
         if (drawingPos) {
             const textHit = checkTextInteraction(drawingPos);
-            // Курсор меняется, если наведен на текст
-            if (textHit.isOver) {
-                canvasWrapper.style.cursor = textHit.onRotateHandle ? 'alias' : 'move';
-            } else if (activeMode) {
-                canvasWrapper.style.cursor = 'crosshair';
-            } else {
-                canvasWrapper.style.cursor = 'default';
-            }
+            canvasWrapper.style.cursor = textHit.isOver ? (textHit.onRotateHandle ? 'alias' : 'move') : (activeMode ? 'crosshair' : 'default');
         }
 
         if (isDrawingArrow) { const pos = screenToDataSpace(e); if(pos) redrawAnnotations({ type: 'arrow', start: currentArrowStart, end: pos }); }
@@ -2489,7 +2417,7 @@ function setupCanvasMouseEvents(wrapper) {
     });
     
     window.addEventListener('mouseup', e => {
-        if (isCropModeActive) return;
+        if (isCropModeActive) return; // Не обрабатываем в режиме выделения
         if (!isAnnotationModeActive) return;
         if(isDraggingText || isRotatingText) { isDraggingText = isRotatingText = false; saveStateToHistory(); return; }
 
@@ -2502,52 +2430,39 @@ function setupCanvasMouseEvents(wrapper) {
         redrawAnnotations();
     });
     
-    canvasWrapper.addEventListener('contextmenu', e => {
+ canvasWrapper.addEventListener('contextmenu', e => {
         if (!isAnnotationModeActive) return;
         e.preventDefault();
-        
-        const drawingPos = screenToDrawingSpace(e); 
-        const dataPos = screenToDataSpace(e);
-        if(!drawingPos || !dataPos) return;
+        const drawingPos = screenToDrawingSpace(e); if(!drawingPos) return;
         
         const textHit = checkTextInteraction(drawingPos);
         const geoHit = checkGeodeticInteraction(drawingPos);
-        const parcelHit = checkParcelInteraction(dataPos);
 
-        const menu = document.getElementById('textContextMenu');
-        
         if (textHit.isOver) {
             if (selectedTextId !== textHit.id) { selectedTextId = textHit.id; updateControlsForSelectedText(); redrawAll(); }
+            // Показываем меню
+            const menu = document.getElementById('textContextMenu');
             menu.style.display = 'block';
             menu.style.left = `${e.clientX + 5}px`;
             menu.style.top = `${e.clientY + 5}px`;
+            
+            // Настраиваем пункты для текста
             menu.innerHTML = `
                 <div class="context-menu-item" onclick="editText()"><i class="fas fa-pencil-alt"></i>Редактировать</div>
                 <div class="context-menu-item" onclick="deleteSelectedObject()"><i class="fas fa-trash-alt"></i>Удалить</div>
             `;
         } else if (geoHit.isOver) {
              if (selectedGeodeticId !== geoHit.id) { selectedGeodeticId = geoHit.id; redrawAll(); }
+             // Показываем меню для схемы
+            const menu = document.getElementById('textContextMenu');
             menu.style.display = 'block';
             menu.style.left = `${e.clientX + 5}px`;
             menu.style.top = `${e.clientY + 5}px`;
+            
+            // Только удаление для схемы (редактирование цвета через палитру)
             menu.innerHTML = `
                 <div class="context-menu-item" onclick="deleteSelectedObject()"><i class="fas fa-trash-alt"></i>Удалить</div>
             `;
-        } else if (parcelHit) {
-            // Контекстное меню для Контура
-            if (selectedParcelId !== parcelHit.id) {
-                selectedParcelId = parcelHit.id;
-                updateControlsForSelectedParcel();
-                redrawAll();
-            }
-            menu.style.display = 'block';
-            menu.style.left = `${e.clientX + 5}px`;
-            menu.style.top = `${e.clientY + 5}px`;
-            menu.innerHTML = `
-                <div class="context-menu-item" onclick="deleteSelectedObject()"><i class="fas fa-trash-alt"></i>Удалить контур</div>
-            `;
-        } else {
-            menu.style.display = 'none';
         }
     });
 }
@@ -2669,7 +2584,6 @@ function showTextModal(textObject, callback) {
 }
 
 function editText() { const text = texts.find(t => t.id === selectedTextId); if(text) { showTextModal(text, ns => { if (ns.text) { Object.assign(text, ns); saveStateToHistory(); } else deleteSelectedObject(); redrawAll(); }); } }
-
 function deleteSelectedObject() {
     let changed = false;
     
@@ -2680,21 +2594,11 @@ function deleteSelectedObject() {
         changed = true;
     }
     
-    // Удаление схемы геодезии
+    // Удаление схемы
     if (selectedGeodeticId) {
         geodeticConstructions = geodeticConstructions.filter(g => g.id !== selectedGeodeticId);
         selectedGeodeticId = null;
         changed = true;
-    }
-
-    // Удаление контура участка (НОВОЕ)
-    if (selectedParcelId) {
-        if(confirm(`Вы действительно хотите удалить контур?`)) {
-            externalParcels = externalParcels.filter(p => p.id !== selectedParcelId);
-            selectedParcelId = null;
-            changed = true;
-            showNotification('Контур удален');
-        }
     }
 
     if (changed) {
@@ -2705,8 +2609,6 @@ function deleteSelectedObject() {
     // Скрываем меню
     document.getElementById('textContextMenu').style.display = 'none';
 }
-
-
 function updateControlsForSelectedText() { const text = texts.find(t => t.id === selectedTextId); if (!text) return; document.getElementById('annotationColorPicker').value = text.color; document.getElementById('fontSizeInput').value = text.size; document.getElementById('fontFamilySelect').value = text.family; document.getElementById('textRotationInput').value = text.rotation; }
 
 // --- УТИЛИТЫ КООРДИНАТ И ВЗАИМОДЕЙСТВИЙ ---
