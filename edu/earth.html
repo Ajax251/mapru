@@ -2,7 +2,7 @@
 <html lang="ru">
 <head>
   <meta charset="UTF-8" />
-  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, user-scalable=no, maximum-scale=1.0" />
   <link rel="icon" href="worldwide.png" type="image/png" />
   <title>Земля</title>
   <style>
@@ -20,12 +20,12 @@
     }
     canvas { display: block; width: 100%; height: 100%; outline: none; }
     
-    /* Loading text - скрыт по умолчанию */
+    /* Loading text */
     #loading {
       position: absolute; top: 50%; left: 50%; transform: translate(-50%, -50%); color: #ccc;
       letter-spacing: 2px; font-size: 14px; pointer-events: none; text-transform: uppercase;
       user-select: none; white-space: nowrap; z-index: 10; text-shadow: 0 0 10px rgba(255,255,255,0.2);
-      display: none; /* Исправлено: скрыто при старте */
+      display: none;
     }
     
     /* UI Panel */
@@ -64,6 +64,36 @@
     #data {
       font-family: "Consolas", monospace; font-size: 11px; color: var(--cyan); margin-top: 6px; 
       padding-top: 10px; border-top: 1px solid rgba(255,255,255,0.1); line-height: 1.6; min-height: 72px;
+    }
+
+    /* Clear Cache Button */
+         #btn-clear-cache {
+      position: absolute;
+      bottom: 20px;
+      left: 20px;
+      width: 40px;
+      height: 40px;
+      background: rgba(15, 20, 30, 0.95);
+      border: 1px solid rgba(255, 80, 80, 0.4);
+      color: #ff5555;
+      border-radius: 50%;
+      cursor: pointer;
+      z-index: 100; /* Подняли выше всех */
+      display: flex; justify-content: center; align-items: center;
+      backdrop-filter: blur(4px);
+      box-shadow: 0 0 10px rgba(0,0,0,0.5);
+      pointer-events: auto; /* Гарантирует кликабельность */
+      transition: transform 0.2s, background 0.2s;
+    }
+    #btn-clear-cache:hover {
+      background: rgba(255, 50, 50, 0.2);
+      transform: scale(1.1) rotate(90deg);
+      box-shadow: 0 0 15px rgba(255, 50, 50, 0.4);
+    }
+    #btn-clear-cache svg { width: 20px; height: 20px; fill: none; stroke: currentColor; stroke-width: 2; stroke-linecap: round; stroke-linejoin: round; }
+    
+    @media (max-width: 720px) {
+      #btn-clear-cache { bottom: 15px; left: 15px; width: 36px; height: 36px; }
     }
     
     /* Moon Visuals */
@@ -126,6 +156,11 @@
       <span>Луна</span>
       <label class="switch"><input type="checkbox" id="chk-moon" /><span class="slider"></span></label>
     </div>
+    <!-- NEW: Galaxy Toggle -->
+    <div class="row">
+      <span>Галактика</span>
+      <label class="switch"><input type="checkbox" id="chk-galaxy" /><span class="slider"></span></label>
+    </div>
     <div class="row">
       <span>Облака</span>
       <label class="switch"><input type="checkbox" id="chk-clouds" /><span class="slider"></span></label>
@@ -135,9 +170,22 @@
       <label class="switch"><input type="checkbox" id="chk-iss" /><span class="slider"></span></label>
     </div>
     <div id="data">МКС выключена</div>
+    
+  
   </div>
 
+  <button id="btn-clear-cache" title="Очистить кэш текстур">
+    <svg viewBox="0 0 24 24">
+      <ellipse cx="12" cy="5" rx="9" ry="3"></ellipse>
+      <path d="M21 12c0 1.66-4 3-9 3s-9-1.34-9-3"></path>
+      <path d="M3 5v14c0 1.66 4 3 9 3 1.2 0 2.33-.08 3.39-.23"></path>
+      <line x1="21" y1="21" x2="17" y2="17" stroke-width="2.5"></line>
+      <line x1="17" y1="21" x2="21" y2="17" stroke-width="2.5"></line>
+    </svg>
+  </button>
+  
   <button id="btn-exit-iss">Отстыковаться</button>
+  
 
   <script type="importmap">
     {
@@ -152,16 +200,110 @@
     import { OrbitControls } from "three/addons/controls/OrbitControls.js";
     import { Lensflare, LensflareElement } from 'three/addons/objects/Lensflare.js';
 
-    // --- ELEMENTS ---
+    // --- INDEXED DB LOGIC (CACHING) ---
+    const DB_NAME = 'EarthISS_DB';
+    const STORE_NAME = 'textures';
+
+    const dbPromise = new Promise((resolve, reject) => {
+        const request = indexedDB.open(DB_NAME, 1);
+        request.onupgradeneeded = (e) => {
+            e.target.result.createObjectStore(STORE_NAME);
+        };
+        request.onsuccess = (e) => resolve(e.target.result);
+        request.onerror = (e) => reject(e);
+    });
+
+    // Fallback standard loader
+    const internalLoader = new THREE.TextureLoader();
+
+    function loadTextureWithCache(url) {
+        const tex = new THREE.Texture();
+        const image = new Image();
+        image.crossOrigin = "Anonymous";
+        tex.image = image; // Associate image with texture immediately
+        
+        image.onload = () => {
+            tex.needsUpdate = true;
+        };
+
+        dbPromise.then(db => {
+            const tx = db.transaction(STORE_NAME, 'readonly');
+            const store = tx.objectStore(STORE_NAME);
+            const request = store.get(url);
+
+            request.onsuccess = () => {
+                if (request.result) {
+                    // Found in cache -> use Blob
+                    image.src = URL.createObjectURL(request.result);
+                } else {
+                    // Not in cache -> fetch and store
+                    fetch(url)
+                        .then(res => res.blob())
+                        .then(blob => {
+                            const txWrite = db.transaction(STORE_NAME, 'readwrite');
+                            txWrite.objectStore(STORE_NAME).put(blob, url);
+                            image.src = URL.createObjectURL(blob);
+                        })
+                        .catch(() => {
+                            // Fetch failed, use fallback
+                            internalLoader.load(url, (t) => {
+                                tex.image = t.image;
+                                tex.needsUpdate = true;
+                            });
+                        });
+                }
+            };
+        }).catch(() => {
+            // DB failed, use fallback
+            internalLoader.load(url, (t) => {
+                tex.image = t.image;
+                tex.needsUpdate = true;
+            });
+        });
+
+        return tex;
+    }
+
+    // --- UI ELEMENTS ---
     const el = {
       loading: document.getElementById("loading"), data: document.getElementById("data"),
       moonInfo: document.getElementById("moonInfo"), moonData: document.getElementById("moonData"),
-      moonCanvas: document.getElementById("moonCanvas"), chkSun: document.getElementById("chk-sun"),
-      chkISS: document.getElementById("chk-iss"), chkMoon: document.getElementById("chk-moon"),
+      moonCanvas: document.getElementById("moonCanvas"), 
+      chkSun: document.getElementById("chk-sun"),
+      chkISS: document.getElementById("chk-iss"), 
+      chkMoon: document.getElementById("chk-moon"),
       chkClouds: document.getElementById("chk-clouds"),
+      chkGalaxy: document.getElementById("chk-galaxy"),
       btnExit: document.getElementById("btn-exit-iss"), issHint: document.getElementById("issHint"),
-      ui: document.getElementById("ui")
+      ui: document.getElementById("ui"),
+      btnClear: document.getElementById("btn-clear-cache")
     };
+
+    // Cache Button Logic
+     el.btnClear.addEventListener('click', () => {
+        // Визуальный отклик
+        el.btnClear.style.transform = "scale(0.9)";
+        setTimeout(() => el.btnClear.style.transform = "", 150);
+
+        const req = indexedDB.deleteDatabase(DB_NAME);
+        
+        req.onsuccess = () => {
+       //     alert('Кэш успешно очищен! Страница будет перезагружена.');
+            location.reload();
+        };
+        
+        req.onerror = (e) => {
+            console.error("Ошибка удаления DB:", e);
+            alert('Не удалось удалить кэш. Попробуйте очистить данные сайта в настройках браузера.');
+        };
+
+        // Самое важное: если база занята (открыта во вкладке)
+        req.onblocked = () => {
+            // Принудительно перезагружаем, чтобы сбросить соединения
+        //    alert('Кэш помечен на удаление. Страница перезагрузится.');
+            location.reload();
+        };
+    });
 
     // --- SCENE SETUP ---
     const scene = new THREE.Scene();
@@ -185,8 +327,8 @@
     sunLight.castShadow = true;
     scene.add(sunLight);
 
-    // --- LENSFLARE GENERATION ---
-   function createFlareTexture(type, colorVal) {
+    // --- LENSFLARE ---
+    function createFlareTexture(type, colorVal) {
       const size = 512;
       const canvas = document.createElement("canvas");
       canvas.width = size; canvas.height = size;
@@ -199,12 +341,10 @@
       if (type === "core" || type === "glow") {
         const grad = ctx.createRadialGradient(cx, cy, 0, cx, cy, size * 0.5);
         if(type==="core") {
-            // Ярко-белое ядро
             grad.addColorStop(0, "rgba(255,255,255,1)"); 
             grad.addColorStop(0.1, `rgba(${r},${g},${b},0.6)`);
             grad.addColorStop(0.4, "rgba(0,0,0,0)");
         } else {
-            // Мягкое свечение
             grad.addColorStop(0, `rgba(${r},${g},${b},0.2)`);
             grad.addColorStop(0.5, `rgba(${r},${g},${b},0.05)`);
             grad.addColorStop(1, "rgba(0,0,0,0)");
@@ -220,59 +360,75 @@
       return texture;
     }
 
-    // ИСПОЛЬЗУЕМ БОЛЕЕ НАТУРАЛЬНЫЕ ЦВЕТА (Белый/Светло-желтый)
-    const texSunCore = createFlareTexture("core", 0xffffff); // Чистый белый
-    const texSunGlow = createFlareTexture("glow", 0xffffee); // Очень светло-желтый
-    const texStreak = createFlareTexture("streak", 0xffffff); // Белые лучи
+    const texSunCore = createFlareTexture("core", 0xffffff);
+    const texSunGlow = createFlareTexture("glow", 0xffffee);
+    const texStreak = createFlareTexture("streak", 0xffffff);
 
     const lensflare = new Lensflare();
-    // Настраиваем элементы бликов на белый/холодный спектр
     lensflare.addElement(new LensflareElement(texSunGlow, 700, 0.0, new THREE.Color(0xffffff)));
     lensflare.addElement(new LensflareElement(texStreak, 1200, 0.0, new THREE.Color(0xffffff)));
     lensflare.addElement(new LensflareElement(texSunCore, 200, 0.0, new THREE.Color(0xffffff)));
-    
-    // Добавим пару мелких артефактов для реализма
     lensflare.addElement(new LensflareElement(texSunGlow, 60, 0.6, new THREE.Color(0xffeecc))); 
     lensflare.addElement(new LensflareElement(texSunGlow, 100, 0.7, new THREE.Color(0xccddff)));
 
     sunLight.add(lensflare);
     lensflare.visible = false;
 
-    // --- CONTROLS ---
+    // --- CONTROLS (Hybrid) ---
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true; controls.dampingFactor = 0.08;
-    controls.minDistance = 12; controls.maxDistance = 200;
-    controls.enablePan = false; controls.rotateSpeed = 0.5;
-    controls.enableZoom = false; // Zoom logic handled manually
+    controls.enableDamping = true; 
+    controls.dampingFactor = 0.08;
+    controls.minDistance = 12; 
+    controls.maxDistance = 200;
+    controls.enablePan = false; 
+    controls.rotateSpeed = 0.5;
+    controls.enableZoom = true; // Mobile Pinch enabled
 
+    // Custom desktop zoom logic
     renderer.domElement.addEventListener('wheel', (e) => {
       e.preventDefault();
+      e.stopImmediatePropagation(); 
+
       const currentDistance = controls.target.distanceTo(camera.position);
       const zoomScale = e.deltaY > 0 ? 1.05 : 0.95;
       let newDistance = currentDistance * zoomScale;
       newDistance = Math.max(controls.minDistance, Math.min(controls.maxDistance, newDistance));
+      
       const direction = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
       camera.position.copy(controls.target).add(direction.multiplyScalar(newDistance));
-    }, { passive: false });
+    }, { passive: false, capture: true });
 
-    // --- EARTH ---
+    // --- EARTH & MILKY WAY ---
     const earthGroup = new THREE.Group();
     scene.add(earthGroup);
-    const texLoader = new THREE.TextureLoader();
+    
+    // Milky Way (Cached)
+    const mwGeo = new THREE.SphereGeometry(2500, 64, 64);
+    const mwMat = new THREE.MeshBasicMaterial({
+        map: loadTextureWithCache('./textures/milkyway.jpg'),
+        side: THREE.BackSide,
+        transparent: true,
+        opacity: 0.5,
+        depthWrite: false
+    });
+    const milkyWay = new THREE.Mesh(mwGeo, mwMat);
+    milkyWay.visible = false; // Off by default
+    scene.add(milkyWay);
 
+    // Earth Materials (Cached)
     const earthMat = new THREE.MeshPhongMaterial({
-        map: texLoader.load('./textures/earth-blue-marble.jpg'),
-        bumpMap: texLoader.load('./textures/earth-topology.png'),
+        map: loadTextureWithCache('./textures/earth-blue-marble.jpg'),
+        bumpMap: loadTextureWithCache('./textures/earth-topology.png'),
         bumpScale: 0.1,
-        specularMap: texLoader.load('./textures/earth-water.png'),
+        specularMap: loadTextureWithCache('./textures/earth-water.png'),
         specular: new THREE.Color(0x333333), shininess: 15
     });
     earthMat.map.colorSpace = THREE.SRGBColorSpace;
     const earth = new THREE.Mesh(new THREE.SphereGeometry(10, 64, 64), earthMat);
     earthGroup.add(earth);
 
-    // Night Lights Shader
-    const nightTexture = texLoader.load('./textures/earth-night.jpg');
+    // Night Lights (Cached)
+    const nightTexture = loadTextureWithCache('./textures/earth-night.jpg');
     nightTexture.colorSpace = THREE.SRGBColorSpace;
     const nightUniforms = { tNight: { value: nightTexture }, sunDirection: { value: new THREE.Vector3(1, 0, 0) } };
     const nightMat = new THREE.ShaderMaterial({
@@ -296,14 +452,16 @@
     const earthNight = new THREE.Mesh(new THREE.SphereGeometry(10.01, 64, 64), nightMat);
     earthGroup.add(earthNight);
 
+    // Clouds (Cached)
     const cloudMat = new THREE.MeshPhongMaterial({
-        map: texLoader.load('./textures/earth-clouds.jpg'),
+        map: loadTextureWithCache('./textures/earth-clouds.jpg'),
         transparent: true, opacity: 0.8, blending: THREE.AdditiveBlending, side: THREE.DoubleSide, depthWrite: false
     });
     const clouds = new THREE.Mesh(new THREE.SphereGeometry(10.15, 64, 64), cloudMat);
     earthGroup.add(clouds);
     clouds.visible = false;
 
+    // Atmosphere
     const atmoMat = new THREE.ShaderMaterial({
         vertexShader: `varying vec3 vN; void main(){vN=normalize(normalMatrix*normal);gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
         fragmentShader: `varying vec3 vN; void main(){float i=pow(0.5-dot(vN,vec3(0,0,1)),3.0);gl_FragColor=vec4(0.3,0.6,1.0,1.0)*i*1.3;}`,
@@ -330,7 +488,7 @@
     }
     scene.add(createStars());
 
-    // --- MOON LOGIC (RESTORED) ---
+    // --- MOON LOGIC ---
     const moonGroup = new THREE.Group();
     moonGroup.visible = false;
     scene.add(moonGroup);
@@ -339,8 +497,8 @@
     const moonImg2D = new Image(); moonImg2D.src = moonUrl;
 
     const moon3DMat = new THREE.MeshPhongMaterial({
-      map: texLoader.load(moonUrl),
-      bumpMap: texLoader.load("./textures/moon-bump.jpg"),
+      map: loadTextureWithCache(moonUrl), // Cached
+      bumpMap: loadTextureWithCache("./textures/moon-bump.jpg"), // Cached
       bumpScale: 0.06, shininess: 2, color: 0xffffff
     });
     moon3DMat.map.colorSpace = THREE.SRGBColorSpace;
@@ -440,102 +598,50 @@
         `Освещенность: ${(illumination * 100).toFixed(1)}%<br>Расстояние: ${moonData.distKm.toFixed(0)} км<br>Трек: ${(elapsed * MOON_SPEED_KM_S).toFixed(0)} км`;
     }
 
-    // --- ISS CONSTRUCTION (Detailed Procedural Model) ---
+    // --- ISS CONSTRUCTION ---
     const issContainer = new THREE.Group();
     earthGroup.add(issContainer);
     issContainer.visible = false;
 
     function buildDetailedISS() {
         const iss = new THREE.Group();
-        
-        // Materials
         const bodyMat = new THREE.MeshPhongMaterial({ color: 0xeeeeee, shininess: 80, specular: 0x444444 });
         const darkMat = new THREE.MeshPhongMaterial({ color: 0x222222, shininess: 50 });
         const solarMat = new THREE.MeshPhongMaterial({ color: 0x3333aa, emissive: 0x050520, shininess: 100, specular: 0x8888ff, side: THREE.DoubleSide });
         
-        // 1. Central Modules (Zarya, Zvezda, Unity, Destiny)
-        // Main spine aligned roughly on X axis for this model
         const zvezda = new THREE.Mesh(new THREE.CylinderGeometry(0.06, 0.06, 0.4, 12), bodyMat);
-        zvezda.rotation.z = Math.PI / 2;
-        iss.add(zvezda);
-
+        zvezda.rotation.z = Math.PI / 2; iss.add(zvezda);
         const zarya = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.065, 0.45, 12), bodyMat);
-        zarya.rotation.z = Math.PI / 2;
-        zarya.position.x = 0.45;
-        iss.add(zarya);
-
+        zarya.rotation.z = Math.PI / 2; zarya.position.x = 0.45; iss.add(zarya);
         const unity = new THREE.Mesh(new THREE.CylinderGeometry(0.07, 0.07, 0.2, 12), bodyMat);
-        unity.rotation.z = Math.PI / 2;
-        unity.position.x = 0.8;
-        iss.add(unity);
-
+        unity.rotation.z = Math.PI / 2; unity.position.x = 0.8; iss.add(unity);
         const destiny = new THREE.Mesh(new THREE.CylinderGeometry(0.065, 0.065, 0.35, 12), bodyMat);
-        destiny.rotation.z = Math.PI / 2;
-        destiny.position.x = 1.1;
-        iss.add(destiny);
-
-        // 2. The Integrated Truss Structure (The long perpendicular beam) - Y Axis here
+        destiny.rotation.z = Math.PI / 2; destiny.position.x = 1.1; iss.add(destiny);
         const truss = new THREE.Mesh(new THREE.BoxGeometry(0.04, 3.5, 0.04), bodyMat);
-        truss.position.x = 0.9; 
-        iss.add(truss);
+        truss.position.x = 0.9; iss.add(truss);
 
-        // 3. Solar Arrays (The big wings)
-        function createSolarWing(yPos, isLeft) {
-            const wingGroup = new THREE.Group();
-            wingGroup.position.set(0.9, yPos, 0);
-            
-            // Rotator joint
+        function createSolarWing(yPos) {
+            const wingGroup = new THREE.Group(); wingGroup.position.set(0.9, yPos, 0);
             const joint = new THREE.Mesh(new THREE.CylinderGeometry(0.03, 0.03, 0.1, 8), darkMat);
             wingGroup.add(joint);
-
-            // Panels
             const panelGeo = new THREE.BoxGeometry(0.3, 1.0, 0.01); 
-            // 2 sets of panels per wing
-            const p1 = new THREE.Mesh(panelGeo, solarMat);
-            p1.position.set(0.2, 0, 0);
-            const p2 = new THREE.Mesh(panelGeo, solarMat);
-            p2.position.set(-0.2, 0, 0);
-            
-            wingGroup.add(p1);
-            wingGroup.add(p2);
-            
-            // Face the sun roughly
-            wingGroup.rotation.x = Math.PI / 4; 
-            
+            const p1 = new THREE.Mesh(panelGeo, solarMat); p1.position.set(0.2, 0, 0);
+            const p2 = new THREE.Mesh(panelGeo, solarMat); p2.position.set(-0.2, 0, 0);
+            wingGroup.add(p1); wingGroup.add(p2); wingGroup.rotation.x = Math.PI / 4; 
             return wingGroup;
         }
-
-        iss.add(createSolarWing(1.6));
-        iss.add(createSolarWing(1.2));
-        iss.add(createSolarWing(-1.2));
-        iss.add(createSolarWing(-1.6));
-
-        // 4. Radiators (White jagged things)
-        const radGeo = new THREE.BoxGeometry(0.2, 0.6, 0.01);
-        const rad1 = new THREE.Mesh(radGeo, bodyMat);
-        rad1.position.set(0.9, 0.5, -0.15);
-        rad1.rotation.x = -0.5;
-        iss.add(rad1);
-
-        const rad2 = new THREE.Mesh(radGeo, bodyMat);
-        rad2.position.set(0.9, -0.5, -0.15);
-        rad2.rotation.x = -0.5;
-        iss.add(rad2);
-
-        // 5. Soyuz/Progress ships docked
-        const soyuz = new THREE.Mesh(new THREE.SphereGeometry(0.05, 8, 8), darkMat);
-        soyuz.position.set(0, -0.08, 0); // docked to Zvezda bottom
-        iss.add(soyuz);
+        iss.add(createSolarWing(1.6)); iss.add(createSolarWing(1.2));
+        iss.add(createSolarWing(-1.2)); iss.add(createSolarWing(-1.6));
         
-        // Hitbox for clicking (invisible)
-        const hitBox = new THREE.Mesh(new THREE.SphereGeometry(2.0, 8, 8), new THREE.MeshBasicMaterial({ visible: false }));
-        iss.add(hitBox);
-
+        const radGeo = new THREE.BoxGeometry(0.2, 0.6, 0.01);
+        const rad1 = new THREE.Mesh(radGeo, bodyMat); rad1.position.set(0.9, 0.5, -0.15); rad1.rotation.x = -0.5; iss.add(rad1);
+        const rad2 = new THREE.Mesh(radGeo, bodyMat); rad2.position.set(0.9, -0.5, -0.15); rad2.rotation.x = -0.5; iss.add(rad2);
+        
         return iss;
     }
 
     const issModel = buildDetailedISS();
-      issModel.scale.set(0.30, 0.30, 0.30); 
+    issModel.scale.set(0.30, 0.30, 0.30); 
     issContainer.add(issModel);
 
     // ISS Trail
@@ -544,12 +650,13 @@
     const trailPos = new Float32Array(MAX_POINTS * 3);
     trailGeo.setAttribute("position", new THREE.BufferAttribute(trailPos, 3));
     trailGeo.setDrawRange(0, 0);
-    const trailMat = new THREE.LineBasicMaterial({ color: 0x00ffff, transparent: true, opacity: 0.5 });
+    // Increased opacity for visibility on mobile
+    const trailMat = new THREE.LineBasicMaterial({ color: 0x00ffff, opacity: 1.0 });
     const trailLine = new THREE.Line(trailGeo, trailMat);
     issContainer.add(trailLine);
 
-    // --- ISS LOGIC & INTERACTION ---
-    let trailIndex = 0, lastISSPose = null, totalDistanceKm = 0;
+    // --- ISS LOGIC ---
+    let trailIndex = 0, totalDistanceKm = 0;
     let issTargetPos = null, issHasFix = false;
     let issVelocityKmS = 7.66; 
     let issDisplayData = { lat: 0, lon: 0, alt: 0 }; 
@@ -558,7 +665,7 @@
     // Raycasting for cinematic mode
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
-    let cameraMode = 'global'; // 'global' | 'iss'
+    let cameraMode = 'global'; 
     
     const camState = {
         isTransitioning: false, startTime: 0, duration: 2000, 
@@ -568,11 +675,9 @@
 
     window.addEventListener('dblclick', (event) => {
         if (!el.chkISS.checked || cameraMode === 'iss') return;
-
         mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
         mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
         raycaster.setFromCamera(mouse, camera);
-
         const intersects = raycaster.intersectObjects(issModel.children, true);
         if (intersects.length > 0) enterISSMode();
     });
@@ -590,16 +695,11 @@
        camState.startPos.copy(camera.position);
         camState.startTarget.copy(controls.target);
         
-   const vUp = issModel.position.clone().normalize(); 
+        const vUp = issModel.position.clone().normalize(); 
         const vRight = new THREE.Vector3(0,1,0).cross(vUp).normalize();
         
-     
-        camState.endPos.copy(issModel.position)
-            .add(vUp.multiplyScalar(0.3))      
-            .add(vRight.multiplyScalar(0.5));  
-            
+        camState.endPos.copy(issModel.position).add(vUp.multiplyScalar(0.3)).add(vRight.multiplyScalar(0.5));  
         camState.endTarget.copy(issModel.position);
-
         startTransition();
     }
 
@@ -614,7 +714,6 @@
         camState.startTarget.copy(controls.target);
         camState.endPos.set(0, 0, 28);
         camState.endTarget.set(0, 0, 0);
-
         startTransition();
     }
 
@@ -626,7 +725,6 @@
 
     function easeInOutCubic(t) { return t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2; }
 
-    // Helpers
     function getVector(lat, lon, altKm, radiusUnits) {
       const phi = (90 - lat) * (Math.PI / 180), theta = (lon + 180) * (Math.PI / 180);
       const r = radiusUnits + (altKm / KM_PER_UNIT_EARTH);
@@ -636,7 +734,8 @@
     async function updateISS() {
       if (!el.chkISS.checked) return;
       try {
-        const res = await fetch("https://api.wheretheiss.at/v1/satellites/25544", { cache: "no-store" });
+        // Added timestamp to prevent mobile caching
+        const res = await fetch(`https://api.wheretheiss.at/v1/satellites/25544?time=${Date.now()}`, { cache: "no-store" });
         if (!res.ok) throw new Error();
         const data = await res.json();
         
@@ -647,7 +746,6 @@
         issTargetPos = pos.clone();
         if (!issHasFix) { issModel.position.copy(issTargetPos); issHasFix = true; }
 
-        // Trail Logic
         if (trailIndex < MAX_POINTS) {
           const arr = trailLine.geometry.attributes.position.array;
           arr[trailIndex * 3] = pos.x; arr[trailIndex * 3 + 1] = pos.y; arr[trailIndex * 3 + 2] = pos.z;
@@ -655,8 +753,6 @@
           trailLine.geometry.setDrawRange(0, trailIndex);
           trailLine.geometry.attributes.position.needsUpdate = true;
         }
-
-        // Hide loading only after success
         el.loading.style.display = "none";
       } catch (e) { }
     }
@@ -667,7 +763,7 @@
     el.chkISS.addEventListener("change", (e) => {
       issContainer.visible = e.target.checked;
       if (e.target.checked) {
-        el.loading.style.display = "block"; // SHOW ONLY WHEN CHECKED
+        el.loading.style.display = "block";
         el.data.innerHTML = "Поиск сигнала..."; 
         scheduleISS();
       } else { 
@@ -679,6 +775,8 @@
     
     el.chkSun.addEventListener("change", updateSunPosition);
     el.chkClouds.addEventListener("change", (e) => { clouds.visible = e.target.checked; });
+    el.chkGalaxy.addEventListener("change", (e) => { milkyWay.visible = e.target.checked; });
+    
     el.chkMoon.addEventListener("change", (e) => {
         moonGroup.visible = e.target.checked; 
         moonOrbitLine.visible = e.target.checked;
@@ -686,7 +784,6 @@
         if(e.target.checked) updateMoonPosition();
     });
     
-    // Hint hover logic
     renderer.domElement.addEventListener('mousemove', (e) => {
         if(!el.chkISS.checked || cameraMode === 'iss') { el.issHint.style.opacity = 0; return; }
         mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
@@ -724,19 +821,20 @@
     }
 
     // --- ANIMATION ---
-    let lastTime = performance.now();
+    let lastFrameT = performance.now();
 
     function animate(t) {
       requestAnimationFrame(animate);
-      const dt = Math.min(0.05, (t - lastTime) / 1000);
-      lastTime = t;
+      
+      const dt = Math.min(0.05, (t - lastFrameT) / 1000);
+      lastFrameT = t;
+      
+      // Animations
+      milkyWay.rotation.y += dt * 0.005; 
+      clouds.rotation.y += dt * 0.006;
 
-      clouds.rotation.y += dt * 0.005;
-
-      // Update Moon roughly every frame if visible to animate track
       if (el.chkMoon.checked) updateMoonPosition();
 
-      // ISS Movement
       if (issHasFix && issTargetPos) {
         const k = 1 - Math.pow(0.02, dt);
         issModel.position.lerp(issTargetPos, k);
@@ -749,7 +847,6 @@
         }
       }
 
-      // Camera Animation
       if (camState.isTransitioning) {
           const elapsed = t - camState.startTime;
           let alpha = elapsed / camState.duration;
