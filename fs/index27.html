@@ -217,38 +217,31 @@
             if(urlParams.get('msg')) console.error("SW Reported Error:", decodeURIComponent(urlParams.get('msg')));
         }
 
-       sb.auth.onAuthStateChange(async (evt, session) => {
-    console.log("Auth event:", evt);
-    
-    if (session) {
-        user = session.user;
-        console.log("User set:", user.id);
-        document.getElementById('auth-screen').style.display = 'none';
-        
-        // Небольшая задержка чтобы Supabase полностью инициализировался
-        await new Promise(r => setTimeout(r, 100));
-        
-        console.log("Calling checkSharedFiles...");
-        await checkSharedFiles();
-        
-        // Если лоадер ещё висит - скрываем
-        if (document.getElementById('share-loader').style.display === 'flex') {
-            document.getElementById('share-loader').style.display = 'none';
-        }
-        
-        nav(path || 'desktop');
+        sb.auth.onAuthStateChange(async (evt, session) => {
+            if (session) {
+                user = session.user;
+                document.getElementById('auth-screen').style.display = 'none';
+                
+                console.log("Auth OK. Checking shared files...");
+                await checkSharedFiles();
+                
+                // Если лоадер все еще висит, но мы закончили проверку - скрываем
+                if (document.getElementById('share-loader').style.display === 'flex' && !window.location.search.includes('shared')) {
+                    document.getElementById('share-loader').style.display = 'none';
+                    nav('desktop');
+                } else if (document.getElementById('share-loader').style.display === 'none') {
+                    nav('desktop');
+                }
 
-        if (evt === "PASSWORD_RECOVERY") {
-           const p = await promptModal("Смена пароля", "Введите новый пароль", true);
-           if (p) sb.auth.updateUser({password: p}).then(() => toast("Пароль изменен"));
-        }
-    } else {
-        console.log("No session");
-        user = null;
-        document.getElementById('auth-screen').style.display = 'flex';
-        document.getElementById('share-loader').style.display = 'none';
-    }
-});
+                if(evt === "PASSWORD_RECOVERY") {
+                   const p = await promptModal("Смена пароля", "Введите новый пароль", true);
+                   if(p) sb.auth.updateUser({password: p}).then(() => toast("Пароль изменен"));
+                }
+            } else {
+                document.getElementById('auth-screen').style.display = 'flex';
+                document.getElementById('share-loader').style.display = 'none';
+            }
+        });
 
         async function auth(type) {
             const email = document.getElementById('email').value;
@@ -316,53 +309,23 @@ async function upload(files) {
     toast("Загрузка...");
     console.log("Batch start: " + files.length + " files");
     
-    // 1. Ждём готовности пользователя
-    console.log("Checking user...");
-    if (!user) {
-        console.log("No user yet, waiting...");
-        // Ждём до 5 секунд
-        for (let i = 0; i < 10; i++) {
-            await new Promise(r => setTimeout(r, 500));
-            if (user) break;
-            console.log("Still waiting for user... " + (i+1));
-        }
-    }
+    // 1. Получаем токен пользователя
+    const { data: sessionData, error: sessionError } = await sb.auth.getSession();
     
-    if (!user) {
-        console.error("User still null after waiting!");
-        toast("Ошибка: не авторизован", 'err');
+    if (sessionError) {
+        console.error("Session Error:", sessionError);
+        toast("Ошибка сессии", 'err');
         return;
     }
-    console.log("User OK:", user.id);
     
-    // 2. Получаем токен
-    console.log("Getting session...");
-    let accessToken;
-    
-    try {
-        const { data: sessionData, error: sessionError } = await sb.auth.getSession();
-        console.log("getSession returned");
-        
-        if (sessionError) {
-            console.error("Session Error:", JSON.stringify(sessionError));
-            toast("Ошибка сессии", 'err');
-            return;
-        }
-        
-        if (!sessionData || !sessionData.session) {
-            console.error("No session data!");
-            toast("Нет сессии", 'err');
-            return;
-        }
-        
-        accessToken = sessionData.session.access_token;
-        console.log("Token OK: " + accessToken.substring(0, 20) + "...");
-        
-    } catch (sessErr) {
-        console.error("Session exception:", sessErr.message);
-        toast("Ошибка получения сессии", 'err');
+    if (!sessionData.session) {
+        console.error("No session!");
+        toast("Нет сессии, войдите заново", 'err');
         return;
     }
+    
+    const accessToken = sessionData.session.access_token;
+    console.log("Got access token: " + accessToken.substring(0, 20) + "...");
 
     let successCount = 0;
     let errorCount = 0;
@@ -372,20 +335,27 @@ async function upload(files) {
         const safeName = Date.now() + "_" + file.name.replace(/[^\w.-]/g, '_');
         const storePath = `${user.id}/${safeName}`;
         
-        console.log(`>> FILE ${i+1}/${files.length}: "${file.name}"`);
-        console.log(`   Size: ${file.size}, Type: "${file.type}"`);
+        console.log(`>> FILE ${i+1}/${files.length}: ${file.name}, size: ${file.size}, type: ${file.type}`);
 
         try {
+            // 2. Проверяем что файл валидный
             if (!file || file.size === 0) {
-                console.error("Empty file!");
+                console.error("Empty file, skipping");
                 errorCount++;
                 continue;
             }
 
-            // 3. Читаем файл
-            console.log("Reading ArrayBuffer...");
-            const arrayBuffer = await file.arrayBuffer();
-            console.log(`ArrayBuffer: ${arrayBuffer.byteLength} bytes`);
+            // 3. Читаем файл в ArrayBuffer
+            console.log("Reading file to ArrayBuffer...");
+            let arrayBuffer;
+            try {
+                arrayBuffer = await file.arrayBuffer();
+                console.log(`ArrayBuffer size: ${arrayBuffer.byteLength}`);
+            } catch (readErr) {
+                console.error("File read error:", readErr);
+                errorCount++;
+                continue;
+            }
 
             if (!arrayBuffer || arrayBuffer.byteLength === 0) {
                 console.error("Empty ArrayBuffer!");
@@ -393,80 +363,94 @@ async function upload(files) {
                 continue;
             }
 
-            // 4. Blob
+            // 4. Создаём Blob
             const contentType = file.type || 'application/octet-stream';
             const fileBlob = new Blob([arrayBuffer], { type: contentType });
-            console.log(`Blob: ${fileBlob.size} bytes`);
+            console.log(`Blob created: ${fileBlob.size} bytes, type: ${contentType}`);
 
-            // 5. Upload
+            // 5. Загружаем через Fetch
             const uploadUrl = `${SB_URL}/storage/v1/object/user_vault/${storePath}`;
-            console.log("Uploading to:", uploadUrl.substring(0, 60) + "...");
+            console.log("Upload URL:", uploadUrl);
+            console.log("Starting fetch upload...");
             
             const controller = new AbortController();
             const timeoutId = setTimeout(() => {
-                console.error("TIMEOUT after 60s!");
+                console.error("Upload timeout!");
                 controller.abort();
-            }, 60000);
+            }, 60000); // 60 секунд таймаут
 
-            console.log("Fetch starting...");
             const response = await fetch(uploadUrl, {
                 method: 'POST',
                 headers: {
                     'Authorization': `Bearer ${accessToken}`,
                     'x-upsert': 'false',
-                    'Content-Type': contentType
+                    'Content-Type': contentType,
+                    'Cache-Control': 'no-cache'
                 },
                 body: fileBlob,
                 signal: controller.signal
             });
+
             clearTimeout(timeoutId);
             
-            console.log("Fetch done, status:", response.status);
+            console.log("Fetch response status:", response.status);
 
             if (!response.ok) {
-                const errText = await response.text();
-                console.error("Response error:", errText);
+                const errorText = await response.text();
+                console.error("Upload Error Response:", errorText);
+                toast(`Ошибка загрузки: ${response.status}`, 'err');
                 errorCount++;
                 continue;
             }
             
-            console.log("Storage OK!");
+            console.log("Storage upload SUCCESS!");
 
-            // 6. Database
-            console.log("Saving to DB...");
+            // 6. Записываем в БД
+            console.log("Writing to database...");
             const fileType = file.type.startsWith('image/') ? 'image' : 
-                           file.type.startsWith('video/') ? 'video' : 'file';
+                           file.type.startsWith('video/') ? 'video' : 
+                           file.type.startsWith('audio/') ? 'audio' : 'file';
             
-            const targetPath = (path === 'trash' || path === 'notes' || path === 'desktop') ? 'downloads' : path;
-            
-            const { error: dbErr } = await sb.from('items').insert({
+            const { data: dbData, error: dbErr } = await sb.from('items').insert({
                 name: file.name, 
                 type: fileType,
-                parent_id: targetPath,
+                parent_id: (path === 'trash' || path === 'notes') ? 'downloads' : path,
                 storage_path: storePath, 
                 user_id: user.id, 
                 is_deleted: false
-            });
+            }).select();
 
             if (dbErr) {
                 console.error("DB Error:", JSON.stringify(dbErr));
+                toast("Ошибка БД: " + dbErr.message, 'err');
                 errorCount++;
             } else {
-                console.log("DB OK!");
+                console.log("DB Insert OK, id:", dbData?.[0]?.id);
                 successCount++;
             }
 
         } catch (e) {
-            console.error("Exception:", e.name, "-", e.message);
+            console.error("CRITICAL ERROR:", e.name, e.message);
+            if (e.name === 'AbortError') {
+                toast("Таймаут загрузки", 'err');
+            } else {
+                toast("Сбой: " + e.message, 'err');
+            }
             errorCount++;
         }
     }
     
-    console.log(`DONE! Success: ${successCount}, Errors: ${errorCount}`);
+    console.log(`Upload complete. Success: ${successCount}, Errors: ${errorCount}`);
+    
+    // Обновляем список файлов
     await loadFiles();
     
-    if (successCount > 0) toast(`Загружено: ${successCount}`);
-    if (errorCount > 0) toast(`Ошибок: ${errorCount}`, 'err');
+    if (successCount > 0) {
+        toast(`Загружено: ${successCount} файл(ов)`);
+    }
+    if (errorCount > 0) {
+        toast(`Ошибок: ${errorCount}`, 'err');
+    }
 }
 
         async function newFolder() {
