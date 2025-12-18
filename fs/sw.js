@@ -1,36 +1,43 @@
-const CACHE_NAME = 'cloud-app-v1';
+const CACHE_NAME = 'cloud-app-v2';
 
 self.addEventListener('install', (event) => {
-    self.skipWaiting();
+    self.skipWaiting(); // Сразу активируем новый SW
 });
 
 self.addEventListener('activate', (event) => {
-    event.waitUntil(self.clients.claim());
+    event.waitUntil(self.clients.claim()); // Немедленно берем контроль над страницей
 });
 
 self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
 
-    // Перехватываем отправку файла через "Поделиться"
-    if (url.pathname.endsWith('/share-target') && event.request.method === 'POST') {
+    // Перехватываем POST запрос от Android (Share Target)
+    // Используем includes, чтобы сработать даже если путь чуть отличается
+    if (url.pathname.includes('share-target') && event.request.method === 'POST') {
         event.respondWith(
             (async () => {
-                const formData = await event.request.formData();
-                const file = formData.get('media'); // Имя поля из manifest.json
+                try {
+                    const formData = await event.request.formData();
+                    const file = formData.get('media'); // Имя поля из manifest.json
 
-                if (file) {
-                    // Сохраняем файл в IndexedDB, чтобы забрать его на главной странице
-                    await saveFileToDB(file);
+                    if (file) {
+                        // Сохраняем файл в базу данных браузера
+                        await saveFileToDB(file);
+                        // Редирект с флагом успеха
+                        return Response.redirect('./index.html?action=shared', 303);
+                    }
+                } catch (err) {
+                    console.error('Share error:', err);
                 }
-
-                // Перенаправляем пользователя обратно в приложение
-                return Response.redirect('./index.html?action=shared', 303);
+                
+                // Даже если ошибка или файла нет - редиректим, чтобы телефон не завис
+                return Response.redirect('./index.html?action=error', 303);
             })()
         );
     }
 });
 
-// --- HELPER: IndexedDB для Service Worker ---
+// --- Вспомогательная функция: IndexedDB ---
 function saveFileToDB(file) {
     return new Promise((resolve, reject) => {
         const request = indexedDB.open('CloudShareDB', 1);
@@ -48,8 +55,8 @@ function saveFileToDB(file) {
             const store = tx.objectStore('files');
             store.add(file);
             tx.oncomplete = () => resolve();
-            tx.onerror = () => reject();
+            tx.onerror = () => resolve(); // Не реджектим, чтобы не ломать редирект
         };
-        request.onerror = reject;
+        request.onerror = () => resolve();
     });
 }
