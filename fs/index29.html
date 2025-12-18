@@ -173,12 +173,6 @@
                     <button class="btn btn-icon" style="background: var(--surface); color: var(--text); border: 1px solid var(--border);" onclick="newFolder()"><i class='bx bx-folder-plus'></i></button>
                     <input type="file" id="file-in" hidden multiple onchange="upload(this.files)">
                 </div>
-                
-                <button onclick="resetDB()" style="background:red;color:white;padding:10px;position:fixed;top:10px;right:10px;z-index:99999;">
-    RESET DB
-</button>
-
-
                 <div id="actions-trash" style="display:none; gap:10px;">
                     <button class="btn btn-danger btn-icon" onclick="emptyTrash()" title="Очистить корзину"><i class='bx bxs-trash'></i></button>
                     <button class="btn btn-danger btn-icon" onclick="deleteAccount()" title="Удалить аккаунт"><i class='bx bxs-user-x'></i></button>
@@ -209,7 +203,7 @@
         const sb = supabase.createClient(SB_URL, SB_KEY);
         
         const DB_NAME = 'CloudShareDB';
-const DB_VERSION = 1;
+const DB_VERSION = 3;
 
         let user = null;
         let path = 'desktop';
@@ -259,32 +253,6 @@ const DB_VERSION = 1;
         document.getElementById('share-loader').style.display = 'none';
     }
 });
-
-async function resetDB() {
-    console.log("Deleting IndexedDB...");
-    
-    return new Promise((resolve) => {
-        const req = indexedDB.deleteDatabase('CloudShareDB');
-        
-        req.onsuccess = () => {
-            console.log("DB Deleted!");
-            alert("База удалена! Перезагрузите страницу.");
-            resolve();
-        };
-        
-        req.onerror = (e) => {
-            console.error("Delete error:", e);
-            alert("Ошибка удаления. Очистите данные Chrome вручную.");
-            resolve();
-        };
-        
-        req.onblocked = () => {
-            console.warn("Delete blocked - closing connections...");
-            alert("База заблокирована. Закройте все вкладки с этим сайтом и попробуйте снова.");
-            resolve();
-        };
-    });
-}
 
         async function auth(type) {
             const email = document.getElementById('email').value;
@@ -572,138 +540,171 @@ async function upload(files) {
   
 
 async function checkSharedFiles() {
-    console.log("checkSharedFiles()");
+    console.log("checkSharedFiles() v3");
     
     const hideLoader = () => {
+        console.log("Hiding loader");
         document.getElementById('share-loader').style.display = 'none';
-        // Чистим URL
-        if (window.location.search) {
-            window.history.replaceState({}, '', window.location.pathname);
-        }
+        window.history.replaceState({}, document.title, window.location.pathname);
     };
     
-    // Проверяем нужно ли вообще проверять
-    const params = new URLSearchParams(window.location.search);
-    if (!params.has('shared') && !params.has('action')) {
-        console.log("No share params, skip DB check");
-        hideLoader();
-        return;
-    }
-    
+    // Проверяем поддержку IndexedDB
     if (!window.indexedDB) {
-        console.error("No IndexedDB!");
+        console.error("IndexedDB not supported!");
         hideLoader();
         return;
     }
     
     return new Promise((resolve) => {
-        let resolved = false;
+        console.log("Opening DB:", DB_NAME, "v" + DB_VERSION);
         
-        // Таймаут на случай зависания
-        const timeout = setTimeout(() => {
-            if (!resolved) {
-                console.error("DB Timeout!");
-                hideLoader();
-                resolved = true;
-                resolve();
-            }
-        }, 5000);
-        
+        let openReq;
         try {
-            const req = indexedDB.open(DB_NAME, DB_VERSION);
+            openReq = indexedDB.open(DB_NAME, DB_VERSION);
+        } catch (e) {
+            console.error("indexedDB.open threw:", e);
+            hideLoader();
+            resolve();
+            return;
+        }
+        
+        openReq.onblocked = (e) => {
+            console.warn("DB Blocked - close other tabs!");
+            hideLoader();
+            resolve();
+        };
+        
+        openReq.onerror = (e) => { 
+            console.error("DB Open Error:", e.target.error?.message || e.target.error || 'unknown');
+            hideLoader();
+            resolve(); 
+        };
+        
+        openReq.onupgradeneeded = (e) => { 
+            console.log("DB Upgrade from", e.oldVersion, "to", e.newVersion); 
+            const db = e.target.result;
             
-            req.onupgradeneeded = (e) => {
-                console.log("DB upgrade needed");
-                const db = e.target.result;
-                if (!db.objectStoreNames.contains('files')) {
-                    db.createObjectStore('files', { autoIncrement: true });
-                }
+            if (db.objectStoreNames.contains('files')) {
+                db.deleteObjectStore('files');
+            }
+            if (db.objectStoreNames.contains('texts')) {
+                db.deleteObjectStore('texts');
+            }
+            
+            db.createObjectStore('files', { autoIncrement: true });
+            console.log("Created files store");
+        };
+        
+        openReq.onsuccess = async (e) => {
+            console.log("DB Opened OK");
+            const db = e.target.result;
+            
+            // Обработчик ошибок базы
+            db.onerror = (e) => {
+                console.error("DB Error event:", e);
             };
             
-            req.onerror = (e) => {
-                console.error("DB Error:", e.target.error?.message || 'unknown');
-                clearTimeout(timeout);
+            if (!db.objectStoreNames.contains('files')) { 
+                console.log("No 'files' store in DB");
+                db.close();
                 hideLoader();
-                if (!resolved) { resolved = true; resolve(); }
-            };
+                resolve(); 
+                return; 
+            }
             
-            req.onblocked = () => {
-                console.warn("DB Blocked");
-                clearTimeout(timeout);
-                hideLoader();
-                if (!resolved) { resolved = true; resolve(); }
-            };
-            
-            req.onsuccess = async (e) => {
-                console.log("DB Opened");
-                clearTimeout(timeout);
+            try {
+                const tx = db.transaction('files', 'readwrite');
+                const store = tx.objectStore('files');
                 
-                const db = e.target.result;
+                console.log("Reading all files...");
+                const getAll = store.getAll();
+                const getAllKeys = store.getAllKeys();
                 
-                if (!db.objectStoreNames.contains('files')) {
-                    console.log("No files store");
-                    db.close();
-                    hideLoader();
-                    if (!resolved) { resolved = true; resolve(); }
-                    return;
-                }
-                
-                try {
-                    const tx = db.transaction('files', 'readwrite');
-                    const store = tx.objectStore('files');
-                    const getReq = store.getAll();
+                getAll.onsuccess = async () => {
+                    const records = getAll.result || [];
+                    console.log("Found", records.length, "records");
                     
-                    getReq.onsuccess = async () => {
-                        const records = getReq.result || [];
-                        console.log("Records:", records.length);
+                    if (records.length > 0) {
+                        const files = [];
                         
-                        if (records.length > 0) {
-                            // Создаём файлы
-                            const files = records
-                                .filter(r => r.data && r.data.byteLength > 0)
-                                .map(r => new File([r.data], r.name || 'file', { type: r.type }));
+                        for (let i = 0; i < records.length; i++) {
+                            const rec = records[i];
+                            console.log(`Record ${i}:`, rec.name, rec.size, "bytes");
                             
-                            console.log("Valid files:", files.length);
-                            
-                            // Очищаем
-                            store.clear();
-                            db.close();
-                            
-                            if (files.length > 0) {
-                                console.log("Uploading...");
-                                path = 'downloads';
-                                await upload(files);
-                                toast("Загружено: " + files.length);
-                                nav('downloads');
+                            if (rec.data) {
+                                try {
+                                    const f = new File([rec.data], rec.name || 'file', { 
+                                        type: rec.type || 'application/octet-stream' 
+                                    });
+                                    console.log(`Created File: ${f.name}, ${f.size}b`);
+                                    
+                                    if (f.size > 0) {
+                                        files.push(f);
+                                    } else {
+                                        console.warn("File is empty after reconstruction!");
+                                    }
+                                } catch (err) {
+                                    console.error("File reconstruct error:", err);
+                                }
+                            } else {
+                                console.warn("Record has no data!");
                             }
-                        } else {
-                            db.close();
                         }
                         
-                        hideLoader();
-                        if (!resolved) { resolved = true; resolve(); }
-                    };
-                    
-                    getReq.onerror = () => {
+                        // Очищаем
+                        console.log("Clearing store...");
+                        try {
+                            store.clear();
+                        } catch (e) {
+                            console.warn("Clear error:", e);
+                        }
+                        
+                        // Закрываем БД перед загрузкой
+                        db.close();
+                        console.log("DB closed");
+                        
+                        if (files.length > 0) {
+                            console.log("Uploading", files.length, "files...");
+                            const savedPath = path;
+                            path = 'downloads';
+                            
+                            try {
+                                await upload(files);
+                                console.log("Upload complete!");
+                            } catch (upErr) {
+                                console.error("Upload error:", upErr);
+                            }
+                            
+                            path = savedPath;
+                            hideLoader();
+                            toast("Файлы загружены!");
+                            nav('downloads');
+                        } else {
+                            hideLoader();
+                            toast("Не удалось прочитать файлы", 'err');
+                        }
+                    } else {
+                        console.log("No records in DB");
                         db.close();
                         hideLoader();
-                        if (!resolved) { resolved = true; resolve(); }
-                    };
-                    
-                } catch (e) {
-                    console.error("TX Error:", e);
+                    }
+                    resolve();
+                };
+                
+                getAll.onerror = (e) => {
+                    console.error("getAll error:", e.target.error);
                     db.close();
                     hideLoader();
-                    if (!resolved) { resolved = true; resolve(); }
-                }
-            };
-            
-        } catch (e) {
-            console.error("Open Error:", e);
-            clearTimeout(timeout);
-            hideLoader();
-            if (!resolved) { resolved = true; resolve(); }
-        }
+                    resolve();
+                };
+                
+            } catch (err) {
+                console.error("Transaction error:", err);
+                db.close();
+                hideLoader();
+                resolve();
+            }
+        };
     });
 }
 

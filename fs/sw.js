@@ -1,124 +1,108 @@
-// sw.js
-const CACHE_NAME = 'cloud-app-v5';
+const CACHE_NAME = 'cloud-app-v6';
 const DB_NAME = 'CloudShareDB';
-const DB_VERSION = 3; // Увеличиваем версию!
+const DB_VERSION = 1; // Сбрасываем на 1 после удаления!
 
 self.addEventListener('install', (event) => {
-    console.log('SW: Installing...');
+    console.log('SW: Install');
     self.skipWaiting();
 });
 
 self.addEventListener('activate', (event) => {
-    console.log('SW: Activating...');
-    event.waitUntil(self.clients.claim());
+    console.log('SW: Activate');
+    event.waitUntil(
+        Promise.all([
+            self.clients.claim(),
+            // Чистим старые кэши
+            caches.keys().then(keys => 
+                Promise.all(keys.filter(k => k !== CACHE_NAME).map(k => caches.delete(k)))
+            )
+        ])
+    );
 });
 
 self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
 
     if (url.pathname.includes('share-target') && event.request.method === 'POST') {
-        console.log('SW: Share target hit!');
-        event.respondWith(handleShareTarget(event.request));
+        console.log('SW: Share target');
+        event.respondWith(handleShare(event.request));
     }
 });
 
-async function handleShareTarget(request) {
-    console.log('SW: Processing share...');
-    
+async function handleShare(request) {
     try {
         const formData = await request.formData();
         const file = formData.get('media');
         
-        console.log('SW: Got file:', file ? file.name : 'none', file ? file.size : 0);
+        console.log('SW: File:', file?.name, file?.size);
 
         if (file && file.size > 0) {
-            const arrayBuffer = await file.arrayBuffer();
-            console.log('SW: Read', arrayBuffer.byteLength, 'bytes');
+            // Читаем файл
+            const buffer = await file.arrayBuffer();
+            console.log('SW: Buffer size:', buffer.byteLength);
             
-            await saveFileToDB({
-                name: file.name || `shared_${Date.now()}`,
+            // Сохраняем
+            const saved = await saveFile({
+                name: file.name,
                 type: file.type || 'application/octet-stream',
-                size: file.size,
-                data: arrayBuffer,
-                timestamp: Date.now()
+                data: buffer
             });
             
-            console.log('SW: File saved, redirecting...');
-            return Response.redirect('./index.html?action=shared&status=ok&t=' + Date.now(), 303);
+            if (saved) {
+                return Response.redirect('./index.html?shared=1&t=' + Date.now(), 303);
+            }
         }
         
-        console.log('SW: No file in form data');
-        return Response.redirect('./index.html?action=shared&status=empty', 303);
+        return Response.redirect('./index.html?shared=0', 303);
         
     } catch (err) {
         console.error('SW Error:', err);
-        return Response.redirect('./index.html?action=error&msg=' + encodeURIComponent(err.message), 303);
+        return Response.redirect('./index.html?error=' + encodeURIComponent(err.message), 303);
     }
 }
 
-function saveFileToDB(fileData) {
-    return new Promise((resolve, reject) => {
-        console.log('SW: Opening DB...');
-        
-        const req = indexedDB.open(DB_NAME, DB_VERSION);
-        
-        req.onupgradeneeded = (e) => {
-            console.log('SW: DB Upgrade from', e.oldVersion, 'to', e.newVersion);
-            const db = e.target.result;
+function saveFile(fileData) {
+    return new Promise((resolve) => {
+        try {
+            const req = indexedDB.open(DB_NAME, DB_VERSION);
             
-            // Удаляем старые stores
-            if (db.objectStoreNames.contains('files')) {
-                db.deleteObjectStore('files');
-            }
-            if (db.objectStoreNames.contains('texts')) {
-                db.deleteObjectStore('texts');
-            }
+            req.onupgradeneeded = (e) => {
+                console.log('SW: DB upgrade');
+                const db = e.target.result;
+                if (!db.objectStoreNames.contains('files')) {
+                    db.createObjectStore('files', { autoIncrement: true });
+                }
+            };
             
-            // Создаём новые
-            db.createObjectStore('files', { autoIncrement: true });
-            console.log('SW: Created files store');
-        };
-        
-        req.onsuccess = (e) => {
-            console.log('SW: DB Opened');
-            const db = e.target.result;
-            
-            try {
-                const tx = db.transaction('files', 'readwrite');
-                const store = tx.objectStore('files');
+            req.onsuccess = (e) => {
+                console.log('SW: DB open ok');
+                const db = e.target.result;
                 
-                const addReq = store.add(fileData);
-                
-                addReq.onsuccess = () => {
-                    console.log('SW: File added to store');
-                };
-                
-                tx.oncomplete = () => {
-                    console.log('SW: Transaction complete');
+                try {
+                    const tx = db.transaction('files', 'readwrite');
+                    tx.objectStore('files').add(fileData);
+                    tx.oncomplete = () => {
+                        console.log('SW: Saved!');
+                        db.close();
+                        resolve(true);
+                    };
+                    tx.onerror = () => {
+                        db.close();
+                        resolve(false);
+                    };
+                } catch (e) {
                     db.close();
-                    resolve();
-                };
-                
-                tx.onerror = (err) => {
-                    console.error('SW: TX Error:', err);
-                    db.close();
-                    resolve(); // resolve anyway to allow redirect
-                };
-            } catch (err) {
-                console.error('SW: Store error:', err);
-                db.close();
-                resolve();
-            }
-        };
-        
-        req.onerror = (e) => {
-            console.error('SW: DB Error:', e.target.error);
-            resolve(); // resolve anyway
-        };
-        
-        req.onblocked = () => {
-            console.warn('SW: DB Blocked');
-            resolve();
-        };
+                    resolve(false);
+                }
+            };
+            
+            req.onerror = () => {
+                console.error('SW: DB error');
+                resolve(false);
+            };
+            
+        } catch (e) {
+            resolve(false);
+        }
     });
 }
