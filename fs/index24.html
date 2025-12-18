@@ -309,51 +309,43 @@ async function upload(files) {
             toast("Загрузка...");
             console.log("Batch start: " + files.length + " files");
             
-            // 1. Получаем токен пользователя (нужен для прав доступа)
-            const { data: { session } } = await sb.auth.getSession();
-            if (!session) {
-                toast("Ошибка: нет сессии", 'err');
-                return;
-            }
-            const accessToken = session.access_token;
-
             for (let file of files) {
                 const safeName = Date.now() + "_" + file.name.replace(/[^\w.]/g, '_');
                 const storePath = `${user.id}/${safeName}`;
                 
                 console.log(`>> FILE: ${file.name}`);
+                console.log(`>> SIZE: ${file.size} bytes`);
+                console.log(`>> TYPE: ${file.type}`);
 
                 try {
-                    // 2. Читаем в память и делаем Blob
+                    // 1. Читаем в память
+                    console.log("Reading file to memory...");
                     const arrayBuffer = await file.arrayBuffer();
+                    console.log(`Read OK. Length: ${arrayBuffer.byteLength}`);
+
+                    // 2. ВАЖНОЕ ИЗМЕНЕНИЕ: Создаем Blob
+                    // Supabase лучше работает с Blob на мобильных устройствах
+                    console.log("Converting to Blob...");
                     const fileBlob = new Blob([arrayBuffer], { type: file.type || 'application/octet-stream' });
-                    console.log(`Blob created: ${fileBlob.size} bytes`);
 
-                    // 3. ОТПРАВЛЯЕМ ЧЕРЕЗ FETCH (В обход библиотеки supabase-js)
-                    // Это самый надежный способ для Android PWA
-                    console.log("Starting RAW Fetch upload...");
-                    
-                    const uploadUrl = `${SB_URL}/storage/v1/object/user_vault/${storePath}`;
-                    
-                    const response = await fetch(uploadUrl, {
-                        method: 'POST',
-                        headers: {
-                            'Authorization': `Bearer ${accessToken}`, // Токен пользователя
-                            'x-upsert': 'false',
-                            'Content-Type': file.type || 'application/octet-stream' // Важно для Supabase
-                        },
-                        body: fileBlob
-                    });
+                    // 3. Отправляем Blob
+                    console.log("Sending Blob to Supabase Storage...");
+                    const { data, error: upErr } = await sb.storage
+                        .from('user_vault')
+                        .upload(storePath, fileBlob, {
+                            contentType: file.type || 'application/octet-stream',
+                            upsert: false
+                        });
 
-                    if (!response.ok) {
-                        const errorText = await response.text();
-                        console.error("Fetch Error:", errorText);
-                        throw new Error(`Upload failed: ${response.status} ${response.statusText}`);
+                    if (upErr) {
+                        console.error("Storage Error:", JSON.stringify(upErr));
+                        toast("Ошибка Storage: " + upErr.message, 'err');
+                        continue; 
                     }
                     
-                    console.log("Raw Fetch Success!");
+                    console.log("Storage Upload Success");
 
-                    // 4. Пишем информацию о файле в БД (тут можно использовать sb, он работает нормально)
+                    // 4. Пишем в БД
                     const { error: dbErr } = await sb.from('items').insert({
                         name: file.name, 
                         type: file.type.startsWith('image/') ? 'image' : 'text',
@@ -365,7 +357,6 @@ async function upload(files) {
 
                     if (dbErr) {
                         console.error("DB Error:", JSON.stringify(dbErr));
-                        toast("Ошибка БД", 'err');
                     } else {
                         console.log("DB Insert OK");
                     }
