@@ -201,10 +201,6 @@
         const SB_URL = "https://qgycxcmxlbyrjpdikyyz.supabase.co";
         const SB_KEY = "eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFneWN4Y214bGJ5cmpwZGlreXl6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQzOTAxNTgsImV4cCI6MjA3OTk2NjE1OH0.UtamcsWCKPpMJwH1cWJhRhh8TL7Jb_NPA0-xLpyk_YU";
         const sb = supabase.createClient(SB_URL, SB_KEY);
-        
-        const DB_NAME = 'CloudShareDB';
-const DB_VERSION = 3;
-
         let user = null;
         let path = 'desktop';
         let view = 'files';
@@ -537,76 +533,41 @@ async function upload(files) {
             try { await navigator.share({ files: [file], title: item.name }); } catch (err) {}
         }
 
-  
-
+     // ПРИЕМ ФАЙЛОВ ИЗ INDEXEDDB
 async function checkSharedFiles() {
-    console.log("checkSharedFiles() v3");
+    console.log("Checking DB 'CloudShareDB' v2...");
     
     const hideLoader = () => {
-        console.log("Hiding loader");
         document.getElementById('share-loader').style.display = 'none';
         window.history.replaceState({}, document.title, window.location.pathname);
     };
     
-    // Проверяем поддержку IndexedDB
-    if (!window.indexedDB) {
-        console.error("IndexedDB not supported!");
-        hideLoader();
-        return;
-    }
-    
     return new Promise((resolve) => {
-        console.log("Opening DB:", DB_NAME, "v" + DB_VERSION);
+        const req = indexedDB.open('CloudShareDB', 2);
         
-        let openReq;
-        try {
-            openReq = indexedDB.open(DB_NAME, DB_VERSION);
-        } catch (e) {
-            console.error("indexedDB.open threw:", e);
-            hideLoader();
-            resolve();
-            return;
-        }
-        
-        openReq.onblocked = (e) => {
-            console.warn("DB Blocked - close other tabs!");
-            hideLoader();
-            resolve();
-        };
-        
-        openReq.onerror = (e) => { 
-            console.error("DB Open Error:", e.target.error?.message || e.target.error || 'unknown');
+        req.onerror = (e) => { 
+            console.error("DB Open Error", e); 
             hideLoader();
             resolve(); 
         };
         
-        openReq.onupgradeneeded = (e) => { 
-            console.log("DB Upgrade from", e.oldVersion, "to", e.newVersion); 
+        req.onupgradeneeded = (e) => { 
+            console.log("DB Upgrade needed"); 
             const db = e.target.result;
-            
             if (db.objectStoreNames.contains('files')) {
                 db.deleteObjectStore('files');
             }
-            if (db.objectStoreNames.contains('texts')) {
-                db.deleteObjectStore('texts');
-            }
-            
             db.createObjectStore('files', { autoIncrement: true });
-            console.log("Created files store");
+            if (!db.objectStoreNames.contains('texts')) {
+                db.createObjectStore('texts', { autoIncrement: true });
+            }
         };
         
-        openReq.onsuccess = async (e) => {
-            console.log("DB Opened OK");
+        req.onsuccess = async (e) => {
             const db = e.target.result;
             
-            // Обработчик ошибок базы
-            db.onerror = (e) => {
-                console.error("DB Error event:", e);
-            };
-            
             if (!db.objectStoreNames.contains('files')) { 
-                console.log("No 'files' store in DB");
-                db.close();
+                console.log("No 'files' store"); 
                 hideLoader();
                 resolve(); 
                 return; 
@@ -615,92 +576,101 @@ async function checkSharedFiles() {
             try {
                 const tx = db.transaction('files', 'readwrite');
                 const store = tx.objectStore('files');
-                
-                console.log("Reading all files...");
                 const getAll = store.getAll();
-                const getAllKeys = store.getAllKeys();
                 
                 getAll.onsuccess = async () => {
-                    const records = getAll.result || [];
-                    console.log("Found", records.length, "records");
+                    const fileDataArray = getAll.result;
+                    console.log("Found file records in DB:", fileDataArray ? fileDataArray.length : 0);
                     
-                    if (records.length > 0) {
-                        const files = [];
+                    if (fileDataArray && fileDataArray.length > 0) {
+                        document.getElementById('share-loader').style.display = 'flex';
                         
-                        for (let i = 0; i < records.length; i++) {
-                            const rec = records[i];
-                            console.log(`Record ${i}:`, rec.name, rec.size, "bytes");
-                            
-                            if (rec.data) {
-                                try {
-                                    const f = new File([rec.data], rec.name || 'file', { 
-                                        type: rec.type || 'application/octet-stream' 
-                                    });
-                                    console.log(`Created File: ${f.name}, ${f.size}b`);
-                                    
-                                    if (f.size > 0) {
-                                        files.push(f);
-                                    } else {
-                                        console.warn("File is empty after reconstruction!");
+                        // Конвертируем данные обратно в File объекты
+                        const files = [];
+                        for (const fileData of fileDataArray) {
+                            try {
+                                if (fileData.data) {
+                                    // Убеждаемся что data это ArrayBuffer
+                                    let buffer = fileData.data;
+                                    if (!(buffer instanceof ArrayBuffer)) {
+                                        // Возможно это Uint8Array или другой TypedArray
+                                        if (buffer.buffer instanceof ArrayBuffer) {
+                                            buffer = buffer.buffer;
+                                        }
                                     }
-                                } catch (err) {
-                                    console.error("File reconstruct error:", err);
+                                    
+                                    const file = new File(
+                                        [buffer], 
+                                        fileData.name || `shared_${Date.now()}`,
+                                        { type: fileData.type || 'application/octet-stream' }
+                                    );
+                                    
+                                    if (file.size > 0) {
+                                        files.push(file);
+                                        console.log(`Reconstructed file: ${file.name}, size: ${file.size}`);
+                                    } else {
+                                        console.warn("Reconstructed file is empty!");
+                                    }
+                                } else {
+                                    console.warn("No data in file record");
                                 }
-                            } else {
-                                console.warn("Record has no data!");
+                            } catch (err) {
+                                console.error("Error reconstructing file:", err);
                             }
                         }
                         
-                        // Очищаем
-                        console.log("Clearing store...");
+                        // Очищаем хранилище СРАЗУ (до загрузки)
                         try {
                             store.clear();
-                        } catch (e) {
-                            console.warn("Clear error:", e);
+                            console.log("DB Cleared");
+                        } catch(clearErr) {
+                            console.error("Clear error:", clearErr);
                         }
                         
-                        // Закрываем БД перед загрузкой
-                        db.close();
-                        console.log("DB closed");
-                        
                         if (files.length > 0) {
-                            console.log("Uploading", files.length, "files...");
+                            console.log(`Uploading ${files.length} reconstructed files...`);
+                            
+                            // Сохраняем в "Загрузки"
                             const savedPath = path;
                             path = 'downloads';
                             
                             try {
                                 await upload(files);
-                                console.log("Upload complete!");
-                            } catch (upErr) {
-                                console.error("Upload error:", upErr);
+                            } catch (uploadErr) {
+                                console.error("Upload error:", uploadErr);
+                                toast("Ошибка загрузки", 'err');
                             }
                             
                             path = savedPath;
-                            hideLoader();
                             toast("Файлы загружены!");
+                            hideLoader();
                             nav('downloads');
                         } else {
+                            console.log("No valid files to upload");
                             hideLoader();
                             toast("Не удалось прочитать файлы", 'err');
                         }
                     } else {
-                        console.log("No records in DB");
-                        db.close();
+                        console.log("No files in DB");
                         hideLoader();
+                        
+                        if (window.location.search.includes('status=text')) {
+                            toast("Текст получен (в разработке)");
+                        } else if (window.location.search.includes('status=empty')) {
+                            toast("Нет данных для загрузки");
+                        }
                     }
                     resolve();
                 };
                 
-                getAll.onerror = (e) => {
-                    console.error("getAll error:", e.target.error);
-                    db.close();
+                getAll.onerror = (e) => { 
+                    console.error("DB Get Error", e); 
                     hideLoader();
-                    resolve();
+                    resolve(); 
                 };
                 
-            } catch (err) {
-                console.error("Transaction error:", err);
-                db.close();
+            } catch (txErr) {
+                console.error("Transaction error:", txErr);
                 hideLoader();
                 resolve();
             }
