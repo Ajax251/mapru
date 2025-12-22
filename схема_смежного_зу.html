@@ -547,6 +547,12 @@
     .btn-check:hover {
         background-color: #e86a00;
     }
+    
+    #canvas:focus {
+    outline: none;
+    border-color: #007bff;
+    box-shadow: 0 0 10px rgba(0,123,255,0.5);
+}
 
 
     </style>
@@ -566,7 +572,7 @@
         </div>
         <div class="center-panel">
             <h1>CSV с описанием части границы смежного ЗУ</h1>
-            <canvas id="canvas"></canvas>
+           <canvas id="canvas" tabindex="0"></canvas>
             <div id="log"></div>
             <div id="distanceLog"></div>
         </div>
@@ -644,6 +650,10 @@ let currentTextareaIdForKNLoad = null;
 let notificationQueue = [];
 let isNotificationActive = false;
 
+let baseScale = 1;
+let globalMinX = 0;
+let globalMinY = 0;
+
 const STORAGE_API_URL = 'https://mapruapp.ru/storage'; 
 const BUCKET_NAME = 'kpt';
 
@@ -685,7 +695,6 @@ function isValidCoordinateFormat(text) {
     });
 }
 
-
 function drawContour(coords1, coords2) {
     const canvas = document.getElementById('canvas');
     const ctx = canvas.getContext('2d');
@@ -698,24 +707,15 @@ function drawContour(coords1, coords2) {
     const points1 = processCoords(coords1);
     const points2 = processCoords(coords2);
 
-    const allPoints = [...points1, ...points2];
-     if (allPoints.length === 0) {
+    if (points1.length === 0 && points2.length === 0) {
         displayLog(points1, points2);
         return;
     }
-    
-    const minX = Math.min(...allPoints.map(p => p[1]));
-    const minY = Math.min(...allPoints.map(p => p[0]));
-    const maxX = Math.max(...allPoints.map(p => p[1]));
-    const maxY = Math.max(...allPoints.map(p => p[0]));
 
-    const scaleX = (maxX - minX === 0) ? 1 : canvas.width / (maxX - minX);
-    const scaleY = (maxY - minY === 0) ? 1 : canvas.height / (maxY - minY);
-    const baseScale = Math.min(scaleX, scaleY) * 0.9;
-
+    // ВАЖНО: Используем глобальные переменные для стабильности зума
     function transformCoords(x, y) {
-        const canvasX = (offsetX + (y - minX) * baseScale) * scale;
-        const canvasY = canvas.height - (offsetY + (x - minY) * baseScale) * scale;
+        const canvasX = (offsetX + (y - globalMinX) * baseScale) * scale;
+        const canvasY = canvas.height - (offsetY + (x - globalMinY) * baseScale) * scale;
         return [canvasX, canvasY];
     }
 
@@ -724,11 +724,8 @@ function drawContour(coords1, coords2) {
         ctx.beginPath();
         points.forEach(([x, y], index) => {
             const [canvasX, canvasY] = transformCoords(x, y);
-            if (index === 0) {
-                ctx.moveTo(canvasX, canvasY);
-            } else {
-                ctx.lineTo(canvasX, canvasY);
-            }
+            if (index === 0) ctx.moveTo(canvasX, canvasY);
+            else ctx.lineTo(canvasX, canvasY);
         });
         ctx.strokeStyle = color;
         ctx.stroke();
@@ -743,13 +740,11 @@ function drawContour(coords1, coords2) {
             ctx.fill();
 
             let isClosingPointSameAsFirst = false;
-            if (points.length > 1 && index === points.length -1) {
-                if (x === points[0][0] && y === points[0][1]) {
-                    isClosingPointSameAsFirst = true;
-                }
+            if (points.length > 1 && index === points.length - 1) {
+                if (x === points[0][0] && y === points[0][1]) isClosingPointSameAsFirst = true;
             }
-             if (!isClosingPointSameAsFirst) {
-                 ctx.fillText(`${prefix}${index + 1}`, canvasX + 5, canvasY - 5);
+            if (!isClosingPointSameAsFirst) {
+                ctx.fillText(`${prefix}${index + 1}`, canvasX + 5, canvasY - 5);
             }
         });
     }
@@ -757,6 +752,7 @@ function drawContour(coords1, coords2) {
     if (points1.length > 0) drawObject(points1, 'red', 'н');
     if (points2.length > 0) drawObject(points2, 'blue');
     
+    // Отрисовка удаляемых точек (кружки вокруг точек)
     if (removedPointsCoords && removedPointsCoords.length > 0) {
         ctx.strokeStyle = 'red';
         ctx.lineWidth = 2;
@@ -771,30 +767,40 @@ function drawContour(coords1, coords2) {
         ctx.lineWidth = 1;
     }
 
+    // Отрисовка оранжевого контура проверки (если запущен "Проверить")
+    if (verificationContour) {
+        ctx.beginPath();
+        verificationContour.forEach(([x, y], index) => {
+            const [canvasX, canvasY] = transformCoords(x, y);
+            if (index === 0) ctx.moveTo(canvasX, canvasY);
+            else ctx.lineTo(canvasX, canvasY);
+        });
+        ctx.strokeStyle = 'orange';
+        ctx.lineWidth = 3;
+        ctx.stroke();
+        ctx.lineWidth = 1;
+    }
+
+    // Подсветка проблемной точки при ошибке проверки
+    if (problematicPoint) {
+        const [canvasX, canvasY] = transformCoords(problematicPoint.x, problematicPoint.y);
+        ctx.strokeStyle = 'red';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.arc(canvasX, canvasY, 15, 0, 2 * Math.PI);
+        ctx.stroke();
+        ctx.lineWidth = 1;
+    }
+
     displayLog(points1, points2);
 
+    // Логика обнаружения точек под курсором
     const allPointsWithIndices = [
         ...points1.map((p, i) => ({point: p, index: i, object: 1})),
         ...points2.map((p, i) => ({point: p, index: i, object: 2}))
     ];
 
-    if (isSelectingPoints && selectedPoints.length >= 2) {
-        ctx.beginPath();
-        selectedPoints.forEach(([x, y], index) => {
-            const [canvasX, canvasY] = transformCoords(x, y);
-            if (index === 0) {
-                ctx.moveTo(canvasX, canvasY);
-            } else {
-                ctx.lineTo(canvasX, canvasY);
-            }
-        });
-        ctx.strokeStyle = 'green';
-        ctx.lineWidth = 2;
-        ctx.stroke();
-        ctx.lineWidth = 1;
-    }
-
-   canvas.onmousemove = function(event) {
+    canvas.onmousemove = function(event) {
         if (isDragging) {
             drag(event);
         } else {
@@ -803,10 +809,9 @@ function drawContour(coords1, coords2) {
             const mouseY = event.clientY - rect.top;
 
             hoveredPoint = allPointsWithIndices.find(({point}) => {
-                if (isNaN(point[0]) || isNaN(point[1])) return false;
                 const [canvasX, canvasY] = transformCoords(point[0], point[1]);
                 const distance = Math.sqrt((mouseX - canvasX)**2 + (mouseY - canvasY)**2);
-                return distance <= 5;
+                return distance <= 8; // Увеличена зона чувствительности для удобства
             });
 
             if (hoveredPoint) {
@@ -815,18 +820,14 @@ function drawContour(coords1, coords2) {
                     highlightCircle.className = 'highlight-circle';
                     document.body.appendChild(highlightCircle);
                 }
-                if (!isNaN(hoveredPoint.point[0]) && !isNaN(hoveredPoint.point[1])) {
-                    const [canvasX, canvasY] = transformCoords(hoveredPoint.point[0], hoveredPoint.point[1]);
-                    highlightCircle.style.left = (canvas.offsetLeft + canvasX - 10) + 'px';
-                    highlightCircle.style.top = (canvas.offsetTop + canvasY - 10) + 'px';
-                    highlightCircle.style.width = '20px';
-                    highlightCircle.style.height = '20px';
-                    highlightCircle.style.borderColor = hoveredPoint.object === 1 ? 'red' : 'blue';
-                }
+                const [canvasX, canvasY] = transformCoords(hoveredPoint.point[0], hoveredPoint.point[1]);
+                highlightCircle.style.left = (canvas.offsetLeft + canvasX - 10) + 'px';
+                highlightCircle.style.top = (canvas.offsetTop + canvasY - 10) + 'px';
+                highlightCircle.style.width = '20px';
+                highlightCircle.style.height = '20px';
+                highlightCircle.style.borderColor = hoveredPoint.object === 1 ? 'red' : 'blue';
             } else if (highlightCircle) {
-                if (highlightCircle.parentNode) {
-                    document.body.removeChild(highlightCircle);
-                }
+                highlightCircle.remove();
                 highlightCircle = null;
             }
         }
@@ -838,89 +839,17 @@ function drawContour(coords1, coords2) {
         const clickY = event.clientY - rect.top;
 
         const clickedPoint = allPointsWithIndices.find(({point}) => {
-            if (isNaN(point[0]) || isNaN(point[1])) return false;
             const [canvasX, canvasY] = transformCoords(point[0], point[1]);
             const distance = Math.sqrt((clickX - canvasX)**2 + (clickY - canvasY)**2);
-            return distance <= 5;
+            return distance <= 8;
         });
 
         if (clickedPoint) {
             clickedX = clickedPoint.point[0];
             clickedY = clickedPoint.point[1];
-
-            if (pulseCircle && pulseCircle.parentNode) {
-                document.body.removeChild(pulseCircle);
-            }
-            pulseCircle = document.createElement('div');
-            pulseCircle.className = 'pulse-circle';
-            if (!isNaN(clickedX) && !isNaN(clickedY)) {
-                const [canvasX, canvasY] = transformCoords(clickedX, clickedY);
-                pulseCircle.style.left = (canvas.offsetLeft + canvasX - 30) + 'px';
-                pulseCircle.style.top = (canvas.offsetTop + canvasY - 30) + 'px';
-                pulseCircle.style.width = '60px';
-                pulseCircle.style.height = '60px';
-                document.body.appendChild(pulseCircle);
-            }
-
             showModal();
-
-            setTimeout(() => {
-                if (pulseCircle && pulseCircle.parentNode) {
-                    document.body.removeChild(pulseCircle);
-                }
-                pulseCircle = null;
-            }, 1000);
         }
     };
-    
-    
-    
-        if (verificationContour && verificationContour.length > 0) {
-        // Соединение линий нового контура
-        ctx.beginPath();
-        verificationContour.forEach(([x, y], index) => {
-            const [canvasX, canvasY] = transformCoords(x, y);
-            if (index === 0) ctx.moveTo(canvasX, canvasY);
-            else ctx.lineTo(canvasX, canvasY);
-        });
-        ctx.strokeStyle = 'orange';
-        ctx.lineWidth = 3; // Делаем линию жирной для наглядности
-        ctx.stroke();
-        
-        // Отрисовка точек нового контура
-        verificationContour.forEach(([x, y], index) => {
-            const [canvasX, canvasY] = transformCoords(x, y);
-            ctx.beginPath();
-            ctx.arc(canvasX, canvasY, 4, 0, 2 * Math.PI);
-            ctx.fillStyle = 'orange';
-            ctx.fill();
-        });
-
-        ctx.lineWidth = 1; // Возвращаем толщину линии по умолчанию
-    }
-    
-       if (problematicPoint) {
-        const [canvasX, canvasY] = transformCoords(problematicPoint.x, problematicPoint.y);
-        ctx.strokeStyle = 'red';
-        ctx.fillStyle = 'rgba(255, 0, 0, 0.2)';
-        ctx.lineWidth = 3;
-        
-        ctx.beginPath();
-        ctx.arc(canvasX, canvasY, 15, 0, 2 * Math.PI); // Большой круг
-        ctx.fill();
-        ctx.stroke();
-        
-        // Перекрестие для акцента
-        ctx.beginPath();
-        ctx.moveTo(canvasX - 10, canvasY);
-        ctx.lineTo(canvasX + 10, canvasY);
-        ctx.moveTo(canvasX, canvasY - 10);
-        ctx.lineTo(canvasX, canvasY + 10);
-        ctx.stroke();
-        
-        ctx.lineWidth = 1;
-    }
-    
 }
 
 
@@ -1055,18 +984,52 @@ function zoom(e) {
     const zoomFactor = Math.exp(wheel * zoomIntensity);
     
     const rect = canvas.getBoundingClientRect();
-    const mouseX = e.clientX - rect.left;
-    const mouseY = e.clientY - rect.top;
+    // Координаты мыши относительно холста
+    const mouseX = e.clientX !== undefined ? e.clientX - rect.left : canvas.width / 2;
+    const mouseY = e.clientY !== undefined ? e.clientY - rect.top : canvas.height / 2;
 
     const newScale = scale * zoomFactor;
 
-    if (newScale > 0.1 && newScale < 10) {
-        offsetX = (offsetX - mouseX / scale) * zoomFactor + mouseX / newScale;
-        offsetY = (offsetY - (canvas.height - mouseY) / scale) * zoomFactor + (canvas.height - mouseY) / newScale;
+    if (newScale > 0.001 && newScale < 1000000) {
+        // Логика: точка под курсором должна иметь те же мировые координаты до и после зума
+        // Вычисляем смещение так, чтобы экранная точка (mouseX, mouseY) "прилипла" к координате
+        offsetX += (mouseX / newScale) - (mouseX / scale);
+        offsetY += ((canvas.height - mouseY) / newScale) - ((canvas.height - mouseY) / scale);
 
         scale = newScale;
-        handleInput();
+        drawContour(
+            document.getElementById('coordsInput1').value.split('\n'), 
+            document.getElementById('coordsInput2').value.split('\n')
+        );
     }
+}
+
+function handleCanvasKeyDown(e) {
+    if (document.activeElement !== canvas) return;
+
+    const panStep = 30 / scale; // Шаг перемещения
+    
+    switch (e.key) {
+        case 'ArrowUp':    offsetY += panStep; break;
+        case 'ArrowDown':  offsetY -= panStep; break;
+        case 'ArrowLeft':  offsetX += panStep; break;
+        case 'ArrowRight': offsetX -= panStep; break;
+        case '+':
+        case '=':
+            zoom({ deltaY: -1, preventDefault: () => {} });
+            return;
+        case '-':
+        case '_':
+            zoom({ deltaY: 1, preventDefault: () => {} });
+            return;
+        default: return;
+    }
+    
+    e.preventDefault();
+    drawContour(
+        document.getElementById('coordsInput1').value.split('\n'), 
+        document.getElementById('coordsInput2').value.split('\n')
+    );
 }
 
 function loadFromMIF(textareaId) {
@@ -1210,8 +1173,8 @@ function parseMIFCoordinates(content) {
 }
 
 function handleInput() {
-       verificationContour = null;
-         problematicPoint = null; 
+    verificationContour = null;
+    problematicPoint = null; 
     const input1 = document.getElementById('coordsInput1').value.trim();
     const input2 = document.getElementById('coordsInput2').value.trim();
     const coords1 = input1.split('\n').filter(line => line.trim() !== '');
@@ -1219,9 +1182,31 @@ function handleInput() {
 
     parseClickedCoordsForRemovedPoints();
 
-    if (coords1.length > 0 || coords2.length > 0) {
-        drawContour(coords1, coords2);
+    // Расчет глобальных констант для стабилизации зума
+    function processCoords(coords) {
+        return coords.map(coord => coord.split('\t').map(c => parseFloat(c.replace(',', '.')))).filter(p => p && p.length === 2 && !isNaN(p[0]) && !isNaN(p[1]));
     }
+    const points1 = processCoords(coords1);
+    const points2 = processCoords(coords2);
+    const allPoints = [...points1, ...points2];
+
+    if (allPoints.length > 0) {
+        const minX = Math.min(...allPoints.map(p => p[1]));
+        const minY = Math.min(...allPoints.map(p => p[0]));
+        const maxX = Math.max(...allPoints.map(p => p[1]));
+        const maxY = Math.max(...allPoints.map(p => p[0]));
+
+        const canvas = document.getElementById('canvas');
+        const scaleX = (maxX - minX === 0) ? 1 : canvas.width / (maxX - minX);
+        const scaleY = (maxY - minY === 0) ? 1 : canvas.height / (maxY - minY);
+        
+        // Эти значения меняются только при вводе новых координат
+        globalMinX = minX;
+        globalMinY = minY;
+        baseScale = Math.min(scaleX, scaleY) * 0.9;
+    }
+
+    drawContour(coords1, coords2);
 
     localStorage.setItem('coordsInput1', input1);
     localStorage.setItem('coordsInput2', input2);
@@ -2004,20 +1989,19 @@ async function checkNSPDData(cadNumber, xmlArea, xmlPoints, xmlIsDeclared) {
 
 
 window.addEventListener('resize', resizeCanvas);
+
 document.addEventListener('DOMContentLoaded', () => {
     resizeCanvas();
     loadFromLocalStorage();
     
-     
     const coordsInput1 = document.getElementById('coordsInput1');
     if (coordsInput1.value.trim() === '' && navigator.clipboard && typeof navigator.clipboard.readText === 'function') {
         navigator.clipboard.readText().then(text => {
             if (isValidCoordinateFormat(text)) {
                 coordsInput1.value = text;
-                handleInput(); // Обновляем канвас и состояние
+                handleInput();
             }
         }).catch(err => {
-            // Ошибки (например, отсутствие прав доступа к буферу) игнорируются, как и требовалось
             console.warn('Не удалось прочитать буфер обмена при загрузке:', err);
         });
     }
@@ -2028,6 +2012,9 @@ document.addEventListener('DOMContentLoaded', () => {
     canvas.addEventListener('mouseup', stopDragging);
     canvas.addEventListener('mouseleave', stopDragging);
     canvas.addEventListener('wheel', zoom);
+    
+    // Новое: обработка клавиш на самом холсте
+    canvas.addEventListener('keydown', handleCanvasKeyDown);
 
     const coordsTextArea = document.getElementById('clickedCoords');
     coordsTextArea.removeAttribute('readonly');
@@ -2053,13 +2040,12 @@ document.addEventListener('DOMContentLoaded', () => {
             }
         });
     }
-const confirmButton = document.getElementById('knConfirmButton');
+    
+    const confirmButton = document.getElementById('knConfirmButton');
     if(confirmButton) confirmButton.addEventListener('click', handleKnConfirm);
     
-    // ИСПРАВЛЕННЫЙ БЛОК
     const egrnButton = document.getElementById('knEgrnButton');
     if(egrnButton) egrnButton.addEventListener('click', handleKnEgrnConfirm); 
-    
 });
 
 </script>
