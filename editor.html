@@ -679,6 +679,12 @@
             background-color: #e74c3c; /* Красный при активности */
             box-shadow: inset 0 2px 4px rgba(0,0,0,0.5);
         }
+        
+        #toggleLabelsDialogBtn.active {
+            background-color: #138496 !important;
+            box-shadow: inset 0 3px 5px rgba(0,0,0,0.2);
+            border: 2px solid #0c5460;
+        }
 
         @media (max-width: 768px) {
             #cutObjectBtn {
@@ -833,6 +839,10 @@
         <button id="openProjectBtn" class="panel-button" style="margin: 0; background-color: #e67e22;">
             <i class="fas fa-folder-open"></i> Открыть проект (JSON)
         </button>
+          <button id="toggleLabelsDialogBtn" class="panel-button" style="margin: 0; background-color: #17a2b8;">
+            <i class="fas fa-tag"></i> Подписи координат
+        </button>
+        
         <!-- Скрытый инпут для загрузки файла -->
         <input type="file" id="projectFileInput" accept=".json" style="display: none;">
     </div>
@@ -975,6 +985,7 @@
 let intersectTargetIndex = -1;
 
  let pendingIntersectionData = null
+ let showLabels = false;
     
     const MAX_GEOMETRY_HISTORY = 10;
 
@@ -1630,17 +1641,48 @@ async function checkClipboardForObjects() {
                isFinite(minX) && isFinite(minY) && isFinite(maxX) && isFinite(maxY);
     }
 
-     function updateToggleButtonStates() {
-         document.getElementById('togglePointsBtn').style.backgroundColor = showPoints ? '#e74c3c' : '#7f8c8d';
-         rulerBtn.classList.toggle('active', rulerMode);
-         drawObjectBtn.classList.toggle('active', isDrawingMode);
-         finishDrawingBtn.style.display = isDrawingActive ? 'flex' : 'none';
-         toggleGeometryEditBtn.classList.toggle('active', isGeometryEditMode);
-         updateUndoButtonState();
+  function updateToggleButtonStates() {
+        const pointsBtn = document.getElementById('togglePointsBtn');
+        if (pointsBtn) {
+            pointsBtn.style.backgroundColor = showPoints ? '#e74c3c' : '#7f8c8d';
+        }
 
-         canvas.classList.toggle('drawing-mode', isDrawingMode && isDrawingActive);
-         canvas.classList.toggle('editing-point-mode', isMovingPoint);
-     }
+        const rulerBtn = document.getElementById('rulerBtn');
+        if (rulerBtn) {
+            rulerBtn.classList.toggle('active', rulerMode);
+        }
+
+        const drawBtn = document.getElementById('drawObjectBtn');
+        if (drawBtn) {
+            drawBtn.classList.toggle('active', isDrawingMode);
+        }
+
+        const finishDrawBtn = document.getElementById('finishDrawingBtn');
+        if (finishDrawBtn) {
+            finishDrawBtn.style.display = isDrawingActive ? 'flex' : 'none';
+        }
+
+        const geomEditBtn = document.getElementById('toggleGeometryEditBtn');
+        if (geomEditBtn) {
+            geomEditBtn.classList.toggle('active', isGeometryEditMode);
+        }
+
+        updateUndoButtonState();
+
+        canvas.classList.toggle('drawing-mode', isDrawingMode && isDrawingActive);
+        canvas.classList.toggle('editing-point-mode', isMovingPoint);
+
+        const labelsDlgBtn = document.getElementById('toggleLabelsDialogBtn');
+        if (labelsDlgBtn) {
+            if (showLabels) {
+                labelsDlgBtn.classList.add('active');
+                labelsDlgBtn.innerHTML = '<i class="fas fa-check-square"></i> Подписи вкл.';
+            } else {
+                labelsDlgBtn.classList.remove('active');
+                labelsDlgBtn.innerHTML = '<i class="fas fa-tag"></i> Подписи коорд.';
+            }
+        }
+    }
 
 function setupEventListeners() {
         canvas.addEventListener('mousedown', handleMouseDown);
@@ -1651,6 +1693,11 @@ function setupEventListeners() {
         canvas.addEventListener('dblclick', handleDoubleClick);
         canvas.addEventListener('mouseout', handleMouseOut);
         canvas.addEventListener('contextmenu', handleContextMenu);
+        
+        const toggleLabelsDialogBtn = document.getElementById('toggleLabelsDialogBtn');
+        if (toggleLabelsDialogBtn) {
+            toggleLabelsDialogBtn.addEventListener('click', toggleLabelsVisibility);
+        }
         
             document.getElementById('saveProjectBtn').addEventListener('click', saveProjectToJson);
         document.getElementById('openProjectBtn').addEventListener('click', () => {
@@ -2941,8 +2988,14 @@ function doBoundingBoxesIntersect(box1, box2) {
         drawObjects(ctx);
         drawActiveDrawingPreview(ctx);
         drawRuler(ctx);
+     
+        
         drawSelectedCoordinateMarker(ctx);
         drawSnapHighlight(ctx);
+
+        if (showLabels) {
+            drawCoordinateLabels(ctx);
+        }
 
         updateGridInfo(gridStep);
         updateViewInfo();
@@ -5613,6 +5666,143 @@ function executeCutOperation(targetIdx, cutterIdx) {
         else { xx = x1 + param * C; yy = y1 + param * D; }
         const dx = px - xx; const dy = py - yy;
         return dx * dx + dy * dy;
+    }
+    
+    function toggleLabelsVisibility() {
+        showLabels = !showLabels;
+        redraw(true);
+        updateToggleButtonStates();
+        saveState();
+    }
+
+function drawCoordinateLabels(ctx) {
+        if (!userObjects || userObjects.length === 0) return;
+
+        ctx.save();
+        ctx.setTransform(1, 0, 0, 1, 0, 0);
+        ctx.font = "11px monospace";
+        ctx.textBaseline = "bottom";
+
+        const occupiedRects = [];
+        const drawnPoints = new Set();
+        const padding = 5;
+        const leaderLength = 40;
+        
+        // Массив возможных углов для выноски (в радианах): 
+        // -45 (СВ), -135 (СЗ), 45 (ЮВ), 135 (ЮЗ)
+        const angles = [ -Math.PI / 4, -3 * Math.PI / 4, Math.PI / 4, 3 * Math.PI / 4 ];
+
+        userObjects.forEach(obj => {
+            if (!obj.contours) return;
+            obj.contours.forEach(contour => {
+                if (!contour) return;
+                contour.forEach(pt => {
+                    if (!pt || !isFinite(pt.x) || !isFinite(pt.y)) return;
+
+                    // Ключ для исключения дубликатов (например, начало/конец замкнутого полигона)
+                    const pointKey = `${pt.x.toFixed(3)}_${pt.y.toFixed(3)}`;
+                    if (drawnPoints.has(pointKey)) return;
+                    drawnPoints.add(pointKey);
+
+                    const [cx, cy] = transformCoord(pt.x, pt.y);
+                    
+                    // Пропускаем точки за пределами экрана
+                    if (cx < -50 || cy < -50 || cx > canvas.width + 50 || cy > canvas.height + 50) return;
+
+                    const textX = `X: ${pt.x.toFixed(2)}`;
+                    const textY = `Y: ${pt.y.toFixed(2)}`;
+                    
+                    const widthX = ctx.measureText(textX).width;
+                    const widthY = ctx.measureText(textY).width;
+                    const boxWidth = Math.max(widthX, widthY) + (padding * 2);
+                    const boxHeight = 30;
+
+                    let bestPos = null;
+
+                    // Поиск свободной позиции для выноски
+                    for (let angle of angles) {
+                        const isRightSide = Math.abs(angle) < Math.PI / 2;
+                        
+                        const elbowX = cx + Math.cos(angle) * leaderLength;
+                        const elbowY = cy + Math.sin(angle) * leaderLength;
+                        
+                        const rectX = isRightSide ? elbowX : (elbowX - boxWidth);
+                        const rectY = elbowY - boxHeight;
+
+                        const currentRect = { x: rectX, y: rectY, w: boxWidth, h: boxHeight };
+                        
+                        let collision = false;
+                        for (let occ of occupiedRects) {
+                            if (currentRect.x < occ.x + occ.w &&
+                                currentRect.x + currentRect.w > occ.x &&
+                                currentRect.y < occ.y + occ.h &&
+                                currentRect.y + currentRect.h > occ.y) {
+                                collision = true;
+                                break;
+                            }
+                        }
+
+                        if (!collision) {
+                            bestPos = { angle, elbowX, elbowY, isRightSide, rect: currentRect };
+                            break; 
+                        }
+                    }
+
+                    // Если все занято, используем дефолтную (СВ)
+                    if (!bestPos) {
+                        const angle = -Math.PI / 4;
+                        const elbowX = cx + Math.cos(angle) * leaderLength;
+                        const elbowY = cy + Math.sin(angle) * leaderLength;
+                        const isRightSide = true;
+                        bestPos = { 
+                            angle, elbowX, elbowY, isRightSide, 
+                            rect: { x: elbowX, y: elbowY - boxHeight, w: boxWidth, h: boxHeight } 
+                        };
+                    }
+
+                    occupiedRects.push(bestPos.rect);
+
+                    // --- СТИЛИЗАЦИЯ (Технический пунктир) ---
+                    ctx.strokeStyle = '#333';
+                    ctx.fillStyle = '#000';
+                    ctx.lineWidth = 1;
+
+                    ctx.beginPath();
+                    // Включаем пунктир [длина штриха, длина пробела]
+                    ctx.setLineDash([3, 2]); 
+                    
+                    ctx.moveTo(cx, cy);
+                    ctx.lineTo(bestPos.elbowX, bestPos.elbowY);
+                    
+                    const shelfEnd = bestPos.isRightSide ? (bestPos.elbowX + boxWidth) : (bestPos.elbowX - boxWidth);
+                    ctx.lineTo(shelfEnd, bestPos.elbowY);
+                    ctx.stroke();
+
+                    // Сбрасываем пунктир для отрисовки текста и точек
+                    ctx.setLineDash([]); 
+
+                    // Текст
+                    // Для лучшей читаемости можно добавить полупрозрачную подложку под текст
+                    ctx.globalAlpha = 0.7;
+                    ctx.fillStyle = 'rgba(255, 255, 255, 0.8)';
+                    ctx.fillRect(bestPos.rect.x, bestPos.rect.y, bestPos.rect.w, bestPos.rect.h);
+                    ctx.globalAlpha = 1.0;
+                    ctx.fillStyle = '#000';
+
+                    const textLeft = bestPos.isRightSide ? (bestPos.elbowX + padding) : (shelfEnd + padding);
+                    
+                    ctx.fillText(textX, textLeft, bestPos.elbowY - 14);
+                    ctx.fillText(textY, textLeft, bestPos.elbowY - 2);
+                    
+                    // Маленькая точка в основании
+                    ctx.beginPath();
+                    ctx.arc(cx, cy, 2, 0, Math.PI * 2);
+                    ctx.fill();
+                });
+            });
+        });
+
+        ctx.restore();
     }
     
 
