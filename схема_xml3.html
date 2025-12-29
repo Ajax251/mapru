@@ -3455,52 +3455,17 @@ async function loadKptForQuarterAndProcess(quarterToLoad, coordinatesTextToProce
         return result;
     }
 
-function getAreaInfo(source) {
-        // Проверка: работаем с XML-элементом или с JSON-объектом
-        if (source && typeof source.querySelector === 'function') {
-            // --- ЛОГИКА ДЛЯ XML ---
-            const areaElement = source.querySelector('params > area');
-            if (!areaElement) return { areaString: '', isDeclaredArea: false };
-            
-            const areaValue = getElementValue(areaElement, 'value');
-            const inaccuracy = getElementValue(areaElement, 'inaccuracy');
-            let areaString = '';
-            let isDeclaredArea = false;
-            
-            if (areaValue) {
-                if (inaccuracy) {
-                    areaString = `Уточненная площадь: ${areaValue} +/- ${inaccuracy}`;
-                } else { 
-                    areaString = `Декларированная площадь: ${areaValue}`; 
-                    isDeclaredArea = true; 
-                }
-            }
-            return { areaString, isDeclaredArea };
-        } else {
-            // --- ЛОГИКА ДЛЯ JSON (source - это объект options) ---
-            const p = source || {};
-            // Пытаемся найти площадь в разных полях, которые встречаются в JSON
-            const areaValue = p.specified_area ?? p.land_record_area_verified ?? p.declared_area ?? p.land_record_area_declaration ?? p.land_record_area ?? p.area;
-            
-            // Определяем, декларированная она или нет
-            // Считаем декларированной, если нет уточненной площади, но есть декларированная
-            const isDeclared = (p.specified_area === null || p.land_record_area_verified === null) && 
-                               (p.declared_area !== null || p.land_record_area_declaration !== null);
-            
-            let areaString = '';
-            if (areaValue !== null && areaValue !== undefined) {
-                const inaccuracy = p.inaccuracy || p.area_inaccuracy || '';
-                if (isDeclared) {
-                    areaString = `Декларированная площадь: ${areaValue}`;
-                } else {
-                    areaString = `Уточненная площадь: ${areaValue}${inaccuracy ? ' +/- ' + inaccuracy : ''}`;
-                }
-            } else {
-                areaString = 'Нет данных';
-            }
-            
-            return { areaString, isDeclaredArea: isDeclared };
+    function getAreaInfo(landRecord) {
+        const areaElement = landRecord.querySelector('params > area');
+        const areaValue = getElementValue(areaElement, 'value');
+        const inaccuracy = getElementValue(areaElement, 'inaccuracy');
+        let areaString = '';
+        let isDeclaredArea = false;
+        if (areaValue) {
+            if (inaccuracy) areaString = `Уточненная площадь: ${areaValue} +/- ${inaccuracy}`;
+            else { areaString = `Декларированная площадь: ${areaValue}`; isDeclaredArea = true; }
         }
+        return { areaString, isDeclaredArea };
     }
 
     function extractContours_UnifiedLandUse(xmlDoc) {
@@ -4297,7 +4262,7 @@ function initCadastralInput() {
     });
     cadastralInput.addEventListener('input', function() { formatCadastralNumber(this); });
 
- cadastralInput.addEventListener('keydown', async function(e) {
+  cadastralInput.addEventListener('keydown', async function(e) {
     if (isDialogActionInProgress) {
         return;
     }
@@ -4310,26 +4275,22 @@ function initCadastralInput() {
         }
 
         if (value === '') return;
-
-        // --- ИСПРАВЛЕНИЕ СЛУЧАЯ 1: Сначала ищем в уже загруженных данных ---
-        // Если объект найден локально, прекращаем дальнейшую логику загрузки
-        if (isValidCadastralNumber(value)) {
-            if (findAndSelectByCadastralNumber(value)) {
-                // Объект найден и выбран, выходим
-                return;
-            }
-        }
-        // -------------------------------------------------------------------
-
+        
+        // --- НАЧАЛО ИЗМЕНЕНИЯ ---
         // Новый блок для обработки кадастровых номеров с "нулевым" кварталом
         if (isUnifiedLandUseFormat(value)) {
             const parts = value.split(':');
             const quarterToSearch = parts.slice(0, 3).join(':');
+            
+            // Обновляем значение в поле ввода на номер квартала
             this.value = quarterToSearch;
+            
+            // Вызываем стандартный поиск и диалог выбора файлов для этого квартала
             const formattedQuarter = quarterToSearch.replace(/:/g, '_');
             await searchAndShowQuarterFiles(formattedQuarter);
-            return;
+            return; // Завершаем выполнение, чтобы не сработали другие проверки
         }
+        // --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
         if (isQuarterOrBlockFormat(value)) {
             let quarterToSearch = value;
@@ -4341,44 +4302,61 @@ function initCadastralInput() {
         } else if (isValidCadastralNumber(value)) {
             const enteredQuarterParts = value.split(':');
             const isStandardCadastral = !isUnifiedLandUseFormat(value);
-            // ... остальная логика загрузки КПТ (без изменений) ...
-            
-            // ВАЖНО: Вставьте остальной код из вашего старого обработчика (логика загрузки КПТ), 
-            // он должен идти ПОСЛЕ проверки findAndSelectByCadastralNumber выше.
-            // Ниже приведен сокращенный вид для понимания места вставки:
-            
-            const quarterToSearchForKPT = enteredQuarterParts.slice(0, 3).join(':');
-            const formattedQuarterForKPT = quarterToSearchForKPT.replace(/:/g, '_');
-            const loaderContainer = document.getElementById('loaderContainer');
-            
-            // Логика загрузки (которая была у вас):
-            updateLoaderProgress(0, 1, `Поиск КПТ для квартала ${quarterToSearchForKPT}...`);
-            if (loaderContainer) loaderContainer.style.display = 'flex';
-            
-            try {
-                const response = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}?search=${formattedQuarterForKPT}`);
-                if (!response.ok) throw new Error(`Ошибка сети: ${response.statusText}`);
-                const fileList = await response.json();
-                const matchingFiles = fileList ? fileList.filter(file => file.name.startsWith(formattedQuarterForKPT)) : [];
+            const enteredQuarter = isStandardCadastral && enteredQuarterParts.length >= 3 ? enteredQuarterParts.slice(0, 3).join(':') : null;
 
-                if (matchingFiles.length > 0) {
-                    const latestFile = findLatestKptFile(matchingFiles);
-                    if (latestFile) {
-                        await handleOpenKpt(latestFile.name, value); // Передаем value для автовыбора
-                    } else {
+            const currentLoadedQuarter = cadastralBlockNumber ? cadastralBlockNumber.slice(0, -1) : null;
+            const noKptDataLoaded = allContours.length === 0 && buildingsContours.length === 0 && zonesAndTerritoriesContours.length === 0;
+
+            if (isStandardCadastral && (noKptDataLoaded || (enteredQuarter && currentLoadedQuarter && enteredQuarter !== currentLoadedQuarter))) {
+                if (enteredQuarterParts.length >= 3) {
+                    const quarterToSearchForKPT = enteredQuarterParts.slice(0, 3).join(':');
+                    const formattedQuarterForKPT = quarterToSearchForKPT.replace(/:/g, '_');
+                    const loaderContainer = document.getElementById('loaderContainer');
+                    updateLoaderProgress(0, 1, `Поиск КПТ для квартала ${quarterToSearchForKPT}...`);
+                    if (loaderContainer) loaderContainer.style.display = 'flex';
+                    
+                    try {
+                        const response = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}?search=${formattedQuarterForKPT}`);
+                         if (!response.ok) {
+                            throw new Error(`Ошибка сети при поиске файла: ${response.statusText}`);
+                        }
+                        const fileList = await response.json();
+
+                        const matchingFiles = fileList ? fileList.filter(file => file.name.startsWith(formattedQuarterForKPT)) : [];
+
+                        if (matchingFiles.length > 0) {
+                            const latestFile = findLatestKptFile(matchingFiles);
+                            if (latestFile) {
+                                // Успешно нашли файл, вызываем handleOpenKpt, который загрузит и обработает его
+                                await handleOpenKpt(latestFile.name, value); // Передаем value для автовыбора
+                            } else {
+                                if (loaderContainer) loaderContainer.style.display = 'none';
+                                showNotification(`Не удалось определить последний КПТ для квартала ${quarterToSearchForKPT}.`, 'warning', 'exclamation-triangle');
+                            }
+                        } else {
+                            // КПТ не найден, но нужно попытаться найти объект, если он уже загружен
+                            if (loaderContainer) loaderContainer.style.display = 'none';
+                            showNotification(`КПТ для квартала ${quarterToSearchForKPT} не найден в базе.`, 'warning', 'folder-open');
+                            if (value !== currentSelection) findAndSelectByCadastralNumber(value);
+                        }
+                    } catch (error) {
                         if (loaderContainer) loaderContainer.style.display = 'none';
-                        showNotification(`Не удалось определить файл для ${quarterToSearchForKPT}.`, 'warning');
+                        showNotification(`Ошибка автозагрузки КПТ: ${error.message}`, 'error', 'exclamation-circle');
+                        // Даже если загрузка не удалась, пытаемся найти объект на случай, если он уже был
+                        if (value !== currentSelection) findAndSelectByCadastralNumber(value);
                     }
                 } else {
-                    if (loaderContainer) loaderContainer.style.display = 'none';
-                    showNotification(`КПТ для квартала ${quarterToSearchForKPT} не найден.`, 'warning', 'folder-open');
+                    // Недостаточно данных для определения квартала
+                    if (value !== currentSelection) findAndSelectByCadastralNumber(value);
                 }
-            } catch (error) {
-                if (loaderContainer) loaderContainer.style.display = 'none';
-                showNotification(`Ошибка автозагрузки КПТ: ${error.message}`, 'error');
+            } else {
+                // Квартал тот же или нет нужды в загрузке, просто ищем объект
+                if (value !== currentSelection) {
+                    findAndSelectByCadastralNumber(value);
+                }
             }
         } else {
-            showNotification('Некорректный формат кадастрового номера', 'warning');
+            showNotification('Некорректный формат кадастрового номера или квартала/блока', 'warning', 'exclamation-triangle');
         }
     }
 });
@@ -4505,15 +4483,13 @@ function initCadastralInput() {
 
                 itemDiv.appendChild(fileInfoWrapper); // Добавляем обёртку в основной элемент списка
 
-                     const buttonsDiv = document.createElement('div');
+                const buttonsDiv = document.createElement('div');
                 buttonsDiv.className = 'quarter-item-actions';
                 const openBtn = document.createElement('button');
                 openBtn.className = 'button icon-button open-kpt-btn';
                 openBtn.dataset.filename = file.name;
                 openBtn.title = 'Открыть';
                 openBtn.innerHTML = '<i class="fas fa-folder-open"></i>';
-                
-                // --- ИСПРАВЛЕНИЕ СЛУЧАЯ 2: Передача номера для выбора ---
                 openBtn.onclick = (e) => {
                     isDialogActionInProgress = true;
                     e.stopPropagation();
@@ -4521,19 +4497,12 @@ function initCadastralInput() {
                     if (isJsonZip) {
                         filters = getJsonFiltersForFile(file.name);
                         if (filters.size === 0) {
-                            showNotification('Не выбраны типы объектов. Загрузка отменена.', 'warning');
+                            showNotification('Не выбраны типы объектов для загрузки из JSON.ZIP. Загрузка отменена.', 'warning', 'filter');
                             return;
                         }
                     }
-                    
-                    // Получаем то, что сейчас введено в поле поиска
-                    const inputVal = document.getElementById('cadastralInput').value.trim();
-                    // Если это полноценный кадастровый номер (а не просто квартал), передаем его для автовыбора
-                    const objectToSelect = isValidCadastralNumber(inputVal) ? inputVal : null;
-
-                    handleOpenKpt(file.name, objectToSelect, filters);
+                    handleOpenKpt(file.name, null, filters);
                 };
-                // --------------------------------------------------------
 
                 const downloadBtn = document.createElement('button');
                 downloadBtn.className = 'button icon-button download-kpt-btn';
@@ -6094,12 +6063,10 @@ function getJsonFiltersForFile(fileName) {
 
         if (!allContours.length && !importedContours.length && !buildingsContours.length && !zonesAndTerritoriesContours.length) return;
 
-            if (!preserveTransform) {
+        if (!preserveTransform) {
             let pointsForBoundsCalculation = [];
             
-            // ЛОГИКА ПРИОРИТЕТА: 
-            // 1. Сначала пытаемся собрать точки только важных объектов (ЗУ, ОКС, Импорт)
-            // Это предотвратит зумирование на огромные границы кварталов, если нам важны участки
+            // ИЗМЕНЕНИЕ: Собираем точки со ВСЕХ типов объектов для корректного расчета границ
             if (allContours.length > 0) {
                 allContours.forEach(p => p.contours.forEach(c => pointsForBoundsCalculation.push(...c)));
             }
@@ -6109,46 +6076,23 @@ function getJsonFiltersForFile(fileName) {
             if (buildingsContours.length > 0) {
                  buildingsContours.forEach(b => b.contours.forEach(c => pointsForBoundsCalculation.push(...c)));
             }
-
-            // 2. Если важных объектов нет (пустой массив), тогда добавляем Зоны и Территории
-            if (pointsForBoundsCalculation.length === 0 && zonesAndTerritoriesContours.length > 0) {
+            if (zonesAndTerritoriesContours.length > 0) {
                  zonesAndTerritoriesContours.forEach(z => z.contours.forEach(c => pointsForBoundsCalculation.push(...c)));
             }
 
             if (pointsForBoundsCalculation.length > 0) {
-                 // ФИЛЬТРАЦИЯ: Убираем NaN и координаты близкие к нулю (мусорные данные)
-                 const validXs = pointsForBoundsCalculation.map(p => p.x).filter(x => isFinite(x) && Math.abs(x) > 1);
-                 const validYs = pointsForBoundsCalculation.map(p => p.y).filter(y => isFinite(y) && Math.abs(y) > 1);
-                 
+                 const validXs = pointsForBoundsCalculation.map(p => p.x).filter(isFinite);
+                 const validYs = pointsForBoundsCalculation.map(p => p.y).filter(isFinite);
                  if(validXs.length > 0 && validYs.length > 0){
                      minX = Math.min(...validXs); minY = Math.min(...validYs); maxX = Math.max(...validXs); maxY = Math.max(...validYs);
-                     
-                     // Добавляем небольшой отступ (padding) 5% по краям
-                     const paddingX = (maxX - minX) * 0.05;
-                     const paddingY = (maxY - minY) * 0.05;
-                     minX -= paddingX; maxX += paddingX;
-                     minY -= paddingY; maxY += paddingY;
-
                      const width = (maxX - minX) || 1; const height = (maxY - minY) || 1;
-                     const scaleX = canvasEl.width / height; 
-                     const scaleY = canvasEl.height / width;
-                     
-                     scale = Math.min(scaleX, scaleY); 
-                     
-                     // УВЕЛИЧИВАЕМ ЛИМИТ: меняем 50 на 5000, чтобы одиночные объекты могли быть крупными
-                     scale = Math.max(1e-6, Math.min(scale, 5000));
-                     
+                     const scaleX = canvasEl.width / height * 0.9; const scaleY = canvasEl.height / width * 0.9;
+                     scale = Math.min(scaleX, scaleY); scale = Math.max(1e-6, Math.min(scale, 50));
                      if (!isFinite(scale) || scale <=0) scale = 1;
-                     
                      offsetX = (canvasEl.width - (maxY - minY) * scale) / 2;
                      offsetY = (canvasEl.height - (maxX - minX) * scale) / 2;
-                 } else { 
-                     // Если все координаты были 0,0
-                     scale = 1; minX = 0; minY = 0; maxX = canvasEl.width; maxY = canvasEl.height; offsetX = 0; offsetY = 0; 
-                 }
-            } else { 
-                scale = 1; minX = 0; minY = 0; maxX = canvasEl.width; maxY = canvasEl.height; offsetX = 0; offsetY = 0; 
-            }
+                 } else { scale = 1; minX = 0; minY = 0; maxX = canvasEl.width; maxY = canvasEl.height; offsetX = 0; offsetY = 0; }
+            } else { scale = 1; minX = 0; minY = 0; maxX = canvasEl.width; maxY = canvasEl.height; offsetX = 0; offsetY = 0; }
          }
 
         if (isGridVisible) { const gridStep = determineGridStep(); drawGrid(ctx, gridStep); }
@@ -6617,7 +6561,7 @@ function getJsonFiltersForFile(fileName) {
             isSelectiveLoadMode = false;
             return;
         }
-        event.target.value = null; // Сброс, чтобы можно было выбрать тот же файл повторно
+        event.target.value = null;
 
         const loaderContainer = document.getElementById('loaderContainer');
         loaderContainer.style.display = 'flex';
@@ -6626,67 +6570,52 @@ function getJsonFiltersForFile(fileName) {
         let processingText = 'Чтение файла...';
 
         if (fileNameLower.endsWith('.xml')) processingText = 'Чтение XML-файла';
-        else if (fileNameLower.endsWith('.json')) processingText = 'Чтение JSON-файла'; // Добавлено
         else if (fileNameLower.endsWith('.json.zip')) processingText = 'Чтение JSON.ZIP архива';
-        else if (fileNameLower.endsWith('.zip')) processingText = 'Чтение ZIP-архива';
+        else if (fileNameLower.endsWith('.zip')) processingText = 'Чтение ZIP-архива (XML)';
 
         updateLoaderProgress(0, fileSize, processingText);
 
         const handleFileContent = async (content, fileNameFromArchive, fileType, contentSize) => {
-            if (fileType === 'xml') {
-                if (contentSize > LARGE_XML_THRESHOLD_BYTES) {
-                    loaderContainer.style.display = 'none';
-                    showLargeXmlDialog(content, fileNameFromArchive, contentSize);
-                    return;
-                }
-                
-                if (isSelectiveLoadMode) {
-                    rawXmlContentForSelection = content;
-                    updateLoaderProgress(fileSize, fileSize, 'Анализ XML для выбора');
-                    try {
-                        const allNumbers = await extractAllCadastralNumbersFromXML(content);
-                        if (allNumbers.length > 0) showSelectionDialog(allNumbers, fileNameFromArchive);
-                        else {
-                            showNotification('В XML файле не найдено номеров для выбора.', 'warning', 'exclamation-triangle');
-                            isSelectiveLoadMode = false; rawXmlContentForSelection = null; loaderContainer.style.display = 'none';
-                        }
-                    } catch (error) {
-                        showNotification('Ошибка при анализе XML для выбора: ' + error.message, 'error', 'exclamation-circle');
-                        isSelectiveLoadMode = false; rawXmlContentForSelection = null; loaderContainer.style.display = 'none';
-                    }
-                } else {
-                    updateLoaderProgress(fileSize, fileSize, 'Обработка XML');
-                    setTimeout(async () => {
-                        try { await processXMLContent(content, fileNameFromArchive); }
-                        catch (error) { showNotification('Ошибка при обработке XML: ' + error.message, 'error', 'exclamation-circle'); }
-                        finally { loaderContainer.style.display = 'none'; }
-                    }, 800);
-                }
-            } else if (fileType === 'json') {
-                // Обработка JSON
-                if (contentSize > LARGE_JSON_THRESHOLD_BYTES) {
-                     showNotification('Файл JSON слишком большой, активирован режим выбора.', 'info', 'filter');
-                     isSelectiveLoadMode = true;
-                     rawJsonContentForSelection = content;
-                     const allIdentifiers = await extractAllIdentifiersFromJson(content);
-                     if (allIdentifiers.length > 0) {
-                         showSelectionDialog(allIdentifiers, fileNameFromArchive);
-                     } else {
-                         showNotification('Не удалось извлечь объекты для выбора из большого JSON.', 'error');
-                         isSelectiveLoadMode = false; rawJsonContentForSelection = null;
-                     }
-                     loaderContainer.style.display = 'none';
-                } else {
-                    updateLoaderProgress(fileSize, fileSize, 'Обработка JSON');
-                    setTimeout(async () => {
-                        try { await handleJsonString(content, fileNameFromArchive); }
-                        catch (error) { showNotification('Ошибка при обработке JSON: ' + error.message, 'error'); }
-                        finally { loaderContainer.style.display = 'none'; }
-                    }, 500);
-                }
-            }
-        };
+          if (fileType === 'xml') {
+    // Единая логика для больших XML-файлов, неважно, выбран ли режим "Выбрать" заранее
+    if (contentSize > LARGE_XML_THRESHOLD_BYTES) {
+        loaderContainer.style.display = 'none';
+        // Просто показываем новый диалог, который сам обработает все варианты
+        showLargeXmlDialog(content, fileNameFromArchive, contentSize); 
+        return; // Прерываем дальнейшее выполнение, т.к. пользователь должен сделать выбор
+    }
 
+    // Этот блок теперь выполняется только для файлов < 10 MB,
+    // а также когда пользователь выбрал объекты в listDialog и мы пришли сюда снова.
+    if (isSelectiveLoadMode) {
+        // Эта ветка теперь будет использоваться только при повторном вызове после выбора в listDialog.
+        // Но так как мы всегда показываем largeXmlDialog, можно упростить.
+        // На практике, при первом открытии большого файла, мы выйдем из функции выше.
+        // Для простоты оставим старую логику для режима выбора, хотя она может стать избыточной.
+        rawXmlContentForSelection = content;
+        updateLoaderProgress(fileSize, fileSize, 'Анализ XML для выбора');
+        try {
+            const allNumbers = await extractAllCadastralNumbersFromXML(content);
+            if (allNumbers.length > 0) showSelectionDialog(allNumbers, fileNameFromArchive);
+            else {
+                showNotification('В XML файле не найдено номеров для выбора.', 'warning', 'exclamation-triangle');
+                isSelectiveLoadMode = false; rawXmlContentForSelection = null; loaderContainer.style.display = 'none';
+            }
+        } catch (error) {
+            showNotification('Ошибка при анализе XML для выбора: ' + error.message, 'error', 'exclamation-circle');
+            isSelectiveLoadMode = false; rawXmlContentForSelection = null; loaderContainer.style.display = 'none';
+        }
+    } else {
+        updateLoaderProgress(fileSize, fileSize, 'Обработка XML');
+        setTimeout(async () => {
+            try { await processXMLContent(content, fileNameFromArchive); }
+            catch (error) { showNotification('Ошибка при обработке XML: ' + error.message, 'error', 'exclamation-circle'); }
+            finally { loaderContainer.style.display = 'none'; }
+        }, 800);
+    }
+}
+        };
+        
         // Блок чтения файлов
         try {
             if (fileNameLower.endsWith('.xml')) {
@@ -6694,44 +6623,27 @@ function getJsonFiltersForFile(fileName) {
                 reader.onload = (e) => handleFileContent(e.target.result, file.name, 'xml', e.target.result.length);
                 reader.onerror = () => { loaderContainer.style.display = 'none'; showNotification('Ошибка при чтении XML-файла', 'error'); };
                 reader.readAsText(file);
-            } 
-            else if (fileNameLower.endsWith('.json')) { // Добавлена поддержка простого .json
-                const reader = new FileReader();
-                reader.onload = (e) => handleFileContent(e.target.result, file.name, 'json', e.target.result.length);
-                reader.onerror = () => { loaderContainer.style.display = 'none'; showNotification('Ошибка при чтении JSON-файла', 'error'); };
-                reader.readAsText(file);
-            }
-            else if (fileNameLower.endsWith('.json.zip')) {
+            } else if (fileNameLower.endsWith('.json.zip')) {
                 const zip = await JSZip.loadAsync(await file.arrayBuffer());
                 let jsonFileEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.json') && !f.dir);
                 if (jsonFileEntry) {
                     const jsonContentString = await jsonFileEntry.async('string');
+                    // Передаем размер контента, а не всего zip-архива
                     await handleFileContent(jsonContentString, jsonFileEntry.name, 'json', jsonContentString.length);
                 } else {
                     throw new Error('JSON-файл не найден в архиве.');
                 }
-            } 
-            else if (fileNameLower.endsWith('.zip')) {
+            } else if (fileNameLower.endsWith('.zip')) {
                 const zip = await JSZip.loadAsync(await file.arrayBuffer());
-                
-                // Сначала ищем XML
-                let targetFileEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.xml') && !f.dir);
-                let targetType = 'xml';
-
-                // Если XML нет, ищем JSON
-                if (!targetFileEntry) {
-                    targetFileEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.json') && !f.dir);
-                    targetType = 'json';
-                }
-
-                if (targetFileEntry) {
-                    const content = await targetFileEntry.async('string');
-                    await handleFileContent(content, targetFileEntry.name, targetType, content.length);
+                let xmlFileEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.xml') && !f.dir);
+                if (xmlFileEntry) {
+                    const xmlContent = await xmlFileEntry.async('string');
+                    await handleFileContent(xmlContent, xmlFileEntry.name, 'xml', xmlContent.length);
                 } else {
-                    throw new Error('В архиве не найдены файлы формата XML или JSON.');
+                    throw new Error('XML-файл не найден в архиве.');
                 }
             } else {
-                throw new Error('Пожалуйста, выберите файл XML, JSON, ZIP или JSON.ZIP.');
+                throw new Error('Пожалуйста, выберите файл XML, ZIP или JSON.ZIP.');
             }
         } catch (error) {
             loaderContainer.style.display = 'none';
