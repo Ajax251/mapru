@@ -886,4 +886,300 @@ ${JSON.stringify(wordsList)}
             
             try {
                 let jsonStr = await callAI(prompt);
-                jsonStr = jsonStr.replace(/
+                jsonStr = jsonStr.replace(/```json/g, '').replace(/```/g, '').trim();
+                
+                const translatedData = JSON.parse(jsonStr);
+                if (!Array.isArray(translatedData)) throw new Error("Invalid AI response format");
+                
+                state.words = translatedData.filter(item => 
+                    item.original && item.translation && !item.original.includes(' ')
+                );
+                
+                if (state.words.length < 4) {
+                    throw new Error("Получено недостаточно корректных переводов");
+                }
+                
+                startGame(false);
+            } catch (e) {
+                console.error(e);
+                alert("Ошибка ИИ: " + e.message);
+            } finally {
+                setLoading(false);
+            }
+        }
+
+        // --- AI CALL WITH AUTO PROXY SWITCHING ---
+        async function callAI(prompt) {
+            const proxies = [
+                {
+                    name: "MAPRUAPP",
+                    url: `${MAPRUAPP_PROXY}/ai/api/v1/chat/completions`,
+                    buildBody: () => ({
+                        model: MODEL,
+                        messages: [{ role: "user", content: prompt }],
+                        max_tokens: 8000,
+                        response_format: { type: "json_object" }
+                    }),
+                    extractContent: (data) => data.choices[0].message.content
+                },
+                {
+                    name: "VERCEL",
+                    url: `${VERCEL_PROXY}/v1beta/models/${MODEL}:generateContent`,
+                    buildBody: () => ({
+                        contents: [{ parts: [{ text: prompt }] }],
+                        generationConfig: { responseMimeType: "application/json" }
+                    }),
+                    extractContent: (data) => data.candidates[0].content.parts[0].text
+                }
+            ];
+
+            let attempts = 0;
+            const maxAttempts = proxies.length;
+
+            while (attempts < maxAttempts) {
+                const proxy = proxies[currentProxyIndex];
+                
+                try {
+                    console.log(`Попытка запроса через ${proxy.name}...`);
+                    
+                    const res = await fetch(proxy.url, {
+                        method: 'POST',
+                        headers: { 'Content-Type': 'application/json' },
+                        body: JSON.stringify(proxy.buildBody())
+                    });
+                    
+                    if (!res.ok) {
+                        throw new Error(`${proxy.name} returned status ${res.status}`);
+                    }
+                    
+                    const data = await res.json();
+                    const content = proxy.extractContent(data);
+                    
+                    console.log(`✓ Успешный ответ от ${proxy.name}`);
+                    return content;
+                    
+                } catch (error) {
+                    console.error(`✗ Ошибка ${proxy.name}:`, error.message);
+                    
+                    // Switch to next proxy
+                    currentProxyIndex = (currentProxyIndex + 1) % proxies.length;
+                    attempts++;
+                    
+                    if (attempts < maxAttempts) {
+                        console.log(`Переключение на ${proxies[currentProxyIndex].name}...`);
+                        await new Promise(resolve => setTimeout(resolve, 500)); // Small delay before retry
+                    }
+                }
+            }
+            
+            throw new Error("Все прокси недоступны. Проверьте соединение.");
+        }
+
+        // --- GAMEPLAY ---
+        function startGame(reversed = false) {
+            if (state.words.length < 4) {
+                alert("Слишком мало слов.");
+                return;
+            }
+            state.isReversed = reversed;
+            state.gameOrder = [...state.words].sort(() => Math.random() - 0.5);
+            state.idx = 0;
+            state.score = 0;
+            state.mistakes = 0;
+            state.mistakesLog = [];
+            showScreen('screen-game');
+            nextWord();
+        }
+
+        function restartGame(reversed) {
+            startGame(reversed);
+        }
+
+        function nextWord() {
+            if (state.idx >= state.gameOrder.length) {
+                endGame();
+                return;
+            }
+            state.locked = false;
+            const current = state.gameOrder[state.idx];
+            
+            const targetEl = document.getElementById('target-word');
+            targetEl.style.animation = 'none';
+            targetEl.offsetHeight; 
+            targetEl.style.animation = 'wordFlash 0.6s ease-out';
+            
+            const questionText = state.isReversed ? current.translation : current.original;
+            targetEl.textContent = questionText;
+
+            document.getElementById('score').textContent = state.score;
+            const pct = (state.idx / state.gameOrder.length) * 100;
+            document.getElementById('progress').style.width = `${pct}%`;
+            
+            renderOptions(current);
+        }
+
+        function renderOptions(correct) {
+            const container = document.getElementById('options-container');
+            container.innerHTML = '';
+            
+            let pool = state.words.filter(w => w.original !== correct.original);
+            let distractors = pool.sort(() => Math.random() - 0.5).slice(0, 3);
+            let options = [correct, ...distractors].sort(() => Math.random() - 0.5);
+            
+            const answerKey = state.isReversed ? 'original' : 'translation';
+
+            options.forEach((opt, index) => {
+                const btn = document.createElement('button');
+                btn.className = 'option-btn';
+                btn.textContent = opt[answerKey];
+                btn.style.animationDelay = (index * 0.08) + 's';
+                btn.onclick = () => handleAnswer(opt, correct, btn);
+                container.appendChild(btn);
+            });
+        }
+
+        function handleAnswer(selected, correct, btn) {
+            if (state.locked) return;
+            state.locked = true;
+            
+            const isCorrect = selected.original === correct.original;
+            
+            if (isCorrect) {
+                btn.classList.add('correct-anim');
+                state.score++;
+            } else {
+                btn.classList.add('wrong-anim');
+                state.mistakes++;
+                
+                const qKey = state.isReversed ? 'translation' : 'original';
+                const aKey = state.isReversed ? 'original' : 'translation';
+                state.mistakesLog.push({
+                    word: correct[qKey],
+                    chosen: selected[aKey],
+                    correct: correct[aKey]
+                });
+
+                const correctText = correct[state.isReversed ? 'original' : 'translation'];
+                Array.from(document.querySelectorAll('.option-btn')).forEach(b => {
+                    if (b.textContent === correctText) {
+                        b.style.transition = "all 0.6s";
+                        b.style.border = "4px solid var(--success)";
+                        b.style.boxShadow = "0 0 30px var(--success)";
+                        b.style.transform = "scale(1.05)";
+                    }
+                });
+            }
+            
+            setTimeout(() => {
+                state.idx++;
+                nextWord();
+            }, 1200);
+        }
+
+        function endGame() {
+            showScreen('screen-result');
+            const total = state.gameOrder.length;
+            const accuracy = Math.round((state.score / total) * 100);
+            
+            document.getElementById('final-percent').textContent = `${accuracy}%`;
+            document.getElementById('res-total').textContent = total;
+            document.getElementById('res-errors').textContent = state.mistakes;
+
+            const mistakesBtn = document.getElementById('btn-show-mistakes');
+            const mistakesSec = document.getElementById('mistakes-section');
+            mistakesSec.style.display = 'none';
+            
+            if (state.mistakesLog.length > 0) {
+                mistakesBtn.style.display = 'flex';
+                renderMistakesList();
+            } else {
+                mistakesBtn.style.display = 'none';
+            }
+        }
+
+        function renderMistakesList() {
+            const container = document.getElementById('mistakes-container');
+            container.innerHTML = '';
+            state.mistakesLog.forEach(log => {
+                const div = document.createElement('div');
+                div.className = 'mistake-card';
+                div.innerHTML = `
+                    <div class="m-word"><i class="fas fa-circle-exclamation" style="color: var(--error); margin-right: 6px;"></i>${log.word}</div>
+                    <div>
+                        <span class="m-wrong"><i class="fas fa-xmark"></i> ${log.chosen}</span>
+                        <span class="m-right"><i class="fas fa-check"></i> ${log.correct}</span>
+                    </div>
+                `;
+                container.appendChild(div);
+            });
+        }
+
+        function toggleMistakes() {
+            const sec = document.getElementById('mistakes-section');
+            const btn = document.getElementById('btn-show-mistakes');
+            if (sec.style.display === 'none') {
+                sec.style.display = 'block';
+                btn.innerHTML = '<i class="fas fa-eye-slash"></i><span>Скрыть ошибки</span>';
+                setTimeout(() => {
+                    const resContent = document.querySelector('.result-content');
+                    resContent.scrollTop = resContent.scrollHeight;
+                }, 100);
+            } else {
+                sec.style.display = 'none';
+                btn.innerHTML = '<i class="fas fa-bug"></i><span>Показать ошибки</span>';
+            }
+        }
+
+        // --- IMPORT / EXPORT ---
+        function exportWords() {
+            if (!state.words || state.words.length === 0) return;
+            const dataStr = JSON.stringify(state.words, null, 2);
+            const blob = new Blob([dataStr], { type: "application/json" });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = `dictionary_${new Date().getTime()}.words`;
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+        }
+
+        function importWords(input) {
+            const file = input.files[0];
+            if (!file) return;
+            const reader = new FileReader();
+            reader.onload = function(e) {
+                try {
+                    const json = JSON.parse(e.target.result);
+                    if (Array.isArray(json) && json.length > 0 && json[0].original) {
+                        state.words = json;
+                        alert(`✓ Загружено ${json.length} слов.`);
+                        startGame(false);
+                    } else { 
+                        throw new Error("Неверный формат"); 
+                    }
+                } catch (err) { 
+                    alert("Ошибка чтения файла: " + err.message); 
+                }
+            };
+            reader.readAsText(file);
+            input.value = '';
+        }
+
+        // --- NAVIGATION & UI ---
+        function showScreen(id) {
+            document.querySelectorAll('.screen').forEach(s => s.classList.remove('active'));
+            document.getElementById(id).classList.add('active');
+        }
+
+        function goToInput() {
+            showScreen('screen-input');
+        }
+
+        function setLoading(active, text = "") {
+            document.getElementById('loader').style.display = active ? 'flex' : 'none';
+            document.getElementById('loader-sub').textContent = text;
+        }
+    </script>
+</body>
+</html>
