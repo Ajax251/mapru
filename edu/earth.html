@@ -868,7 +868,7 @@ input:checked + .slider:before {
             Время (геогр.): --:--:--
         </div>
         <div class="trajectory-toggle">
-            <span>🌠 Траектории</span>
+            <span>🌠 Траектории и МКС</span>
             <label class="switch"><input type="checkbox" id="chk-trajectories" /><span class="slider"></span></label>
         </div>
         <div id="sky-weather" class="weather-section">
@@ -1019,6 +1019,9 @@ let targetLocationOffset = null;
 let currentSkyLat = null, currentSkyLon = null;
 let sunTrajectoryLine = null, moonTrajectoryLine = null;
 let celestialObjects = [];
+
+let skyIssMesh = null;       
+let skyIssTrajectory = null;
 
 const BRIGHT_STARS = [
    
@@ -1593,6 +1596,166 @@ function initSkyView() {
     skyInitialized = true;
 }
 
+
+function getSatelliteTopo(obsLat, obsLon, satLat, satLon, satAltKm) {
+    const R = 6371; // Радиус Земли
+    const DEG2RAD = Math.PI / 180;
+    
+    // Координаты наблюдателя в декартовой системе (ECEF)
+    const lat1 = obsLat * DEG2RAD;
+    const lon1 = obsLon * DEG2RAD;
+    const r1 = R;
+    const x1 = r1 * Math.cos(lat1) * Math.cos(lon1);
+    const y1 = r1 * Math.cos(lat1) * Math.sin(lon1);
+    const z1 = r1 * Math.sin(lat1);
+
+    // Координаты спутника в ECEF
+    const lat2 = satLat * DEG2RAD;
+    const lon2 = satLon * DEG2RAD;
+    const r2 = R + satAltKm;
+    const x2 = r2 * Math.cos(lat2) * Math.cos(lon2);
+    const y2 = r2 * Math.cos(lat2) * Math.sin(lon2);
+    const z2 = r2 * Math.sin(lat2);
+
+    // Вектор от наблюдателя к спутнику
+    const dx = x2 - x1;
+    const dy = y2 - y1;
+    const dz = z2 - z1;
+
+    // Преобразование в топоцентрическую систему (Восток-Север-Верх)
+    const sinLat = Math.sin(lat1);
+    const cosLat = Math.cos(lat1);
+    const sinLon = Math.sin(lon1);
+    const cosLon = Math.cos(lon1);
+
+    const topS = -sinLat * cosLon * dx - sinLat * sinLon * dy + cosLat * dz; // North
+    const topE = -sinLon * dx + cosLon * dy;                                 // East
+    const topZ = cosLat * cosLon * dx + cosLat * sinLon * dy + sinLat * dz;  // Up
+
+    // Азимут и Высота
+    const az = Math.atan2(topE, topS);
+    const range = Math.sqrt(topE*topE + topS*topS + topZ*topZ);
+    const alt = Math.asin(topZ / range);
+
+    return { 
+        azimuth: (az * 180 / Math.PI + 360) % 360, 
+        altitude: alt * 180 / Math.PI 
+    };
+}
+
+
+function updateSkyISS() {
+    // Если МКС не найдена, траектории выключены или нет GPS наблюдателя - удаляем и выходим
+    if (!issHasFix || !el.chkTrajectories.checked || currentSkyLat === null) {
+        if (skyIssMesh) { skyScene.remove(skyIssMesh); skyIssMesh = null; }
+        if (skyIssTrajectory) { skyScene.remove(skyIssTrajectory); skyIssTrajectory = null; }
+        return;
+    }
+
+    // 1. Считаем текущее положение
+    const topo = getSatelliteTopo(currentSkyLat, currentSkyLon, issDisplayData.lat, issDisplayData.lon, issDisplayData.alt);
+    
+    // Перевод в координаты сцены (сфера радиусом 35)
+    const azRad = topo.azimuth * Math.PI / 180;
+    const altRad = topo.altitude * Math.PI / 180;
+    const r = 35;
+    
+    const x = -r * Math.cos(altRad) * Math.sin(azRad);
+    const y = r * Math.sin(altRad);
+    const z = r * Math.cos(altRad) * Math.cos(azRad);
+
+    // 2. Создаем или обновляем Маркер МКС
+    if (!skyIssMesh) {
+        skyIssMesh = new THREE.Group();
+        
+        // Точка
+        const dot = new THREE.Mesh(
+            new THREE.SphereGeometry(0.4, 16, 16),
+            new THREE.MeshBasicMaterial({ color: 0xff3333, emissive: 0xff0000 })
+        );
+        skyIssMesh.add(dot);
+
+        // Текст
+        const canvas = document.createElement('canvas');
+        canvas.width = 256; canvas.height = 64;
+        const ctx = canvas.getContext('2d');
+        ctx.font = 'bold 40px Consolas';
+        ctx.fillStyle = '#ff7043';
+        ctx.textAlign = 'center';
+        ctx.textBaseline = 'middle';
+        ctx.fillText("МКС (ISS)", 128, 32);
+        
+        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ 
+            map: new THREE.CanvasTexture(canvas), 
+            depthTest: false,
+            transparent: true 
+        }));
+        sprite.position.y = 1.5;
+        sprite.scale.set(6, 1.5, 1);
+        skyIssMesh.add(sprite);
+        
+        skyScene.add(skyIssMesh);
+    }
+    
+    skyIssMesh.position.set(x, y, z);
+    skyIssMesh.lookAt(0, 0, 0);
+
+    // 3. Рисуем траекторию (вектор движения)
+    // Прогнозируем точку через 10 минут (МКС летит быстро, ~4 град/мин)
+    // Упрощенная экстраполяция: берем текущую скорость изменения координат
+    // Но для визуализации проще построить линию по двум точкам
+    
+    if (skyIssTrajectory) { skyScene.remove(skyIssTrajectory); }
+
+    // Прогноз будущей точки (грубый, но для короткого вектора хватит)
+    // МКС движется на восток, наклон орбиты 51.6. 
+    // Для точного вектора нужно считать heading, но мы возьмем просто линию "назад" (хвост)
+    // или "вперед". Сделаем хвост.
+    
+    // Вектор позиции
+    const posVec = new THREE.Vector3(x, y, z);
+    
+    // Вектор "хвоста" (просто визуальный эффект, направленный к горизонту или по орбите)
+    // Чтобы не усложнять математику орбиты, нарисуем круг вокруг наблюдателя, проходящий через МКС?
+    // Нет, лучше просто пунктирную линию орбиты.
+    
+    // Самый простой вариант траектории: круг высоты (орбита МКС примерно круговая)
+    // Но это сложно. Нарисуем "хвост" на основе предыдущего кадра? Нет истории.
+    // Нарисуем просто красную линию
+    
+    const points = [];
+    // Текущая точка
+    points.push(new THREE.Vector3(x, y, z));
+    // Точка "впереди" (симуляция движения по азимуту)
+    // МКС всегда летит примерно на Восток (с вариациями С-В или Ю-В)
+    // Добавим +5 градусов к долготе спутника и пересчитаем
+    const futureTopo = getSatelliteTopo(currentSkyLat, currentSkyLon, issDisplayData.lat, issDisplayData.lon + 5, issDisplayData.alt);
+    const fAz = futureTopo.azimuth * Math.PI / 180;
+    const fAlt = futureTopo.altitude * Math.PI / 180;
+    
+    points.push(new THREE.Vector3(
+        -r * Math.cos(fAlt) * Math.sin(fAz),
+        r * Math.sin(fAlt),
+        r * Math.cos(fAlt) * Math.cos(fAz)
+    ));
+
+    const trajGeo = new THREE.BufferGeometry().setFromPoints(points);
+    const trajMat = new THREE.LineDashedMaterial({
+        color: 0xff3333,
+        dashSize: 1,
+        gapSize: 0.5,
+        opacity: 0.7,
+        transparent: true
+    });
+    
+    skyIssTrajectory = new THREE.Line(trajGeo, trajMat);
+    skyIssTrajectory.computeLineDistances();
+    skyScene.add(skyIssTrajectory);
+}
+
+
+
+
 function updateSkySun(lat, lon) {
     if (!skySunMesh) return;
     
@@ -1765,6 +1928,7 @@ function animateSky() {
     }
     
     skyAnimationId = requestAnimationFrame(animateSky);
+      updateSkyISS(); 
     
     const timeDisplay = document.getElementById('sky-local-time');
     
