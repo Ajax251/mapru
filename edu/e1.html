@@ -1,0 +1,252 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Инфо о городе на карте</title>
+    <style>
+        body, html { margin: 0; padding: 0; height: 100%; font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; }
+        #map { width: 100%; height: 100%; }
+        
+        /* Стили для балуна (окна информации) */
+        .balloon-content {
+            min-width: 250px;
+            max-width: 300px;
+        }
+        .balloon-header {
+            font-size: 18px;
+            font-weight: bold;
+            margin-bottom: 10px;
+            color: #333;
+            border-bottom: 2px solid #ffcc00; /* Яндекс желтый */
+            padding-bottom: 5px;
+        }
+        .balloon-row {
+            margin-bottom: 6px;
+            font-size: 14px;
+            color: #555;
+            display: flex;
+            justify-content: space-between;
+        }
+        .balloon-row span:first-child {
+            font-weight: 600;
+            color: #333;
+        }
+        .weather-block {
+            background-color: #f0f8ff;
+            padding: 8px;
+            border-radius: 8px;
+            margin-top: 10px;
+            display: flex;
+            align-items: center;
+            gap: 10px;
+        }
+        .weather-icon { font-size: 24px; }
+        .wiki-link {
+            display: block;
+            margin-top: 12px;
+            text-align: right;
+            color: #007bff;
+            text-decoration: none;
+            font-size: 13px;
+        }
+        .wiki-link:hover { text-decoration: underline; }
+        .loader { text-align: center; color: #888; font-style: italic; }
+    </style>
+    
+    <!-- Подключаем Яндекс Карты. Ключ используется тестовый/публичный, лучше заменить на свой -->
+    <script src="https://api-maps.yandex.ru/2.1/?apikey=dde71a0e-b612-44b7-b53b-82533420240f&lang=ru_RU" type="text/javascript"></script>
+</head>
+<body>
+
+<div id="map"></div>
+
+<script>
+    // --- Конфигурация API ---
+    const WIKI_API = "https://ru.wikipedia.org/w/api.php";
+    const WIKIDATA_API = "https://www.wikidata.org/w/api.php";
+    const WEATHER_API = "https://api.open-meteo.com/v1/forecast";
+
+    // --- Словарик кодов погоды WMO ---
+    const weatherCodes = {
+        0: ['☀️', 'Ясно'], 1: ['🌤️', 'Преим. ясно'], 2: ['⛅', 'Переменная облачность'], 3: ['☁️', 'Пасмурно'],
+        45: ['🌫️', 'Туман'], 48: ['🌫️', 'Изморозь'],
+        51: ['🌧️', 'Лёгкая морось'], 53: ['🌧️', 'Морось'], 55: ['🌧️', 'Сильная морось'],
+        61: ['🌧️', 'Слабый дождь'], 63: ['🌧️', 'Дождь'], 65: ['🌧️', 'Сильный дождь'],
+        71: ['❄️', 'Слабый снег'], 73: ['❄️', 'Снег'], 75: ['❄️', 'Сильный снег'],
+        80: ['🌦️', 'Ливень'], 95: ['⛈️', 'Гроза']
+    };
+
+    ymaps.ready(init);
+
+    function init() {
+        const map = new ymaps.Map("map", {
+            center: [55.751574, 37.573856], // Москва
+            zoom: 9,
+            controls: ['zoomControl', 'searchControl', 'typeSelector']
+        });
+
+        // Отключаем стандартный зум по двойному клику, чтобы обрабатывать наше событие
+        map.behaviors.disable('dblClickZoom');
+
+        // Обработчик двойного клика
+        map.events.add('dblclick', async function (e) {
+            const coords = e.get('coords');
+            
+            // 1. Открываем балун с загрузкой сразу в точке клика
+            map.balloon.open(coords, {
+                contentHeader: "Загрузка...",
+                contentBody: '<div class="loader">Получение данных о населенном пункте...</div>'
+            });
+
+            try {
+                // 2. Получаем данные
+                const data = await gatherCityInfo(coords);
+                
+                // 3. Формируем HTML для балуна
+                const htmlContent = buildBalloonContent(data);
+
+                // 4. Обновляем балун
+                map.balloon.setData({
+                    contentBody: htmlContent
+                });
+
+            } catch (error) {
+                console.error(error);
+                map.balloon.setData({
+                    contentBody: `<div style="color:red;">Не удалось получить данные. Возможно, это не населенный пункт.</div>`
+                });
+            }
+        });
+    }
+
+    // --- Основная функция сбора данных ---
+    async function gatherCityInfo(coords) {
+        const [lat, lon] = coords;
+        
+        // 1. Яндекс Геокодер (получаем название)
+        const geocodeRes = await ymaps.geocode(coords, { kind: 'locality', results: 1 });
+        const firstGeoObject = geocodeRes.geoObjects.get(0);
+        
+        if (!firstGeoObject) throw new Error("Населенный пункт не найден");
+        
+        // Получаем название (например, "Москва")
+        const cityName = firstGeoObject.getLocalities().length > 0 
+            ? firstGeoObject.getLocalities()[0] 
+            : firstGeoObject.getName();
+
+        // Запускаем параллельно запросы к Википедии/Викиданным и Погоде
+        const [wikiData, weatherData] = await Promise.all([
+            fetchWikiData(cityName),
+            fetchWeather(lat, lon)
+        ]);
+
+        return {
+            name: cityName,
+            ...wikiData,
+            ...weatherData
+        };
+    }
+
+    // --- Получение данных из Википедии и Викиданных ---
+    async function fetchWikiData(query) {
+        const result = { population: 'н/д', area: 'н/д', wikiUrl: '#', summary: '' };
+
+        try {
+            // А. Поиск страницы в Википедии
+            const searchUrl = `${WIKI_API}?origin=*&action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json`;
+            const searchRes = await fetch(searchUrl).then(r => r.json());
+            
+            if (!searchRes.query.search.length) return result;
+            
+            const title = searchRes.query.search[0].title;
+            
+            // Б. Получение URL статьи и ID сущности Викиданных (Wikibase Item)
+            const infoUrl = `${WIKI_API}?origin=*&action=query&prop=info|pageprops&inprop=url&ppprop=wikibase_item&titles=${encodeURIComponent(title)}&format=json`;
+            const infoRes = await fetch(infoUrl).then(r => r.json());
+            
+            const pageId = Object.keys(infoRes.query.pages)[0];
+            const pageData = infoRes.query.pages[pageId];
+
+            result.wikiUrl = pageData.fullurl;
+            
+            if (pageData.pageprops && pageData.pageprops.wikibase_item) {
+                // В. Запрос к Викиданным (за населением и площадью)
+                const qId = pageData.pageprops.wikibase_item; // Например, Q649
+                const wdUrl = `${WIKIDATA_API}?origin=*&action=wbgetentities&ids=${qId}&props=claims&format=json`;
+                const wdRes = await fetch(wdUrl).then(r => r.json());
+                
+                const claims = wdRes.entities[qId].claims;
+
+                // P1082 - Население
+                if (claims.P1082 && claims.P1082[0]) {
+                    const popVal = claims.P1082[0].mainsnak.datavalue.value.amount;
+                    result.population = parseInt(popVal.replace('+', '')).toLocaleString('ru-RU');
+                }
+
+                // P2046 - Площадь
+                if (claims.P2046 && claims.P2046[0]) {
+                    const areaVal = claims.P2046[0].mainsnak.datavalue.value.amount;
+                    result.area = parseFloat(areaVal.replace('+', '')).toFixed(1) + ' км²';
+                }
+            }
+        } catch (e) {
+            console.warn("Wiki fetch error", e);
+        }
+        return result;
+    }
+
+    // --- Получение погоды ---
+    async function fetchWeather(lat, lon) {
+        try {
+            const url = `${WEATHER_API}?latitude=${lat}&longitude=${lon}&current=temperature_2m,weather_code&wind_speed_unit=ms`;
+            const res = await fetch(url).then(r => r.json());
+            
+            if (!res.current) return { temp: '?', weatherText: 'Нет данных', weatherIcon: '❓' };
+
+            const code = res.current.weather_code;
+            const weatherInfo = weatherCodes[code] || ['🌡️', 'Нет данных'];
+            
+            return {
+                temp: Math.round(res.current.temperature_2m),
+                weatherIcon: weatherInfo[0],
+                weatherText: weatherInfo[1]
+            };
+        } catch (e) {
+            return { temp: '?', weatherText: 'Ошибка', weatherIcon: '⚠️' };
+        }
+    }
+
+    // --- Генерация HTML контента ---
+    function buildBalloonContent(data) {
+        return `
+            <div class="balloon-content">
+                <div class="balloon-header">${data.name}</div>
+                
+                <div class="balloon-row">
+                    <span>👥 Население:</span>
+                    <span>${data.population}</span>
+                </div>
+                <div class="balloon-row">
+                    <span>📐 Площадь:</span>
+                    <span>${data.area}</span>
+                </div>
+
+                <div class="weather-block">
+                    <div class="weather-icon">${data.weatherIcon}</div>
+                    <div>
+                        <div style="font-weight:bold; font-size:16px;">${data.temp > 0 ? '+' : ''}${data.temp}°C</div>
+                        <div style="font-size:12px; color:#666;">${data.weatherText}</div>
+                    </div>
+                </div>
+
+                <a href="${data.wikiUrl}" target="_blank" class="wiki-link">
+                    📖 Читать в Википедии &rarr;
+                </a>
+            </div>
+        `;
+    }
+</script>
+
+</body>
+</html>
