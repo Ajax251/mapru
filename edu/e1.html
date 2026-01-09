@@ -149,50 +149,82 @@
     }
 
     // --- Получение данных из Википедии и Викиданных ---
-    async function fetchWikiData(query) {
+  async function fetchWikiData(query) {
         const result = { population: 'н/д', area: 'н/д', wikiUrl: '#', summary: '' };
-
         try {
-            // А. Поиск страницы в Википедии
+            // 1. Поиск статьи
             const searchUrl = `${WIKI_API}?origin=*&action=query&list=search&srsearch=${encodeURIComponent(query)}&format=json`;
             const searchRes = await fetch(searchUrl).then(r => r.json());
-            
             if (!searchRes.query.search.length) return result;
             
             const title = searchRes.query.search[0].title;
             
-            // Б. Получение URL статьи и ID сущности Викиданных (Wikibase Item)
+            // 2. Получение ID Викиданных
             const infoUrl = `${WIKI_API}?origin=*&action=query&prop=info|pageprops&inprop=url&ppprop=wikibase_item&titles=${encodeURIComponent(title)}&format=json`;
             const infoRes = await fetch(infoUrl).then(r => r.json());
-            
             const pageId = Object.keys(infoRes.query.pages)[0];
             const pageData = infoRes.query.pages[pageId];
 
             result.wikiUrl = pageData.fullurl;
             
             if (pageData.pageprops && pageData.pageprops.wikibase_item) {
-                // В. Запрос к Викиданным (за населением и площадью)
-                const qId = pageData.pageprops.wikibase_item; // Например, Q649
+                const qId = pageData.pageprops.wikibase_item;
                 const wdUrl = `${WIKIDATA_API}?origin=*&action=wbgetentities&ids=${qId}&props=claims&format=json`;
                 const wdRes = await fetch(wdUrl).then(r => r.json());
-                
                 const claims = wdRes.entities[qId].claims;
 
-                // P1082 - Население
-                if (claims.P1082 && claims.P1082[0]) {
-                    const popVal = claims.P1082[0].mainsnak.datavalue.value.amount;
-                    result.population = parseInt(popVal.replace('+', '')).toLocaleString('ru-RU');
+                // --- ИСПРАВЛЕНИЕ: Умный поиск населения (P1082) ---
+                if (claims.P1082) {
+                    let bestPop = 0;
+                    let bestYear = 0;
+
+                    // Перебираем все записи о населении
+                    for (const claim of claims.P1082) {
+                        try {
+                            const amountStr = claim.mainsnak.datavalue.value.amount;
+                            const amount = parseInt(amountStr.replace('+', ''));
+                            
+                            // Пытаемся найти год этой записи (квалификатор P585 - момент времени)
+                            let year = 0;
+                            if (claim.qualifiers && claim.qualifiers.P585 && claim.qualifiers.P585[0]) {
+                                const timeStr = claim.qualifiers.P585[0].datavalue.value.time;
+                                // Формат времени: "+2024-01-01T00:00:00Z"
+                                year = parseInt(timeStr.replace('+', '').split('-')[0]);
+                            }
+
+                            // Логика выбора:
+                            // 1. Если у записи ранг "preferred" (предпочтительный), берем её приоритетно
+                            if (claim.rank === 'preferred') {
+                                if (year > bestYear) { // Если несколько preferred, берем свежее
+                                    bestPop = amount;
+                                    bestYear = year;
+                                }
+                            } 
+                            // 2. Если пока нет preferred, ищем просто самую свежую дату среди "normal"
+                            else if (claim.rank === 'normal' && year > bestYear) {
+                                bestPop = amount;
+                                bestYear = year;
+                            }
+                            // 3. Если дат вообще нет (редко), берем просто максимальное число
+                            else if (year === 0 && amount > bestPop) {
+                                bestPop = amount;
+                            }
+                        } catch(e) {}
+                    }
+                    
+                    if (bestPop > 0) {
+                        result.population = bestPop.toLocaleString('ru-RU');
+                        // Можно добавить год для точности: result.population += ` (${bestYear})`;
+                    }
                 }
 
-                // P2046 - Площадь
+                // P2046 - Площадь (берем первую, обычно она одна актуальная или preferred)
                 if (claims.P2046 && claims.P2046[0]) {
                     const areaVal = claims.P2046[0].mainsnak.datavalue.value.amount;
                     result.area = parseFloat(areaVal.replace('+', '')).toFixed(1) + ' км²';
                 }
             }
-        } catch (e) {
-            console.warn("Wiki fetch error", e);
-        }
+        } catch (e) { console.warn("Wiki fetch error", e); }
         return result;
     }
 
