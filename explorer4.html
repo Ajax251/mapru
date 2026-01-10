@@ -997,187 +997,66 @@ function openRouteInNewTab(route) {
 }
 
 // --- API ФУНКЦИИ ---
-function tryFixTruncatedJson(jsonString) {
-    let fixed = jsonString.trim();
-    
-    // Если JSON явно обрезан, пробуем закрыть его
-    if (fixed.startsWith('[')) {
-        // Массив объектов
-        // Находим последний полный объект
-        let lastCompleteIndex = -1;
-        let braceCount = 0;
-        let inString = false;
-        let escapeNext = false;
-        
-        for (let i = 0; i < fixed.length; i++) {
-            const char = fixed[i];
-            
-            if (escapeNext) {
-                escapeNext = false;
-                continue;
-            }
-            
-            if (char === '\\') {
-                escapeNext = true;
-                continue;
-            }
-            
-            if (char === '"' && !escapeNext) {
-                inString = !inString;
-                continue;
-            }
-            
-            if (inString) continue;
-            
-            if (char === '{') {
-                braceCount++;
-            } else if (char === '}') {
-                braceCount--;
-                if (braceCount === 0) {
-                    lastCompleteIndex = i;
-                }
-            }
-        }
-        
-        if (lastCompleteIndex > 0) {
-            // Обрезаем до последнего полного объекта и закрываем массив
-            fixed = fixed.substring(0, lastCompleteIndex + 1);
-            // Убираем возможную запятую в конце
-            fixed = fixed.replace(/,\s*$/, '');
-            fixed = fixed + ']';
-        }
-    } else if (fixed.startsWith('{')) {
-        // Объект с routes
-        // Ищем последний полный waypoint или route
-        let lastCompleteIndex = fixed.lastIndexOf('}');
-        if (lastCompleteIndex > 0) {
-            fixed = fixed.substring(0, lastCompleteIndex + 1);
-            
-            // Проверяем, нужно ли закрыть массивы и объекты
-            let openBraces = (fixed.match(/{/g) || []).length;
-            let closeBraces = (fixed.match(/}/g) || []).length;
-            let openBrackets = (fixed.match(/\[/g) || []).length;
-            let closeBrackets = (fixed.match(/]/g) || []).length;
-            
-            // Убираем запятую в конце
-            fixed = fixed.replace(/,\s*$/, '');
-            
-            // Закрываем недостающие скобки
-            while (closeBrackets < openBrackets) {
-                fixed += ']';
-                closeBrackets++;
-            }
-            while (closeBraces < openBraces) {
-                fixed += '}';
-                closeBraces++;
-            }
-        }
-    }
-    
-    return fixed;
-}
-
-// Задержка для retry
-function delay(ms) {
-    return new Promise(function(resolve) { setTimeout(resolve, ms); });
-}
-
-// --- API ФУНКЦИИ ---
-async function fetchAI(systemPrompt, userQuery, retryCount) {
-    retryCount = retryCount || 0;
-    const maxRetries = 3;
-    
+async function fetchAI(systemPrompt, userQuery) {
     const model = getCurrentModel();
     let apiUrl, requestBody;
     const fetchOptions = { method: 'POST', headers: { 'Content-Type': 'application/json' } };
     
     if (currentApiMode === 'mapruapp') {
+        // Прокси MapRuApp - OpenAI-compatible формат
         apiUrl = MAPRUAPP_PROXY_BASE_URL + '/ai/api/v1/chat/completions';
         requestBody = { 
             model: currentModelId, 
             messages: [{role: 'system', content: systemPrompt}, {role: 'user', content: userQuery}], 
-            max_tokens: 16000 
+            max_tokens: 8096 
         };
     } else if (currentApiMode === 'vercel') {
+        // Прокси Vercel
         if (model.apiType === 'gemini') {
             apiUrl = VERCEL_PROXY_BASE_URL + '/v1beta/models/' + currentModelId + ':generateContent';
             requestBody = { 
                 contents: [{ role: 'user', parts: [{ text: userQuery }] }], 
-                systemInstruction: { parts: [{text: systemPrompt}] },
-                generationConfig: { maxOutputTokens: 16000 }
+                systemInstruction: { parts: [{text: systemPrompt}] } 
             };
         } else if (model.apiType === 'openrouter') {
             apiUrl = VERCEL_PROXY_BASE_URL + '/proxy/openrouter/api/v1/chat/completions';
             requestBody = { 
                 model: currentModelId, 
                 messages: [{role: 'system', content: systemPrompt}, {role: 'user', content: userQuery}], 
-                max_tokens: 16000 
+                max_tokens: 8096 
             };
         } else if (model.apiType === 'mistral') {
             apiUrl = VERCEL_PROXY_BASE_URL + '/proxy/mistral/v1/chat/completions';
             requestBody = { 
                 model: currentModelId, 
                 messages: [{role: 'system', content: systemPrompt}, {role: 'user', content: userQuery}], 
-                max_tokens: 16000 
+                max_tokens: 8096 
             };
         }
     } else if (currentApiMode === 'direct') {
+        // Прямой доступ к Gemini
         apiUrl = 'https://generativelanguage.googleapis.com/v1beta/models/' + currentModelId + ':generateContent?key=' + geminiApiKey;
         requestBody = { 
             contents: [{ role: 'user', parts: [{ text: userQuery }] }], 
-            systemInstruction: { parts: [{text: systemPrompt}] },
-            generationConfig: { maxOutputTokens: 16000 }
+            systemInstruction: { parts: [{text: systemPrompt}] } 
         };
     } else if (currentApiMode === 'direct_mistral') {
+        // Прямой доступ к Mistral
         apiUrl = 'https://api.mistral.ai/v1/chat/completions';
         fetchOptions.headers['Authorization'] = 'Bearer ' + mistralApiKey;
         requestBody = { 
             model: currentModelId, 
             messages: [{role: 'system', content: systemPrompt}, {role: 'user', content: userQuery}], 
-            max_tokens: 16000 
+            max_tokens: 8096 
         };
     }
     
     fetchOptions.body = JSON.stringify(requestBody);
-    
-    let response;
-    try {
-        response = await fetch(apiUrl, fetchOptions);
-    } catch (networkError) {
-        throw new Error('Сетевая ошибка: ' + networkError.message);
-    }
-    
-    // Обработка rate limiting с retry
-    if (response.status === 429) {
-        if (retryCount < maxRetries) {
-            // Пытаемся извлечь время ожидания из ответа
-            let waitTime = 5000 * (retryCount + 1); // базовое время с экспоненциальным ростом
-            
-            try {
-                const errorData = await response.json();
-                const errorMsg = errorData.error && errorData.error.message || '';
-                // Ищем время в сообщении об ошибке (например: "Please retry in 37.208198551s")
-                const timeMatch = errorMsg.match(/retry in (\d+\.?\d*)/i);
-                if (timeMatch) {
-                    waitTime = Math.ceil(parseFloat(timeMatch[1]) * 1000) + 1000; // +1 сек запас
-                }
-            } catch (e) {
-                // Игнорируем ошибки парсинга
-            }
-            
-            console.log('Rate limit, ожидание ' + (waitTime/1000) + ' сек, попытка ' + (retryCount + 1) + '/' + maxRetries);
-            await delay(waitTime);
-            return fetchAI(systemPrompt, userQuery, retryCount + 1);
-        } else {
-            throw new Error('Превышен лимит запросов. Попробуйте позже или смените модель/режим.');
-        }
-    }
-    
+    const response = await fetch(apiUrl, fetchOptions);
     if (!response.ok) {
         const errorText = await response.text();
-        throw new Error('Ошибка ' + response.status + ': ' + errorText.substring(0, 200));
+        throw new Error('Сетевая ошибка ' + response.status + ': ' + errorText);
     }
-    
     const data = await response.json();
     
     let aiResponseText;
@@ -1185,36 +1064,24 @@ async function fetchAI(systemPrompt, userQuery, retryCount) {
     // Парсинг ответа в зависимости от API
     if (currentApiMode === 'mapruapp' || currentApiMode === 'direct_mistral' || 
         (currentApiMode === 'vercel' && (model.apiType === 'openrouter' || model.apiType === 'mistral'))) {
+        // OpenAI-compatible формат
         aiResponseText = data.choices && data.choices[0] && data.choices[0].message && data.choices[0].message.content;
     } else if (model.apiType === 'gemini' || currentApiMode === 'direct') {
+        // Gemini формат
         aiResponseText = data.candidates && data.candidates[0] && data.candidates[0].content && 
                         data.candidates[0].content.parts && data.candidates[0].content.parts[0] && 
                         data.candidates[0].content.parts[0].text;
     }
     
-    if (!aiResponseText) throw new Error('AI вернул пустой ответ.');
+    if (!aiResponseText) throw new Error('AI вернул пустой или некорректный ответ.');
     
     if (systemPrompt.includes("JSON")) {
-        let cleanedJsonString = aiResponseText.replace(/^```json\s*|```\s*$/g, '').trim();
-        
-        // Первая попытка парсинга
+        const cleanedJsonString = aiResponseText.replace(/^```json\s*|```\s*$/g, '').trim();
         try {
             return JSON.parse(cleanedJsonString);
         } catch (e) {
-            console.warn("Первая попытка парсинга не удалась, пробуем исправить JSON...");
-            
-            // Пробуем исправить обрезанный JSON
-            try {
-                const fixedJson = tryFixTruncatedJson(cleanedJsonString);
-                console.log("Исправленный JSON:", fixedJson.substring(0, 200) + "...");
-                const parsed = JSON.parse(fixedJson);
-                console.log("JSON успешно исправлен!");
-                return parsed;
-            } catch (e2) {
-                console.error("Не удалось исправить JSON:", e2);
-                console.error("Оригинальная строка (первые 500 символов):", cleanedJsonString.substring(0, 500));
-                throw new Error('AI вернул некорректный JSON. Попробуйте повторить запрос.');
-            }
+            console.error("Ошибка парсинга JSON:", e, "\nПолученная строка:", cleanedJsonString);
+            throw new Error('AI вернул ответ в неверном формате JSON.');
         }
     } else {
         return aiResponseText;
@@ -1307,29 +1174,13 @@ async function processWikiArticle(title) {
     
     try {
         const articleText = await getWikipediaContent(title);
-        // Уменьшаем размер текста для избежания обрезки ответа
-        const truncatedText = articleText.substring(0, 50000);
+        const truncatedText = articleText.substring(0, 30000);
         const analysisPrompt = 'Статья: "' + title + '". Текст статьи: \n' + truncatedText;
         
-        // Выполняем запросы последовательно чтобы избежать rate limit
-        let placesResult, routesResult;
-        
-        try {
-            const places = await fetchAI(AI_PROMPT_WIKI_EXTRACTOR_PLACES, analysisPrompt);
-            placesResult = { status: 'fulfilled', value: places };
-        } catch (e) {
-            placesResult = { status: 'rejected', reason: e };
-        }
-        
-        // Небольшая пауза между запросами
-        await delay(1000);
-        
-        try {
-            const routes = await fetchAI(AI_PROMPT_WIKI_EXTRACTOR_ROUTES, analysisPrompt);
-            routesResult = { status: 'fulfilled', value: routes };
-        } catch (e) {
-            routesResult = { status: 'rejected', reason: e };
-        }
+        const [placesResult, routesResult] = await Promise.allSettled([
+            fetchAI(AI_PROMPT_WIKI_EXTRACTOR_PLACES, analysisPrompt),
+            fetchAI(AI_PROMPT_WIKI_EXTRACTOR_ROUTES, analysisPrompt)
+        ]);
         
         if (placesResult.status === 'fulfilled') {
             displayPlaces(placesResult.value);
