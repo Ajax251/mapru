@@ -1175,6 +1175,7 @@
     <script>
     let loadedKptData = { xmlString: null, fileName: null, objectList: [], title: null };
     let currentObjectGeometry = null; // Глобальная переменная для хранения геометрии текущего объекта в EPSG:3857
+    let foundZouitFeatures = [];
     const sixDigitsRegions = ['02', '03', '04', '05', '08', '15', '16', '18', '19', '21', '22', '25', '26', '28', '30', '33', '34', '37', '38', '39', '40', '43', '44', '45', '46', '54', '55', '73', '75', '76', '91', '92'];
 
 
@@ -1880,7 +1881,6 @@ async function parseNspdJson(feature) {
 }
 
 function displayResults(data, title, isKptFile = false) {
-     window.currentReportData = data; 
     const output = document.getElementById('report-output');
     const pages = [];
 
@@ -2375,29 +2375,43 @@ async function fetchLinkedObjects(feature) {
     }
 }
 
-    function drawPlan(contours, canvasId, source, extraFeatures = []) {
-    const canvas = document.getElementById(canvasId);
-    if (!canvas) return;
-    const ctx = canvas.getContext('2d');
+function drawPlan(contours, canvasId, source, zouitFeatures = []) {
+    const canvas = document.getElementById(canvasId); 
+    if (!canvas) return; 
+    const ctx = canvas.getContext('2d'); 
     const container = canvas.parentElement;
-    canvas.width = container.clientWidth > 0 ? container.clientWidth : 800;
+    canvas.width = container.clientWidth > 0 ? container.clientWidth : 800; 
     canvas.height = 500;
+    
+    const allCoords = contours.flat(); 
+    if(allCoords.length < 1) return;
 
-    const allCoords = contours.flat();
-    if (allCoords.length < 1) return;
+    const allX = allCoords.map(c => c.x), allY = allCoords.map(c => c.y);
+    let minX = Math.min(...allX), maxX = Math.max(...allX);
+    let minY = Math.min(...allY), maxY = Math.max(...allY);
 
-    // 1. Вычисляем масштаб ТОЛЬКО по основному объекту
-    const allX = allCoords.map(c => c.x);
-    const allY = allCoords.map(c => c.y);
-    const minX = Math.min(...allX);
-    const maxX = Math.max(...allX);
-    const minY = Math.min(...allY);
-    const maxY = Math.max(...allY);
+    // Учитываем координаты ЗОУИТ для расчета границ
+    if (zouitFeatures.length > 0) {
+        zouitFeatures.forEach(f => {
+            if (f.geometry && f.geometry.coordinates) {
+                const extractBounds = (coords) => {
+                    if (typeof coords[0] === 'number') {
+                        minX = Math.min(minX, coords[0]);
+                        maxX = Math.max(maxX, coords[0]);
+                        minY = Math.min(minY, coords[1]);
+                        maxY = Math.max(maxY, coords[1]);
+                    } else {
+                        coords.forEach(extractBounds);
+                    }
+                };
+                extractBounds(f.geometry.coordinates);
+            }
+        });
+    }
 
     const dataWidth = (source === 'nspd' || source === 'nspd_converted') ? maxX - minX : maxY - minY;
     const dataHeight = (source === 'nspd' || source === 'nspd_converted') ? maxY - minY : maxX - minX;
-    
-    if (dataWidth <= 0 || dataHeight <= 0) return;
+    if(dataWidth <= 0 || dataHeight <= 0) return;
 
     const margin = 40;
     const canvasDrawWidth = canvas.width - 2 * margin;
@@ -2414,90 +2428,125 @@ async function fetchLinkedObjects(feature) {
     const offsetX = horizontalPadding / 2;
     const offsetY = verticalPadding / 2;
 
-    // Функция трансформации координат в пиксели
-    const toPixel = (x, y) => {
-        let px, py;
-        if (source === 'nspd' || source === 'nspd_converted') {
-            px = margin + offsetX + (x - minX) * scale;
-            py = (canvas.height - margin - offsetY) - (y - minY) * scale;
-        } else {
-            px = margin + offsetX + (y - minY) * scale;
-            py = (canvas.height - margin - offsetY) - (x - minX) * scale;
-        }
-        return [px, py];
-    };
-
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
-    // 2. Сначала рисуем ЗОУИТ (фоном)
-    if (extraFeatures && extraFeatures.length > 0) {
-        extraFeatures.forEach(feature => {
-            if (!feature.geometry) return;
-            
-            // Определение цвета
-            const name = (feature.properties.options?.name_by_doc || '').toLowerCase();
-            let strokeColor = '#b0b0b0'; // Серый по умолчанию
-            let fillColor = 'rgba(176, 176, 176, 0.1)';
+    // Функция для преобразования координат в canvas
+    const toCanvasCoords = (x, y) => {
+        let canvasX, canvasY;
+        if (source === 'nspd' || source === 'nspd_converted') {
+            canvasX = margin + offsetX + (x - minX) * scale;
+            canvasY = (canvas.height - margin - offsetY) - (y - minY) * scale;
+        } else {
+            canvasX = margin + offsetX + (y - minY) * scale;
+            canvasY = (canvas.height - margin - offsetY) - (x - minX) * scale;
+        }
+        return { canvasX, canvasY };
+    };
 
-            if (name.includes('газ')) {
-                strokeColor = '#f59e0b'; // Желто-оранжевый (Amber)
-                fillColor = 'rgba(245, 158, 11, 0.1)';
-            } else if (name.includes('электр') || name.includes('вл ') || name.includes('лэп')) {
+    // === ОТРИСОВКА ЗОУИТ (сначала, чтобы были под основным контуром) ===
+    if (zouitFeatures.length > 0) {
+        zouitFeatures.forEach(f => {
+            if (!f.geometry) return;
+
+            const props = f.properties?.options || {};
+            const nameByDoc = (props.name_by_doc || '').toLowerCase();
+            const content = (props.content_restrict_encumbrances || '').toLowerCase();
+            const searchText = nameByDoc + ' ' + content;
+
+            // Определяем цвет
+            let strokeColor, fillColor;
+            if (searchText.includes('газ')) {
+                strokeColor = '#f59e0b'; // Желтый/оранжевый
+                fillColor = 'rgba(245, 158, 11, 0.15)';
+            } else if (searchText.includes('электр') || searchText.includes(' вл ') || searchText.includes('вл ') || searchText.includes(' вл')) {
                 strokeColor = '#ef4444'; // Красный
-                fillColor = 'rgba(239, 68, 68, 0.1)';
+                fillColor = 'rgba(239, 68, 68, 0.15)';
+            } else {
+                strokeColor = '#6b7280'; // Серый
+                fillColor = 'rgba(107, 114, 128, 0.1)';
             }
 
-            // Парсинг геометрии
-            let polys = [];
-            if (feature.geometry.type === 'Polygon') polys = [feature.geometry.coordinates];
-            else if (feature.geometry.type === 'MultiPolygon') polys = feature.geometry.coordinates;
-
-            polys.forEach(poly => {
-                // Берем внешнее кольцо [0]
-                const ring = poly[0]; 
-                ctx.beginPath();
-                ring.forEach((coord, i) => {
-                    // coord[0] = x, coord[1] = y (для NSPD)
-                    const [px, py] = toPixel(coord[0], coord[1]);
-                    i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+            // Функция отрисовки полигона
+            const drawPolygon = (rings) => {
+                rings.forEach((ring, ringIndex) => {
+                    ctx.beginPath();
+                    ring.forEach((coord, i) => {
+                        const { canvasX, canvasY } = toCanvasCoords(coord[0], coord[1]);
+                        i === 0 ? ctx.moveTo(canvasX, canvasY) : ctx.lineTo(canvasX, canvasY);
+                    });
+                    ctx.closePath();
+                    
+                    if (ringIndex === 0) {
+                        ctx.fillStyle = fillColor;
+                        ctx.fill();
+                    }
+                    ctx.strokeStyle = strokeColor;
+                    ctx.lineWidth = 1.5;
+                    ctx.setLineDash([5, 3]);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
                 });
-                ctx.closePath();
-                ctx.fillStyle = fillColor;
-                ctx.fill();
-                ctx.strokeStyle = strokeColor;
-                ctx.lineWidth = 1.5;
-                // Делаем пунктир для ЗОУИТ
-                ctx.setLineDash([5, 3]); 
-                ctx.stroke();
-                ctx.setLineDash([]); // Сброс пунктира
-            });
+            };
+
+            if (f.geometry.type === 'Polygon') {
+                drawPolygon(f.geometry.coordinates);
+            } else if (f.geometry.type === 'MultiPolygon') {
+                f.geometry.coordinates.forEach(polygon => drawPolygon(polygon));
+            }
         });
     }
 
-    // 3. Рисуем ОСНОВНОЙ объект (поверх)
+    // === ОТРИСОВКА ОСНОВНОГО КОНТУРА ===
     contours.forEach(contour => {
-        if (contour.length === 0) return;
+        if (contour.length === 0) return; 
         ctx.beginPath();
         contour.forEach((c, i) => {
-            const [px, py] = toPixel(c.x, c.y);
-            i === 0 ? ctx.moveTo(px, py) : ctx.lineTo(px, py);
+            const { canvasX, canvasY } = toCanvasCoords(c.x, c.y);
+            i === 0 ? ctx.moveTo(canvasX, canvasY) : ctx.lineTo(canvasX, canvasY);
         });
-        
-        // Замыкаем, если это полигон
-        const first = contour[0];
-        const last = contour[contour.length - 1];
-        const isClosed = contour.length > 2 && Math.abs(first.x - last.x) < 0.01 && Math.abs(first.y - last.y) < 0.01;
-        
-        if (isClosed) {
+        const first = contour[0], last = contour[contour.length - 1];
+        if (contour.length > 2 && Math.abs(first.x - last.x) < 0.01 && Math.abs(first.y - last.y) < 0.01) {
             ctx.closePath();
-            ctx.fillStyle = 'rgba(66, 133, 244, 0.15)'; // Голубая заливка
+            ctx.fillStyle = 'rgba(0, 123, 255, 0.2)';
             ctx.fill();
         }
-        
-        ctx.strokeStyle = '#2563eb'; // Ярко-синий контур
-        ctx.lineWidth = 2.5;
+        ctx.strokeStyle = '#007bff'; 
+        ctx.lineWidth = 2.5; 
         ctx.stroke();
     });
+
+    // === ЛЕГЕНДА (если есть ЗОУИТ) ===
+    if (zouitFeatures.length > 0) {
+        ctx.font = '11px Arial';
+        const legendX = canvas.width - 140;
+        let legendY = 20;
+        
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
+        ctx.fillRect(legendX - 10, legendY - 12, 135, 70);
+        ctx.strokeStyle = '#ccc';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(legendX - 10, legendY - 12, 135, 70);
+
+        // Газ
+        ctx.fillStyle = '#f59e0b';
+        ctx.fillRect(legendX, legendY, 14, 10);
+        ctx.fillStyle = '#333';
+        ctx.fillText('Газ', legendX + 20, legendY + 9);
+        legendY += 18;
+
+        // Электр/ВЛ
+        ctx.fillStyle = '#ef4444';
+        ctx.fillRect(legendX, legendY, 14, 10);
+        ctx.fillStyle = '#333';
+        ctx.fillText('Электр./ВЛ', legendX + 20, legendY + 9);
+        legendY += 18;
+
+        // Прочие
+        ctx.fillStyle = '#6b7280';
+        ctx.fillRect(legendX, legendY, 14, 10);
+        ctx.fillStyle = '#333';
+        ctx.fillText('Прочие ЗОУИТ', legendX + 20, legendY + 9);
+    }
 }
     
 async function savePageToPdf(button) {
@@ -2801,6 +2850,26 @@ function formatCadastralNumber(input) {
     function appendExtendedData(results) {
         const output = document.getElementById('report-output');
         let htmlContent = '';
+        
+        // Сохраняем ЗОУИТ для отрисовки на плане
+    const zouitResult = results.find(r => r.type === 'zouit');
+    if (zouitResult && zouitResult.features.length > 0) {
+        foundZouitFeatures = zouitResult.features;
+        
+        // Перерисовываем план с ЗОУИТ
+        const dataSource = originalNspdData ? 'nspd' : 'nspd_converted';
+        if (currentObjectGeometry) {
+            // Восстанавливаем координаты из текущего отображения
+            const currentPages = document.querySelectorAll('.page');
+            // Небольшая задержка для корректной перерисовки
+            setTimeout(() => {
+                const canvas = document.getElementById('plan-canvas');
+                if (canvas && originalNspdData && originalNspdData.coordinates) {
+                    drawPlan(originalNspdData.coordinates, 'plan-canvas', 'nspd', foundZouitFeatures);
+                }
+            }, 100);
+        }
+    }
 
         // Преобразуем геометрию основного объекта в GeoJSON (WGS84) для Turf.js
         // В currentObjectGeometry координаты в EPSG:3857.
@@ -2830,16 +2899,6 @@ function formatCadastralNumber(input) {
 
         results.forEach(group => {
             if (group.features.length === 0) return;
-            
-                if (group.type === 'zouit' && window.currentReportData) {
-               
-                drawPlan(
-                    window.currentReportData.coordinates, 
-                    'plan-canvas', 
-                    window.currentReportData.source, 
-                    group.features
-                );
-            }
 
             let title = '';
             let tableHeader = '';
