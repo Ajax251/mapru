@@ -2400,6 +2400,7 @@ function drawPlan(contours, canvasId, source, zouitFeatures = []) {
     const minY = Math.min(...allY), maxY = Math.max(...allY);
 
     // Только source === 'nspd' использует прямую ориентацию
+    // nspd_converted и xml используют перевёрнутую (X<->Y)
     const isDirectOrientation = (source === 'nspd');
 
     const dataWidth = isDirectOrientation ? maxX - minX : maxY - minY;
@@ -2436,10 +2437,10 @@ function drawPlan(contours, canvasId, source, zouitFeatures = []) {
         return { canvasX, canvasY };
     };
 
-    // === ОТРИСОВКА ЗОУИТ (ИСПРАВЛЕННЫЙ БЛОК) ===
+    // === ОТРИСОВКА ЗОУИТ (сначала, чтобы были под основным контуром) ===
     if (zouitFeatures.length > 0) {
+        // Сохраняем состояние и включаем обрезку по области canvas
         ctx.save();
-        // Обрезка по области рисования
         ctx.beginPath();
         ctx.rect(margin - 5, margin - 5, canvasDrawWidth + 10, canvasDrawHeight + 10);
         ctx.clip();
@@ -2455,54 +2456,49 @@ function drawPlan(contours, canvasId, source, zouitFeatures = []) {
             // Определяем цвет
             let strokeColor, fillColor;
             if (searchText.includes('газ')) {
-                strokeColor = '#f59e0b'; // Оранжевый
-                fillColor = 'rgba(245, 158, 11, 0.2)';
+                strokeColor = '#f59e0b';
+                fillColor = 'rgba(245, 158, 11, 0.15)';
             } else if (searchText.includes('электр') || searchText.includes(' вл ') || searchText.includes('вл ') || searchText.includes(' вл')) {
-                strokeColor = '#ef4444'; // Красный
-                fillColor = 'rgba(239, 68, 68, 0.2)';
+                strokeColor = '#ef4444';
+                fillColor = 'rgba(239, 68, 68, 0.15)';
             } else {
-                strokeColor = '#6b7280'; // Серый
-                fillColor = 'rgba(107, 114, 128, 0.15)';
+                strokeColor = '#6b7280';
+                fillColor = 'rgba(107, 114, 128, 0.1)';
             }
 
-            // Настраиваем стили перед началом рисования объекта
-            ctx.fillStyle = fillColor;
-            ctx.strokeStyle = strokeColor;
-            ctx.lineWidth = 1.5;
-            ctx.setLineDash([5, 3]);
-
-            // Начинаем путь для ВСЕГО объекта (включая все кольца)
-            ctx.beginPath();
-
-            // Вспомогательная функция добавления пути колец в текущий path
-            const addRingsToPath = (rings) => {
-                rings.forEach((ring) => {
+            // Функция отрисовки полигона
+            const drawPolygon = (rings) => {
+                rings.forEach((ring, ringIndex) => {
+                    ctx.beginPath();
                     ring.forEach((coord, i) => {
                         const { canvasX, canvasY } = toCanvasCoords(coord[0], coord[1]);
-                        if (i === 0) ctx.moveTo(canvasX, canvasY);
-                        else ctx.lineTo(canvasX, canvasY);
+                        i === 0 ? ctx.moveTo(canvasX, canvasY) : ctx.lineTo(canvasX, canvasY);
                     });
-                    ctx.closePath(); // Закрываем каждое кольцо (внешнее или дырку)
+                    ctx.closePath();
+                    
+                    if (ringIndex === 0) {
+                        ctx.fillStyle = fillColor;
+                        ctx.fill();
+                    }
+                    ctx.strokeStyle = strokeColor;
+                    ctx.lineWidth = 1.5;
+                    ctx.setLineDash([5, 3]);
+                    ctx.stroke();
+                    ctx.setLineDash([]);
                 });
             };
 
             if (f.geometry.type === 'Polygon') {
-                addRingsToPath(f.geometry.coordinates);
+                drawPolygon(f.geometry.coordinates);
             } else if (f.geometry.type === 'MultiPolygon') {
-                f.geometry.coordinates.forEach(polygonRings => addRingsToPath(polygonRings));
+                f.geometry.coordinates.forEach(polygon => drawPolygon(polygon));
             }
-
-            // ВАЖНО: Заливаем один раз с правилом 'evenodd'
-            // Это корректно обрабатывает "дырки" и сложные пересечения
-            ctx.fill('evenodd'); 
-            ctx.stroke();
         });
 
-        ctx.restore(); // Сброс стилей и обрезки
+        ctx.restore(); // Снимаем обрезку
     }
 
     // === ОТРИСОВКА ОСНОВНОГО КОНТУРА ===
-    ctx.setLineDash([]); // Убираем пунктир для основного объекта
     contours.forEach(contour => {
         if (contour.length === 0) return; 
         ctx.beginPath();
@@ -2510,12 +2506,10 @@ function drawPlan(contours, canvasId, source, zouitFeatures = []) {
             const { canvasX, canvasY } = toCanvasCoords(c.x, c.y);
             i === 0 ? ctx.moveTo(canvasX, canvasY) : ctx.lineTo(canvasX, canvasY);
         });
-        
-        // Замыкаем контур, если первая и последняя точки совпадают
         const first = contour[0], last = contour[contour.length - 1];
         if (contour.length > 2 && Math.abs(first.x - last.x) < 0.01 && Math.abs(first.y - last.y) < 0.01) {
             ctx.closePath();
-            ctx.fillStyle = 'rgba(0, 123, 255, 0.15)'; // Чуть более прозрачный синий
+            ctx.fillStyle = 'rgba(0, 123, 255, 0.2)';
             ctx.fill();
         }
         ctx.strokeStyle = '#007bff'; 
@@ -2523,36 +2517,34 @@ function drawPlan(contours, canvasId, source, zouitFeatures = []) {
         ctx.stroke();
     });
 
-    // === ЛЕГЕНДА ===
+    // === ЛЕГЕНДА (если есть ЗОУИТ) ===
     if (zouitFeatures.length > 0) {
         ctx.font = '11px Arial';
         const legendX = canvas.width - 140;
         let legendY = 20;
         
-        // Фон легенды
-        ctx.fillStyle = 'rgba(255,255,255,0.95)';
-        ctx.shadowColor = 'rgba(0,0,0,0.1)';
-        ctx.shadowBlur = 4;
+        ctx.fillStyle = 'rgba(255,255,255,0.9)';
         ctx.fillRect(legendX - 10, legendY - 12, 135, 70);
-        ctx.shadowBlur = 0;
-        
         ctx.strokeStyle = '#ccc';
         ctx.lineWidth = 1;
         ctx.strokeRect(legendX - 10, legendY - 12, 135, 70);
 
-        // Элементы легенды
-        const drawLegendItem = (color, text, y) => {
-            ctx.fillStyle = color;
-            ctx.fillRect(legendX, y, 14, 10);
-            ctx.fillStyle = '#333';
-            ctx.fillText(text, legendX + 20, y + 9);
-        };
+        ctx.fillStyle = '#f59e0b';
+        ctx.fillRect(legendX, legendY, 14, 10);
+        ctx.fillStyle = '#333';
+        ctx.fillText('Газ', legendX + 20, legendY + 9);
+        legendY += 18;
 
-        drawLegendItem('#f59e0b', 'Газ', legendY);
+        ctx.fillStyle = '#ef4444';
+        ctx.fillRect(legendX, legendY, 14, 10);
+        ctx.fillStyle = '#333';
+        ctx.fillText('Электричество', legendX + 20, legendY + 9);
         legendY += 18;
-        drawLegendItem('#ef4444', 'Электричество', legendY);
-        legendY += 18;
-        drawLegendItem('#6b7280', 'Прочие ЗОУИТ', legendY);
+
+        ctx.fillStyle = '#6b7280';
+        ctx.fillRect(legendX, legendY, 14, 10);
+        ctx.fillStyle = '#333';
+        ctx.fillText('Прочие ЗОУИТ', legendX + 20, legendY + 9);
     }
 }
 
@@ -2981,34 +2973,34 @@ function appendExtendedData(results) {
             output.insertAdjacentHTML('beforeend', zouitPageHtml);
         } 
         // === Остальные слои — добавляем строки в main-info-table ===
-      else if (mainTable) {
-    let title = '';
-    switch(group.type) {
-        case 'zone': title = 'Территориальная зона'; break;
-        case 'settlement': title = 'Населенный пункт'; break;
-        case 'municipal': title = 'Муниципальное образование'; break;
-        case 'forestry': title = 'Лесничество'; break;
-    }
+        else if (mainTable) {
+            let title = '';
+            switch(group.type) {
+                case 'zone': title = 'Территориальная зона'; break;
+                case 'settlement': title = 'Населенный пункт'; break;
+                case 'municipal': title = 'Муниципальное образование'; break;
+                case 'forestry': title = 'Лесничество'; break;
+            }
 
-    let value = 'Нет данных';
-    if (group.features.length > 0) {
-        const values = group.features.map(f => {
-            const props = f.properties.options || {};
-            const name = props.name_by_doc || f.properties.label || props.name || '';
-            const desc = props.reg_numb_border || f.properties.descr || '';
-            
-           
-            const parts = [name, desc].filter(Boolean);
-            return parts.join(' ');
-        }).filter(Boolean);
-        
-        // Каждый объект с новой строки, если их несколько
-        value = values.length > 0 ? values.join('<br>') : 'Нет данных';
-    }
+            let value = 'Нет данных';
+            if (group.features.length > 0) {
+                const values = group.features.map(f => {
+                    const props = f.properties.options || {};
+                    const name = props.name_by_doc || f.properties.label || props.name || '';
+                    const desc = props.reg_numb_border || f.properties.descr || '';
+                    
+                    if (group.type === 'zone') {
+                        return desc ? `${name} (${desc})` : name;
+                    }
+                    return name || desc;
+                }).filter(Boolean);
+                
+                value = values.length > 0 ? values.join('; ') : 'Нет данных';
+            }
 
-    const newRow = `<tr><td>${title}</td><td>${value}</td></tr>`;
-    mainTable.insertAdjacentHTML('beforeend', newRow);
-}
+            const newRow = `<tr><td>${title}</td><td>${value}</td></tr>`;
+            mainTable.insertAdjacentHTML('beforeend', newRow);
+        }
     });
 
     // Прокручиваем к новым данным (если добавлена страница ЗОУИТ)
