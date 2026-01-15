@@ -2219,8 +2219,8 @@ function displayResults(data, title, isKptFile = false) {
         extendedReportBtn.style.display = 'none'; // Не показываем для XML без геометрии НСПД
     }
 
-      if (data.coordinates && data.coordinates.length > 0) {
-        drawPlan(data.coordinates, 'plan-canvas', data.source, [], data.common.cadNum);
+    if (data.coordinates && data.coordinates.length > 0) {
+        drawPlan(data.coordinates, 'plan-canvas', data.source);
     }
 
     restoreMergeState();
@@ -2447,7 +2447,7 @@ async function fetchLinkedObjects(feature) {
     }
 }
 
-function drawPlan(contours, canvasId, source, zouitFeatures = [], cadNum = '') {
+function drawPlan(contours, canvasId, source, zouitFeatures = []) {
     const canvas = document.getElementById(canvasId); 
     if (!canvas) return; 
     const ctx = canvas.getContext('2d'); 
@@ -2499,55 +2499,13 @@ function drawPlan(contours, canvasId, source, zouitFeatures = [], cadNum = '') {
         return { canvasX, canvasY };
     };
 
-    // Вспомогательная функция: центр видимой части ЗОУИТ (в пределах bbox основного объекта)
-    const getVisibleZouitCenter = (geometry) => {
-        let coords = [];
-        const extractCoords = (arr) => {
-            if (arr.length >= 2 && typeof arr[0] === 'number') {
-                coords.push(arr);
-            } else if (Array.isArray(arr[0])) {
-                arr.forEach(item => extractCoords(item));
-            }
-        };
-        if (geometry.coordinates) extractCoords(geometry.coordinates);
-        if (coords.length === 0) return null;
-        
-        // Фильтруем только точки, попадающие в bbox основного объекта (с небольшим запасом)
-        const padding = Math.max(maxX - minX, maxY - minY) * 0.15; // 15% запас
-        const visibleCoords = coords.filter(c => 
-            c[0] >= minX - padding && c[0] <= maxX + padding &&
-            c[1] >= minY - padding && c[1] <= maxY + padding
-        );
-        
-        // Если есть видимые точки - берём их центр
-        if (visibleCoords.length > 0) {
-            let sumX = 0, sumY = 0;
-            visibleCoords.forEach(c => { sumX += c[0]; sumY += c[1]; });
-            return { x: sumX / visibleCoords.length, y: sumY / visibleCoords.length };
-        }
-        
-        // Иначе берём точку на границе bbox (ближайшую к центру ЗОУИТ)
-        let sumX = 0, sumY = 0;
-        coords.forEach(c => { sumX += c[0]; sumY += c[1]; });
-        const zouitCenterX = sumX / coords.length;
-        const zouitCenterY = sumY / coords.length;
-        
-        // Ограничиваем центр ЗОУИТ рамками bbox
-        const clampedX = Math.max(minX, Math.min(maxX, zouitCenterX));
-        const clampedY = Math.max(minY, Math.min(maxY, zouitCenterY));
-        return { x: clampedX, y: clampedY };
-    };
-
-    // === ОТРИСОВКА ЗОУИТ ===
+    // === ОТРИСОВКА ЗОУИТ (ИСПРАВЛЕННЫЙ БЛОК) ===
     if (zouitFeatures.length > 0) {
         ctx.save();
         // Обрезка по области рисования
         ctx.beginPath();
         ctx.rect(margin - 5, margin - 5, canvasDrawWidth + 10, canvasDrawHeight + 10);
         ctx.clip();
-
-        // Массив для хранения позиций подписей (чтобы избежать наложения)
-        const labelPositions = [];
 
         zouitFeatures.forEach(f => {
             if (!f.geometry) return;
@@ -2598,67 +2556,9 @@ function drawPlan(contours, canvasId, source, zouitFeatures = [], cadNum = '') {
             }
 
             // ВАЖНО: Заливаем один раз с правилом 'evenodd'
+            // Это корректно обрабатывает "дырки" и сложные пересечения
             ctx.fill('evenodd'); 
             ctx.stroke();
-
-            // === ПОДПИСЬ РЕЕСТРОВОГО НОМЕРА ЗОУИТ ===
-            const regNum = props.reg_numb_border || '';
-            if (regNum) {
-                const visibleCenter = getVisibleZouitCenter(f.geometry);
-                if (visibleCenter) {
-                    const { canvasX, canvasY } = toCanvasCoords(visibleCenter.x, visibleCenter.y);
-                    
-                    // Проверяем, что точка в пределах canvas
-                    if (canvasX > margin + 10 && canvasX < canvas.width - margin - 10 && 
-                        canvasY > margin + 10 && canvasY < canvas.height - margin - 10) {
-                        
-                        ctx.font = '9px Arial';
-                        const textWidth = ctx.measureText(regNum).width;
-                        const labelHeight = 13;
-                        
-                        // Проверка на наложение с другими подписями
-                        let finalX = canvasX;
-                        let finalY = canvasY;
-                        let attempts = 0;
-                        const maxAttempts = 8;
-                        
-                        while (attempts < maxAttempts) {
-                            let hasOverlap = false;
-                            for (const pos of labelPositions) {
-                                if (Math.abs(finalX - pos.x) < (textWidth + pos.width) / 2 + 5 &&
-                                    Math.abs(finalY - pos.y) < labelHeight + 2) {
-                                    hasOverlap = true;
-                                    break;
-                                }
-                            }
-                            if (!hasOverlap) break;
-                            
-                            // Смещаем подпись
-                            finalY += labelHeight + 3;
-                            attempts++;
-                        }
-                        
-                        // Сохраняем позицию
-                        labelPositions.push({ x: finalX, y: finalY, width: textWidth });
-                        
-                        // Фон
-                        ctx.fillStyle = 'rgba(255, 255, 255, 0.9)';
-                        ctx.setLineDash([]);
-                        ctx.fillRect(finalX - textWidth / 2 - 3, finalY - 6, textWidth + 6, labelHeight);
-                        
-                        // Рамка в цвет ЗОУИТ
-                        ctx.strokeStyle = strokeColor;
-                        ctx.lineWidth = 1;
-                        ctx.strokeRect(finalX - textWidth / 2 - 3, finalY - 6, textWidth + 6, labelHeight);
-                        
-                        // Текст
-                        ctx.fillStyle = '#333';
-                        ctx.textAlign = 'center';
-                        ctx.textBaseline = 'middle';
-                        ctx.fillText(regNum, finalX, finalY);
-                    }
-                }
-            }
         });
 
         ctx.restore(); // Сброс стилей и обрезки
@@ -2678,38 +2578,13 @@ function drawPlan(contours, canvasId, source, zouitFeatures = [], cadNum = '') {
         const first = contour[0], last = contour[contour.length - 1];
         if (contour.length > 2 && Math.abs(first.x - last.x) < 0.01 && Math.abs(first.y - last.y) < 0.01) {
             ctx.closePath();
-            ctx.fillStyle = 'rgba(0, 123, 255, 0.15)';
+            ctx.fillStyle = 'rgba(0, 123, 255, 0.15)'; // Чуть более прозрачный синий
             ctx.fill();
         }
         ctx.strokeStyle = '#007bff'; 
         ctx.lineWidth = 2.5; 
         ctx.stroke();
     });
-
-    // === ПОДПИСЬ КАДАСТРОВОГО НОМЕРА ОСНОВНОГО ОБЪЕКТА ===
-    if (cadNum) {
-        const centerX = (minX + maxX) / 2;
-        const centerY = (minY + maxY) / 2;
-        const { canvasX, canvasY } = toCanvasCoords(centerX, centerY);
-        
-        ctx.font = 'bold 12px Arial';
-        const textWidth = ctx.measureText(cadNum).width;
-        
-        // Фон
-        ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
-        ctx.fillRect(canvasX - textWidth / 2 - 6, canvasY - 9, textWidth + 12, 20);
-        
-        // Рамка
-        ctx.strokeStyle = '#007bff';
-        ctx.lineWidth = 1.5;
-        ctx.strokeRect(canvasX - textWidth / 2 - 6, canvasY - 9, textWidth + 12, 20);
-        
-        // Текст
-        ctx.fillStyle = '#1a365d';
-        ctx.textAlign = 'center';
-        ctx.textBaseline = 'middle';
-        ctx.fillText(cadNum, canvasX, canvasY);
-    }
 
     // === ЛЕГЕНДА ===
     if (zouitFeatures.length > 0) {
@@ -2733,16 +2608,14 @@ function drawPlan(contours, canvasId, source, zouitFeatures = [], cadNum = '') {
             ctx.fillStyle = color;
             ctx.fillRect(legendX, y, 14, 10);
             ctx.fillStyle = '#333';
-            ctx.textAlign = 'left';
-            ctx.textBaseline = 'top';
-            ctx.fillText(text, legendX + 20, y);
+            ctx.fillText(text, legendX + 20, y + 9);
         };
 
-        drawLegendItem('#f59e0b', 'Газопроводы', legendY); 
-        legendY += 18;
-        drawLegendItem('#ef4444', 'Электросети', legendY);
-        legendY += 18;
-        drawLegendItem('#6b7280', 'Прочие ЗОУИТ', legendY);
+drawLegendItem('#f59e0b', 'Газопроводы', legendY); 
+legendY += 18;
+drawLegendItem('#ef4444', 'Электросети', legendY);
+legendY += 18;
+drawLegendItem('#6b7280', 'Прочие ЗОУИТ', legendY);
     }
 }
 
@@ -3067,12 +2940,12 @@ function appendExtendedData(results) {
         foundZouitFeatures = zouitResult.features;
         
         // Перерисовываем план с ЗОУИТ
-       setTimeout(() => {
-                const canvas = document.getElementById('plan-canvas');
-                if (canvas && originalNspdData && originalNspdData.coordinates) {
-                    drawPlan(originalNspdData.coordinates, 'plan-canvas', 'nspd', foundZouitFeatures, originalNspdData.common.cadNum);
-                }
-            }, 100);
+        setTimeout(() => {
+            const canvas = document.getElementById('plan-canvas');
+            if (canvas && originalNspdData && originalNspdData.coordinates) {
+                drawPlan(originalNspdData.coordinates, 'plan-canvas', 'nspd', foundZouitFeatures);
+            }
+        }, 100);
     }
 
     // Преобразуем геометрию основного объекта в GeoJSON (WGS84) для Turf.js
@@ -3190,9 +3063,9 @@ function appendExtendedData(results) {
             // ИЗМЕНЕНИЕ: Для зон меняем порядок на [номер, имя], для остальных оставляем как есть
             let parts;
             if (group.type === 'zone') {
-                parts = [desc, name].filter(Boolean); 
+                parts = [desc, name].filter(Boolean); // Сначала номер (16:...), потом Название
             } else {
-                parts = [name, desc].filter(Boolean); 
+                parts = [name, desc].filter(Boolean); // Для остальных сохраняем текущий порядок (так как у МО и НП он отображается верно)
             }
             
             return parts.join(' ');
