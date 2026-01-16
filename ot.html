@@ -1182,7 +1182,7 @@
     </div>
   // <script src="cb.js"></script> 
     <script>
-    let loadedKptData = { xmlString: null, fileName: null, objectList: [], title: null };
+ let loadedKptData = { xmlString: null, fileName: null, objectList: [], title: null, skipCoordinates: false };
     let currentObjectGeometry = null; // Глобальная переменная для хранения геометрии текущего объекта в EPSG:3857
     let foundZouitFeatures = [];
     const sixDigitsRegions = ['02', '03', '04', '05', '08', '15', '16', '18', '19', '21', '22', '25', '26', '28', '30', '33', '34', '37', '38', '39', '40', '43', '44', '45', '46', '54', '55', '73', '75', '76', '91', '92'];
@@ -1306,7 +1306,7 @@ function showStartView() {
     document.getElementById('start-view').style.display = 'flex';
     document.getElementById('results-view').style.display = 'none';
     document.getElementById('report-output').innerHTML = '';
-   loadedKptData = { xmlString: null, fileName: null, objectList: [], title: null };
+  loadedKptData = { xmlString: null, fileName: null, objectList: [], title: null, skipCoordinates: false };
     document.getElementById('selectObjectBtn').style.display = 'none';
     document.getElementById('extendedReportBtn').style.display = 'none';
     currentObjectGeometry = null;
@@ -1330,24 +1330,41 @@ async function handleFileSelect(event) {
     resetAndShowLoader();
     try {
         let xmlString, fileName = file.name;
+        let fileSize = file.size; // Размер в байтах
+        
         if (file.name.toLowerCase().endsWith('.zip')) {
             const zip = await JSZip.loadAsync(await file.arrayBuffer());
             const xmlFile = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.xml'));
             if (!xmlFile) throw new Error("XML-файл не найден в архиве.");
             xmlString = await xmlFile.async("string");
             fileName = xmlFile.name;
-        } else { xmlString = await file.text(); }
+            fileSize = xmlString.length; // Размер распакованного XML
+        } else { 
+            xmlString = await file.text(); 
+            fileSize = xmlString.length;
+        }
+        
         const parser = new DOMParser();
         const xmlDoc = parser.parseFromString(xmlString, "text/xml");
-   const reportTitle = createTitleFromXml(xmlDoc, fileName);
+        const reportTitle = createTitleFromXml(xmlDoc, fileName);
+
+        // Проверка размера файла (5 MB = 5 * 1024 * 1024 байт)
+        const SIZE_THRESHOLD = 5 * 1024 * 1024;
+        let skipCoordinates = false;
+        
+        if (fileSize > SIZE_THRESHOLD) {
+            showLoader(false);
+            skipCoordinates = !(await showCoordinatesConfirmDialog(fileSize));
+            showLoader(true);
+        }
 
         const records = xmlDoc.querySelectorAll('land_record, build_record, construction_record');
         if (records.length > 1) {
             showLoader(false);
-            extractAndShowObjectList(xmlString, records, fileName, reportTitle);
+            extractAndShowObjectList(xmlString, records, fileName, reportTitle, skipCoordinates);
             document.getElementById('selectObjectBtn').style.display = 'inline-flex';
         } else {
-            const { data, isKptFile } = parseXml(xmlString);
+            const { data, isKptFile } = parseXml(xmlString, null, skipCoordinates);
             displayResults(data, reportTitle, isKptFile);
             showResultsView();
         }
@@ -1499,46 +1516,47 @@ function resetAndShowLoader() {
 }
 
 function reShowObjectSelectionDialog() {
-            if (loadedKptData && loadedKptData.objectList.length > 0) {
-        const { xmlString, fileName, objectList, title } = loadedKptData;
+    if (loadedKptData && loadedKptData.objectList.length > 0) {
+        const { xmlString, fileName, objectList, title, skipCoordinates } = loadedKptData;
         const overlay = document.createElement('div');
-            overlay.className = 'modal-overlay';
-            const dialog = document.createElement('div');
-            dialog.className = 'modal-dialog';
+        overlay.className = 'modal-overlay';
+        const dialog = document.createElement('div');
+        dialog.className = 'modal-dialog';
 
-            dialog.innerHTML = `
-                <h3>Выберите объект из файла "${fileName}" (${objectList.length} шт.)</h3>
-                <input type="text" id="object-filter-input" onkeyup="filterObjectList(this)" placeholder="Фильтр по кадастровому номеру...">
-            `;
+        dialog.innerHTML = `
+            <h3>Выберите объект из файла "${fileName}" (${objectList.length} шт.)</h3>
+            <input type="text" id="object-filter-input" onkeyup="filterObjectList(this)" placeholder="Фильтр по кадастровому номеру...">
+        `;
 
-            const list = document.createElement('ul');
-            list.className = 'modal-list';
-            objectList.forEach(obj => {
-                const listItem = document.createElement('li');
-                listItem.innerHTML = `<span>${obj.cadNum}</span><span class="obj-type">${obj.type}</span>`;
-                listItem.onclick = () => {
-                    document.body.removeChild(overlay); resetAndShowLoader();
-                    setTimeout(() => {
-                        try {
-                            const { data, isKptFile } = parseXml(xmlString, obj.cadNum);
-                             displayResults(data, title, isKptFile);
-                            showResultsView();
-                        } catch (e) { displayError(e); }
-                        finally { showLoader(false); }
-                    }, 10);
-                };
-                list.appendChild(listItem);
-            });
-            dialog.appendChild(list);
-            overlay.appendChild(dialog);
-            document.body.appendChild(overlay);
-            overlay.onclick = (e) => { if (e.target === overlay) document.body.removeChild(overlay); };
+        const list = document.createElement('ul');
+        list.className = 'modal-list';
+        objectList.forEach(obj => {
+            const listItem = document.createElement('li');
+            listItem.innerHTML = `<span>${obj.cadNum}</span><span class="obj-type">${obj.type}</span>`;
+            listItem.onclick = () => {
+                document.body.removeChild(overlay); 
+                resetAndShowLoader();
+                setTimeout(() => {
+                    try {
+                        const { data, isKptFile } = parseXml(xmlString, obj.cadNum, skipCoordinates);
+                        displayResults(data, title, isKptFile);
+                        showResultsView();
+                    } catch (e) { displayError(e); }
+                    finally { showLoader(false); }
+                }, 10);
+            };
+            list.appendChild(listItem);
+        });
+        dialog.appendChild(list);
+        overlay.appendChild(dialog);
+        document.body.appendChild(overlay);
+        overlay.onclick = (e) => { if (e.target === overlay) document.body.removeChild(overlay); };
 
-            document.getElementById('object-filter-input').focus();
-        } else {
-            alert("Нет данных о загруженном файле для выбора объекта.");
-        }
+        document.getElementById('object-filter-input').focus();
+    } else {
+        alert("Нет данных о загруженном файле для выбора объекта.");
     }
+}
 
  function filterObjectList(input) {
         const filterText = input.value.trim();
@@ -1572,7 +1590,7 @@ function reShowObjectSelectionDialog() {
     }
 
 
-function extractAndShowObjectList(xmlString, records, fileName, title) {
+function extractAndShowObjectList(xmlString, records, fileName, title, skipCoordinates = false) {
     const objectList = [];
     const typeMap = { 'land_record': 'ЗУ', 'build_record': 'Здание', 'construction_record': 'Сооружение' };
     records.forEach(record => {
@@ -1580,7 +1598,7 @@ function extractAndShowObjectList(xmlString, records, fileName, title) {
         const type = typeMap[record.tagName] || 'Объект';
         if (cadNum) objectList.push({ cadNum, type });
     });
-    loadedKptData = { xmlString, fileName, objectList, title };
+    loadedKptData = { xmlString, fileName, objectList, title, skipCoordinates }; // <-- Сохраняем флаг
     reShowObjectSelectionDialog();
 }
 
@@ -1612,7 +1630,7 @@ async function getNspdData(cadNum) {
     }
 }
 
-function parseXml(xmlString, targetCadNum = null) {
+function parseXml(xmlString, targetCadNum = null, skipCoordinates = false) {
     const parser = new DOMParser();
     const xmlDoc = parser.parseFromString(xmlString, "text/xml");
     if (xmlDoc.querySelector('parsererror')) {
@@ -1685,7 +1703,7 @@ function parseXml(xmlString, targetCadNum = null) {
         }
     });
     
-xmlDoc.querySelectorAll(`restrict_record`).forEach(rec => {
+    xmlDoc.querySelectorAll(`restrict_record`).forEach(rec => {
         const objectCadNumInRestriction = getValue(rec, 'object_cad_number');
         if (!isKptFile || objectCadNumInRestriction === recordCadNum || !objectCadNumInRestriction) {
             const docNode = rec.querySelector('underlying_documents > underlying_document');
@@ -1721,7 +1739,7 @@ xmlDoc.querySelectorAll(`restrict_record`).forEach(rec => {
 
     data.coordinatesSystem = '';
 
-    if (contoursNode) {
+    if (contoursNode && !skipCoordinates) {
         data.coordinatesSystem = getValue(contoursNode, 'entity_spatial sk_id');
 
         const allSpatialElements = contoursNode.querySelectorAll('spatial_element, Spatial_Element');
@@ -2288,6 +2306,74 @@ function showMskSelector(originalData) {
     document.body.appendChild(overlay);
     overlay.onclick = (e) => { if (e.target === overlay) document.body.removeChild(overlay); };
     document.getElementById('msk-filter-input').focus();
+}
+
+
+function showCoordinatesConfirmDialog(fileSize) {
+    return new Promise((resolve) => {
+        const sizeMB = (fileSize / (1024 * 1024)).toFixed(1);
+        
+        const overlay = document.createElement('div');
+        overlay.className = 'modal-overlay';
+        
+        const dialog = document.createElement('div');
+        dialog.className = 'modal-dialog selector-modal glass-panel';
+        dialog.style.maxWidth = '450px';
+        dialog.style.textAlign = 'center';
+        
+        dialog.innerHTML = `
+            <h3 style="padding: 30px 30px 15px;">⚠️ Большой файл</h3>
+            <div style="padding: 0 30px 25px; color: #5f6368; font-size: 16px;">
+                <p style="margin-bottom: 15px;">Размер файла: <strong>${sizeMB} МБ</strong></p>
+                <p style="margin-bottom: 0;">Отображение координат может замедлить работу.</p>
+            </div>
+            <div style="padding: 0 30px 30px; display: flex; gap: 15px; justify-content: center;">
+                <button id="coords-yes-btn" style="
+                    padding: 14px 35px;
+                    border-radius: 10px;
+                    border: none;
+                    color: white;
+                    cursor: pointer;
+                    font-size: 16px;
+                    font-weight: 500;
+                    background: linear-gradient(135deg, #34a853 0%, #4caf50 100%);
+                    transition: all 0.3s;
+                ">Да, показать</button>
+                <button id="coords-no-btn" style="
+                    padding: 14px 35px;
+                    border-radius: 10px;
+                    border: none;
+                    color: white;
+                    cursor: pointer;
+                    font-size: 16px;
+                    font-weight: 500;
+                    background: linear-gradient(135deg, #9aa0a6 0%, #80868b 100%);
+                    transition: all 0.3s;
+                ">Нет, пропустить</button>
+            </div>
+        `;
+        
+        overlay.appendChild(dialog);
+        document.body.appendChild(overlay);
+        
+        document.getElementById('coords-yes-btn').onclick = () => {
+            document.body.removeChild(overlay);
+            resolve(true);
+        };
+        
+        document.getElementById('coords-no-btn').onclick = () => {
+            document.body.removeChild(overlay);
+            resolve(false);
+        };
+        
+        // Закрытие по клику на оверлей = "Нет"
+        overlay.onclick = (e) => {
+            if (e.target === overlay) {
+                document.body.removeChild(overlay);
+                resolve(false);
+            }
+        };
+    });
 }
 
 
