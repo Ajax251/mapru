@@ -1103,6 +1103,86 @@
     transform: translateY(-2px);
     box-shadow: 0 4px 12px rgba(0,0,0,0.2);
 }
+
+/* Стили для диалога расширенного отчета - анимация */
+.checkbox-list li {
+    padding: 12px 15px;
+    display: flex;
+    align-items: center;
+    font-size: 16px;
+    border-radius: 8px;
+    transition: all 0.3s ease;
+    margin-bottom: 4px;
+    border: 2px solid transparent;
+}
+
+.checkbox-list li.processing {
+    background: linear-gradient(90deg, #e0f2fe, #bae6fd, #e0f2fe);
+    background-size: 200% 100%;
+    animation: shimmer 1.5s infinite;
+    border-color: #38bdf8;
+}
+
+.checkbox-list li.completed {
+    background: #dcfce7;
+    border-color: #22c55e;
+}
+
+.checkbox-list li.completed::after {
+    content: '✓';
+    margin-left: auto;
+    color: #22c55e;
+    font-weight: bold;
+    font-size: 18px;
+}
+
+.checkbox-list li.skipped {
+    opacity: 0.5;
+}
+
+@keyframes shimmer {
+    0% { background-position: -200% 0; }
+    100% { background-position: 200% 0; }
+}
+
+#generateReportBtn {
+    margin: 20px 30px;
+    padding: 14px 24px;
+    background: linear-gradient(135deg, var(--primary-blue) 0%, #5a9fd4 100%);
+    color: white;
+    border: none;
+    border-radius: 10px;
+    font-size: 16px;
+    font-weight: 500;
+    cursor: pointer;
+    transition: all 0.3s ease;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    gap: 8px;
+    min-width: 160px;
+}
+
+#generateReportBtn:hover:not(:disabled) {
+    transform: translateY(-2px);
+    box-shadow: 0 4px 12px rgba(0,0,0,0.2);
+}
+
+#generateReportBtn.cancel-btn {
+    background: linear-gradient(135deg, #ef4444 0%, #dc2626 100%);
+}
+
+#generateReportBtn.cancel-btn:hover {
+    background: linear-gradient(135deg, #dc2626 0%, #b91c1c 100%);
+}
+
+#generateReportBtn:disabled {
+    opacity: 0.6;
+    cursor: not-allowed;
+    transform: none;
+}
+
+
 </style>
 </head>
 <body>
@@ -1185,6 +1265,7 @@
  let loadedKptData = { xmlString: null, fileName: null, objectList: [], title: null, skipCoordinates: false };
     let currentObjectGeometry = null; // Глобальная переменная для хранения геометрии текущего объекта в EPSG:3857
     let foundZouitFeatures = [];
+    let extendedReportAbortController = null;
     const sixDigitsRegions = ['02', '03', '04', '05', '08', '15', '16', '18', '19', '21', '22', '25', '26', '28', '30', '33', '34', '37', '38', '39', '40', '43', '44', '45', '46', '54', '55', '73', '75', '76', '91', '92'];
 
 
@@ -1844,6 +1925,18 @@ async function parseNspdJson(feature) {
         }
 
     } 
+    
+    // Машино-места
+else if (data.common.objType.includes("Машино")) {
+    addParam('Площадь', options.area ? `${formatNumberWithSpaces(options.area)} м²` : null);
+    addParam('Этаж', options.floor);
+    addParam('Номер на плане', options.floor_plan_number);
+    addParam('КН здания/сооружения', options.parent_cad_number);
+    
+    // ДОБАВИТЬ: получение связанных ЗУ
+    const landList = await fetchLinkedObjects(feature);
+    if (landList && landList.length > 0) data.links['Расположен на ЗУ'] = landList;
+}
     // Характеристики ЗДАНИЯ
     else if (data.common.objType.includes("Здания")) {
         const areaVal = options.area || options.build_record_area;
@@ -2509,16 +2602,28 @@ async function fetchLinkedObjects(feature) {
     const geomId = feature.id;
     const categoryId = feature.properties.category;
     const categoryName = feature.properties.categoryName;
+    const registersId = feature.properties.options?.registersId;
 
     let path = '';
+    
+    // Для ЗУ - ищем ОКС на участке
     if (categoryName === "Земельные участки ЕГРН") {
-        path = `/api/geoportal/v1/tab-group-data?tabClass=objectsList&categoryId=${categoryId}&geomId=${geomId}`;
-    } else {
-        path = `/api/geoportal/v1/tab-values-data?tabClass=landLinks&categoryId=${categoryId}&geomId=${geomId}`;
+        if (registersId) {
+            path = `/api/geoportal/v1/tab-group-data?tabClass=objectsList&objdocId=${geomId}&registersId=${registersId}`;
+        } else {
+            path = `/api/geoportal/v1/tab-group-data?tabClass=objectsList&categoryId=${categoryId}&geomId=${geomId}`;
+        }
+    } 
+    // Для ОКС (Здания, Помещения, Сооружения) - ищем ЗУ
+    else if (categoryName && (categoryName.includes("Здания") || categoryName.includes("Помещения") || categoryName.includes("Сооружения"))) {
+        if (registersId) {
+            path = `/api/geoportal/v1/tab-values-data?tabClass=landLinks&objdocId=${geomId}&registersId=${registersId}`;
+        } else {
+            path = `/api/geoportal/v1/tab-values-data?tabClass=landLinks&categoryId=${categoryId}&geomId=${geomId}`;
+        }
     }
 
-    if (!geomId || !categoryId) {
-        console.error("Отсутствует geomId или categoryId, невозможно запросить связанные объекты.");
+    if (!path || !geomId) {
         return null;
     }
 
@@ -2526,7 +2631,13 @@ async function fetchLinkedObjects(feature) {
         const res = await fetch(`https://nspd.gov.ru${path}`);
         if (!res.ok) return null;
         const data = await res.json();
-        return (data?.object?.[0]?.value || data?.value) || null;
+        
+        // Для ЗУ ответ в data.object[0].value, для ОКС - в data.value
+        if (categoryName === "Земельные участки ЕГРН") {
+            return data?.object?.[0]?.value || null;
+        } else {
+            return (data && !data.message && data.value?.length > 0) ? data.value : null;
+        }
     } catch (e) {
         console.error("Ошибка при запросе связанных объектов:", e);
         return null;
@@ -3017,8 +3128,10 @@ function showExtendedReportDialog() {
         return savedState.hasOwnProperty(id) ? savedState[id] : defaults[id];
     };
 
-    const hasLinks = originalNspdData?.links &&
-                     (originalNspdData.links['ОКС на земельном участке'] || originalNspdData.links['Расположен на ЗУ']);
+    // ИЗМЕНЕНО: более явная проверка наличия связей
+    const oksOnLand = originalNspdData?.links?.['ОКС на земельном участке'];
+    const landForOks = originalNspdData?.links?.['Расположен на ЗУ'];
+    const hasLinks = (oksOnLand && oksOnLand.length > 0) || (landForOks && landForOks.length > 0);
 
     const overlay = document.createElement('div');
     overlay.className = 'modal-overlay';
@@ -3035,34 +3148,45 @@ function showExtendedReportDialog() {
     }
 
     dialog.innerHTML = `
-        <h3>Выберите разделы для расширенных сведений</h3>
-        <ul class="checkbox-list">
-            <li>
-                <input type="checkbox" id="check-zouit" ${isChecked('check-zouit') ? 'checked' : ''}>
-                <label for="check-zouit">Зоны с особыми условиями (ЗОУИТ)</label>
-            </li>
-            <li>
-                <input type="checkbox" id="check-zones" ${isChecked('check-zones') ? 'checked' : ''}>
-                <label for="check-zones">Территориальные зоны</label>
-            </li>
-            <li>
-                <input type="checkbox" id="check-settlements" ${isChecked('check-settlements') ? 'checked' : ''}>
-                <label for="check-settlements">Населенные пункты</label>
-            </li>
-            <li>
-                <input type="checkbox" id="check-municipal" ${isChecked('check-municipal') ? 'checked' : ''}>
-                <label for="check-municipal">Муниципальные образования</label>
-            </li>
-            <li>
-                <input type="checkbox" id="check-forestry" ${isChecked('check-forestry') ? 'checked' : ''}>
-                <label for="check-forestry">Лесничества</label>
-            </li>
-            ${linkedCheckboxHtml}
-        </ul>
-        <div style="text-align: center;">
-            <button id="generateReportBtn">Сформировать</button>
-        </div>
-    `;
+    <h3>Выберите разделы для расширенных сведений</h3>
+    <ul class="checkbox-list">
+    
+        ${linkedCheckboxHtml}
+        
+        <li>
+            <input type="checkbox" id="check-zouit" ${isChecked('check-zouit') ? 'checked' : ''}>
+            <label for="check-zouit">Зоны с особыми условиями (ЗОУИТ)</label>
+        </li>
+        <li>
+            <input type="checkbox" id="check-zones" ${isChecked('check-zones') ? 'checked' : ''}>
+            <label for="check-zones">Территориальные зоны</label>
+        </li>
+        <li>
+            <input type="checkbox" id="check-settlements" ${isChecked('check-settlements') ? 'checked' : ''}>
+            <label for="check-settlements">Населенные пункты</label>
+        </li>
+        <li>
+            <input type="checkbox" id="check-municipal" ${isChecked('check-municipal') ? 'checked' : ''}>
+            <label for="check-municipal">Муниципальные образования</label>
+        </li>
+        <li>
+            <input type="checkbox" id="check-forestry" ${isChecked('check-forestry') ? 'checked' : ''}>
+            <label for="check-forestry">Лесничества</label>
+        </li>
+    
+    </ul>
+    <div style="text-align: center;">
+        <button id="generateReportBtn">
+            <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2">
+                <path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/>
+                <polyline points="14 2 14 8 20 8"/>
+                <line x1="12" y1="18" x2="12" y2="12"/>
+                <line x1="9" y1="15" x2="15" y2="15"/>
+            </svg>
+            Сформировать
+        </button>
+    </div>
+`;
 
     overlay.appendChild(dialog);
     document.body.appendChild(overlay);
@@ -3092,11 +3216,25 @@ function showExtendedReportDialog() {
 
 async function generateExtendedReport(btn) {
     const overlay = btn.closest('.modal-overlay');
-    const btnOriginalText = btn.textContent;
-    btn.disabled = true;
-    btn.style.opacity = '0.7';
     
-    showLoader(true);
+    // Создаем контроллер для отмены
+    extendedReportAbortController = new AbortController();
+    
+    // Меняем кнопку на "Отмена"
+    btn.innerHTML = `
+        <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2">
+            <line x1="18" y1="6" x2="6" y2="18"></line>
+            <line x1="6" y1="6" x2="18" y2="18"></line>
+        </svg>
+        Отмена
+    `;
+    btn.classList.add('cancel-btn');
+    btn.onclick = () => {
+        if (extendedReportAbortController) {
+            extendedReportAbortController.abort();
+            extendedReportAbortController = null;
+        }
+    };
 
     const geoJSON = currentObjectGeometry;
     const results = [];
@@ -3110,10 +3248,35 @@ async function generateExtendedReport(btn) {
         { id: 'check-forestry', layerId: 36314, type: 'forestry', name: 'Лесничества', method: 'WMS' }
     ];
 
+    // Функция для подсветки элемента
+    const highlightItem = (id, state) => {
+        const checkbox = document.getElementById(id);
+        if (checkbox) {
+            const li = checkbox.closest('li');
+            if (li) {
+                li.classList.remove('processing', 'completed', 'skipped');
+                if (state) li.classList.add(state);
+            }
+        }
+    };
+
+    // Пометить невыбранные как пропущенные
+    layersToCheck.forEach(item => {
+        const checkbox = document.getElementById(item.id);
+        if (checkbox && !checkbox.checked) {
+            highlightItem(item.id, 'skipped');
+        }
+    });
+
+    const linkedCheckbox = document.getElementById('check-linked-objects');
+    if (linkedCheckbox && !linkedCheckbox.checked) {
+        highlightItem('check-linked-objects', 'skipped');
+    }
+
     try {
-        const linkedCheckbox = document.getElementById('check-linked-objects');
+        // Обработка связанных объектов
         if (linkedCheckbox && linkedCheckbox.checked && originalNspdData?.links) {
-            updateLoaderText('Поиск связанных объектов...');
+            highlightItem('check-linked-objects', 'processing');
             
             let cadNumbersToFetch = [];
             if (originalNspdData.links['ОКС на земельном участке']) {
@@ -3126,23 +3289,32 @@ async function generateExtendedReport(btn) {
             cadNumbersToFetch = [...new Set(cadNumbersToFetch)];
 
             for (let i = 0; i < cadNumbersToFetch.length; i++) {
+                // Проверяем отмену
+                if (extendedReportAbortController?.signal.aborted) {
+                    throw new DOMException('Отменено пользователем', 'AbortError');
+                }
+                
                 const cadNum = cadNumbersToFetch[i];
-                updateLoaderText(`Загрузка объекта: ${cadNum} (${i + 1}/${cadNumbersToFetch.length})`);
+                updateLoaderText(`Загрузка: ${cadNum} (${i + 1}/${cadNumbersToFetch.length})`);
                 
                 try {
-                    const response = await fetch(`https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(cadNum)}`);
+                    const response = await fetch(
+                        `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(cadNum)}`,
+                        { signal: extendedReportAbortController.signal }
+                    );
                     if (response.ok) {
                         const json = await response.json();
                         if (json.data && json.data.features && json.data.features.length > 0) {
                             const feat = json.data.features[0];
                             if (feat.geometry) {
                                 if (!feat.properties.options) feat.properties.options = {};
-                                feat.properties.options.cad_num = cadNum; 
+                                feat.properties.options.cad_num = cadNum;
                                 linkedFeatures.push(feat);
                             }
                         }
                     }
                 } catch (e) {
+                    if (e.name === 'AbortError') throw e;
                     console.error(`Ошибка загрузки ${cadNum}`, e);
                 }
 
@@ -3150,39 +3322,112 @@ async function generateExtendedReport(btn) {
                     await delay(1000);
                 }
             }
+            
+            highlightItem('check-linked-objects', 'completed');
         }
 
+        // Обработка слоев
         for (const item of layersToCheck) {
             const checkbox = document.getElementById(item.id);
             if (checkbox && checkbox.checked) {
+                // Проверяем отмену
+                if (extendedReportAbortController?.signal.aborted) {
+                    throw new DOMException('Отменено пользователем', 'AbortError');
+                }
+                
+                highlightItem(item.id, 'processing');
                 updateLoaderText(`Поиск: ${item.name}...`);
                 
                 let data;
-                if (item.method === 'POST') {
-                    data = await searchIntersectionsPost(geoJSON, item.layerId, item.type);
-                } else {
-                    data = await searchWmsGet(geoJSON, item.layerId, item.type);
+                try {
+                    if (item.method === 'POST') {
+                        data = await searchIntersectionsPost(geoJSON, item.layerId, item.type);
+                    } else {
+                        data = await searchWmsGet(geoJSON, item.layerId, item.type);
+                    }
+                    results.push(data);
+                    highlightItem(item.id, 'completed');
+                } catch (e) {
+                    if (e.name === 'AbortError') throw e;
+                    console.error(`Ошибка при запросе ${item.name}:`, e);
+                    highlightItem(item.id, 'completed'); // Всё равно помечаем как завершенное
                 }
-                
-                results.push(data);
 
                 const waitTime = 1500 + Math.random() * 500;
-                await delay(waitTime); 
+                await delay(waitTime);
             }
         }
+// Успешное завершение - закрываем диалог и добавляем данные
+document.body.removeChild(overlay);
+appendExtendedData(results, linkedFeatures);
 
-        document.body.removeChild(overlay);
-        appendExtendedData(results, linkedFeatures);
+
+window.scrollTo({ top: 0, behavior: 'smooth' });
+        
 
     } catch (error) {
-        console.error(error);
-        alert('Ошибка при формировании отчета: ' + error.message);
+        if (error.name === 'AbortError') {
+            // Отмена пользователем
+            showNotification('Формирование отчета отменено', 'info');
+            
+            // Сбрасываем состояние элементов
+            layersToCheck.forEach(item => highlightItem(item.id, ''));
+            highlightItem('check-linked-objects', '');
+            
+        } else {
+            console.error(error);
+            alert('Ошибка при формировании отчета: ' + error.message);
+        }
     } finally {
+        extendedReportAbortController = null;
         showLoader(false);
+        
+        // Восстанавливаем кнопку
+        btn.innerHTML = 'Сформировать';
+        btn.classList.remove('cancel-btn');
         btn.disabled = false;
-        btn.textContent = btnOriginalText;
-        btn.style.opacity = '1';
+        btn.onclick = function() { generateExtendedReport(this); };
     }
+}
+
+
+function showNotification(message, type = 'info') {
+    // Создаем контейнер если его нет
+    let container = document.getElementById('notification-container');
+    if (!container) {
+        container = document.createElement('div');
+        container.id = 'notification-container';
+        container.style.cssText = 'position:fixed;bottom:20px;right:20px;z-index:9999;display:flex;flex-direction:column;gap:10px;';
+        document.body.appendChild(container);
+    }
+    
+    const notification = document.createElement('div');
+    notification.style.cssText = `
+        padding: 15px 20px;
+        border-radius: 8px;
+        color: white;
+        font-weight: 500;
+        box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+        animation: slideIn 0.3s ease;
+    `;
+    
+    const colors = {
+        'info': '#3b82f6',
+        'success': '#22c55e',
+        'warning': '#f59e0b',
+        'error': '#ef4444'
+    };
+    notification.style.background = colors[type] || colors.info;
+    notification.textContent = message;
+    
+    container.appendChild(notification);
+    
+    setTimeout(() => {
+        notification.style.opacity = '0';
+        notification.style.transform = 'translateX(100px)';
+        notification.style.transition = 'all 0.3s ease';
+        setTimeout(() => notification.remove(), 300);
+    }, 3000);
 }
 
 
