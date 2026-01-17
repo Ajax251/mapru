@@ -1260,7 +1260,7 @@
             <div id="report-output"></div>
         </div>
     </div>
-
+  // <script src="cb.js"></script> 
     <script>
  let loadedKptData = { xmlString: null, fileName: null, objectList: [], title: null, skipCoordinates: false };
     let currentObjectGeometry = null; // Глобальная переменная для хранения геометрии текущего объекта в EPSG:3857
@@ -1290,7 +1290,6 @@ let originalNspdData = null; // Для возможности возврата �
 let isAutoMskEnabled = localStorage.getItem('app_auto_msk') === 'true';
 let savedOrientation = localStorage.getItem('app_orientation') || 'portrait';
 let savedMergedIndices = JSON.parse(localStorage.getItem('app_merged_indices') || '[]');
-const delay = ms => new Promise(res => setTimeout(res, ms));
 
 function saveMergeState() {
     const merged = [];
@@ -2086,31 +2085,7 @@ function displayResults(data, title, isKptFile = false) {
             ${generateTableRow('Местоположение', data.common.location)}
             ${Object.entries(data.params).map(([key, value]) => generateTableRow(key, value)).join('')}
             ${generateTableRow('Кадастровая стоимость', data.common.cost ? `${new Intl.NumberFormat('ru-RU').format(data.common.cost)} руб.` : '')}
-        ${Object.entries(data.links || {}).map(([key, value]) => {
-    if (!value) return '';
-    // Проверяем, что value - это массив
-    if (Array.isArray(value) && value.length > 0) {
-        // Если это массив объектов с детальной информацией (из расширенного отчета)
-        if (typeof value[0] === 'object' && value[0].cadNum) {
-            const formattedValue = value.map(obj => {
-                let parts = [obj.cadNum];
-                if (obj.type && obj.name) {
-                    parts.push(`(${obj.type}: ${obj.name})`);
-                } else if (obj.type) {
-                    parts.push(`(${obj.type})`);
-                }
-                return parts.join(' ');
-            }).join('<br>');
-            return generateTableRow(key, formattedValue);
-        }
-        // Если это просто массив строк (кадастровые номера)
-        else {
-            return generateTableRow(key, value.join(', '));
-        }
-    }
-    // Если это не массив - выводим как есть
-    return generateTableRow(key, value);
-}).join('')}
+            ${Object.entries(data.links || {}).map(([key, value]) => generateTableRow(key, Array.isArray(value) ? value.join(', ') : value)).join('')}
             ${generateTableRow('Статус', data.common.status)}`;
     
     // Права
@@ -2621,22 +2596,6 @@ function toggleAllOrientations() {
     localStorage.setItem('app_orientation', newOrientation);
 }
 
-
-
-
-async function safeFetch(url, options = {}, delayMs = 800) {
-    try {
-        const response = await fetch(url, options);
-        // Добавляем задержку ПОСЛЕ каждого запроса
-        await delay(delayMs);
-        return response;
-    } catch (error) {
-        await delay(delayMs); // Задержка даже при ошибке
-        throw error;
-    }
-}
-
-
 async function fetchLinkedObjects(feature) {
     if (!feature || !feature.properties) return null;
 
@@ -2647,6 +2606,7 @@ async function fetchLinkedObjects(feature) {
 
     let path = '';
     
+    // Для ЗУ - ищем ОКС на участке
     if (categoryName === "Земельные участки ЕГРН") {
         if (registersId) {
             path = `/api/geoportal/v1/tab-group-data?tabClass=objectsList&objdocId=${geomId}&registersId=${registersId}`;
@@ -2654,6 +2614,7 @@ async function fetchLinkedObjects(feature) {
             path = `/api/geoportal/v1/tab-group-data?tabClass=objectsList&categoryId=${categoryId}&geomId=${geomId}`;
         }
     } 
+    // Для ОКС (Здания, Помещения, Сооружения) - ищем ЗУ
     else if (categoryName && (categoryName.includes("Здания") || categoryName.includes("Помещения") || categoryName.includes("Сооружения"))) {
         if (registersId) {
             path = `/api/geoportal/v1/tab-values-data?tabClass=landLinks&objdocId=${geomId}&registersId=${registersId}`;
@@ -2662,33 +2623,26 @@ async function fetchLinkedObjects(feature) {
         }
     }
 
-    if (!path || !geomId) return null;
+    if (!path || !geomId) {
+        return null;
+    }
 
     try {
-        const res = await safeFetch(`https://nspd.gov.ru${path}`, {}, 800);
+        const res = await fetch(`https://nspd.gov.ru${path}`);
         if (!res.ok) return null;
         const data = await res.json();
         
-        let cadNumbers = [];
+        // Для ЗУ ответ в data.object[0].value, для ОКС - в data.value
         if (categoryName === "Земельные участки ЕГРН") {
-            const objectsList = data?.object?.[0]?.value;
-            if (objectsList) {
-                cadNumbers = typeof objectsList === 'string' 
-                    ? objectsList.split(',').map(s => s.trim()).filter(Boolean)
-                    : [objectsList];
-            }
+            return data?.object?.[0]?.value || null;
         } else {
-            cadNumbers = (data && !data.message && data.value?.length > 0) ? data.value : [];
+            return (data && !data.message && data.value?.length > 0) ? data.value : null;
         }
-
-        return cadNumbers.length > 0 ? cadNumbers : null;
-
     } catch (e) {
         console.error("Ошибка при запросе связанных объектов:", e);
         return null;
     }
 }
-
 
 function drawPlan(contours, canvasId, source, zouitFeatures = [], cadNum = '', linkedFeatures = []) {
     const canvas = document.getElementById(canvasId); 
@@ -3258,13 +3212,15 @@ function showExtendedReportDialog() {
     };
 }
 
-   
+    const delay = ms => new Promise(res => setTimeout(res, ms));
 
 async function generateExtendedReport(btn) {
     const overlay = btn.closest('.modal-overlay');
     
+    // Создаем контроллер для отмены
     extendedReportAbortController = new AbortController();
     
+    // Меняем кнопку на "Отмена"
     btn.innerHTML = `
         <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="white" stroke-width="2">
             <line x1="18" y1="6" x2="6" y2="18"></line>
@@ -3292,6 +3248,7 @@ async function generateExtendedReport(btn) {
         { id: 'check-forestry', layerId: 36314, type: 'forestry', name: 'Лесничества', method: 'WMS' }
     ];
 
+    // Функция для подсветки элемента
     const highlightItem = (id, state) => {
         const checkbox = document.getElementById(id);
         if (checkbox) {
@@ -3303,6 +3260,7 @@ async function generateExtendedReport(btn) {
         }
     };
 
+    // Пометить невыбранные как пропущенные
     layersToCheck.forEach(item => {
         const checkbox = document.getElementById(item.id);
         if (checkbox && !checkbox.checked) {
@@ -3321,27 +3279,17 @@ async function generateExtendedReport(btn) {
             highlightItem('check-linked-objects', 'processing');
             
             let cadNumbersToFetch = [];
-            
-            // Собираем ВСЕ кадастровые номера из связей
-            Object.values(originalNspdData.links).forEach(linkValue => {
-                if (Array.isArray(linkValue)) {
-                    linkValue.forEach(item => {
-                        // Если это строка - добавляем напрямую
-                        if (typeof item === 'string') {
-                            cadNumbersToFetch.push(item);
-                        }
-                        // Если объект с cadNum - извлекаем номер
-                        else if (item && item.cadNum) {
-                            cadNumbersToFetch.push(item.cadNum);
-                        }
-                    });
-                }
-            });
+            if (originalNspdData.links['ОКС на земельном участке']) {
+                cadNumbersToFetch = cadNumbersToFetch.concat(originalNspdData.links['ОКС на земельном участке']);
+            }
+            if (originalNspdData.links['Расположен на ЗУ']) {
+                cadNumbersToFetch = cadNumbersToFetch.concat(originalNspdData.links['Расположен на ЗУ']);
+            }
 
-            // Убираем дубликаты
             cadNumbersToFetch = [...new Set(cadNumbersToFetch)];
 
             for (let i = 0; i < cadNumbersToFetch.length; i++) {
+                // Проверяем отмену
                 if (extendedReportAbortController?.signal.aborted) {
                     throw new DOMException('Отменено пользователем', 'AbortError');
                 }
@@ -3350,16 +3298,13 @@ async function generateExtendedReport(btn) {
                 updateLoaderText(`Загрузка: ${cadNum} (${i + 1}/${cadNumbersToFetch.length})`);
                 
                 try {
-                    // Используем safeFetch с задержкой 1 секунда
-                    const response = await safeFetch(
+                    const response = await fetch(
                         `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(cadNum)}`,
-                        { signal: extendedReportAbortController.signal },
-                        1000 // 1 секунда между запросами
+                        { signal: extendedReportAbortController.signal }
                     );
-                    
                     if (response.ok) {
                         const json = await response.json();
-                        if (json.data?.features?.[0]) {
+                        if (json.data && json.data.features && json.data.features.length > 0) {
                             const feat = json.data.features[0];
                             if (feat.geometry) {
                                 if (!feat.properties.options) feat.properties.options = {};
@@ -3372,15 +3317,20 @@ async function generateExtendedReport(btn) {
                     if (e.name === 'AbortError') throw e;
                     console.error(`Ошибка загрузки ${cadNum}`, e);
                 }
+
+                if (i < cadNumbersToFetch.length - 1) {
+                    await delay(1000);
+                }
             }
             
             highlightItem('check-linked-objects', 'completed');
         }
 
-        // Обработка слоев (с паузами)
+        // Обработка слоев
         for (const item of layersToCheck) {
             const checkbox = document.getElementById(item.id);
             if (checkbox && checkbox.checked) {
+                // Проверяем отмену
                 if (extendedReportAbortController?.signal.aborted) {
                     throw new DOMException('Отменено пользователем', 'AbortError');
                 }
@@ -3400,23 +3350,30 @@ async function generateExtendedReport(btn) {
                 } catch (e) {
                     if (e.name === 'AbortError') throw e;
                     console.error(`Ошибка при запросе ${item.name}:`, e);
-                    highlightItem(item.id, 'completed');
+                    highlightItem(item.id, 'completed'); // Всё равно помечаем как завершенное
                 }
 
-                // Задержка между проверкой разных слоев
-                await delay(1200);
+                const waitTime = 1500 + Math.random() * 500;
+                await delay(waitTime);
             }
         }
+// Успешное завершение - закрываем диалог и добавляем данные
+document.body.removeChild(overlay);
+appendExtendedData(results, linkedFeatures);
 
-        document.body.removeChild(overlay);
-        appendExtendedData(results, linkedFeatures);
-        window.scrollTo({ top: 0, behavior: 'smooth' });
+
+window.scrollTo({ top: 0, behavior: 'smooth' });
+        
 
     } catch (error) {
         if (error.name === 'AbortError') {
+            // Отмена пользователем
             showNotification('Формирование отчета отменено', 'info');
+            
+            // Сбрасываем состояние элементов
             layersToCheck.forEach(item => highlightItem(item.id, ''));
             highlightItem('check-linked-objects', '');
+            
         } else {
             console.error(error);
             alert('Ошибка при формировании отчета: ' + error.message);
@@ -3424,6 +3381,8 @@ async function generateExtendedReport(btn) {
     } finally {
         extendedReportAbortController = null;
         showLoader(false);
+        
+        // Восстанавливаем кнопку
         btn.innerHTML = 'Сформировать';
         btn.classList.remove('cancel-btn');
         btn.disabled = false;
@@ -3473,11 +3432,9 @@ function showNotification(message, type = 'info') {
 
 
     // Метод 1: POST /intersects (Только для ЗОУИТ)
-   async function searchIntersectionsPost(geometry, layerId, type) {
-    try {
-        const response = await safeFetch(
-            'https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject',
-            {
+    async function searchIntersectionsPost(geometry, layerId, type) {
+        try {
+            const response = await fetch('https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject', {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({
@@ -3491,44 +3448,50 @@ function showNotification(message, type = 'info') {
                     },
                     "categories": [{"id": layerId}]
                 })
-            },
-            1000 // 1 секунда задержка
-        );
+            });
 
-        if (!response.ok) return { type, features: [] };
-        const data = await response.json();
-        return { type, features: data.features || [] };
-    } catch (e) {
-        console.error(e);
-        return { type, features: [] };
-    }
-}
-
-    // Метод 2: GET WMS (Для остальных слоев)
-   async function searchWmsGet(geometry3857, layerId, type) {
-    try {
-        const center = getCenterFromGeometry(geometry3857);
-        if (!center) return { type, features: [] };
-
-        const delta = 10;
-        const bbox = `${center.x - delta},${center.y - delta},${center.x + delta},${center.y + delta}`;
-        const url = `https://nspd.gov.ru/api/aeggis/v3/${layerId}/wms?REQUEST=GetFeatureInfo&QUERY_LAYERS=${layerId}&SERVICE=WMS&VERSION=1.3.0&FORMAT=image%2Fpng&STYLES=&TRANSPARENT=true&LAYERS=${layerId}&INFO_FORMAT=application%2Fjson&FEATURE_COUNT=10&I=256&J=256&WIDTH=512&HEIGHT=512&CRS=EPSG%3A3857&BBOX=${bbox}`;
-
-        const response = await safeFetch(url, { method: 'GET', mode: 'cors' }, 1000);
-
-        if (!response.ok) {
-            console.warn(`WMS Error ${layerId}: ${response.status}`);
+            if (!response.ok) return { type, features: [] };
+            const data = await response.json();
+            return { type, features: data.features || [] };
+        } catch (e) {
+            console.error(e);
             return { type, features: [] };
         }
-
-        const data = await response.json();
-        return { type, features: data.features || [] };
-
-    } catch (e) {
-        console.error(`WMS Fetch Error ${layerId}:`, e);
-        return { type, features: [] };
     }
-}
+
+    // Метод 2: GET WMS (Для остальных слоев)
+    async function searchWmsGet(geometry3857, layerId, type) {
+        try {
+            // 1. Находим центр объекта (в координатах 3857)
+            const center = getCenterFromGeometry(geometry3857);
+            if (!center) return { type, features: [] };
+
+            // 2. Формируем BBOX (маленький квадрат вокруг центра, +/- 10 метров)
+            const delta = 10;
+            const bbox = `${center.x - delta},${center.y - delta},${center.x + delta},${center.y + delta}`;
+
+            // 3. Формируем URL как в примере "Карты" (версия v3)
+            const url = `https://nspd.gov.ru/api/aeggis/v3/${layerId}/wms?REQUEST=GetFeatureInfo&QUERY_LAYERS=${layerId}&SERVICE=WMS&VERSION=1.3.0&FORMAT=image%2Fpng&STYLES=&TRANSPARENT=true&LAYERS=${layerId}&INFO_FORMAT=application%2Fjson&FEATURE_COUNT=10&I=256&J=256&WIDTH=512&HEIGHT=512&CRS=EPSG%3A3857&BBOX=${bbox}`;
+
+            const response = await fetch(url, {
+                method: 'GET',
+                mode: 'cors'
+            });
+
+            if (!response.ok) {
+                console.warn(`WMS Error ${layerId}: ${response.status}`);
+                return { type, features: [] };
+            }
+
+            const data = await response.json();
+            return { type, features: data.features || [] };
+
+        } catch (e) {
+            console.error(`WMS Fetch Error ${layerId}:`, e);
+            return { type, features: [] };
+        }
+    }
+
     // Вспомогательная функция: Найти центр геометрии (простое среднее арифметическое)
     function getCenterFromGeometry(geometry) {
         let coords = [];
@@ -3560,65 +3523,6 @@ function showNotification(message, type = 'info') {
 function appendExtendedData(results, linkedFeatures = []) {
     const output = document.getElementById('report-output');
     const mainTable = output.querySelector('.main-info-table');
-
-    // --- НОВАЯ ЛОГИКА: Обновляем строки таблицы данными о связанных объектах ---
-    if (linkedFeatures.length > 0 && mainTable) {
-        Array.from(mainTable.rows).forEach(row => {
-            const label = row.cells[0].textContent.trim();
-            
-            // Ищем нужные строки
-            if (label === 'ОКС на земельном участке' || label === 'Расположен на ЗУ') {
-                const valueCell = row.cells[1];
-                let cadNumbers = [];
-
-                // Берем исходный список номеров из сохраненных данных или парсим ячейку
-                if (originalNspdData?.links?.[label]) {
-                    const raw = originalNspdData.links[label];
-                    cadNumbers = Array.isArray(raw) ? raw.map(r => typeof r === 'string' ? r : r.cadNum) : [raw];
-                } else {
-                    cadNumbers = valueCell.innerText.split(/,|;|\n/).map(s => s.trim()).filter(Boolean);
-                }
-
-                // Формируем красивый HTML с деталями
-                const newHtml = cadNumbers.map(cadNum => {
-                    const feature = linkedFeatures.find(f =>
-                        (f.properties?.options?.cad_num === cadNum) ||
-                        (f.properties?.options?.cad_number === cadNum) ||
-                        (f.properties?.label === cadNum)
-                    );
-
-                    if (feature) {
-                        const opts = feature.properties.options || {};
-                        
-                        // Определяем тип (Здание, Сооружение и т.д.)
-                        let type = opts.build_record_type_value || 
-                                   opts.object_type_value || 
-                                   feature.properties.categoryName || 
-                                   'Объект';
-                        type = type.replace(' ЕГРН', ''); // Убираем лишнее
-
-                        // Определяем наименование
-                        const name = opts.building_name || 
-                                     opts.name || 
-                                     opts.params_name || 
-                                     opts.name_by_doc || 
-                                     opts.descr || '';
-
-                        if (name) {
-                            return `${cadNum} (${type}: ${name})`;
-                        } else {
-                            return `${cadNum} (${type})`;
-                        }
-                    }
-                    return cadNum; // Если детали не нашлись, возвращаем просто номер
-                }).join('<br>');
-
-                valueCell.innerHTML = newHtml;
-            }
-        });
-    }
-    // --- КОНЕЦ НОВОЙ ЛОГИКИ ---
-
     const currentCadNum = originalNspdData?.common?.cadNum || '';
     const cadInfoBlock = currentCadNum ? 
         `<table class="coord-info-table" style="margin-top: 5px; margin-bottom: 15px;">
