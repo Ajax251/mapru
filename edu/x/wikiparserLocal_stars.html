@@ -1,0 +1,415 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <title>Star Wiki Collector v7 (No AI)</title>
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;600&family=JetBrains+Mono:wght@400&display=swap" rel="stylesheet">
+    <style>
+        :root { --bg: #0f172a; --panel: #1e293b; --text: #e2e8f0; --accent: #8b5cf6; --success: #22c55e; --error: #ef4444; --warning: #f59e0b; }
+        body { background: var(--bg); color: var(--text); font-family: 'Inter', sans-serif; margin: 0; padding: 20px; height: 100vh; box-sizing: border-box; display: flex; flex-direction: column; gap: 15px; }
+        
+        header { display: flex; justify-content: space-between; align-items: center; padding-bottom: 15px; border-bottom: 1px solid #334155; }
+        h1 { margin: 0; font-size: 1.2rem; }
+        
+        .layout { display: grid; grid-template-columns: 300px 1fr; gap: 20px; flex: 1; min-height: 0; }
+        
+        .panel { background: var(--panel); border-radius: 8px; padding: 15px; display: flex; flex-direction: column; border: 1px solid #334155; }
+        .panel h2 { margin-top: 0; font-size: 0.9rem; color: #94a3b8; text-transform: uppercase; letter-spacing: 1px; margin-bottom: 15px;}
+        
+        textarea#simple-input { background: #020617; color: #94a3b8; border: 1px solid #334155; border-radius: 4px; padding: 10px; font-family: 'Inter', sans-serif; font-size: 12px; resize: none; flex: 1; margin-bottom: 10px;}
+        
+        #logs { flex: 1; overflow-y: auto; font-family: 'JetBrains Mono', monospace; font-size: 12px; display: flex; flex-direction: column; gap: 5px; background: #000; padding: 10px; border-radius: 4px; }
+        .log-item { padding: 5px 8px; border-radius: 4px; border-left: 3px solid transparent; background: rgba(255,255,255,0.05); margin-bottom: 2px; }
+        .log-info { border-left-color: var(--accent); }
+        .log-success { border-left-color: var(--success); color: #86efac; }
+        .log-error { border-left-color: var(--error); color: #fca5a5; background: rgba(239, 68, 68, 0.1); }
+        .log-warn { border-left-color: var(--warning); color: #fcd34d; }
+
+        .controls { display: flex; gap: 10px; margin-top: auto; flex-wrap: wrap;}
+        button { flex: 1; padding: 10px; border: none; border-radius: 6px; font-weight: 600; cursor: pointer; transition: opacity 0.2s; white-space: nowrap; }
+        button:hover { opacity: 0.9; }
+        button:disabled { opacity: 0.5; cursor: not-allowed; }
+        .btn-primary { background: var(--accent); color: white; }
+        .btn-stop { background: var(--error); color: white; }
+        .btn-download { background: var(--success); color: #020617; }
+
+        .modal-overlay { position: fixed; inset: 0; background: rgba(0,0,0,0.8); backdrop-filter: blur(4px); display: none; align-items: center; justify-content: center; z-index: 100; }
+        .modal { background: var(--panel); padding: 25px; border-radius: 12px; width: 500px; border: 1px solid #475569; box-shadow: 0 20px 50px rgba(0,0,0,0.5); }
+        .wiki-list { max-height: 300px; overflow-y: auto; margin: 15px 0; display: flex; flex-direction: column; gap: 5px; }
+        .wiki-item { padding: 10px; background: #334155; border-radius: 4px; cursor: pointer; border: 1px solid transparent; }
+        .wiki-item:hover { border-color: var(--accent); background: #475569; }
+        .progress-bar { height: 4px; background: #334155; width: 100%; border-radius: 2px; margin-top: 10px; overflow: hidden; }
+        .progress-fill { height: 100%; background: var(--success); width: 0%; transition: width 0.3s; }
+
+        #db-status { font-size: 11px; color: #94a3b8; margin-top: 10px; }
+    </style>
+</head>
+<body>
+
+    <header>
+        <div style="display:flex; align-items:center; gap:10px;">
+            <h1>📚 Star Wiki Collector v7</h1>
+            <span style="font-size: 12px; background: #334155; padding: 2px 8px; border-radius: 4px;">Local DB Mode</span>
+        </div>
+        <div id="stats" style="font-size: 12px; color: #94a3b8;">Ожидание...</div>
+    </header>
+
+    <div class="layout">
+        <div class="panel">
+            <h2>1. Список звезд</h2>
+            <p style="font-size: 12px; color: #94a3b8; margin-bottom: 5px;">Вставьте названия (через ;):</p>
+            <textarea id="simple-input" placeholder="Сириус; Канопус; Альфа Центавра...">Сириус</textarea>
+            <div class="controls">
+                <button id="btn-parse" class="btn-primary">Загрузить список</button>
+            </div>
+            <div id="db-status">IndexedDB: Инициализация...</div>
+        </div>
+
+        <div class="panel">
+            <h2>2. Сбор данных (Wikipedia Only)</h2>
+            <div class="progress-bar"><div class="progress-fill" id="progress"></div></div>
+            <div id="logs"></div>
+            <div class="controls">
+                <button id="btn-start" class="btn-primary" disabled>🚀 Запуск</button>
+                <button id="btn-stop" class="btn-stop" disabled>⛔ Стоп</button>
+                <button id="btn-download" class="btn-download" disabled>💾 Скачать JSON</button>
+                <button id="btn-clear-db" style="background: #334155; color: #94a3b8;">🗑 Очистить локальную БД</button>
+            </div>
+        </div>
+    </div>
+
+    <!-- Модалка выбора Wiki -->
+    <div class="modal-overlay" id="wiki-modal">
+        <div class="modal">
+            <h3 style="margin-top:0">Уточнение статьи</h3>
+            <p>Не найдено: <b id="modal-star-name" style="color:var(--accent)"></b></p>
+            <div class="wiki-list" id="modal-list"></div>
+            <div style="display:flex; gap:10px;">
+                <input type="text" id="manual-wiki-input" placeholder="Название статьи..." style="flex:1; padding:8px; background:#0f172a; border:1px solid #475569; color:white;">
+                <button id="btn-modal-ok" class="btn-primary" style="flex:0 0 80px;">ОК</button>
+            </div>
+            <div style="display:flex; gap:10px; margin-top:10px;">
+                <button id="btn-modal-skip" style="flex:1; background:transparent; border:1px solid #475569; color:#94a3b8;">Пропустить</button>
+                <button id="btn-modal-skip-all" style="flex:1; background: #7c3aed; color: white;">Пропустить все</button>
+            </div>
+        </div>
+    </div>
+
+<script>
+    // --- КОНФИГУРАЦИЯ ---
+    const SUPABASE_URL = 'https://qgycxcmxlbyrjpdikyyz.supabase.co';
+    const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFneWN4Y214bGJ5cmpwZGlreXl6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQzOTAxNTgsImV4cCI6MjA3OTk2NjE1OH0.UtamcsWCKPpMJwH1cWJhRhh8TL7Jb_NPA0-xLpyk_YU';
+    
+    // Греческий алфавит для нормализации
+    const greekMap = {
+        'α': 'Альфа', 'β': 'Бета', 'γ': 'Гамма', 'δ': 'Дельта', 'ε': 'Эпсилон',
+        'ζ': 'Дзета', 'η': 'Эта', 'θ': 'Тета', 'ι': 'Йота', 'κ': 'Каппа',
+        'λ': 'Лямбда', 'μ': 'Мю', 'ν': 'Ню', 'ξ': 'Кси', 'ο': 'Омикрон',
+        'π': 'Пи', 'ρ': 'Ро', 'σ': 'Сигма', 'τ': 'Тау', 'υ': 'Ипсилон',
+        'φ': 'Фи', 'χ': 'Хи', 'ψ': 'Пси', 'ω': 'Омега'
+    };
+
+    let supabaseClient = null;
+    let starsQueue = [];
+    let shouldStop = false;
+    let modalResolver = null;
+    let skipAllWikiPrompts = false;
+    let db = null; // IndexedDB instance
+
+    // --- INDEXED DB LOGIC ---
+    const DB_NAME = 'StarMinerDB';
+    const STORE_NAME = 'wiki_data';
+
+    function initDB() {
+        return new Promise((resolve, reject) => {
+            const request = indexedDB.open(DB_NAME, 1);
+            
+            request.onupgradeneeded = (event) => {
+                const db = event.target.result;
+                if (!db.objectStoreNames.contains(STORE_NAME)) {
+                    db.createObjectStore(STORE_NAME, { keyPath: 'name' });
+                }
+            };
+
+            request.onsuccess = (event) => {
+                db = event.target.result;
+                updateDBCount();
+                resolve(db);
+            };
+
+            request.onerror = (event) => {
+                log("Ошибка открытия IndexedDB", "error");
+                reject(event.target.error);
+            };
+        });
+    }
+
+    async function saveToDB(data) {
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction([STORE_NAME], 'readwrite');
+            const store = transaction.objectStore(STORE_NAME);
+            const request = store.put(data);
+            request.onsuccess = () => { updateDBCount(); resolve(); };
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async function getAllFromDB() {
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction([STORE_NAME], 'readonly');
+            const store = transaction.objectStore(STORE_NAME);
+            const request = store.getAll();
+            request.onsuccess = () => resolve(request.result);
+            request.onerror = () => reject(request.error);
+        });
+    }
+
+    async function clearDB() {
+        return new Promise((resolve, reject) => {
+            const transaction = db.transaction([STORE_NAME], 'readwrite');
+            const store = transaction.objectStore(STORE_NAME);
+            const request = store.clear();
+            request.onsuccess = () => { 
+                updateDBCount(); 
+                log("Локальная база очищена", "warn");
+                resolve(); 
+            };
+        });
+    }
+
+    async function updateDBCount() {
+        const transaction = db.transaction([STORE_NAME], 'readonly');
+        const store = transaction.objectStore(STORE_NAME);
+        const countRequest = store.count();
+        countRequest.onsuccess = () => {
+            document.getElementById('db-status').textContent = `В локальной БД: ${countRequest.result} записей`;
+            document.getElementById('btn-download').disabled = countRequest.result === 0;
+        };
+    }
+
+    // --- MAIN SCRIPT ---
+
+    document.addEventListener('DOMContentLoaded', async function() {
+        log("Инициализация...", "info");
+        
+        // Supabase
+        try {
+            supabaseClient = supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
+        } catch (e) {
+            log("Ошибка подключения Supabase: " + e.message, 'error');
+        }
+
+        // IndexedDB
+        await initDB();
+
+        // UI Events
+        document.getElementById('btn-parse').addEventListener('click', parseInput);
+        document.getElementById('btn-start').addEventListener('click', startProcess);
+        document.getElementById('btn-stop').addEventListener('click', () => { shouldStop = true; log("Остановка...", "warn"); });
+        document.getElementById('btn-modal-ok').addEventListener('click', () => {
+             const val = document.getElementById('manual-wiki-input').value;
+             if(val && modalResolver) { document.getElementById('wiki-modal').style.display='none'; modalResolver(val); }
+        });
+        document.getElementById('btn-modal-skip').addEventListener('click', () => {
+            document.getElementById('wiki-modal').style.display='none'; modalResolver(null);
+        });
+        document.getElementById('btn-modal-skip-all').addEventListener('click', () => {
+            skipAllWikiPrompts = true;
+            document.getElementById('wiki-modal').style.display='none'; modalResolver(null);
+        });
+        document.getElementById('btn-download').addEventListener('click', downloadJSON);
+        document.getElementById('btn-clear-db').addEventListener('click', clearDB);
+    });
+
+    function log(msg, type = 'info') {
+        const el = document.getElementById('logs');
+        const item = document.createElement('div');
+        item.className = `log-item log-${type}`;
+        item.innerHTML = `<span style="opacity:0.5">[${new Date().toLocaleTimeString()}]</span> ${msg}`;
+        el.appendChild(item);
+        el.scrollTop = el.scrollHeight;
+    }
+
+    function fixStarName(rawName) {
+        let name = rawName.trim();
+        const regex = /(.+?)\s+([α-ω])([¹²³]?)/;
+        const match = name.match(regex);
+        if (match && greekMap[match[2]]) {
+            return `${greekMap[match[2]]}${match[3] || ""} ${match[1]}`;
+        }
+        return name;
+    }
+
+    async function parseInput() {
+        const btn = document.getElementById('btn-parse');
+        btn.disabled = true; btn.textContent = 'Проверка...';
+        
+        const raw = document.getElementById('simple-input').value;
+        const names = raw.split(';').map(s => s.trim()).filter(s => s.length > 0);
+        
+        let allStars = names.map(name => ({ originalName: name, name: fixStarName(name) }));
+        
+        // 1. Check Supabase (Skip existing in Remote DB)
+        if (supabaseClient) {
+            const allNames = [...new Set(allStars.flatMap(s => [s.name, s.originalName]))];
+            const existingNames = new Set();
+            
+            // Batch check
+            for (let i = 0; i < allNames.length; i += 50) {
+                const chunk = allNames.slice(i, i + 50);
+                const { data } = await supabaseClient.from('stars').select('name').in('name', chunk);
+                if (data) data.forEach(e => existingNames.add(e.name));
+            }
+            
+            const before = allStars.length;
+            allStars = allStars.filter(s => !existingNames.has(s.name) && !existingNames.has(s.originalName));
+            if (before > allStars.length) log(`⏭ Пропущено ${before - allStars.length} (уже в Supabase)`, 'warn');
+        }
+
+        // 2. Check IndexedDB (Skip existing in Local DB)
+        const localData = await getAllFromDB();
+        const localNames = new Set(localData.map(d => d.name));
+        const beforeLocal = allStars.length;
+        allStars = allStars.filter(s => !localNames.has(s.name));
+        
+        if (beforeLocal > allStars.length) log(`⏭ Пропущено ${beforeLocal - allStars.length} (уже скачаны локально)`, 'warn');
+
+        starsQueue = allStars;
+        document.getElementById('stats').textContent = `В очереди: ${starsQueue.length}`;
+        log(`✅ Готово к скачиванию: ${starsQueue.length} звезд`, 'success');
+        
+        btn.disabled = false; btn.textContent = 'Загрузить список';
+        document.getElementById('btn-start').disabled = starsQueue.length === 0;
+    }
+
+    async function startProcess() {
+        shouldStop = false;
+        skipAllWikiPrompts = false;
+        document.getElementById('btn-start').disabled = true;
+        document.getElementById('btn-stop').disabled = false;
+
+        for (let i = 0; i < starsQueue.length; i++) {
+            if (shouldStop) break;
+            const star = starsQueue[i];
+            const progress = ((i + 1) / starsQueue.length) * 100;
+            document.getElementById('progress').style.width = `${progress}%`;
+            document.getElementById('stats').textContent = `${i+1}/${starsQueue.length}: ${star.name}`;
+
+            try {
+                // Find Wiki
+                let wikiData = await getWikiData(star.name);
+                if (!wikiData && star.name !== star.originalName) {
+                    wikiData = await getWikiData(star.originalName);
+                }
+
+                if (!wikiData || wikiData.isDisambiguation) {
+                    // Try auto suffix
+                    const auto = await getWikiData(star.name + " (звезда)");
+                    if (auto && !auto.isDisambiguation) wikiData = auto;
+                    else {
+                        // Ask User
+                        if (skipAllWikiPrompts) {
+                            log(`⏭ Пропуск (режим Skip All): ${star.name}`, 'warn');
+                            continue;
+                        }
+                        const userChoice = await askUserForArticle(star.name);
+                        if (!userChoice) {
+                            log(`❌ Пропуск: ${star.name}`, 'error');
+                            continue;
+                        }
+                        wikiData = await getWikiData(userChoice);
+                    }
+                }
+
+                if (wikiData) {
+                    // Save to Local DB
+                    await saveToDB({
+                        name: star.name,
+                        originalName: star.originalName,
+                        wiki_title: wikiData.title,
+                        wiki_url: `https://ru.wikipedia.org/wiki/${encodeURIComponent(wikiData.title)}`,
+                        wikitext: wikiData.wikitext,
+                        downloaded_at: new Date().toISOString()
+                    });
+                    log(`💾 Сохранено: ${star.name}`, 'success');
+                } else {
+                    log(`❌ Не найдено Wiki: ${star.name}`, 'error');
+                }
+
+            } catch (e) {
+                log(`Ошибка: ${e.message}`, 'error');
+            }
+
+            // Delay for politeness (Wiki API)
+            await new Promise(r => setTimeout(r, 800)); 
+        }
+
+        document.getElementById('btn-start').disabled = false;
+        document.getElementById('btn-stop').disabled = true;
+        log("🎉 Сбор завершен!", "success");
+    }
+
+    // --- WIKI API UTILS ---
+    async function getWikiData(title) {
+        const url = `https://ru.wikipedia.org/w/api.php?action=parse&page=${encodeURIComponent(title)}&format=json&prop=wikitext&origin=*&redirects=1`;
+        try {
+            const res = await fetch(url);
+            const data = await res.json();
+            if (data.error) return null;
+            const wikitext = data.parse.wikitext['*'];
+            return { 
+                title: data.parse.title, 
+                wikitext, 
+                isDisambiguation: wikitext.includes('{{неоднозначность}}') || wikitext.includes('{{disambig}}') 
+            };
+        } catch { return null; }
+    }
+
+    async function searchWiki(query) {
+        const url = `https://ru.wikipedia.org/w/api.php?action=opensearch&search=${encodeURIComponent(query)}&limit=5&format=json&origin=*`;
+        const res = await fetch(url);
+        const data = await res.json();
+        return data[1];
+    }
+
+    async function askUserForArticle(query) {
+        const modal = document.getElementById('wiki-modal');
+        const listEl = document.getElementById('modal-list');
+        document.getElementById('modal-star-name').textContent = query;
+        document.getElementById('manual-wiki-input').value = '';
+        listEl.innerHTML = 'Загрузка...';
+        modal.style.display = 'flex';
+        
+        const suggestions = await searchWiki(query);
+        const more = await searchWiki(query + " (звезда)");
+        const opts = [...new Set([...suggestions, ...more])];
+        
+        listEl.innerHTML = '';
+        if(opts.length === 0) listEl.innerHTML = '<p style="color:#94a3b8; text-align:center">Нет вариантов</p>';
+        opts.forEach(opt => {
+            const d = document.createElement('div');
+            d.className = 'wiki-item';
+            d.innerHTML = `<strong>${opt}</strong>`;
+            d.onclick = () => { document.getElementById('wiki-modal').style.display='none'; if(modalResolver) modalResolver(opt); };
+            listEl.appendChild(d);
+        });
+        return new Promise(r => modalResolver = r);
+    }
+
+    async function downloadJSON() {
+        const data = await getAllFromDB();
+        const json = JSON.stringify(data, null, 2);
+        const blob = new Blob([json], { type: 'application/json' });
+        const url = URL.createObjectURL(blob);
+        const a = document.createElement('a');
+        a.href = url;
+        a.download = `wiki_stars_dump_${data.length}.json`;
+        document.body.appendChild(a);
+        a.click();
+        document.body.removeChild(a);
+        URL.revokeObjectURL(url);
+    }
+</script>
+</body>
+</html>
