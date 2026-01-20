@@ -159,7 +159,7 @@ const CONSTELLATIONS = {
         abbr: "Boo",
         stars: [
             { name: "Арктур", bayer: "α", ra: 14.261, dec: 19.182, mag: -0.05 },
-            { name: "Некар", bayer: "β", ra: 15.032, dec: 40.391, mag: 3.49 },
+            { name: "Нкекар", bayer: "β", ra: 15.032, dec: 40.391, mag: 3.49 },
             { name: "Сегинус", bayer: "γ", ra: 14.535, dec: 38.308, mag: 3.03 },
             { name: "Волопаса δ", bayer: "δ", ra: 15.258, dec: 33.315, mag: 3.47 },
             { name: "Изар", bayer: "ε", ra: 14.750, dec: 27.074, mag: 2.35 },
