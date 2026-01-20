@@ -1542,6 +1542,8 @@ async function checkClipboardForObjects() {
 
             // 1. Проверка на одиночный кадастровый номер
             if (lines.length === 1 && isValidCadastralNumberFormat(trimmedText)) {
+                // REMOVED: const userConfirmation = window.confirm(`В буфере обмена обнаружен кадастровый номер: ${trimmedText}. Загрузить его из базы данных? (Это очистит текущие объекты)`);
+                // REMOVED: if (userConfirmation) {
                 showLoader(true, `Загрузка ${trimmedText}...`);
                 userObjects = []; nextObjectId = 1; nextColorIndex = 0; selectedObjectIndex = -1; editingObjectIndex = -1; geometryHistory = [];
                 console.log("Состояние очищено перед импортом КН из буфера обмена.");
@@ -1549,12 +1551,20 @@ async function checkClipboardForObjects() {
                 await handleImportFromCadNumbers([trimmedText]);
                 showLoader(false);
                 return true;
+                // REMOVED: }
+                // REMOVED: return false;
             }
 
             // 2. Проверка на многострочные данные
             const looksLikeCoordinateData = /\d/.test(trimmedText) && /[ \t,.]/.test(trimmedText);
 
             if (looksLikeCoordinateData) {
+                // REMOVED: const userConfirmation = window.confirm("В буфере обмена обнаружены данные, похожие на координаты объектов. Хотите импортировать их? (Это очистит текущие объекты)");
+                // REMOVED: if (!userConfirmation) {
+                // REMOVED:     console.log("Пользователь отклонил импорт из буфера обмена.");
+                // REMOVED:     return false;
+                // REMOVED: }
+
                 showLoader(true, "Импорт из буфера обмена...");
                 userObjects = []; nextObjectId = 1; nextColorIndex = 0; selectedObjectIndex = -1; editingObjectIndex = -1; geometryHistory = [];
                 console.log("Состояние очищено перед импортом объектов из буфера обмена.");
@@ -1563,50 +1573,46 @@ async function checkClipboardForObjects() {
                 let tempNextObjectIdForNaming = 1;
 
                 if (parsedClipboardObjects.length > 0) {
-                    
-                    // --- ИЗМЕНЕНИЕ: Сбор всех контуров и перегруппировка с учетом вложенности ---
-                    // Собираем все контуры из всех распознанных блоков в один массив
-                    let allRawContours = [];
-                    parsedClipboardObjects.forEach(obj => {
-                       if (obj.contours && obj.contours.length > 0) {
-                           allRawContours.push(...obj.contours);
-                       }
-                    });
-
-                    // Применяем логику вложенности (дырок)
-                    const groupedObjects = consolidateContoursIntoObjects(allRawContours);
                     let addedObjectsBatch = [];
+                    for (const objData of parsedClipboardObjects) {
+                        if (isValidCadastralNumberFormat(objData.name) && objData.contours.length === 0 && parsedClipboardObjects.length > 1) {
+                            console.log(`Пропущен КН "${objData.name}" без координат, так как он не единственный в буфере и является заголовком.`);
+                            continue;
+                        }
 
-                    for (const objectContours of groupedObjects) {
-                        // Определяем имя
-                        let finalName = `Объект #${tempNextObjectIdForNaming++}`;
-                        
-                        // Определяем тип
+                        let finalName = objData.name;
+                        if (finalName === `Объект #${nextObjectIdPlaceholder}`) {
+                            finalName = `Объект #${tempNextObjectIdForNaming++}`;
+                        }
+
                         let objectType = 'point';
-                        const firstPrimaryContour = objectContours[0];
-                        if (firstPrimaryContour) {
-                            if (firstPrimaryContour.length >= 3) {
-                                const firstPt = firstPrimaryContour[0];
-                                const lastPt = firstPrimaryContour[firstPrimaryContour.length - 1];
-                                const PRECISION_THRESHOLD = 0.001;
-                                if (Math.abs(firstPt.x - lastPt.x) < PRECISION_THRESHOLD && Math.abs(firstPt.y - lastPt.y) < PRECISION_THRESHOLD) {
-                                    objectType = 'polygon';
-                                } else {
+                         if (objData.contours && objData.contours.length > 0) {
+                            const firstPrimaryContour = objData.contours.find(c => c && c.length > 0);
+                            if (firstPrimaryContour) {
+                                if (firstPrimaryContour.length >= 3) {
+                                    const firstPt = firstPrimaryContour[0];
+                                    const lastPt = firstPrimaryContour[firstPrimaryContour.length - 1];
+                                    const PRECISION_THRESHOLD = 0.001;
+                                    if (Math.abs(firstPt.x - lastPt.x) < PRECISION_THRESHOLD && Math.abs(firstPt.y - lastPt.y) < PRECISION_THRESHOLD) {
+                                        objectType = 'polygon';
+                                    } else {
+                                        objectType = 'line';
+                                    }
+                                } else if (firstPrimaryContour.length === 2) {
                                     objectType = 'line';
                                 }
-                            } else if (firstPrimaryContour.length === 2) {
-                                objectType = 'line';
                             }
                         }
 
-                        // Добавляем объект
-                        const newObj = addObjectInternal(objectContours, finalName, objectType, true);
-                        if (newObj) {
-                            addedObjectsBatch.push(newObj);
+                        if (objData.contours.length > 0 || isValidCadastralNumberFormat(finalName)) {
+                            const newObj = addObjectInternal(objData.contours, finalName, objectType, true);
+                            if (newObj) {
+                                addedObjectsBatch.push(newObj);
+                            }
+                        } else if (objData.name !== `Объект #${nextObjectIdPlaceholder}`) {
+                            console.warn(`Объект "${finalName}" не был добавлен, так как не имеет валидных контуров.`);
                         }
                     }
-                    // ---------------------------------------------------------------------------
-
                     if (addedObjectsBatch.length > 0) {
                         finalizeBatchAdd(addedObjectsBatch);
                         showNotification(`Импортировано ${addedObjectsBatch.length} объектов из буфера обмена.`, "success", "clipboard-check");
@@ -2823,88 +2829,30 @@ function doBoundingBoxesIntersect(box1, box2) {
     );
 }
 
-function consolidateContoursIntoObjects(contours) {
-        // 1. Подготовка данных с вычислением площади
-        let items = contours.map(c => ({
-            contour: c,
-            area: calculatePolygonArea(c),
-            holes: []
-        }));
-
-        // 2. Сортировка по убыванию площади (от самого большого к самому маленькому)
-        items.sort((a, b) => b.area - a.area);
-
-        const roots = [];
-
-        // 3. Проверка вложенности
-        items.forEach(item => {
-            let bestParent = null;
-
-            // Ищем подходящего родителя среди уже отобранных "корневых" полигонов
-            for (const r of roots) {
-                // Проверяем, находится ли первая точка текущего контура внутри потенциального родителя
-                // (Этого обычно достаточно для корректной геометрии)
-                if (isPointInPolygon(item.contour[0], r.contour)) {
-                    // Если нашли родителя, проверяем, является ли он "ближайшим" (наименьшим из подходящих)
-                    // Хотя при сортировке по убыванию первый найденный часто подходит, 
-                    // поиск наименьшего родителя обеспечивает корректную вложенность (остров внутри озера на острове)
-                    if (!bestParent || r.area < bestParent.area) {
-                        bestParent = r;
-                    }
-                }
-            }
-
-            if (bestParent) {
-                // Если родитель найден, добавляем текущий контур как дырку
-                bestParent.holes.push(item.contour);
-            } else {
-                // Если родителя нет, это новый внешний контур
-                roots.push(item);
-            }
-        });
-
-        // 4. Возвращаем массив объектов, где каждый объект — это массив контуров [внешний, дырка1, дырка2...]
-        return roots.map(r => [r.contour, ...r.holes]);
-    }
-    
-
- async function handleImportFromTextareaCoordinates(text) {
-         const parsedContours = parseCoordinatesFromText(text); // Возвращает массив отдельных контуров
+    async function handleImportFromTextareaCoordinates(text) {
+         const parsedContours = parseCoordinatesFromText(text); // Returns array of contours
          if (parsedContours && parsedContours.length > 0) {
             closeCoordsDialog();
-            
-            // --- ИЗМЕНЕНИЕ: Группировка контуров (обработка дырок) ---
-            const groupedContours = consolidateContoursIntoObjects(parsedContours);
-            
             let addedObjects = [];
-            for (let i = 0; i < groupedContours.length; i++) {
-                const objectContours = groupedContours[i]; // Это массив [внешний, внутренние...]
-                
-                if (objectContours && objectContours.length > 0) {
-                     // Проверка на замкнутость первого контура
-                     const mainContour = objectContours[0];
-                     const isClosed = mainContour.length >= 3 &&
-                                   Math.abs(mainContour[0].x - mainContour[mainContour.length - 1].x) < 0.001 &&
-                                   Math.abs(mainContour[0].y - mainContour[mainContour.length - 1].y) < 0.001;
-                    
-                    let objectType = isClosed ? 'polygon' : (mainContour.length >= 2 ? 'line' : 'point');
-                    
-                    // Формируем имя
-                    const nameBase = groupedContours.length > 1 ? `Участок ${nextObjectId} (${i+1})` : `Участок ${nextObjectId}`;
-
-                    // Добавляем объект целиком (со всеми дырками сразу)
-                    const newObj = await promptAndAddObjectInternal(objectContours, objectType, nameBase);
+            for (let i = 0; i < parsedContours.length; i++) {
+                const contour = parsedContours[i];
+                if (contour && contour.length > 0) {
+                     const isClosed = contour.length >= 3 &&
+                                   Math.abs(contour[0].x - contour[contour.length - 1].x) < 0.001 &&
+                                   Math.abs(contour[0].y - contour[contour.length - 1].y) < 0.001;
+                    let objectType = isClosed ? 'polygon' : (contour.length >= 2 ? 'line' : 'point');
+                    // For text input, we treat each block as a separate object, so pass [contour]
+                    const newObj = await promptAndAddObjectInternal([contour], objectType, `Участок  ${nextObjectId -1}`); // -1 because nextObjectId was already incremented
                     if(newObj) addedObjects.push(newObj);
                 }
             }
-            // ---------------------------------------------------------
-
             if(addedObjects.length > 0) {
                 finalizeBatchAdd(addedObjects);
             }
 
          } else { showNotification("Не удалось распознать валидные координаты X Y.", "error", "exclamation-circle"); }
     }
+
 
     async function handleImportFromFile() {
          const fileInput = document.createElement('input'); fileInput.type = 'file'; fileInput.accept = '.txt,.csv';
@@ -4797,23 +4745,23 @@ visibilityBtn.innerHTML = isVisible
         if (newName !== null) await renameObject(index, newName);
     }
 
-const USE_PROXY_FALLBACK = false;
-
 async function fetchNspd(url) {
-    const requestHeaders = {
-        'Referer': 'https://nspd.gov.ru/'
-    };
+        // Заголовки, которые мы будем использовать, включая обязательный Referer
+        const requestHeaders = {
+            'Referer': 'https://nspd.gov.ru/'
+        };
 
-    try {
-        const directResponse = await fetch(url, { headers: requestHeaders });
-        if (!directResponse.ok) {
-            throw new Error(`Прямой запрос не удался: ${directResponse.status}`);
-        }
-        return await directResponse.json();
-    } catch (error) {
-        if (USE_PROXY_FALLBACK) {
+        // Попытка прямого запроса
+        try {
+            const directResponse = await fetch(url, { headers: requestHeaders });
+            if (!directResponse.ok) {
+                throw new Error(`Прямой запрос не удался: ${directResponse.status}`);
+            }
+            return await directResponse.json();
+        } catch (error) {
             console.warn(`Прямой запрос не удался: ${error.message}. Переключаюсь на прокси.`);
             
+            // Запасной вариант: запрос через прокси
             const vercelProxyUrl = 'https://nsp-two.vercel.app/';
             const urlObject = new URL(url);
             const targetPath = `${urlObject.pathname}${urlObject.search}`;
@@ -4825,11 +4773,8 @@ async function fetchNspd(url) {
                 throw new Error(`Запрос через прокси также не удался: ${proxyResponse.statusText}. Ответ: ${errorText}`);
             }
             return await proxyResponse.json();
-        } else {
-            throw error;
         }
     }
-}
 
     async function fetchCadastralData(cadastralNumber) {
         const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${cadastralNumber}`;
