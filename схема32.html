@@ -5432,201 +5432,119 @@ function displayGeoJSONComments(comments) {
     pointsList.appendChild(wrapper);
 }
 
-function processFileToCoordinates(file) {
-    return new Promise((resolve) => {
-        const extension = file.name.split('.').pop().toLowerCase();
-        
-        // Специальная обработка для ZIP, так как там используется JSZip
-        if (extension === 'zip') {
-            parseZipToCoordinates(file).then(coords => {
-                resolve(coords ? { coordinates: coords, names: [] } : null);
-            }).catch(() => resolve(null));
-            return;
-        }
 
-        const reader = new FileReader();
-
-        reader.onload = function(event) {
-            const content = event.target.result;
-            let coordinates = [];
-            let names = [];
-
-            try {
-                switch (extension) {
-                    case 'xml':
-                        if (content.includes('interact_entry_boundaries')) {
-                            coordinates = extractCoordinatesFromInteractEntryBoundaries(content);
-                        } else {
-                            coordinates = extractCoordinatesFromXML(content);
-                        }
-                        break;
-                    case 'geojson':
-                        const contoursData = extractCoordinatesFromGeoJSON(content);
-                        if (contoursData && contoursData.length > 0) {
-                            coordinates = contoursData.map(c => c.points.join('\n')); // Превращаем массив точек в строку
-                            names = contoursData.map(c => c.name);
-                        }
-                        break;
-                    case 'kml':
-                        coordinates = extractCoordinatesFromKML(content);
-                        break;
-                    case 'dxf':
-                        coordinates = extractCoordinatesFromDXF(content);
-                        break;
-                    case 'mif':
-                        coordinates = extractCoordinatesFromMIF(content);
-                        break;
-                    case 'csv':
-                    case 'txt':
-                        coordinates = extractCoordinatesFromText(content);
-                        break;
-                }
-            } catch (e) {
-                console.warn(`Ошибка парсинга файла ${file.name}:`, e);
-                resolve(null);
-                return;
-            }
-
-            if (coordinates && coordinates.length > 0) {
-                resolve({ coordinates, names });
-            } else {
-                resolve(null);
-            }
-        };
-
-        reader.onerror = () => resolve(null);
-        reader.readAsText(file, 'UTF-8');
-    });
-}
-
-// Промисифицированная функция для ZIP (на основе старой handleZipFile)
-function parseZipToCoordinates(file) {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = function(event) {
-            const zipData = event.target.result;
-            JSZip.loadAsync(zipData).then(function(zip) {
-                let xmlFile = null;
-                
-                zip.forEach(function(relativePath, zipEntry) {
-                    if (relativePath.toLowerCase().endsWith('.xml')) {
-                        xmlFile = zipEntry;
-                    }
-                });
-                
-                if (xmlFile) {
-                    xmlFile.async("string").then(function(xmlContent) {
-                        let coordinates;
-                        if (xmlContent.includes('interact_entry_boundaries')) {
-                            coordinates = extractCoordinatesFromInteractEntryBoundaries(xmlContent);
-                        } else {
-                            coordinates = extractCoordinatesFromXML(xmlContent);
-                        }
-                        resolve(coordinates);
-                    });
-                } else {
-                    resolve(null);
-                }
-            }).catch(reject);
-        };
-        reader.onerror = reject;
-        reader.readAsArrayBuffer(file);
-    });
-}
 
     
 // Модифицированная версия importFile()
 function importFile(isAppend = false) {
-    // Если это новая загрузка (не добавление), очищаем списки
-    if (!isAppend) {
-        savedContourNames = []; 
-        savedContours = [];
+     if (!isAppend) {
+        savedContourNames = []; // Очищаем старые названия при новой загрузке
     }
-
     const fileInput = document.createElement('input');
     fileInput.type = 'file';
-    fileInput.multiple = true; // ВКЛЮЧЕН МУЛЬТИВЫБОР
     fileInput.accept = '.xml,.zip,.dxf,.mif,.csv,.txt,.geojson,.kml';
+    
+    fileInput.onchange = function(e) {
+        const file = e.target.files[0];
+        if (!file) return;
 
-    fileInput.onchange = async function(e) {
-        const files = Array.from(e.target.files);
-        if (files.length === 0) return;
+        const extension = file.name.split('.').pop().toLowerCase();
+        const reader = new FileReader();
 
-        const aiLoader = document.getElementById('aiLoader');
-        if (aiLoader) {
-            aiLoader.querySelector('span').textContent = `Обработка файлов (${files.length})...`;
-            aiLoader.style.display = 'flex';
-        }
+        reader.onload = function(event) {
+            let content = event.target.result;
+            let coordinates;
 
-        try {
-            // Обрабатываем файлы параллельно
-            const filePromises = files.map(file => processFileToCoordinates(file));
-            const results = await Promise.all(filePromises);
+            switch (extension) {
+                case 'xml':
+                case 'zip':
+                    if (extension === 'zip') {
+                        handleZipFile(file, isAppend);
+                        return;
+                    }
+                    // Проверяем, содержит ли файл interact_entry_boundaries
+                    if (content.includes('interact_entry_boundaries')) {
+                        coordinates = extractCoordinatesFromInteractEntryBoundaries(content);
+                    } else {
+                        coordinates = extractCoordinatesFromXML(content);
+                    }
+                    break;
+                    
+case 'geojson':
+                    // 1. Извлекаем структурированные данные
+                    const contoursData = extractCoordinatesFromGeoJSON(content);
+                    if (!contoursData || contoursData.length === 0) {
+                        showNotification('Не удалось найти геометрию в GeoJSON файле');
+                        return; // Выходим, если ничего не найдено
+                    }
+                    
+                    // 2. Разделяем данные на контуры и названия
+                    const newContours = contoursData.map(c => c.points);
+                    const newNames = contoursData.map(c => c.name);
 
-            // Оставляем только те, из которых удалось извлечь координаты
-            const validResults = results.filter(r => r !== null);
+                    // 3. Обновляем глобальные переменные состояния
+                    if (isAppend) {
+                        savedContours.push(...newContours);
+                        savedContourNames.push(...newNames);
+                    } else {
+                        savedContours = newContours;
+                        savedContourNames = newNames;
+                    }
 
-            if (validResults.length === 0) {
-                showNotification('Не удалось извлечь координаты ни из одного файла');
-                return;
+                    // 4. Обновляем текстовое поле для консистентности
+                    const textContent = savedContours.map(contour => contour.join('\n')).join('\n\n');
+                    document.getElementById('coordsInput').value = textContent;
+
+                    // 5. Обновляем боковой список с названиями
+                    displayGeoJSONComments(savedContourNames.filter(name => name));
+
+                    // 6. Вызываем отрисовку с обновленными данными
+                    drawContour(savedContours);
+                    
+                    // Мы обработали все сами, поэтому прерываем switch, чтобы не попасть в общую логику ниже
+                    return; // ВАЖНО: используем return, чтобы выйти из функции
+                    
+                    
+                case 'kml':
+                    coordinates = extractCoordinatesFromKML(content);
+                    break;
+                    
+                case 'dxf':
+                    coordinates = extractCoordinatesFromDXF(content);
+                    break;
+                case 'mif':
+                    coordinates = extractCoordinatesFromMIF(content);
+                    break;
+                case 'csv':
+                case 'txt':
+                    coordinates = extractCoordinatesFromText(content);
+                    break;
+                default:
+                    showNotification('Неподдерживаемый формат файла');
+                    return;
             }
 
-            // Массив строк с координатами (каждый элемент - содержимое одного файла)
-            let allNewCoordsBlocks = [];
-            let newNames = [];
-
-            validResults.forEach(res => {
-                if (res.coordinates && res.coordinates.length > 0) {
-                    // Объединяем строки координат внутри одного файла (если там несколько контуров)
-                    const fileContent = res.coordinates.join('\n');
-                    allNewCoordsBlocks.push(fileContent);
+            if (coordinates && coordinates.length > 0) {
+                if (isAppend) {
+                    appendCoordinates(coordinates);
+                } else {
+                    document.getElementById('coordsInput').value = coordinates.join('\n');
+                    handleInput(true);
                 }
-                if (res.names && res.names.length > 0) {
-                    newNames.push(...res.names);
-                }
-            });
-
-            // Объединяем содержимое разных файлов через ДВОЙНОЙ перенос строки (пустая строка между файлами)
-            const combinedText = allNewCoordsBlocks.join('\n\n');
-
-            // Логика добавления имен
-            if (isAppend) {
-                savedContourNames.push(...newNames);
+                updateImportButtonText(file.name);
             } else {
-                savedContourNames = newNames;
+                showNotification('Не удалось найти координаты в файле');
             }
+        };
 
-            // Логика вставки координат в поле
-            if (isAppend) {
-                // Функция appendCoordinates сама добавит отступ от существующего текста
-                // Передаем combinedText как единственный элемент массива, чтобы appendCoordinates
-                // просто добавила этот большой блок текста.
-                appendCoordinates([combinedText]);
-            } else {
-                document.getElementById('coordsInput').value = combinedText;
-                handleInput(true);
-            }
+        reader.onerror = function() {
+            showNotification('Ошибка при чтении файла');
+        };
 
-            // Обновляем список имен в боковой панели (для GeoJSON и т.д.)
-            if (savedContourNames.length > 0) {
-                displayGeoJSONComments(savedContourNames.filter(name => name));
-            }
-
-            // Обновляем текст на кнопке импорта
-            if (files.length === 1) {
-                updateImportButtonText(files[0].name);
-            } else {
-                updateImportButtonText(`Загружено файлов: ${files.length}`);
-            }
-            
-            showNotification(isAppend ? `Добавлено файлов: ${files.length}` : `Загружено файлов: ${files.length}`);
-
-        } catch (err) {
-            console.error(err);
-            showNotification('Ошибка при обработке файлов');
-        } finally {
-            if (aiLoader) aiLoader.style.display = 'none';
-            fileInput.value = ''; // Сброс инпута для возможности повторного выбора тех же файлов
+        if (extension === 'zip') {
+            reader.readAsArrayBuffer(file);
+        } else {
+            reader.readAsText(file, 'UTF-8');
         }
     };
 
