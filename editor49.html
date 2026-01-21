@@ -881,14 +881,6 @@
             <!-- Опции будут добавлены через JavaScript -->
         </select>
     </div>
-    
-      <div style="margin-bottom: 10px; display: flex; align-items: center; gap: 10px; background: #f9f9f9; padding: 8px; border-radius: 4px;">
-        <input type="checkbox" id="useFixedColor" style="cursor: pointer;">
-        <label for="useFixedColor" style="cursor: pointer; user-select: none;">Использовать фиксированный цвет:</label>
-        <input type="color" id="importColorInput" value="#FF0000" style="cursor: pointer; height: 25px; border: none; background: none;">
-    </div>
-    
-    
     <textarea id="coordsInput" placeholder="Вставьте координаты (X Y или Y X на каждой строке, разделенные пробелом/табуляцией) ИЛИ кадастровый номер объекта или квартала (каждый на новой строке)"></textarea>
 <div class="dialog-buttons">
         <button id="importCoordsBtn">
@@ -1370,135 +1362,287 @@ async function initializeApp() { // Сделана асинхронной
          }
     }
     
+function processSingleObjectBlock(blockLines, defaultNameBase = "Объект") {
+        if (blockLines.length === 0) return null;
 
+        let objectName;
+        let coordinateLinesStartIdx = 0;
+
+        const firstLine = blockLines[0].trim();
+
+        // 1. Проверяем, является ли первая строка валидным кадастровым номером
+        if (isValidCadastralNumberFormat(firstLine)) {
+            objectName = firstLine;
+            coordinateLinesStartIdx = 1;
+        } else {
+            // 2. Если не КН, проверяем, похожа ли она на координаты
+            // Более строгая проверка: X<разделитель>Y, где X и Y - числа с возможной дробной частью
+            // Разделитель - пробел или таб. Должно быть ДВА числа.
+            const coordParts = firstLine.replace(/,/g, '.').split(/[\s\t]+/);
+            let firstLineIsCoords = false;
+            if (coordParts.length >= 2) {
+                const xCand = parseFloat(coordParts[0]);
+                const yCand = parseFloat(coordParts[1]);
+                if (isFinite(xCand) && isFinite(yCand)) {
+                    firstLineIsCoords = true;
+                } else if (coordParts.length > 2) { // Попробовать вторую и третью, если первая пара не числа
+                    const xCand2 = parseFloat(coordParts[1]);
+                    const yCand2 = parseFloat(coordParts[2]);
+                     if (isFinite(xCand2) && isFinite(yCand2)) {
+                        firstLineIsCoords = true;
+                    }
+                }
+            }
+
+
+            if (firstLineIsCoords) {
+                // Первая строка - это координаты, генерируем имя
+                objectName = `${defaultNameBase} #${nextObjectIdPlaceholder}`;
+                coordinateLinesStartIdx = 0; // Все строки из blockLines - потенциальные координаты
+            } else {
+                // Первая строка не КН и не явные координаты - считаем ее произвольным именем
+                objectName = firstLine;
+                coordinateLinesStartIdx = 1;
+            }
+        }
+
+        if (coordinateLinesStartIdx >= blockLines.length && objectName !== `${defaultNameBase} #${nextObjectIdPlaceholder}` && !isValidCadastralNumberFormat(objectName) ) {
+             // Если было произвольное имя (не КН и не автоген), но не было координат
+             console.warn(`Объект с именем "${objectName}" не имел координатных строк.`);
+             return null;
+        }
+         // Если это был КН и нет координатных строк, это нормально - КН может быть без координат в данном тексте
+         // и должен быть добавлен как объект, координаты для него могут быть загружены позже, если это единичный КН из буфера.
+         // Но если это КН как часть большого блока, и мы не нашли для него координат в ЭТОМ блоке,
+         // то сам processSingleObjectBlock вернет contours.length === 0, и он не будет добавлен.
+
+
+        const contours = [];
+        let currentContour = [];
+
+        for (let i = coordinateLinesStartIdx; i < blockLines.length; i++) {
+            const line = blockLines[i];
+            if (line === "") {
+                if (currentContour.length > 0) {
+                    contours.push(currentContour);
+                    currentContour = [];
+                }
+            } else {
+                const parts = line.replace(/,/g, '.').split(/[\s\t]+/);
+                if (parts.length >= 2) {
+                    let x = parseFloat(parts[0]);
+                    let y = parseFloat(parts[1]);
+                    if (!isFinite(x) || !isFinite(y)) {
+                        x = parseFloat(parts[1]);
+                        y = parseFloat(parts[0]);
+                    }
+                    if (isFinite(x) && isFinite(y)) {
+                        currentContour.push({ x: roundCoord(x), y: roundCoord(y) });
+                    }
+                }
+            }
+        }
+        if (currentContour.length > 0) {
+            contours.push(currentContour);
+        }
+
+        // Важно: если это был КН (objectName = firstLine и isValidCadastralNumberFormat(objectName)),
+        // и для него не нашлось координат В ЭТОМ БЛОКЕ (contours.length == 0),
+        // то мы все равно должны вернуть объект с именем КН и пустыми контурами.
+        // Это позволит функции checkClipboardForObjects решить, что делать дальше
+        // (например, если это единственный КН, то загрузить из Supabase).
+        // Если же это был КН как часть мульти-блока, и дальше нет координат - то он не добавится в addedObjectsBatch.
+
+        if (contours.length > 0 && contours.some(c => c.length > 0)) {
+            return { name: objectName, contours: contours.filter(c => c.length > 0) };
+        } else if (isValidCadastralNumberFormat(objectName) && coordinateLinesStartIdx === 1) {
+            // Если это был КН и после него не было координатных строк ВООБЩЕ
+            // (т.е. blockLines состоял только из КН или КН + пустые строки)
+            // Возвращаем его с пустыми контурами, чтобы checkClipboardForObjects мог его обработать как одиночный КН
+            return { name: objectName, contours: [] };
+        }
+
+
+        return null;
+    }
     
     
-   
+     function processObjectBlock(objectLines, parsedObjectsArray) {
+        if (objectLines.length < 2) return; // Нужно имя и хотя бы одна координата
 
+        const objectName = objectLines[0];
+        const coordinateLines = objectLines.slice(1);
 
-    
-    
-function parseTextToObjects(text, defaultColor = null) {
-    if (!text || !text.trim()) return [];
+        const contours = [];
+        let currentContour = [];
 
-    const lines = text.trim().split('\n').map(l => l.trim());
-    if (lines.length === 0) return [];
+        for (const coordLine of coordinateLines) {
+            // coordLine уже очищена от пробелов по краям из внешнего цикла
+            // Пустая строка ВНУТРИ блока объекта означает новый контур
+            if (coordLine === "") {
+                if (currentContour.length > 0) {
+                    contours.push(currentContour);
+                    currentContour = [];
+                }
+            } else {
+                const parts = coordLine.replace(/,/g, '.').split(/[\s\t]+/);
+                if (parts.length >= 2) {
+                    let x = parseFloat(parts[0]);
+                    let y = parseFloat(parts[1]);
+                    if (!isFinite(x) || !isFinite(y)) { // Попробовать поменять местами
+                        x = parseFloat(parts[1]);
+                        y = parseFloat(parts[0]);
+                    }
+                    if (isFinite(x) && isFinite(y)) {
+                        currentContour.push({ x: roundCoord(x), y: roundCoord(y) });
+                    }
+                }
+            }
+        }
+        if (currentContour.length > 0) { // Добавить последний контур
+            contours.push(currentContour);
+        }
 
-    const firstLine = lines[0];
-    let nameBase = null;
-    let coordsStartIndex = 0;
-
-    // Проверка первой строки: это имя или координаты?
-    const firstLineParts = firstLine.replace(/,/g, '.').split(/[\s\t]+/);
-    const isFirstLineCoords = firstLineParts.length >= 2 && 
-                              isFinite(parseFloat(firstLineParts[0])) && 
-                              isFinite(parseFloat(firstLineParts[1]));
-
-    if (!isFirstLineCoords) {
-        nameBase = firstLine;
-        coordsStartIndex = 1;
+        if (contours.length > 0 && contours.some(c => c.length > 0)) {
+            parsedObjectsArray.push({ name: objectName, contours: contours.filter(c => c.length > 0) });
+        }
     }
 
-    const coordinatesText = lines.slice(coordsStartIndex).join('\n');
-    
-    // 1. Получаем все "сырые" контуры
-    const rawContours = parseCoordinatesFromText(coordinatesText);
-    if (rawContours.length === 0) return [];
+ function parseObjectsFromClipboardText(text) {
+        const parsedObjectData = [];
+        // Сначала разбиваем весь текст на блоки, где каждый блок - это потенциальный объект.
+        // Разделитель между объектами - две или более последовательные пустые строки.
+        // Используем регулярное выражение для разделения по двум и более переводам строки.
+        // trim() в начале убирает лишние пробелы и пустые строки в начале/конце всего текста.
+        const objectBlocksAsStrings = text.trim().split(/\n\s*\n\s*\n*/); // Две или более пустые строки
 
-    // 2. ВАЖНО: Группируем их (Внешние + Дырки)
-    // Эта функция вернет массив массивов: [ [Внешний1, Дырка1], [Внешний2], [Внешний3, Дырка3a, Дырка3b] ]
-    const groupedContours = consolidateContoursIntoObjects(rawContours);
+        for (const blockStr of objectBlocksAsStrings) {
+            if (blockStr.trim() === "") continue; // Пропускаем полностью пустые блоки
 
-    const resultObjects = [];
+            // Теперь каждую строку внутри блока объекта тримим и разбиваем
+            const blockLines = blockStr.split('\n').map(line => line.trim()).filter(line => line !== "" || blockStr.split('\n').map(l => l.trim()).indexOf(line.trim()) !== blockStr.split('\n').map(l => l.trim()).lastIndexOf(line.trim()) );
+            // Фильтр (line => line !== "" || ...) нужен, чтобы сохранить одну пустую строку, если она разделяет контуры,
+            // но удалить множественные пустые строки внутри одного блока объекта, которые не являются разделителями контуров.
+            // Проще: разбиваем блок на строки, потом передаем в processSingleObjectBlock, который сам обработает пустые строки как разделители контуров.
 
-    // 3. Создаем объекты на основе ГРУПП, а не отдельных линий
-    groupedContours.forEach((objectContours, idx) => {
-        // objectContours - это массив [ВнешнийКонтур, ...ВнутренниеКонтуры]
+            const linesForSingleObject = blockStr.split('\n').map(l => l.trim());
 
-        // Формируем имя для ГРУППЫ
-        let finalName;
-        if (nameBase) {
-            finalName = groupedContours.length > 1 ? `${nameBase} (${idx + 1})` : nameBase;
-        } else {
-            finalName = `Участок ${nextObjectIdPlaceholder} (${idx + 1})`;
-        }
 
-        // Тип определяем по главному (внешнему) контуру
-        const mainContour = objectContours[0];
-        let objectType = 'point';
-        if (mainContour.length >= 3) {
-            const first = mainContour[0];
-            const last = mainContour[mainContour.length - 1];
-            if (Math.abs(first.x - last.x) < 0.001 && Math.abs(first.y - last.y) < 0.001) {
-                objectType = 'polygon';
-            } else {
-                objectType = 'line';
+            const obj = processSingleObjectBlock(linesForSingleObject);
+            if (obj) {
+                // Проверка, если имя объекта - это валидный КН, и у него нет координат,
+                // то это может быть случай, когда КН был частью блока с координатами.
+                // Такой КН не должен обрабатываться как отдельный объект, если он не единственный в буфере.
+                if (isValidCadastralNumberFormat(obj.name) && obj.contours.length === 0) {
+                     // Пропускаем, если это КН без координат, который мог быть "заголовком"
+                     console.log(`Пропущен КН "${obj.name}" без координат как потенциальный заголовок.`);
+                } else {
+                    parsedObjectData.push(obj);
+                }
             }
-        } else if (mainContour.length === 2) {
-            objectType = 'line';
         }
-
-        resultObjects.push({
-            contours: objectContours, // Передаем ВСЮ группу (с дырками)
-            name: finalName,
-            type: objectType,
-            color: defaultColor
-        });
-    });
-
-    return resultObjects;
-}
-
-
-
+        return parsedObjectData;
+    }
 
 async function checkClipboardForObjects() {
-    try {
-        const text = await navigator.clipboard.readText();
-        if (!text || text.trim().length === 0) return false;
+        try {
+            const text = await navigator.clipboard.readText();
+            if (!text || text.trim().length === 0) return false;
 
-        const trimmedText = text.trim();
-        const lines = trimmedText.split('\n').map(l=>l.trim()).filter(l=>l);
+            const trimmedText = text.trim();
+            const lines = trimmedText.split('\n');
 
-        // 1. Одиночный КН без координат -> загрузка из сети
-        if (lines.length === 1 && isValidCadastralNumberFormat(lines[0])) {
-            showLoader(true, `Загрузка ${lines[0]}...`);
-            userObjects = []; nextObjectId = 1; nextColorIndex = 0; selectedObjectIndex = -1; editingObjectIndex = -1; geometryHistory = [];
-            await handleImportFromCadNumbers([lines[0]]);
-            showLoader(false);
-            return true;
-        }
+            // 1. Проверка на одиночный кадастровый номер
+            if (lines.length === 1 && isValidCadastralNumberFormat(trimmedText)) {
+                showLoader(true, `Загрузка ${trimmedText}...`);
+                userObjects = []; nextObjectId = 1; nextColorIndex = 0; selectedObjectIndex = -1; editingObjectIndex = -1; geometryHistory = [];
+                console.log("Состояние очищено перед импортом КН из буфера обмена.");
 
-        // 2. Попытка парсинга как объектов
-        const objectsToAdd = parseTextToObjects(trimmedText);
-
-        if (objectsToAdd.length > 0) {
-            showLoader(true, "Импорт из буфера обмена...");
-            userObjects = []; nextObjectId = 1; nextColorIndex = 0; selectedObjectIndex = -1; editingObjectIndex = -1; geometryHistory = [];
-            
-            let addedBatch = [];
-            objectsToAdd.forEach(objData => {
-                const realName = objData.name.replace(nextObjectIdPlaceholder, nextObjectId);
-                
-                // ИСПРАВЛЕНО: передаем objData.contours без лишних []
-                const newObj = addObjectInternal(objData.contours, realName, objData.type, true);
-                
-                if (newObj) addedBatch.push(newObj);
-            });
-
-            if (addedBatch.length > 0) {
-                finalizeBatchAdd(addedBatch);
-                showNotification(`Импортировано ${addedBatch.length} объектов из буфера.`, "success", "clipboard-check");
+                await handleImportFromCadNumbers([trimmedText]);
                 showLoader(false);
                 return true;
             }
+
+            // 2. Проверка на многострочные данные
+            const looksLikeCoordinateData = /\d/.test(trimmedText) && /[ \t,.]/.test(trimmedText);
+
+            if (looksLikeCoordinateData) {
+                showLoader(true, "Импорт из буфера обмена...");
+                userObjects = []; nextObjectId = 1; nextColorIndex = 0; selectedObjectIndex = -1; editingObjectIndex = -1; geometryHistory = [];
+                console.log("Состояние очищено перед импортом объектов из буфера обмена.");
+
+                const parsedClipboardObjects = parseObjectsFromClipboardText(trimmedText);
+                let tempNextObjectIdForNaming = 1;
+
+                if (parsedClipboardObjects.length > 0) {
+                    
+                    // --- ИЗМЕНЕНИЕ: Сбор всех контуров и перегруппировка с учетом вложенности ---
+                    // Собираем все контуры из всех распознанных блоков в один массив
+                    let allRawContours = [];
+                    parsedClipboardObjects.forEach(obj => {
+                       if (obj.contours && obj.contours.length > 0) {
+                           allRawContours.push(...obj.contours);
+                       }
+                    });
+
+                    // Применяем логику вложенности (дырок)
+                    const groupedObjects = consolidateContoursIntoObjects(allRawContours);
+                    let addedObjectsBatch = [];
+
+                    for (const objectContours of groupedObjects) {
+                        // Определяем имя
+                        let finalName = `Объект #${tempNextObjectIdForNaming++}`;
+                        
+                        // Определяем тип
+                        let objectType = 'point';
+                        const firstPrimaryContour = objectContours[0];
+                        if (firstPrimaryContour) {
+                            if (firstPrimaryContour.length >= 3) {
+                                const firstPt = firstPrimaryContour[0];
+                                const lastPt = firstPrimaryContour[firstPrimaryContour.length - 1];
+                                const PRECISION_THRESHOLD = 0.001;
+                                if (Math.abs(firstPt.x - lastPt.x) < PRECISION_THRESHOLD && Math.abs(firstPt.y - lastPt.y) < PRECISION_THRESHOLD) {
+                                    objectType = 'polygon';
+                                } else {
+                                    objectType = 'line';
+                                }
+                            } else if (firstPrimaryContour.length === 2) {
+                                objectType = 'line';
+                            }
+                        }
+
+                        // Добавляем объект
+                        const newObj = addObjectInternal(objectContours, finalName, objectType, true);
+                        if (newObj) {
+                            addedObjectsBatch.push(newObj);
+                        }
+                    }
+                    // ---------------------------------------------------------------------------
+
+                    if (addedObjectsBatch.length > 0) {
+                        finalizeBatchAdd(addedObjectsBatch);
+                        showNotification(`Импортировано ${addedObjectsBatch.length} объектов из буфера обмена.`, "success", "clipboard-check");
+                    } else {
+                        showNotification("Не удалось импортировать объекты из буфера обмена. Проверьте формат или убедитесь, что есть валидные координаты.", "warning", "exclamation-triangle");
+                    }
+                } else {
+                     showNotification("Не найдено валидных объектов для импорта в буфере обмена.", "info", "clipboard");
+                }
+                showLoader(false);
+                return parsedClipboardObjects.length > 0;
+            }
+        } catch (err) {
+             if (err.name === 'NotAllowedError' || (err.message && err.message.toLowerCase().includes('permission denied'))) {
+                 console.warn('Чтение из буфера обмена не удалось (разрешения/фокус).', err.name);
+            } else if (err.name === 'TypeError' && (err.message && err.message.toLowerCase().includes('readtext'))) {
+                console.warn('API буфера обмена navigator.clipboard недоступно.');
+            } else {
+                console.error('Ошибка чтения/парсинга буфера обмена:', err);
+            }
+            showLoader(false);
         }
-    } catch (err) {
-        console.warn('Ошибка буфера обмена:', err);
+        return false;
     }
-    showLoader(false);
-    return false;
-}
   
 
 
@@ -1869,7 +2013,7 @@ function setupEventListeners() {
         }
     }
 
-function addObjectInternal(contoursData, name, objectType, isMultiPart = false, subType = null, specificColor = null) {
+function addObjectInternal(contoursData, name, objectType, isMultiPart = false, subType = null) {
     if (!contoursData || contoursData.length === 0 || contoursData.every(c => !c || c.length === 0)) {
         if (!isMultiPart) showNotification("Не удалось добавить объект: нет контуров или они пусты.", "error", "exclamation-circle");
         return null;
@@ -1900,18 +2044,7 @@ function addObjectInternal(contoursData, name, objectType, isMultiPart = false, 
     }
 
     const newId = nextObjectId++;
-    
-    // --- ИЗМЕНЕНИЕ: Логика выбора цвета ---
-    let newColor;
-    if (specificColor) {
-        newColor = specificColor;
-        // Не увеличиваем nextColorIndex, чтобы авто-цвета не "сбивались" впустую, 
-        // или наоборот - можно не трогать, это не критично.
-    } else {
-        newColor = objectColors[nextColorIndex % objectColors.length]; 
-        nextColorIndex++;
-    }
-    // -------------------------------------
+    const newColor = objectColors[nextColorIndex % objectColors.length]; nextColorIndex++;
 
     const newObject = {
         id: newId,
@@ -2345,19 +2478,35 @@ async function handleUniversalImport() {
         return;
     }
 
-    const useFixedColor = document.getElementById('useFixedColor').checked;
-    const fixedColor = useFixedColor ? document.getElementById('importColorInput').value : null;
-
     const lines = inputText.split('\n').map(line => line.trim()).filter(line => line);
+    const isSingleLine = lines.length === 1;
     
-    // 1. Проверка на чистый список КН (без координат) для загрузки из интернета
-    // Если первая строка КН, а вторая КН - это список.
-    // Если первая КН, а вторая координаты - это наш случай с ручным вводом.
-    const firstIsKn = isValidCadastralNumberFormat(lines[0]);
-    const secondIsKn = lines.length > 1 && isValidCadastralNumberFormat(lines[1]);
-    const isKnList = firstIsKn && (lines.length === 1 || secondIsKn);
+    // Проверяем, являются ли ВСЕ строки кадастровыми номерами
+    const isKnList = lines.length > 0 && lines.every(line => isValidCadastralNumberFormat(line));
     
-    const isSingleQuarter = lines.length === 1 && isQuarterFormat(lines[0]);
+    const isSingleQuarter = isSingleLine && isQuarterFormat(lines[0]);
+
+    // Логика для "КН + Координаты" (Сооружение).
+    // Срабатывает ТОЛЬКО если первая строка КН, строк > 1, И вторая строка НЕ КН (значит координаты)
+    if (lines.length > 1 && isValidCadastralNumberFormat(lines[0]) && !isValidCadastralNumberFormat(lines[1])) {
+        const cadNumber = lines[0];
+        const coordinatesText = lines.slice(1).join('\n');
+        
+        console.log(`[handleUniversalImport] Обнаружен блок с КН (${cadNumber}) и координатами.`);
+        
+        closeCoordsDialog();
+        
+        const parsedContours = parseCoordinatesFromText(coordinatesText);
+        if (parsedContours && parsedContours.length > 0) {
+            const newObj = addObjectInternal(parsedContours, cadNumber, "polygon", true, 'construction_record');
+            if (newObj) {
+                finalizeBatchAdd([newObj]);
+            }
+        } else {
+            showNotification("Не удалось распознать координаты после кадастрового номера.", "error");
+        }
+        return;
+    }
 
     if (isSingleQuarter) {
         closeCoordsDialog();
@@ -2365,46 +2514,21 @@ async function handleUniversalImport() {
         return; 
     }
 
+    // Если это список КН (один или много)
     if (isKnList) {
         const importMode = document.getElementById('importModeSelect').value;
         if (importMode === 'xml') {
             await handleImportFromCadNumbers(lines);
         } else {
-            if (lines.length > 20 && !confirm(`В списке ${lines.length} объектов. Продолжить?`)) return;
+            // Лимит можно проверить здесь, если нужно
+            if (lines.length > 20) {
+                 if(!confirm(`В списке ${lines.length} объектов. Загрузка может занять время. Продолжить?`)) return;
+            }
             await handleImportFromNspdAndConvertToMsk(lines, importMode);
         }
-        return;
-    }
-
-    // 2. Обработка текста (Координаты или Имя+Координаты)
-    const objectsToAdd = parseTextToObjects(inputText, fixedColor);
-    
- if (objectsToAdd.length > 0) {
-        closeCoordsDialog();
-        let addedBatch = [];
-        
-        objectsToAdd.forEach(objData => {
-            const realName = objData.name.replace(nextObjectIdPlaceholder, nextObjectId);
-            
-            // ИСПРАВЛЕНО: objData.contours уже является массивом контуров (внешний + дырки),
-            // поэтому квадратные скобки [] вокруг него НЕ НУЖНЫ.
-            const newObj = addObjectInternal(
-                objData.contours,  // <-- Передаем как есть
-                realName, 
-                objData.type, 
-                true, 
-                null, 
-                objData.color
-            );
-            if (newObj) addedBatch.push(newObj);
-        });
-
-        if (addedBatch.length > 0) {
-            finalizeBatchAdd(addedBatch);
-            showNotification(`Добавлено ${addedBatch.length} объектов.`, "success");
-        }
     } else {
-        showNotification("Не удалось распознать данные.", "error");
+        // Иначе пытаемся парсить просто как текст координат
+        await handleImportFromTextareaCoordinates(inputText);
     }
 }
 
@@ -2931,47 +3055,45 @@ function consolidateContoursIntoObjects(contours) {
     }
     
 
-async function handleImportFromTextareaCoordinates(text, color = null) {
-     const parsedContours = parseCoordinatesFromText(text);
-     if (parsedContours && parsedContours.length > 0) {
-        closeCoordsDialog();
-        
-        const groupedContours = consolidateContoursIntoObjects(parsedContours);
-        
-        let addedObjects = [];
-        for (let i = 0; i < groupedContours.length; i++) {
-            const objectContours = groupedContours[i];
+async function handleImportFromTextareaCoordinates(text) {
+         const parsedContours = parseCoordinatesFromText(text); // Возвращает массив отдельных контуров
+         if (parsedContours && parsedContours.length > 0) {
+            closeCoordsDialog();
             
-            if (objectContours && objectContours.length > 0) {
-                 const mainContour = objectContours[0];
-                 const isClosed = mainContour.length >= 3 &&
-                               Math.abs(mainContour[0].x - mainContour[mainContour.length - 1].x) < 0.001 &&
-                               Math.abs(mainContour[0].y - mainContour[mainContour.length - 1].y) < 0.001;
+            // --- ИЗМЕНЕНИЕ: Группировка контуров (обработка дырок) ---
+            const groupedContours = consolidateContoursIntoObjects(parsedContours);
+            
+            let addedObjects = [];
+            for (let i = 0; i < groupedContours.length; i++) {
+                const objectContours = groupedContours[i]; // Это массив [внешний, внутренние...]
                 
-                let objectType = isClosed ? 'polygon' : (mainContour.length >= 2 ? 'line' : 'point');
-                
-                const nameBase = groupedContours.length > 1 ? `Участок ${nextObjectId} (${i+1})` : `Участок ${nextObjectId}`;
+                if (objectContours && objectContours.length > 0) {
+                     // Проверка на замкнутость первого контура
+                     const mainContour = objectContours[0];
+                     const isClosed = mainContour.length >= 3 &&
+                                   Math.abs(mainContour[0].x - mainContour[mainContour.length - 1].x) < 0.001 &&
+                                   Math.abs(mainContour[0].y - mainContour[mainContour.length - 1].y) < 0.001;
+                    
+                    let objectType = isClosed ? 'polygon' : (mainContour.length >= 2 ? 'line' : 'point');
+                    
+                    // Формируем имя автоматически
+                    const nameBase = groupedContours.length > 1 ? `Участок ${nextObjectId} (${i+1})` : `Участок ${nextObjectId}`;
 
-                // --- ИЗМЕНЕНИЕ: Передаем color ---
-                const newObj = addObjectInternal(objectContours, nameBase, objectType, true, null, color);
-                // ---------------------------------
-                if(newObj) addedObjects.push(newObj);
+                    // ИЗМЕНЕНИЕ: Добавляем объект сразу, без запроса имени
+                    const newObj = addObjectInternal(objectContours, nameBase, objectType, true);
+                    if(newObj) addedObjects.push(newObj);
+                }
             }
-        }
+            // ---------------------------------------------------------
 
-        if(addedObjects.length > 0) {
-            finalizeBatchAdd(addedObjects);
-        }
+            if(addedObjects.length > 0) {
+                finalizeBatchAdd(addedObjects);
+            }
 
-     } else { showNotification("Не удалось распознать валидные координаты X Y.", "error", "exclamation-circle"); }
-}
+         } else { showNotification("Не удалось распознать валидные координаты X Y.", "error", "exclamation-circle"); }
+    }
 
-async function handleImportFromFile() {
-         // --- СЧИТЫВАНИЕ ЦВЕТА ---
-         const useFixedColor = document.getElementById('useFixedColor').checked;
-         const fixedColor = useFixedColor ? document.getElementById('importColorInput').value : null;
-         // ------------------------
-
+    async function handleImportFromFile() {
          const fileInput = document.createElement('input'); fileInput.type = 'file'; fileInput.accept = '.txt,.csv';
          fileInput.onchange = async (e) => {
              const file = e.target.files[0]; if (!file) return;
@@ -2991,11 +3113,9 @@ async function handleImportFromFile() {
                                    Math.abs(contour[0].y - contour[contour.length - 1].y) < 0.001;
                                let objectType = isClosed ? 'polygon' : (contour.length >= 2 ? 'line' : 'point');
                                
+                               // ИЗМЕНЕНИЕ: Формируем имя и добавляем сразу
                                const autoName = `${baseName}${parsedContours.length > 1 ? '_'+(i+1) : ''}`;
-                               
-                               // --- ИЗМЕНЕНИЕ: Передаем fixedColor ---
-                               const newObj = addObjectInternal([contour], autoName, objectType, true, null, fixedColor);
-                               // --------------------------------------
+                               const newObj = addObjectInternal([contour], autoName, objectType, true);
                                
                                if(newObj) addedObjects.push(newObj);
                            }
