@@ -784,12 +784,6 @@
               <span id="showAllObjectsBtn" class="section-title-action" title="Показать все" style="right: 40px;">
                 <i class="fas fa-expand"></i>
                             </span>
-                            
-                            <span id="showAdjacentPointsBtn" class="section-title-action" title="Показать точки смежных (1м)" style="right: 70px;">
-    <i class="fas fa-dot-circle"></i>
-</span>
-
-
             <span id="deleteAllObjectsBtn" class="section-title-action" title="Удалить все объекты">
                 <i class="fas fa-eraser"></i>
             </span>
@@ -1013,9 +1007,6 @@ let intersectTargetIndex = -1;
 
  let pendingIntersectionData = null
  let showLabels = false;
- 
-    let adjacentPointsMode = false;
-    let adjacentObjectIndices = new Set();
     
     const MAX_GEOMETRY_HISTORY = 10;
 
@@ -1704,23 +1695,10 @@ async function checkClipboardForObjects() {
                isFinite(minX) && isFinite(minY) && isFinite(maxX) && isFinite(maxY);
     }
 
-function updateToggleButtonStates() {
+  function updateToggleButtonStates() {
         const pointsBtn = document.getElementById('togglePointsBtn');
         if (pointsBtn) {
             pointsBtn.style.backgroundColor = showPoints ? '#e74c3c' : '#7f8c8d';
-        }
-        
-        const adjBtn = document.getElementById('showAdjacentPointsBtn');
-        if (adjBtn) {
-            if (adjacentPointsMode) {
-                adjBtn.style.color = '#e74c3c'; // Активный цвет
-                // ИСПРАВЛЕНИЕ: Добавляем translateY(-50%), чтобы кнопка оставалась по центру
-                adjBtn.style.transform = 'translateY(-50%) scale(1.2)';
-            } else {
-                adjBtn.style.color = ''; 
-                // ИСПРАВЛЕНИЕ: Сбрасываем только scale, но оставляем позиционирование CSS
-                adjBtn.style.transform = ''; 
-            }
         }
 
         const rulerBtn = document.getElementById('rulerBtn');
@@ -1901,9 +1879,6 @@ function setupEventListeners() {
         });
         
         document.getElementById('deleteAllObjectsBtn').addEventListener('click', deleteAllObjects);
-        
-            document.getElementById('showAdjacentPointsBtn').addEventListener('click', toggleAdjacentPointsMode);
-            
           document.getElementById('showAllObjectsBtn').addEventListener('click', () => {
             if (userObjects.length > 0) {
                 resetView();   // Пересчитывает границы и масштаб
@@ -2069,7 +2044,6 @@ function addObjectInternal(contoursData, name, objectType, isMultiPart = false, 
         calculateBounds();
         displayObjectInfo(selectedObjectIndex);
         setTimeout(() => { centerOnObject(newIndex, true); }, 50);
-          checkTotalPointsAndHide(); 
         saveState();
         redraw(true);
     }
@@ -2319,156 +2293,6 @@ async function handleImportFromNspdAndConvertToMsk(cadNumbers, destScId) {
         document.getElementById('dialogOverlay').classList.remove('show');
     }
     
-    
-    // --- ЛОГИКА СМЕЖНЫХ ТОЧЕК ---
-
-function getObjectBoundingBox(obj) {
-    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-    if (!obj.contours) return null;
-    obj.contours.forEach(c => {
-        if (!c) return;
-        c.forEach(p => {
-            if (p && isFinite(p.x) && isFinite(p.y)) {
-                minX = Math.min(minX, p.x); minY = Math.min(minY, p.y);
-                maxX = Math.max(maxX, p.x); maxY = Math.max(maxY, p.y);
-            }
-        });
-    });
-    if (minX === Infinity) return null;
-    return { minX, minY, maxX, maxY };
-}
-
-function calculateAdjacentIndices(targetIndex) {
-    const indices = new Set();
-    if (targetIndex < 0 || targetIndex >= userObjects.length) return indices;
-
-    indices.add(targetIndex); // Добавляем сам выбранный объект
-    const targetObj = userObjects[targetIndex];
-    const targetBBox = getObjectBoundingBox(targetObj);
-    if (!targetBBox) return indices;
-
-    // Расширяем BBox на 1.5 метра для грубой фильтрации
-    const buffer = 1.5;
-    const expandedTargetBBox = {
-        minX: targetBBox.minX - buffer, minY: targetBBox.minY - buffer,
-        maxX: targetBBox.maxX + buffer, maxY: targetBBox.maxY + buffer
-    };
-
-    const thresholdSq = 1.0 * 1.0; // 1 метр в квадрате
-
-    // Получаем сегменты целевого объекта ОДИН РАЗ
-    const segsTarget = getAllSegments(targetObj);
-
-    userObjects.forEach((otherObj, idx) => {
-        if (idx === targetIndex) return;
-        if (!otherObj.contours) return;
-
-        // 1. Грубая проверка по BBox (отсеиваем далекие объекты)
-        const otherBBox = getObjectBoundingBox(otherObj);
-        if (!otherBBox) return;
-
-        if (otherBBox.maxX < expandedTargetBBox.minX || otherBBox.minX > expandedTargetBBox.maxX ||
-            otherBBox.maxY < expandedTargetBBox.minY || otherBBox.minY > expandedTargetBBox.maxY) {
-            return;
-        }
-
-        let isAdjacent = false;
-        const segsOther = getAllSegments(otherObj);
-
-        // --- НОВАЯ ПРОВЕРКА: ПЕРЕСЕЧЕНИЕ ЛИНИЙ (SEGMENT to SEGMENT) ---
-        // Это решает проблему на скриншоте, когда полигоны накладываются, но вершины далеко
-        for (const s1 of segsTarget) {
-            for (const s2 of segsOther) {
-                // Используем уже существующую функцию getSegmentIntersection
-                if (getSegmentIntersection(s1.p1, s1.p2, s2.p1, s2.p2)) {
-                    isAdjacent = true;
-                    break;
-                }
-            }
-            if (isAdjacent) break;
-        }
-        // --------------------------------------------------------------
-
-        // Если прямого пересечения линий нет, проверяем близость (1 метр)
-        if (!isAdjacent) {
-            // Проверка: Точки Other рядом с сегментами Target
-            for (const contour of otherObj.contours) {
-                if (!contour) continue;
-                for (const pt of contour) {
-                    for (const seg of segsTarget) {
-                        const distSq = pointLineDistSq(pt.x, pt.y, seg.p1.x, seg.p1.y, seg.p2.x, seg.p2.y);
-                        if (distSq <= thresholdSq) {
-                            isAdjacent = true; break;
-                        }
-                    }
-                    if (isAdjacent) break;
-                }
-                if (isAdjacent) break;
-            }
-        }
-
-        // Обратная проверка: Точки Target рядом с сегментами Other
-        if (!isAdjacent) {
-            for (const contour of targetObj.contours) {
-                if (!contour) continue;
-                for (const pt of contour) {
-                    for (const seg of segsOther) {
-                        const distSq = pointLineDistSq(pt.x, pt.y, seg.p1.x, seg.p1.y, seg.p2.x, seg.p2.y);
-                        if (distSq <= thresholdSq) {
-                            isAdjacent = true; break;
-                        }
-                    }
-                    if (isAdjacent) break;
-                }
-                if (isAdjacent) break;
-            }
-        }
-
-        if (isAdjacent) {
-            indices.add(idx);
-        }
-    });
-
-    return indices;
-}
-
-function toggleAdjacentPointsMode() {
-    if (adjacentPointsMode) {
-        // Выключение режима
-        adjacentPointsMode = false;
-        adjacentObjectIndices.clear();
-        showNotification("Режим смежных точек выключен.", "info");
-    } else {
-        // Включение режима
-        if (selectedObjectIndex === -1) {
-            showNotification("Выберите объект для отображения смежных точек.", "warning", "hand-pointer");
-            return;
-        }
-
-        const countBefore = adjacentObjectIndices.size;
-        showLoader(true, "Поиск смежных объектов (1м)...");
-        
-        // Используем setTimeout, чтобы лоадер успел отрисоваться
-        setTimeout(() => {
-            adjacentObjectIndices = calculateAdjacentIndices(selectedObjectIndex);
-            adjacentPointsMode = true;
-            
-            // Выключаем глобальные точки
-            showPoints = false;
-            
-            showLoader(false);
-            showNotification(`Показаны точки для ${adjacentObjectIndices.size} объектов (выбранный + смежные).`, "success", "dot-circle");
-            
-            // Обновляем кнопки и перерисовываем
-            updateToggleButtonStates();
-            redraw(true);
-        }, 50);
-        return; // redraw внутри timeout
-    }
-    
-    updateToggleButtonStates();
-    redraw(true);
-}
     
 
 async function handleUniversalImport() {
@@ -3353,14 +3177,17 @@ function drawObjects(ctx) {
         ctx.strokeStyle = obj.color || '#000000';
         ctx.lineWidth = (isSelected || isBeingEdited) ? 2.5 : 1.5;
 
-        // 1. Отрисовка линий/полигонов (без изменений)
         if (obj.subType === 'construction_record') {
             obj.contours.forEach(contour => {
                 if (!contour || contour.length < 1) return;
                 ctx.beginPath();
                 contour.forEach((point, pIdx) => {
                     const [canvasX, canvasY] = transformCoord(point.x, point.y);
-                    if (pIdx === 0) { ctx.moveTo(canvasX, canvasY); } else { ctx.lineTo(canvasX, canvasY); }
+                    if (pIdx === 0) {
+                        ctx.moveTo(canvasX, canvasY);
+                    } else {
+                        ctx.lineTo(canvasX, canvasY);
+                    }
                 });
                 ctx.stroke();
             });
@@ -3371,45 +3198,69 @@ function drawObjects(ctx) {
             if (obj.type === 'polygon') {
                 ctx.beginPath();
                 let hasValidContour = false;
+                
                 obj.contours.forEach((contour) => {
                     if (!contour || contour.length === 0) return;
+                    
                     let firstPoint = true;
                     contour.forEach((point) => {
                         const [canvasX, canvasY] = transformCoord(point.x, point.y);
-                        if (firstPoint) { ctx.moveTo(canvasX, canvasY); firstPoint = false; } else { ctx.lineTo(canvasX, canvasY); }
+                        if (firstPoint) {
+                            ctx.moveTo(canvasX, canvasY);
+                            firstPoint = false;
+                        } else {
+                            ctx.lineTo(canvasX, canvasY);
+                        }
                     });
-                    ctx.closePath(); hasValidContour = true;
+                    ctx.closePath(); 
+                    hasValidContour = true;
                 });
-                if (hasValidContour) { ctx.fill('evenodd'); ctx.stroke(); }
+
+                if (hasValidContour) {
+                    ctx.fill('evenodd');
+                    ctx.stroke();
+                }
+
             } else if (obj.type === 'line') {
                  obj.contours.forEach((contour) => {
                     if (!contour || contour.length === 0) return;
                     ctx.beginPath();
                     contour.forEach((point, pIdx) => {
                         const [canvasX, canvasY] = transformCoord(point.x, point.y);
-                        if (pIdx === 0) ctx.moveTo(canvasX, canvasY); else ctx.lineTo(canvasX, canvasY);
+                        if (pIdx === 0) ctx.moveTo(canvasX, canvasY);
+                        else ctx.lineTo(canvasX, canvasY);
                     });
                     ctx.stroke();
                 });
             } else if (obj.type === 'point') {
-                // Отрисовка точек-объектов (без изменений)
                 obj.contours.forEach((contour) => {
                     if (!contour || contour.length === 0) return;
                     if (contour[0] && isFinite(contour[0].x) && isFinite(contour[0].y)){
                         const [cx, cy] = transformCoord(contour[0].x, contour[0].y);
                         if(isFinite(cx) && isFinite(cy)){
                             ctx.save(); ctx.setTransform(1,0,0,1,0,0);
+                            
                             if (obj.subType === 'crosshair') {
                                 const size = (isSelected || isBeingEdited) ? 10 : 7;
-                                ctx.strokeStyle = obj.color || '#e74c3c'; ctx.lineWidth = (isSelected || isBeingEdited) ? 3 : 2;
-                                ctx.beginPath(); ctx.moveTo(cx - size, cy); ctx.lineTo(cx + size, cy);
-                                ctx.moveTo(cx, cy - size); ctx.lineTo(cx, cy + size); ctx.stroke();
-                                ctx.beginPath(); ctx.arc(cx, cy, size / 1.5, 0, Math.PI * 2); ctx.stroke();
+                                ctx.strokeStyle = obj.color || '#e74c3c'; 
+                                ctx.lineWidth = (isSelected || isBeingEdited) ? 3 : 2;
+                                
+                                ctx.beginPath();
+                                ctx.moveTo(cx - size, cy); ctx.lineTo(cx + size, cy);
+                                ctx.moveTo(cx, cy - size); ctx.lineTo(cx, cy + size);
+                                ctx.stroke();
+                                
+                                ctx.beginPath();
+                                ctx.arc(cx, cy, size / 1.5, 0, Math.PI * 2);
+                                ctx.stroke();
+
                                 if (scale > 0.5) { 
-                                    ctx.fillStyle = '#333'; ctx.font = "10px monospace";
+                                    ctx.fillStyle = '#333';
+                                    ctx.font = "10px monospace";
                                     ctx.fillText(`${contour[0].x.toFixed(2)}, ${contour[0].y.toFixed(2)}`, cx + size, cy - size);
                                 }
-                            } else {
+                            } 
+                            else {
                                 ctx.fillStyle=obj.color||'#000000';
                                 ctx.beginPath(); ctx.arc(cx,cy,(isSelected || isBeingEdited)?5:3.5,0,Math.PI*2); ctx.closePath(); ctx.fill();
                                 ctx.strokeStyle='white'; ctx.lineWidth=1; ctx.stroke();
@@ -3421,12 +3272,7 @@ function drawObjects(ctx) {
             }
         }
 
-        // 2. ОТРИСОВКА ВЕРШИН (ЗДЕСЬ БЫЛА ОШИБКА)
-        // Определяем, нужно ли рисовать точки для ЭТОГО конкретного объекта
-        const shouldDrawPointsForThisObj = (showPoints) || (adjacentPointsMode && adjacentObjectIndices.has(index));
-
-        // Убрали внешний if (showPoints...), который всё блокировал
-        if (shouldDrawPointsForThisObj && obj.contours.some(c => c && c.length > 0) && obj.type !== 'point') {
+        if (showPoints && obj.contours.some(c => c && c.length > 0) && obj.type !== 'point') {
             obj.contours.forEach((contour, cIdx) => {
                 if (!contour) return;
                 contour.forEach((point, pIdx) => {
@@ -3452,7 +3298,9 @@ function drawObjects(ctx) {
                     ctx.save(); ctx.setTransform(1, 0, 0, 1, 0, 0);
                     let pointFill = isSelected || isBeingEdited ? hexToRgba(obj.color, 0.9) : hexToRgba(obj.color, 0.7);
                     let pointRadius = isSelected || isBeingEdited ? 4 : 3;
-                    if(isCurrentMovingPoint){ pointFill = 'yellow'; pointRadius = 5; }
+                    if(isCurrentMovingPoint){
+                        pointFill = 'yellow'; pointRadius = 5;
+                    }
 
                     ctx.fillStyle = pointFill;
                     ctx.beginPath(); ctx.arc(px, py, pointRadius, 0, Math.PI * 2); ctx.closePath(); ctx.fill();
@@ -3462,7 +3310,6 @@ function drawObjects(ctx) {
             });
         }
 
-        // 3. Подписи названий (без изменений)
         if (scale > 0.005 && obj.contours.length > 0 && obj.contours[0] && obj.contours[0].length > 0) {
             const firstContour = obj.contours[0];
             if (firstContour.every(p => p && isFinite(p.x) && isFinite(p.y))) {
@@ -3484,6 +3331,7 @@ function drawObjects(ctx) {
         }
     });
 }
+
 
     
     function drawActiveDrawingPreview(ctx) {
@@ -4308,15 +4156,6 @@ function selectObjectByPoint(dataClickPoint) {
             if (isGeometryEditMode && editingObjectIndex !== clickedIdx) {
                 deactivateGeometryEditMode(false);
             }
-            
-                if (clickedIdx !== selectedObjectIndex && adjacentPointsMode) {
-                // Если кликнули на другой объект, а режим включен -> выключаем или пересчитываем
-                // Для простоты - выключаем, чтобы не путать пользователя
-                adjacentPointsMode = false;
-                adjacentObjectIndices.clear();
-                showNotification("Смена объекта: режим смежных точек сброшен.", "info");
-            }
-            
             selectedObjectIndex = clickedIdx;
             displayObjectInfo(selectedObjectIndex); updateObjectListSelection();
         } else {
@@ -4866,11 +4705,6 @@ visibilityBtn.innerHTML = isVisible
             // ------------------------------------
 
             if (!isNaN(idx) && selectedObjectIndex !== idx) {
-                  if (adjacentPointsMode) {
-                    adjacentPointsMode = false;
-                    adjacentObjectIndices.clear();
-                }
-                
                 if (isDrawingMode && isDrawingActive) cancelDrawing();
                 if (isGeometryEditMode) deactivateGeometryEditMode(false);
                 displayObjectInfo(idx);
@@ -5328,29 +5162,6 @@ async function handleImportFromCadNumbers(cadNumbers) {
     }
 }
 
-
-    function checkTotalPointsAndHide() {
-        // Если точки уже скрыты, проверять не нужно
-        if (!showPoints) return;
-
-        let totalPoints = 0;
-        for (const obj of userObjects) {
-            if (obj && obj.contours) {
-                for (const contour of obj.contours) {
-                    if (contour) {
-                        totalPoints += contour.length;
-                    }
-                }
-            }
-        }
-
-        if (totalPoints > 2000) {
-            showPoints = false;
-            updateToggleButtonStates(); // Обновляем состояние кнопки
-            showNotification("Точки скрыты автоматически в целях производительности (более 2000 вершин).", "warning", "eye-slash");
-        }
-    }
-
     function finalizeBatchAdd(addedObjectsArray) {
         if (addedObjectsArray.length === 0) return;
         updateObjectList();
@@ -5361,7 +5172,6 @@ async function handleImportFromCadNumbers(cadNumbers) {
             if (selectedObjectIndex !== -1) centerOnObject(selectedObjectIndex, true);
             else resetView();
         }, 100);
-         checkTotalPointsAndHide();
         saveState();
         redraw(true);
     }
