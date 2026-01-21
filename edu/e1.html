@@ -988,6 +988,7 @@ let highlightedStarName = null;
 let currentSunAltitude = -90;
 let minMagnitude = 6;
 let maxMagnitude = -2;
+let isMoonPhaseMode = false;
 
 const PLANETS = ['Mercury', 'Venus', 'Mars', 'Jupiter', 'Saturn', 'Uranus', 'Neptune'];
 const PLANET_NAMES_RU = { Mercury: 'Меркурий', Venus: 'Венера', Mars: 'Марс', Jupiter: 'Юпитер', Saturn: 'Сатурн', Uranus: 'Уран', Neptune: 'Нептун' };
@@ -1019,6 +1020,7 @@ let landscapeMesh = null;
 
 const interactiveObjects = [];
 let hoveredObject = null;
+let hoverTrajectory = null;
 
 let isInsideMode = false;
 let spherical = { phi: Math.PI / 2, theta: 0 };
@@ -1726,6 +1728,48 @@ function initDetailScene() {
             detailCamera.updateProjectionMatrix();
         }
     }, { passive: false });
+    
+    
+    // Обработчик клика в детальном просмотре (для Луны)
+    detailRenderer.domElement.addEventListener('click', (e) => {
+        if (!isDetailMode || !detailMainObject || detailMainObject.userData.type !== 'moon_detail') return;
+
+        // Переключаем режим
+        isMoonPhaseMode = !isMoonPhaseMode;
+
+        let detailLight = null;
+        detailScene.traverse(obj => { if (obj.isDirectionalLight && obj.intensity > 1.0) detailLight = obj; });
+
+        if (!isMoonPhaseMode) {
+            // == РЕЖИМ СТАНДАРТ (как планеты) ==
+            // Свет ставим "как в студии" (сбоку-сверху-спереди), чтобы было всё видно
+            if (detailLight) detailLight.position.set(100, 50, 100);
+            
+            // Меняем подсказку
+            const factEl = document.getElementById('d-fact');
+            if (factEl) factEl.textContent = 'Режим обзора: Вращение включено. Освещение стандартное.';
+        } else {
+            // == РЕЖИМ ФАЗЫ ==
+            // Возвращаем свет в позицию реальной фазы (пересчитываем или просто перезапускаем вью)
+            // Для простоты вызовем пересчет света:
+             const now = new Date();
+             const observer = new Astronomy.Observer(observerLat, observerLon, 0);
+             const sunEq = Astronomy.Equator('Sun', now, observer, false, true);
+             const moonEq = Astronomy.Equator('Moon', now, observer, false, true);
+             let raDiff = sunEq.ra - moonEq.ra;
+             while (raDiff < 0) raDiff += 24;
+             while (raDiff > 24) raDiff -= 24;
+             const angleRad = raDiff * 15 * (Math.PI / 180);
+             const lightDist = 100;
+             if (detailLight) detailLight.position.set(Math.sin(angleRad) * lightDist, 0, Math.cos(angleRad) * lightDist);
+             
+             // Сбрасываем вращение для аккуратности
+             detailMainObject.rotation.set(0,0,0);
+             
+             const factEl = document.getElementById('d-fact');
+             if (factEl) factEl.textContent = 'Луна всегда обращена к Земле одной стороной. Кликните по ней, чтобы включить вращение.';
+        }
+    });
 }
 
 // === ОЧИСТКА ДЕТАЛЬНОЙ СЦЕНЫ ===
@@ -2691,6 +2735,121 @@ function updateFlight() {
     if (progress >= 1) finishFlight();
 }
 
+
+function openMoonDetailView() {
+    isDetailMode = true;
+    isMoonPhaseMode = true; // При открытии включаем режим фазы (нет вращения, реальный свет)
+    
+    const container = document.getElementById('detail-view');
+    const detailInfo = document.getElementById('detail-info');
+    const textureLoader = new THREE.TextureLoader();
+
+    container.style.display = 'block';
+    container.classList.remove('visible', 'show-info');
+    document.getElementById('detail-loading').style.display = 'none';
+    
+    // Очистка предыдущей сцены
+    clearDetailScene();
+
+    // 1. Создание Луны
+    const geometry = new THREE.SphereGeometry(2, 64, 64); // Радиус как у планет (базовый)
+    const material = new THREE.MeshPhongMaterial({
+        map: textureLoader.load('./textures/moon-color.jpg'),
+        bumpMap: textureLoader.load('./textures/moon-bump.jpg'),
+        bumpScale: 0.05,
+        specular: new THREE.Color(0x111111),
+        shininess: 5
+    });
+    
+    detailMainObject = new THREE.Mesh(geometry, material);
+    detailMainObject.userData.removable = true;
+    detailMainObject.userData.type = 'moon_detail'; // Метка для клика
+    detailScene.add(detailMainObject);
+
+    // 2. Расчет положения света для фазы
+    // Камера смотрит на Луну с оси Z+. Нам нужно понять, где Солнце относительно Луны.
+    const now = new Date();
+    const observer = new Astronomy.Observer(observerLat, observerLon, 0);
+    const sunEq = Astronomy.Equator('Sun', now, observer, false, true);
+    const moonEq = Astronomy.Equator('Moon', now, observer, false, true);
+    
+    // Вычисляем разницу RA (прямого восхождения) для определения угла освещения
+    // 1 час RA = 15 градусов.
+    let raDiff = sunEq.ra - moonEq.ra;
+    // Нормализация угла
+    while (raDiff < 0) raDiff += 24;
+    while (raDiff > 24) raDiff -= 24;
+    
+    // Конвертация в радианы для позиции света
+    // RA растет против часовой стрелки.
+    const angleRad = raDiff * 15 * (Math.PI / 180);
+    
+    // Позиционируем свет. Радиус орбиты света не важен, главное направление.
+    const lightDist = 100;
+    // Корректировка: при RA_Sun = RA_Moon (Новолуние) свет должен быть сзади Луны (-Z)
+    // При противостоянии (Полнолуние) свет должен быть со стороны камеры (+Z)
+    // Формула для плоскости XZ (Y - верх)
+    const sunX = Math.sin(angleRad) * lightDist;
+    const sunZ = Math.cos(angleRad) * lightDist;
+
+    // В детальной сцене свет по умолчанию: sunLight (индекс 1 в children, если не меняли порядок)
+    // Находим DirectionalLight
+    let detailLight = null;
+    detailScene.traverse(obj => {
+        if (obj.isDirectionalLight && obj.intensity > 1.0) detailLight = obj;
+    });
+
+    if (detailLight) {
+        detailLight.position.set(sunX, 0, sunZ);
+    }
+
+    // 3. UI Инфо (используем структуру планет)
+    document.getElementById('d-name').textContent = 'Луна';
+    document.getElementById('d-type').textContent = 'Спутник Земли';
+    document.getElementById('d-type').style.color = '#cccccc';
+    document.getElementById('d-constellation').style.display = 'none';
+
+    // Заполняем данные (можно расширить реальными)
+    const illum = Astronomy.Illumination('Moon', now);
+    const statsHTML = `
+        <div class="d-stat highlight">
+            <h4>Фаза</h4>
+            <p>${(illum.phase_fraction * 100).toFixed(1)}%</p>
+        </div>
+        <div class="d-stat">
+            <h4>Зв. величина</h4>
+            <p>${illum.mag.toFixed(2)}m</p>
+        </div>
+        <div class="d-stat">
+            <h4>Расстояние</h4>
+            <p>${(illum.dist_km).toFixed(0)} км</p>
+        </div>
+        <div class="d-stat">
+            <h4>Возраст фазы</h4>
+            <p>~${(illum.phase_angle / 12).toFixed(1)} дн.</p>
+        </div>
+    `;
+    document.getElementById('d-stats').innerHTML = statsHTML;
+    document.getElementById('d-fact').textContent = 'Луна всегда обращена к Земле одной стороной. Кликните по ней, чтобы включить вращение и полный свет.';
+    document.getElementById('d-fact').style.display = 'block';
+    document.getElementById('d-wiki').style.display = 'none';
+    document.getElementById('size-comparison').style.display = 'none';
+
+    // Настройка камеры
+    detailCamera.position.set(0, 0, 8); // Ближе, чем планеты
+    detailControls.target.set(0, 0, 0);
+    detailControls.minDistance = 4;
+    detailControls.maxDistance = 20;
+    detailControls.update();
+
+    detailInfo.style.transform = '';
+    
+    setTimeout(() => {
+        container.classList.add('visible');
+        setTimeout(() => { container.classList.add('show-info'); }, 300);
+    }, 100);
+}
+
 // === ЗАВЕРШЕНИЕ ПОЛЁТА ===
 function finishFlight() {
     isFlightMode = false;
@@ -2699,13 +2858,16 @@ function finishFlight() {
     document.getElementById('speed-lines').innerHTML = '';
     updateVignette(0);
     
-
-    
     if (detailType === 'star') {
         openStarDetailView(flightTargetName, flightTargetData);
     } else if (detailType === 'planet') {
         openPlanetDetailView(flightTargetName);
+    } 
+    // --- ИЗМЕНЕНИЕ: Открытие Луны ---
+    else if (detailType === 'moon') {
+        openMoonDetailView();
     }
+    // --------------------------------
 }
 
 function startReturnFlight() {
@@ -3490,6 +3652,60 @@ function drawTrajectory(body, color, date, obs) {
     if (pts.length > 1) groups.trajectories.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(pts), new THREE.LineBasicMaterial({ color, opacity: 0.6, transparent: true })));
 }
 
+function createHoverTrajectory(data, color) {
+    const pts = [];
+    const now = new Date();
+    const startOfDay = new Date(now);
+    startOfDay.setHours(0, 0, 0, 0);
+    
+    const observer = new Astronomy.Observer(observerLat, observerLon, 0);
+
+    // Определяем английское имя для библиотеки Astronomy, если это не звезда
+    let bodyName = null;
+    if (data.type === 'sun') bodyName = 'Sun';
+    else if (data.type === 'moon') bodyName = 'Moon';
+    else if (data.type === 'planet') {
+        // Пытаемся получить английское название из карты или используем как есть
+        bodyName = PLANET_NAMES_EN[data.name] || data.name;
+    }
+
+    // Рассчитываем точки на 24 часа с шагом 10 минут
+    for (let i = 0; i <= 24 * 60; i += 10) {
+        const t = new Date(startOfDay.getTime() + i * 60000);
+        try {
+            let hor;
+            
+            if (data.type === 'star') {
+                // Для звезд координаты (RA/Dec) считаем постоянными
+                hor = Astronomy.Horizon(t, observer, data.ra, data.dec, 'normal');
+            } else if (bodyName) {
+                // Для планет/Солнца/Луны координаты меняются в течение дня
+                const eq = Astronomy.Equator(bodyName, t, observer, false, true);
+                hor = Astronomy.Horizon(t, observer, eq.ra, eq.dec, 'normal');
+            }
+
+            if (hor) {
+                pts.push(sphericalToCartesian(SPHERE_RADIUS, hor.azimuth, hor.altitude));
+            }
+        } catch (e) { }
+    }
+
+    const geometry = new THREE.BufferGeometry().setFromPoints(pts);
+    const material = new THREE.LineDashedMaterial({
+        color: color,
+        dashSize: 1,
+        gapSize: 0.5,
+        opacity: 0.6,
+        transparent: true
+    });
+
+    const line = new THREE.Line(geometry, material);
+    line.computeLineDistances();
+    // Сохраняем имя объекта, чтобы не пересоздавать линию лишний раз
+    line.userData = { targetName: data.name, isHoverLine: true }; 
+    return line;
+}
+
 function getTopo(obsLat, obsLon, satLat, satLon, satAltKm) {
     const R = 6371, D2R = Math.PI / 180, R2D = 180 / Math.PI;
     const lat1 = obsLat * D2R, lon1 = obsLon * D2R, lat2 = satLat * D2R, lon2 = satLon * D2R;
@@ -3793,24 +4009,69 @@ function setupTooltip() {
         mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
         raycaster.setFromCamera(mouse, camera);
         const intersects = raycaster.intersectObjects(interactiveObjects, false);
+        
         if (intersects.length > 0) {
             const obj = intersects[0].object;
             if (obj.userData && obj.userData.type) {
                 hoveredObject = obj;
                 showTooltip(e.clientX, e.clientY, obj.userData);
                 canvas.style.cursor = 'pointer';
+
+                // --- НАЧАЛО ИЗМЕНЕНИЙ: Траектория при наведении ---
+                // Рисуем только если: включены траектории, это звезда, и для неё еще не нарисован трек
+                     const supportedTypes = ['star', 'planet', 'sun', 'moon'];
+                
+                if (settings.traj && supportedTypes.includes(obj.userData.type)) {
+                    // Если трек уже есть, но для другого объекта - удаляем старый
+                    if (hoverTrajectory && hoverTrajectory.userData.targetName !== obj.userData.name) {
+                        scene.remove(hoverTrajectory);
+                        if (hoverTrajectory.geometry) hoverTrajectory.geometry.dispose();
+                        hoverTrajectory = null;
+                    }
+
+                    // Если трека нет - создаем новый
+                    if (!hoverTrajectory) {
+                        // Выбираем цвет: для звезд серый, для планет/солнца - поярче (например, золотистый или голубой)
+                        // Но чтобы было как просили (как для солнца) - возьмем 0xaaaaaa или цвет объекта
+                        let trackColor = 0xaaaaaa;
+                        if (obj.userData.type === 'sun') trackColor = 0xffaa00;
+                        else if (obj.userData.type === 'planet') trackColor = 0xaaccff;
+
+                        hoverTrajectory = createHoverTrajectory(obj.userData, trackColor);
+                        scene.add(hoverTrajectory);
+                    }
+                }
+                // --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
                 return;
             }
         }
+        
+        // Если курсор ушел с объекта
+        if (hoverTrajectory) {
+            scene.remove(hoverTrajectory);
+            if (hoverTrajectory.geometry) hoverTrajectory.geometry.dispose();
+            hoverTrajectory = null;
+        }
+
         hoveredObject = null;
         tooltip.style.display = 'none';
         canvas.style.cursor = isMouseDown ? 'grabbing' : 'grab';
     });
 
-    canvas.addEventListener('mouseleave', () => { tooltip.style.display = 'none'; hoveredObject = null; });
+    canvas.addEventListener('mouseleave', () => { 
+        tooltip.style.display = 'none'; 
+        hoveredObject = null;
+        
+        // Удаляем траекторию при уходе мыши с холста
+        if (hoverTrajectory) {
+            scene.remove(hoverTrajectory);
+            hoverTrajectory = null;
+        }
+    });
 
     // === ДВОЙНОЙ КЛИК — ЦЕНТРИРОВАНИЕ + ПОЛЁТ ===
-    canvas.addEventListener('dblclick', async (e) => {
+ canvas.addEventListener('dblclick', async (e) => {
         if (isTransitioning || isFlightMode || isDetailMode) return;
         
         mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
@@ -3822,7 +4083,7 @@ function setupTooltip() {
             const data = intersects[0].object.userData;
             const position = intersects[0].object.position.clone();
             
-            tooltip.style.display = 'none'; // Скрываем tooltip
+            tooltip.style.display = 'none';
             
             // Звезда
             if (data.type === 'star') {
@@ -3832,6 +4093,11 @@ function setupTooltip() {
             else if (data.type === 'planet' && PLANETS_DATA[data.name]) {
                 await centerAndFlyToObject(data, position, 'planet');
             }
+            // --- ИЗМЕНЕНИЕ: Добавлено условие для Луны ---
+            else if (data.type === 'moon') {
+                 await centerAndFlyToObject(data, position, 'moon');
+            }
+            // --------------------------------------------
         }
     });
 }
@@ -3842,30 +4108,43 @@ function setupTooltip() {
 function calculateObjectTimes(ra, dec) {
     const result = { rise: null, set: null, maxAltitude: -90, transitTime: null };
     const observer = new Astronomy.Observer(observerLat, observerLon, 0);
+    
     const now = new Date();
     const startOfDay = new Date(now);
     startOfDay.setHours(0, 0, 0, 0);
     
     let prevAlt = null;
     let maxAlt = -90;
-    let transitTime = null;
     
-    for (let minutes = 0; minutes <= 24 * 60; minutes += 10) {
+    // Уменьшаем шаг с 10 до 2 минут для точности
+    const step = 2; 
+    
+    // Проходим сутки
+    for (let minutes = 0; minutes <= 24 * 60; minutes += step) {
         const t = new Date(startOfDay.getTime() + minutes * 60000);
         try {
+            // 'normal' учитывает рефракцию атмосферы
             const hor = Astronomy.Horizon(t, observer, ra, dec, 'normal');
             
+            // Поиск кульминации (макс. высоты)
             if (hor.altitude > maxAlt) {
                 maxAlt = hor.altitude;
-                transitTime = t;
+                result.transitTime = t;
             }
             
             if (prevAlt !== null) {
+                // Интерполяция времени для точного определения момента пересечения горизонта (0 градусов)
+                // Если в прошлом шаге было ниже 0, а сейчас выше -> Восход
                 if (prevAlt < 0 && hor.altitude >= 0 && !result.rise) {
-                    result.rise = t;
+                    const fraction = (0 - prevAlt) / (hor.altitude - prevAlt);
+                    const preciseMinutes = (minutes - step) + (fraction * step);
+                    result.rise = new Date(startOfDay.getTime() + preciseMinutes * 60000);
                 }
+                // Если в прошлом шаге было выше 0, а сейчас ниже -> Закат
                 if (prevAlt >= 0 && hor.altitude < 0 && !result.set) {
-                    result.set = t;
+                    const fraction = (0 - prevAlt) / (hor.altitude - prevAlt);
+                    const preciseMinutes = (minutes - step) + (fraction * step);
+                    result.set = new Date(startOfDay.getTime() + preciseMinutes * 60000);
                 }
             }
             
@@ -3874,49 +4153,52 @@ function calculateObjectTimes(ra, dec) {
     }
     
     result.maxAltitude = maxAlt;
-    result.transitTime = transitTime;
     return result;
 }
 
+
 // Вычисление времён для планет/Солнца/Луны
 function calculateBodyTimes(bodyName) {
-    const result = { rise: null, set: null, maxAltitude: -90, transitTime: null };
     const observer = new Astronomy.Observer(observerLat, observerLon, 0);
     const now = new Date();
     const startOfDay = new Date(now);
     startOfDay.setHours(0, 0, 0, 0);
+
+    // Используем встроенные функции поиска событий для высокой точности
+    // +1 = Восход, -1 = Закат. Лимит поиска = 1 день.
+    const riseEvent = Astronomy.SearchRiseSet(bodyName, observer, +1, startOfDay, 1);
+    const setEvent = Astronomy.SearchRiseSet(bodyName, observer, -1, startOfDay, 1);
     
-    let prevAlt = null;
-    let maxAlt = -90;
-    let transitTime = null;
+    // Для поиска кульминации ищем момент, когда часовой угол равен 0
+    const transitEvent = Astronomy.SearchHourAngle(bodyName, observer, 0, startOfDay);
+
+    // Получаем даты из событий (библиотека может вернуть null, если события нет в этот день)
+    const rise = riseEvent ? riseEvent.date : null;
+    const set = setEvent ? setEvent.date : null;
+    let transitTime = transitEvent ? transitEvent.date : null;
+
+    // Вычисляем максимальную высоту в момент кульминации
+    let maxAltitude = -90;
     
-    for (let minutes = 0; minutes <= 24 * 60; minutes += 10) {
-        const t = new Date(startOfDay.getTime() + minutes * 60000);
-        try {
-            const eq = Astronomy.Equator(bodyName, t, observer, false, true);
-            const hor = Astronomy.Horizon(t, observer, eq.ra, eq.dec, 'normal');
-            
-            if (hor.altitude > maxAlt) {
-                maxAlt = hor.altitude;
-                transitTime = t;
-            }
-            
-            if (prevAlt !== null) {
-                if (prevAlt < 0 && hor.altitude >= 0 && !result.rise) {
-                    result.rise = t;
-                }
-                if (prevAlt >= 0 && hor.altitude < 0 && !result.set) {
-                    result.set = t;
-                }
-            }
-            
-            prevAlt = hor.altitude;
-        } catch(e) {}
+    // Если кульминация найдена, считаем высоту точно в это время
+    if (transitTime) {
+        const eq = Astronomy.Equator(bodyName, transitTime, observer, false, true);
+        const hor = Astronomy.Horizon(transitTime, observer, eq.ra, eq.dec, 'normal');
+        maxAltitude = hor.altitude;
+    } else {
+        // Фоллбек, если кульминация не попадает в эти сутки (редко, но бывает для Луны)
+        // Берем текущий момент как приблизительный
+        const eq = Astronomy.Equator(bodyName, now, observer, false, true);
+        const hor = Astronomy.Horizon(now, observer, eq.ra, eq.dec, 'normal');
+        maxAltitude = hor.altitude;
     }
-    
-    result.maxAltitude = maxAlt;
-    result.transitTime = transitTime;
-    return result;
+
+    return { 
+        rise: rise, 
+        set: set, 
+        maxAltitude: maxAltitude, 
+        transitTime: transitTime 
+    };
 }
 
 // Форматирование времени
@@ -4317,7 +4599,13 @@ function setupUI() {
     bind('chk-const-names', 'constNames');
     bind('chk-star-names', 'starNames');
     bind('chk-planets', 'planets');
-    bind('chk-traj', 'traj');
+  bind('chk-traj', 'traj', () => {
+        // Если выключили траектории, сразу убираем линию наведения
+        if (!settings.traj && hoverTrajectory) {
+            scene.remove(hoverTrajectory);
+            hoverTrajectory = null;
+        }
+    });
     bind('chk-iss', 'iss', async () => { await updateISS(); if (settings.iss && issPosition) navigateToPosition(issPosition); });
     bind('chk-ground', 'ground');
 
@@ -4399,6 +4687,11 @@ function animate() {
         
         if (detailMainObject) {
             detailMainObject.rotation.y += 0.002;
+              if (detailMainObject) {
+           
+            if (!(detailMainObject.userData.type === 'moon_detail' && isMoonPhaseMode)) {
+                detailMainObject.rotation.y += 0.002;
+            }
             if (detailAtmosphere) detailAtmosphere.rotation.y += 0.0015;
             if (detailRing) detailRing.rotation.z += 0.0005;
         }
