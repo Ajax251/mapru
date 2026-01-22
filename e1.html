@@ -6399,10 +6399,10 @@ contextMenu.innerHTML = `
             
               <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
             <div class="custom-context-menu-item" id="export-map-json-menu-item">
-                <i class="fas fa-file-export"></i>Экспорт Карты (.map)
+                <i class="fas fa-file-export"></i>Экспорт Карты
             </div>
             <div class="custom-context-menu-item" id="import-map-json-menu-item">
-                <i class="fas fa-file-import"></i>Импорт Карты (.map)
+                <i class="fas fa-file-import"></i>Импорт Карты
             </div>
             
         </div>
@@ -12016,25 +12016,49 @@ async function exportVisibleObjectsToGeoredaсtor() {
 }
 
 // --- ФУНКЦИЯ ЭКСПОРТА ---
+// Вспомогательная функция для безопасного копирования данных без циклических ссылок
+function getSafeData(data) {
+    if (typeof data !== 'object' || data === null) return data;
+    
+    // Если это массив
+    if (Array.isArray(data)) {
+        return data.map(item => getSafeData(item));
+    }
+
+    // Если это объект
+    const safeObj = {};
+    for (const key in data) {
+        if (Object.prototype.hasOwnProperty.call(data, key)) {
+            const value = data[key];
+            // Исключаем системные поля API Яндекс.Карт, начинающиеся с _ или сложные объекты
+            // Также исключаем само свойство 'map', которое часто вызывает циклы
+            if (key.startsWith('_') || key === 'map' || key === 'parent' || key === 'events') continue;
+            
+            // Если значение - функция или сложный объект API (имеет методы API), пропускаем
+            if (typeof value === 'function') continue;
+            if (value && typeof value === 'object' && (value.events || value.options)) continue;
+
+            safeObj[key] = getSafeData(value);
+        }
+    }
+    return safeObj;
+}
+
 async function exportMapToJson() {
     showLoader('Подготовка карты к экспорту...');
     
     try {
         const mapData = {
             type: "MapData",
-            version: "2.0", // Версия формата
+            version: "2.1",
             created_at: new Date().toISOString(),
             description: "Экспорт состояния карты NSPD",
-            offsetSettings: {
-                // Сохраняем, какие смещения были при создании, на всякий случай
-                x: mapOffsetX,
-                y: mapOffsetY
-            },
-            features: [], // Гео-объекты
-            texts: []     // Текстовые заметки
+            offsetSettings: { x: mapOffsetX, y: mapOffsetY },
+            features: [],
+            texts: []
         };
 
-        // 1. Собираем все гео-объекты (полигоны, линии, метки)
+        // Собираем уникальные объекты
         const allObjects = new Set([...polygons, ...areaObjects, ...parcelPlacemarks]);
         
         allObjects.forEach(obj => {
@@ -12043,13 +12067,11 @@ async function exportMapToJson() {
             let geometryType = obj.geometry.getType();
             let coordinates = obj.geometry.getCoordinates();
             
-            // --- НОРМАЛИЗАЦИЯ КООРДИНАТ (Убираем смещение карты) ---
-            // Превращаем "визуальные" координаты обратно в "истинные" WGS84
+            // Убираем смещение (нормализация к чистому WGS84)
             let trueCoordinates;
-            
             const revertOffset = (coord) => [
-                coord[0] + (mapOffsetY * 0.000008983), // Lat
-                coord[1] + (mapOffsetX * 0.000008983)  // Lon
+                coord[0] + (mapOffsetY * 0.000008983),
+                coord[1] + (mapOffsetX * 0.000008983)
             ];
 
             if (geometryType === 'Point') {
@@ -12060,21 +12082,36 @@ async function exportMapToJson() {
                 trueCoordinates = coordinates.map(ring => ring.map(revertOffset));
             }
 
-            // Собираем свойства
-            const properties = obj.properties.getAll();
-            // Собираем визуальные опции (стили)
-            const options = obj.options.getAll();
+            // Получаем "сырые" данные и очищаем их
+            const rawProperties = obj.properties.getAll();
+            const rawOptions = obj.options.getAll();
+            
+            const cleanProperties = getSafeData(rawProperties);
+            const cleanOptions = getSafeData(rawOptions);
 
-            // Создаем объект для сохранения
+            // Дополнительная чистка options (удаляем Layout, т.к. это классы)
+            delete cleanOptions.iconLayout; 
+            delete cleanOptions.hintLayout;
+
+            // Определяем, был ли это кастомный лейаут (для меток ЗУ)
+            // Важно: проверяем до того, как удалили iconLayout из cleanOptions
+            let isCustomLabel = false;
+            try {
+                // Пытаемся получить текущее значение опции напрямую
+                const currentLayout = obj.options.get('iconLayout');
+                isCustomLabel = (obj instanceof ymaps.Placemark) && (currentLayout === customPlacemarkLayout);
+            } catch (e) {
+                // Игнорируем ошибки доступа
+            }
+
             const serializedFeature = {
                 type: "Feature",
                 geometry: {
                     type: geometryType,
                     coordinates: trueCoordinates
                 },
-                properties: properties,
-                options: options,
-                // Специфические флаги приложения для логики (важно для восстановления!)
+                properties: cleanProperties,
+                options: cleanOptions,
                 appFlags: {
                     isParcelInQuarter: obj.properties.get('isParcelInQuarter'),
                     isFoundInArea: obj.properties.get('isFoundInArea'),
@@ -12082,56 +12119,50 @@ async function exportMapToJson() {
                     isStructure: obj.properties.get('isStructure'),
                     isZouit: obj.properties.get('isZouit'),
                     isManuallyDrawn: obj.properties.get('isManuallyDrawn'),
-                    isAreaMeasurement: areaObjects.includes(obj), // Флаг измерения площади
-                    isVertexPoint: obj.properties.get('isVertexPoint') // Точки редактирования
+                    isAreaMeasurement: areaObjects.includes(obj),
+                    isVertexPoint: obj.properties.get('isVertexPoint'),
+                    isCustomLabel: isCustomLabel 
                 }
             };
 
             mapData.features.push(serializedFeature);
         });
 
-        // 2. Собираем текстовые заметки (DOM элементы)
+        // Экспорт Draggable Text (без изменений)
         draggableTexts.forEach(el => {
             const span = el.querySelector('span');
             if (!span) return;
-            
             const rect = el.getBoundingClientRect();
-            // Конвертируем позицию на экране в гео-координаты
-            const globalPx = map.converter.pageToGlobal([rect.left + rect.width/2, rect.top + rect.height/2]);
-            const geo = map.options.get('projection').fromGlobalPixels(globalPx, map.getZoom());
-            
-            // Убираем смещение
-            const trueGeo = [
-                geo[0] + (mapOffsetY * 0.000008983),
-                geo[1] + (mapOffsetX * 0.000008983)
-            ];
+            // Защита от ошибок конвертации (если элемент вне экрана или удален)
+            try {
+                const globalPx = map.converter.pageToGlobal([rect.left + rect.width/2, rect.top + rect.height/2]);
+                const geo = map.options.get('projection').fromGlobalPixels(globalPx, map.getZoom());
+                const trueGeo = [geo[0] + (mapOffsetY * 0.000008983), geo[1] + (mapOffsetX * 0.000008983)];
 
-            mapData.texts.push({
-                content: span.textContent,
-                position: trueGeo,
-                rotation: el.dataset.rotation || 0,
-                style: {
-                    color: span.style.color,
-                    fontSize: span.style.fontSize,
-                    backgroundVisible: span.dataset.backgroundVisible
-                }
-            });
+                mapData.texts.push({
+                    content: span.textContent,
+                    position: trueGeo,
+                    rotation: el.dataset.rotation || 0,
+                    style: {
+                        color: span.style.color,
+                        fontSize: span.style.fontSize,
+                        backgroundVisible: span.dataset.backgroundVisible
+                    }
+                });
+            } catch (err) {
+                console.warn("Не удалось экспортировать текстовую метку:", span.textContent);
+            }
         });
 
-        // 3. Генерируем файл
         const jsonString = JSON.stringify(mapData, null, 2);
         const blob = new Blob([jsonString], {type: "application/json"});
-        
-        // Имя файла с датой
         const dateStr = new Date().toISOString().slice(0,10);
-        const fileName = `Map_Export_${dateStr}.map`;
-        
-        saveAs(blob, fileName);
+        saveAs(blob, `Map_Export_${dateStr}.map`);
         
         showNotification(`Экспортировано объектов: ${mapData.features.length + mapData.texts.length}`, 'success', 'file-export');
 
     } catch (e) {
-        console.error("Ошибка экспорта карты:", e);
+        console.error("Ошибка экспорта:", e);
         showNotification("Ошибка экспорта: " + e.message, 'error');
     } finally {
         hideLoader();
@@ -12154,22 +12185,20 @@ function handleMapJsonImport(event) {
                 throw new Error("Неверный формат файла (.map)");
             }
 
-            // 1. Очищаем текущую карту
+            // Очищаем текущую карту
             clearMapAndResetTheme();
 
             let importedCount = 0;
-            const restoredParcelsData = []; // Для восстановления сайдбара
+            const restoredParcelsData = [];
             const restoredBuildingsData = [];
             const restoredStructuresData = [];
             const restoredZouitsData = [];
 
-            // Хелпер для применения текущего смещения
             const applyOffset = (coord) => [
                 coord[0] - (mapOffsetY * 0.000008983),
                 coord[1] - (mapOffsetX * 0.000008983)
             ];
 
-            // 2. Восстанавливаем гео-объекты
             if (mapData.features) {
                 mapData.features.forEach(f => {
                     let ymapsObj;
@@ -12179,7 +12208,7 @@ function handleMapJsonImport(event) {
                     let opts = f.options || {};
                     let flags = f.appFlags || {};
 
-                    // Применяем смещение к координатам
+                    // Восстанавливаем координаты
                     let visualCoords;
                     if (type === 'Point') {
                         visualCoords = applyOffset(coords);
@@ -12189,63 +12218,79 @@ function handleMapJsonImport(event) {
                         visualCoords = coords.map(ring => ring.map(applyOffset));
                     }
 
-                    // Создаем объект Яндекса
+                    // --- СОЗДАНИЕ ОБЪЕКТОВ ---
                     if (type === 'Point') {
                         ymapsObj = new ymaps.Placemark(visualCoords, props, opts);
-                        // Восстанавливаем кастомные макеты, если были (важно для меток ЗУ)
-                        if (opts.iconLayout && typeof opts.iconLayout === 'string' && opts.iconLayout.includes('template')) {
-                             // Если это наш кастомный лейаут, переназначаем его (т.к. строки из JSON не станут функциями)
-                             // Для простоты, если это метка ЗУ, ставим наш customPlacemarkLayout
-                             if (props.cadastralNumber) {
-                                 ymapsObj.options.set('iconLayout', customPlacemarkLayout);
+                        
+                        // ИСПРАВЛЕНИЕ 1: Восстановление внешнего вида меток
+                        // Если был флаг isCustomLabel ИЛИ есть кадастровый номер в свойствах - это текстовая метка
+                        if (flags.isCustomLabel || (props.cadastralNumber && !flags.isVertexPoint)) {
+                            ymapsObj.options.set('iconLayout', customPlacemarkLayout);
+                        }
+                        
+                        // Если это точка вершины (редактирование полигона), восстанавливаем её спец. макеты
+                        if (flags.isVertexPoint) {
+                             if (props.isCoordLabel) {
+                                 ymapsObj.options.set('iconLayout', coordinateLabelLayout);
+                             } else if (props.dotSize) {
+                                 // Это красная точка (у нее dotSize в свойствах)
+                                 ymapsObj.options.set('iconLayout', redDotLayout);
+                             } else if (props.fontSize) {
+                                 // Это подпись н1 (у нее fontSize)
+                                 ymapsObj.options.set('iconLayout', numberedPointLayout);
                              }
                         }
+
                     } else if (type === 'LineString') {
                         ymapsObj = new ymaps.Polyline(visualCoords, props, opts);
                     } else if (type === 'Polygon') {
                         ymapsObj = new ymaps.Polygon(visualCoords, props, opts);
-                        // Восстанавливаем хинт (т.к. JSON не сохраняет функции шаблонов)
-                        ymapsObj.options.set('hintLayout', customHintLayout);
+                        
+                        // ИСПРАВЛЕНИЕ 2: Умное восстановление подсказок (Hint)
+                        // Применяем кастомный макет ТОЛЬКО если hintContent - это объект (ЗУ, ОКС, ЗОУИТ)
+                        // Если hintContent - строка (Терр. зоны, ручные объекты), оставляем стандартный
+                        if (props.hintContent && typeof props.hintContent === 'object') {
+                            ymapsObj.options.set('hintLayout', customHintLayout);
+                        }
                     }
 
                     if (ymapsObj) {
-                        // Восстанавливаем флаги приложения
-                        if (flags.isParcelInQuarter) ymapsObj.properties.set('isParcelInQuarter', true);
-                        if (flags.isFoundInArea) ymapsObj.properties.set('isFoundInArea', true);
-                        if (flags.isBuilding) ymapsObj.properties.set('isBuilding', true);
-                        if (flags.isStructure) ymapsObj.properties.set('isStructure', true);
-                        if (flags.isZouit) ymapsObj.properties.set('isZouit', true);
-                        if (flags.isManuallyDrawn) ymapsObj.properties.set('isManuallyDrawn', true);
-                        if (flags.isVertexPoint) ymapsObj.properties.set('isVertexPoint', true);
+                        // Восстанавливаем флаги
+                        Object.keys(flags).forEach(key => {
+                            ymapsObj.properties.set(key, flags[key]);
+                        });
 
-                        // Добавляем на карту
                         map.geoObjects.add(ymapsObj);
                         
-                        // Распределяем по массивам приложения
+                        // Распределяем по массивам
                         if (flags.isAreaMeasurement) {
                             areaObjects.push(ymapsObj);
                         } else {
                             polygons.push(ymapsObj);
                         }
 
-                        // Если это метка с кадастровым номером, добавляем в список меток
-                        if (type === 'Point' && props.cadastralNumber) {
-                            // Ищем родительский полигон (грубая связка, но для визуала пойдет)
-                            // В идеале можно сохранять ID связи, но для простоты:
-                            const parentPoly = polygons.find(p => p instanceof ymaps.Polygon && p.properties.get('cadastralNumber') === props.cadastralNumber);
+                        // Если это метка ЗУ, добавляем в спец массив
+                        if (type === 'Point' && flags.isCustomLabel) {
+                            // Ищем родительский полигон для связи
+                            const parentPoly = polygons.find(p => 
+                                p instanceof ymaps.Polygon && 
+                                p.properties.get('cadastralNumber') === props.cadastralNumber
+                            );
                             if (parentPoly) ymapsObj.polygon = parentPoly;
                             parcelPlacemarks.push(ymapsObj);
                         }
+                        
+                        // Восстанавливаем связи для вершин (точек редактирования)
+                        if (flags.isVertexPoint && props.relatedPolygonCadastralNumber) {
+                             // В props нужно было бы сохранять ID полигона, но это сложно.
+                             // Оставим пока без жесткой привязки, визуально точки будут на месте.
+                        }
 
-                        // Сбор данных для сайдбара и тем
+                        // Сбор данных
                         const featureData = props.featureData;
                         if (featureData) {
-                            // Восстанавливаем объект featureData в свойствах (он уже там есть из JSON, но убедимся)
                             ymapsObj.properties.set('featureData', featureData);
-
-                            if (flags.isParcelInQuarter || flags.isFoundInArea) {
-                                restoredParcelsData.push(featureData);
-                            }
+                            if (flags.isParcelInQuarter || flags.isFoundInArea) restoredParcelsData.push(featureData);
                             if (flags.isBuilding) restoredBuildingsData.push(featureData);
                             if (flags.isStructure) restoredStructuresData.push(featureData);
                             if (flags.isZouit) restoredZouitsData.push(featureData);
@@ -12256,20 +12301,17 @@ function handleMapJsonImport(event) {
                 });
             }
 
-            // 3. Восстанавливаем текст
+            // Восстановление текста (Draggable Text)
             if (mapData.texts) {
                 mapData.texts.forEach(t => {
                     const visualPos = applyOffset(t.position);
-                    // Конвертируем гео в пиксели для createDraggableText
                     const projection = map.options.get('projection');
                     const zoom = map.getZoom();
                     const px = projection.toGlobalPixels(visualPos, zoom);
                     const pagePx = map.converter.globalToPage(px);
                     
-                    // Создаем текст
                     createDraggableText(t.content, {x: pagePx[0], y: pagePx[1]});
                     
-                    // Применяем стили к последнему созданному элементу
                     const newTextEl = draggableTexts[draggableTexts.length - 1];
                     if (newTextEl) {
                         newTextEl.dataset.rotation = t.rotation;
@@ -12279,7 +12321,6 @@ function handleMapJsonImport(event) {
                             span.style.color = t.style.color;
                             span.style.fontSize = t.style.fontSize;
                             if (t.style.backgroundVisible === 'false') {
-                                // Триггерим клик по кнопке глаза, чтобы скрыть фон
                                 const eyeBtn = newTextEl.querySelector('button i.fa-eye-slash')?.parentNode;
                                 if (eyeBtn) eyeBtn.click();
                             }
@@ -12289,7 +12330,7 @@ function handleMapJsonImport(event) {
                 });
             }
 
-            // 4. Восстанавливаем состояние приложения
+            // Восстановление данных приложения
             if (restoredParcelsData.length > 0) {
                 parcelFeaturesData = restoredParcelsData;
                 populateSidebarWithParcels(parcelFeaturesData, "Импорт JSON");
@@ -12298,22 +12339,19 @@ function handleMapJsonImport(event) {
             if (restoredStructuresData.length > 0) structureFeaturesData = restoredStructuresData;
             if (restoredZouitsData.length > 0) zouitFeaturesData = restoredZouitsData;
 
-            // Применяем тему (по умолчанию сброс, но данные уже в памяти)
             applyCurrentTheme();
-
-            showNotification(`Импорт завершен. Загружено объектов: ${importedCount}`, 'success', 'check-circle');
+            showNotification(`Импорт завершен. Объектов: ${importedCount}`, 'success', 'check-circle');
 
         } catch (error) {
             console.error("Ошибка импорта JSON:", error);
-            showNotification("Не удалось прочитать файл карты: " + error.message, 'error');
+            showNotification("Не удалось прочитать файл: " + error.message, 'error');
         } finally {
             hideLoader();
-            event.target.value = ''; // Сброс input
+            event.target.value = '';
         }
     };
     reader.readAsText(file);
 }
-
 
 async function copyAllOks(oksArray) {
     if (!oksArray || oksArray.length === 0) {
