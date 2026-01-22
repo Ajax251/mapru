@@ -6348,10 +6348,6 @@ contextMenu.innerHTML = `
             <i class="fas fa-drafting-compass"></i>ГеоРедактор
         </div>
         
-          <div class="custom-context-menu-item" id="georedaсtor-visible-menu-item">
-            <i class="fas fa-crop"></i>Видимые в ГеоРедактор
-        </div>
-        
         <div class="custom-context-menu-item" id="quarter-msk-xml-menu-item">
             <i class="fas fa-file-archive"></i>ЗУ в XML КПТ
         </div>
@@ -6981,11 +6977,6 @@ if (event.target.id === 'find-on-map-menu-item') {
         
           if (event.target.id === 'georedaсtor-all-objects-menu-item') {
             await exportAllObjectsToGeoredaсtor();
-            contextMenu.style.display = 'none';
-        }
-        
-          if (event.target.id === 'georedaсtor-visible-menu-item') {
-            await exportVisibleObjectsToGeoredaсtor();
             contextMenu.style.display = 'none';
         }
         
@@ -11840,147 +11831,6 @@ async function copyTextWithFeedback(text, element) {
     } catch (err) {
         console.error('Ошибка копирования:', err);
         showNotification('Не удалось скопировать', 'error');
-    }
-}
-
-async function exportVisibleObjectsToGeoredaсtor() {
-    try {
-        // 1. Получаем границы экрана
-        const bounds = map.getBounds();
-        if (!bounds) {
-            showNotification('Не удалось определить границы экрана', 'error');
-            return;
-        }
-
-        // BBox для Turf.js: [minLon, minLat, maxLon, maxLat]
-        const screenBbox = [
-            Math.min(bounds[0][1], bounds[1][1]), 
-            Math.min(bounds[0][0], bounds[1][0]), 
-            Math.max(bounds[0][1], bounds[1][1]), 
-            Math.max(bounds[0][0], bounds[1][0])
-        ];
-
-        // 2. Собираем объекты (только полигоны и линии, текст не обрезаем)
-        const allDrawableObjects = new Set([...polygons, ...areaObjects]);
-        const objectsToConvert = Array.from(allDrawableObjects).filter(obj => 
-            obj instanceof ymaps.Polygon || obj instanceof ymaps.Polyline
-        );
-
-        if (objectsToConvert.length === 0) {
-            showNotification('На карте нет объектов для экспорта', 'warning', 'exclamation-triangle');
-            return;
-        }
-        
-        showLoader(`Анализ и обрезка видимых объектов...`);
-
-        // 3. Настройки координат
-        const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
-        const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destSc);
-        if (!destSystem || !destSystem.def) {
-            throw new Error(`Определение для ${destSc} не найдено в sk.js`);
-        }
-
-        let offsetX = 0, offsetY = 0;
-        const isAutoLoadEnabled = (localStorage.getItem('autoLoadMskOffset') !== 'false');
-        if (isAutoLoadEnabled) {
-            offsetX = destSystem.offsetX || 0;
-            offsetY = destSystem.offsetY || 0;
-        } else {
-            offsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
-            offsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
-        }
-        
-        const formattedBlocks = [];
-        let objectCounter = 1;
-        let clippedCount = 0;
-
-        // 4. Обработка
-        for (const targetObject of objectsToConvert) {
-            let identifier = null;
-            let turfFeature;
-
-            // Подготовка геометрии для Turf
-            if (targetObject instanceof ymaps.Polygon) {
-                const rings = targetObject.geometry.getCoordinates();
-                const geoJsonCoords = rings.map(ring => ring.map(c => [c[1], c[0]])); // [lon, lat]
-                turfFeature = turf.polygon(geoJsonCoords);
-            } else { // Polyline
-                const coords = targetObject.geometry.getCoordinates();
-                const geoJsonCoords = coords.map(c => [c[1], c[0]]);
-                turfFeature = turf.lineString(geoJsonCoords);
-            }
-
-            // ОБРЕЗКА (Clipping)
-            const clipped = turf.bboxClip(turfFeature, screenBbox);
-            const geometry = clipped.geometry;
-            if (!geometry || geometry.coordinates.length === 0) continue; // Объект вне экрана
-
-            clippedCount++;
-
-            // ОПРЕДЕЛЕНИЕ ИМЕНИ (Логика из exportAllObjectsToGeoredaсtor)
-            identifier = targetObject.properties.get('cadastralNumber');
-            if (!identifier) {
-                const featureData = targetObject.properties.get('featureData');
-                if (featureData && featureData.properties) {
-                    identifier = featureData.properties.descr || 
-                                 featureData.properties.options?.reg_numb_border || 
-                                 featureData.properties.options?.cad_num || 
-                                 featureData.properties.options?.cad_number;
-                }
-            }
-            if (!identifier) {
-                let hint = targetObject.properties.get('hintContent');
-                if (hint) {
-                    if (typeof hint === 'object' && hint.cadastralNumber) identifier = hint.cadastralNumber;
-                    else if (typeof hint === 'string') identifier = hint.replace(/<[^>]*>?/gm, '').trim();
-                }
-            }
-            if (!identifier) {
-                identifier = (targetObject instanceof ymaps.Polygon) ? `Объект_${objectCounter++}` : `Линия_${objectCounter++}`;
-            }
-            identifier = String(identifier).replace(/[\r\n]+/g, ' ').trim();
-
-            // ПОДГОТОВКА КООРДИНАТ ОБРЕЗАННОГО ОБЪЕКТА
-            let coordsToProcess = [];
-            if (geometry.type === 'Polygon') coordsToProcess = geometry.coordinates;
-            else if (geometry.type === 'MultiPolygon') geometry.coordinates.forEach(p => coordsToProcess.push(...p));
-            else if (geometry.type === 'LineString') coordsToProcess = [geometry.coordinates];
-            else if (geometry.type === 'MultiLineString') coordsToProcess = geometry.coordinates;
-
-            // КОНВЕРТАЦИЯ
-            for (const ring of coordsToProcess) {
-                if (ring.length === 0) continue;
-
-                const wgs84Coords = ring.map(coord => {
-                    // Turf [lon, lat] -> True WGS84 [lat, lon]
-                    const trueLat = coord[1] + (mapOffsetY * 0.000008983);
-                    const trueLon = coord[0] + (mapOffsetX * 0.000008983);
-                    return [trueLon, trueLat]; // Для convertWgs84ToMskWithOffset нужно [lon, lat]
-                });
-
-                const mskCoordsText = convertWgs84ToMskWithOffset(wgs84Coords, destSc, destSystem.def, offsetX, offsetY);
-                if (mskCoordsText) {
-                    formattedBlocks.push(`${identifier}\n${mskCoordsText}`);
-                }
-            }
-        }
-
-        if (formattedBlocks.length === 0) {
-            showNotification('В видимой области нет объектов', 'warning');
-            return;
-        }
-
-        const finalStringToCopy = formattedBlocks.join('\n\n');
-        await navigator.clipboard.writeText(finalStringToCopy);
-        
-        showNotification(`Данные ${clippedCount} видимых объектов скопированы`, 'success', 'check-circle');
-        window.open('editor.html', '_blank');
-
-    } catch (error) {
-        console.error("Ошибка при экспорте видимых в Георедактор:", error);
-        showNotification(`Ошибка: ${error.message}`, 'error', 'exclamation-circle');
-    } finally {
-        hideLoader();
     }
 }
 
