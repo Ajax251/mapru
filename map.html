@@ -6340,6 +6340,10 @@ contextMenu.innerHTML = `
             <i class="fas fa-layer-group"></i>Все объекты в МСК
         </div>
         
+          <div class="custom-context-menu-item" id="convert-visible-msk-menu-item">
+            <i class="fas fa-crop-alt"></i>Видимые в МСК
+        </div>
+        
            <div class="custom-context-menu-item" id="georedaсtor-all-objects-menu-item">
             <i class="fas fa-drafting-compass"></i>ГеоРедактор
         </div>
@@ -6977,11 +6981,16 @@ if (event.target.id === 'find-on-map-menu-item') {
         }
         
            if (event.target.id === 'convert-all-msk-menu-item') {
-            // Вызываем новую функцию для конвертации всех объектов
+          
             await convertAllObjectsToMskAndCopy();
             contextMenu.style.display = 'none';
         }
         
+        
+           if (event.target.id === 'convert-visible-msk-menu-item') {
+            await convertVisibleObjectsToMskAndCopy();
+            contextMenu.style.display = 'none';
+        }
         
         if (event.target.id === 'coords-msk-menu-item') {
     const lat = parseFloat(contextMenu.dataset.lat);
@@ -8211,7 +8220,157 @@ function convertJsonToXml(nspdData, quarterNumber, targetCS_value, offsetX, offs
 
 
 
+async function convertVisibleObjectsToMskAndCopy() {
+    try {
+        // 1. Получаем границы экрана
+        const bounds = map.getBounds();
+        if (!bounds) {
+            showNotification('Не удалось определить границы экрана', 'error');
+            return;
+        }
 
+        // Яндекс возвращает [[minLat, minLon], [maxLat, maxLon]]
+        // Turf.js ожидает BBox в формате [minLon, minLat, maxLon, maxLat]
+        const screenBbox = [
+            Math.min(bounds[0][1], bounds[1][1]), // minLon
+            Math.min(bounds[0][0], bounds[1][0]), // minLat
+            Math.max(bounds[0][1], bounds[1][1]), // maxLon
+            Math.max(bounds[0][0], bounds[1][0])  // maxLat
+        ];
+
+        // 2. Собираем объекты для обработки
+        const allDrawableObjects = new Set([...polygons, ...areaObjects]);
+        const objectsToConvert = Array.from(allDrawableObjects).filter(obj => 
+            obj instanceof ymaps.Polygon || obj instanceof ymaps.Polyline
+        );
+
+        if (objectsToConvert.length === 0) {
+            showNotification('На карте нет объектов для конвертации', 'warning', 'exclamation-triangle');
+            return;
+        }
+        
+        showLoader(`Анализ видимой области...`);
+
+        // 3. Настройка системы координат (копируем логику из convertAllObjects)
+        const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
+        const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destSc);
+        if (!destSystem || !destSystem.def) {
+            throw new Error(`Определение для ${destSc} не найдено в sk.js`);
+        }
+
+        let offsetX = 0;
+        let offsetY = 0;
+        const isAutoLoadEnabled = (localStorage.getItem('autoLoadMskOffset') !== 'false');
+
+        if (isAutoLoadEnabled) {
+            offsetX = destSystem.offsetX || 0;
+            offsetY = destSystem.offsetY || 0;
+        } else {
+            const offsetXRaw = localStorage.getItem('savedMskOffsetX') || '0';
+            const offsetYRaw = localStorage.getItem('savedMskOffsetY') || '0';
+            offsetX = parseFloat(offsetXRaw.replace(',', '.')) || 0;
+            offsetY = parseFloat(offsetYRaw.replace(',', '.')) || 0;
+        }
+        
+        const allMskBlocks = [];
+        let clippedCount = 0;
+
+        // 4. Проходим по объектам и обрезаем их
+        for (const targetObject of objectsToConvert) {
+            let turfFeature;
+            
+            // Конвертируем геометрию Яндекса в формат GeoJSON для Turf
+            // Важно: работаем в текущих координатах карты (с визуальным смещением),
+            // так как bounds экрана тоже в них.
+            if (targetObject instanceof ymaps.Polygon) {
+                // Берем только внешний контур для упрощения обрезки, или все контуры
+                const rings = targetObject.geometry.getCoordinates();
+                // GeoJSON Polygon: [[[lon, lat], ...], [[lon, lat], ...]]
+                const geoJsonCoords = rings.map(ring => ring.map(c => [c[1], c[0]]));
+                turfFeature = turf.polygon(geoJsonCoords);
+            } else { // Polyline
+                const coords = targetObject.geometry.getCoordinates();
+                const geoJsonCoords = coords.map(c => [c[1], c[0]]);
+                turfFeature = turf.lineString(geoJsonCoords);
+            }
+
+            // Выполняем обрезку (Clipping)
+            const clipped = turf.bboxClip(turfFeature, screenBbox);
+
+            // Обрабатываем результат обрезки
+            // bboxClip может вернуть MultiPolygon, Polygon, MultiLineString, LineString или null/empty
+            const geometry = clipped.geometry;
+            if (!geometry || geometry.coordinates.length === 0) continue; // Объект полностью за пределами экрана
+
+            clippedCount++;
+            
+            let coordsToProcess = [];
+
+            // Нормализация координат для обработки
+            if (geometry.type === 'Polygon') {
+                // Polygon coordinates: [ [ [lon, lat]... ] ] (массив колец)
+                coordsToProcess = geometry.coordinates;
+            } else if (geometry.type === 'MultiPolygon') {
+                // MultiPolygon: [ [ [ [lon, lat]... ] ] ] (массив полигонов)
+                geometry.coordinates.forEach(poly => {
+                    coordsToProcess.push(...poly);
+                });
+            } else if (geometry.type === 'LineString') {
+                // LineString: [ [lon, lat]... ] -> оборачиваем в массив, чтобы структура была похожа на кольцо
+                coordsToProcess = [geometry.coordinates];
+            } else if (geometry.type === 'MultiLineString') {
+                // MultiLineString: [ [ [lon, lat]... ] ]
+                coordsToProcess = geometry.coordinates;
+            }
+
+            const currentObjectMskBlocks = [];
+
+            for (const ring of coordsToProcess) {
+                if (ring.length === 0) continue;
+
+                // Конвертируем Turf [lon, lat] обратно в [lat, lon] для вашей функции конвертации
+                // И применяем логику возврата к "истинным" WGS84 перед конвертацией в МСК
+                const wgs84Coords = ring.map(coord => {
+                    // coord = [lon, lat] (визуальные на карте)
+                    const trueLat = coord[1] + (mapOffsetY * 0.000008983);
+                    const trueLon = coord[0] + (mapOffsetX * 0.000008983);
+                    return [trueLon, trueLat];
+                });
+
+                // Если это был полигон, bboxClip мог изменить порядок обхода.
+                // Ваша функция convertWgs84ToMskWithOffset просто конвертирует список.
+                // Для полигонов в МСК обычно порядок не критичен для списка координат, 
+                // но если нужен конкретный порядок, Turf обычно возвращает CCW.
+                
+                const mskCoordsText = convertWgs84ToMskWithOffset(wgs84Coords, destSc, destSystem.def, offsetX, offsetY);
+                currentObjectMskBlocks.push(mskCoordsText);
+            }
+            
+            if (currentObjectMskBlocks.length > 0) {
+                allMskBlocks.push(currentObjectMskBlocks.join('\n\n'));
+            }
+        }
+
+        if (allMskBlocks.length === 0) {
+            showNotification('В видимой области нет объектов', 'warning');
+            return;
+        }
+
+        // 5. Копируем
+        const finalStringToCopy = allMskBlocks.join('\n\n');
+        await navigator.clipboard.writeText(finalStringToCopy);
+        
+        let notificationMessage = `Обработано ${clippedCount} объектов (обрезаны по экрану)`;
+        showNotification(notificationMessage, 'success', 'check-circle');
+        window.open('схема.html', '_blank');
+
+    } catch (error) {
+        console.error("Ошибка при конвертации видимых объектов:", error);
+        showNotification(`Ошибка: ${error.message}`, 'error', 'exclamation-circle');
+    } finally {
+        hideLoader();
+    }
+}
 
 async function convertAllObjectsToMskAndCopy() {
     try {
@@ -8307,21 +8466,23 @@ async function convertAllObjectsToMskAndCopy() {
 
 async function exportAllObjectsToGeoredaсtor() {
     try {
+        // Собираем все объекты: полигоны, линии и точки (текст)
         const allDrawableObjects = new Set([...polygons, ...areaObjects]);
         const draggableTextElements = Array.from(document.querySelectorAll('.draggable-text'));
 
-        // ***** ФИЛЬТРУЕМ ТОЧЕЧНЫЕ ОБЪЕКТЫ *****
+        // Фильтруем только полигоны и линии
         const objectsToConvert = Array.from(allDrawableObjects).filter(obj => 
             obj instanceof ymaps.Polygon || obj instanceof ymaps.Polyline
         );
 
         if (objectsToConvert.length === 0 && draggableTextElements.length === 0) {
-            showNotification('На карте нет площадных или линейных объектов для экспорта в Георедактор', 'warning', 'exclamation-triangle');
+            showNotification('На карте нет объектов для экспорта в Георедактор', 'warning', 'exclamation-triangle');
             return;
         }
         
         showLoader(`Подготовка данных для Георедактора...`);
 
+        // Настройка системы координат и смещений
         const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
         const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destSc);
         if (!destSystem || !destSystem.def) {
@@ -8345,18 +8506,17 @@ async function exportAllObjectsToGeoredaсtor() {
         const formattedBlocks = [];
         let objectCounter = 1;
 
-        // ***** ИСПОЛЬЗУЕМ ОТФИЛЬТРОВАННЫЙ МАССИВ *****
+        // --- ОБРАБОТКА ПОЛИГОНОВ И ЛИНИЙ ---
         for (const targetObject of objectsToConvert) {
-            let identifier;
-            let coordsListToProcess = []; // Массив контуров для обработки
+            let identifier = null;
+            let coordsListToProcess = [];
 
+            // 1. Определение геометрии
             if (targetObject instanceof ymaps.Polygon) {
-                identifier = targetObject.properties.get('cadastralNumber') || `Площадной_объект_${objectCounter++}`;
-                // --- ИЗМЕНЕНИЕ: Берём ВСЕ контуры (внешний + внутренние), а не только [0] ---
+                // Берем ВСЕ контуры (внешний + внутренние)
                 coordsListToProcess = targetObject.geometry.getCoordinates(); 
             } else if (targetObject instanceof ymaps.Polyline) {
-                identifier = targetObject.properties.get('hintContent') || `Линейный_объект_${objectCounter++}`;
-                // Для линии оборачиваем координаты в массив, чтобы структура была единой (как список контуров)
+                // Оборачиваем линию в массив для унификации цикла
                 coordsListToProcess = [targetObject.geometry.getCoordinates()];
             } else {
                 continue; 
@@ -8364,26 +8524,75 @@ async function exportAllObjectsToGeoredaсtor() {
 
             if (!coordsListToProcess || coordsListToProcess.length === 0) continue;
 
-            // --- ИЗМЕНЕНИЕ: Проходим по ВСЕМ контурам объекта ---
+            // 2. ИЗВЛЕЧЕНИЕ НАЗВАНИЯ (Identifier)
+            
+            // А. Проверяем явное свойство cadastralNumber (устанавливается при загрузке квартала/ЗУ)
+            identifier = targetObject.properties.get('cadastralNumber');
+
+            // Б. Если пусто, копаем в featureData (для объектов из "Поиска", "Наложений", "Рядом")
+            if (!identifier) {
+                const featureData = targetObject.properties.get('featureData');
+                if (featureData && featureData.properties) {
+                    // Приоритет: descr (обычно КН) -> reg_numb_border (ЗОУИТ) -> cad_num (ОКС)
+                    identifier = featureData.properties.descr || 
+                                 featureData.properties.options?.reg_numb_border || 
+                                 featureData.properties.options?.cad_num || 
+                                 featureData.properties.options?.cad_number;
+                }
+            }
+
+            // В. Если все еще пусто, пробуем hintContent (для нарисованных вручную линий/полигонов)
+            if (!identifier) {
+                let hint = targetObject.properties.get('hintContent');
+                if (hint) {
+                    if (typeof hint === 'object' && hint.cadastralNumber) {
+                        identifier = hint.cadastralNumber;
+                    } else if (typeof hint === 'string') {
+                        // Очистка от HTML тегов, если они есть
+                        identifier = hint.replace(/<[^>]*>?/gm, '').trim(); 
+                    }
+                }
+            }
+
+            // Г. Если совсем ничего нет — генерируем имя
+            if (!identifier) {
+                identifier = (targetObject instanceof ymaps.Polygon) 
+                    ? `Объект_${objectCounter++}` 
+                    : `Линия_${objectCounter++}`;
+            }
+
+            // Чистим имя от лишних пробелов/переносов
+            identifier = String(identifier).replace(/[\r\n]+/g, ' ').trim();
+
+
+            // 3. КОНВЕРТАЦИЯ КООРДИНАТ
             for (const ringCoords of coordsListToProcess) {
                 if (!ringCoords || ringCoords.length === 0) continue;
 
-                const reversedYandexCoords = [...ringCoords].reverse();
-                const wgs84Coords = reversedYandexCoords.map(coord => {
+                // Для полигонов в МСК важен порядок обхода (обычно против часовой),
+                // но ymaps хранит как есть. Если нужно - раскомментируйте .reverse()
+                const sourceCoords = [...ringCoords].reverse(); 
+                
+                const wgs84Coords = sourceCoords.map(coord => {
+                    // Возвращаем "визуальные" координаты к истинным WGS84
                     const trueLat = coord[0] + (mapOffsetY * 0.000008983);
                     const trueLon = coord[1] + (mapOffsetX * 0.000008983);
+                    // Proj4 принимает [lon, lat]
                     return [trueLon, trueLat];
                 });
                 
+                // Конвертируем в МСК с учетом смещения
+                // Функция возвращает строки вида "X \t Y"
                 const mskCoordsText = convertWgs84ToMskWithOffset(wgs84Coords, destSc, destSystem.def, offsetX, offsetY);
                 
                 if (mskCoordsText) {
+                    // Формируем блок: Заголовок + перенос + Координаты
                     formattedBlocks.push(`${identifier}\n${mskCoordsText}`);
                 }
             }
         }
 
-        // Обработка текстовых меток (как точечных объектов)
+        // --- ОБРАБОТКА ТЕКСТОВЫХ МЕТОК (draggable-text) ---
         for (const textEl of draggableTextElements) {
             const textContent = textEl.querySelector('span')?.textContent || `Текст_${objectCounter++}`;
             const rect = textEl.getBoundingClientRect();
@@ -8391,14 +8600,14 @@ async function exportAllObjectsToGeoredaсtor() {
             try {
                 const globalPixelCoords = map.converter.pageToGlobal([rect.left + rect.width / 2, rect.top + rect.height / 2]);
                 geoCoords = map.options.get('projection').fromGlobalPixels(globalPixelCoords, map.getZoom());
-            } catch (e) {
-                continue;
-            }
+            } catch (e) { continue; }
 
             if (!geoCoords) continue;
 
             const trueLat = geoCoords[0] + (mapOffsetY * 0.000008983);
             const trueLon = geoCoords[1] + (mapOffsetX * 0.000008983);
+            
+            // Текст - это точка, массив из одной координаты
             const mskCoordsText = convertWgs84ToMskWithOffset([[trueLon, trueLat]], destSc, destSystem.def, offsetX, offsetY);
             
             if (mskCoordsText) {
@@ -8410,10 +8619,12 @@ async function exportAllObjectsToGeoredaсtor() {
             throw new Error('Не удалось получить координаты ни для одного объекта.');
         }
 
+        // Объединяем все блоки с двойным переносом строки между ними
         const finalStringToCopy = formattedBlocks.join('\n\n');
+        
         await navigator.clipboard.writeText(finalStringToCopy);
         
-        showNotification(`Координаты ${formattedBlocks.length} контуров для Георедактора скопированы`, 'success', 'check-circle');
+        showNotification(`Данные ${formattedBlocks.length} контуров скопированы для Георедактора`, 'success', 'check-circle');
         window.open('editor.html', '_blank');
 
     } catch (error) {
