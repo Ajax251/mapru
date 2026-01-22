@@ -1525,119 +1525,76 @@ async function initializeApp() { // Сделана асинхронной
 
     
     
-// --- НОВАЯ ВСПОМОГАТЕЛЬНАЯ ФУНКЦИЯ ---
-    function isCoordinateLine(line) {
-        if (!line) return false;
-        // Заменяем запятые на точки, разбиваем по пробелам или табуляции
-        const parts = line.replace(/,/g, '.').trim().split(/[\s\t]+/);
-        // Должно быть минимум 2 части (X и Y)
-        if (parts.length < 2) return false;
-        
-        // Проверяем, являются ли первые две части числами
-        const x = parseFloat(parts[0]);
-        const y = parseFloat(parts[1]);
-        
-        return isFinite(x) && isFinite(y);
+function parseTextToObjects(text, defaultColor = null) {
+    if (!text || !text.trim()) return [];
+
+    const lines = text.trim().split('\n').map(l => l.trim());
+    if (lines.length === 0) return [];
+
+    const firstLine = lines[0];
+    let nameBase = null;
+    let coordsStartIndex = 0;
+
+    // Проверка первой строки: это имя или координаты?
+    const firstLineParts = firstLine.replace(/,/g, '.').split(/[\s\t]+/);
+    const isFirstLineCoords = firstLineParts.length >= 2 && 
+                              isFinite(parseFloat(firstLineParts[0])) && 
+                              isFinite(parseFloat(firstLineParts[1]));
+
+    if (!isFirstLineCoords) {
+        nameBase = firstLine;
+        coordsStartIndex = 1;
     }
 
-    // --- ОБНОВЛЕННАЯ ФУНКЦИЯ ПАРСИНГА ---
-    function parseTextToObjects(text, defaultColor = null) {
-        if (!text || !text.trim()) return [];
+    const coordinatesText = lines.slice(coordsStartIndex).join('\n');
+    
+    // 1. Получаем все "сырые" контуры
+    const rawContours = parseCoordinatesFromText(coordinatesText);
+    if (rawContours.length === 0) return [];
 
-        const lines = text.trim().split('\n').map(l => l.trim());
-        if (lines.length === 0) return [];
+    // 2. ВАЖНО: Группируем их (Внешние + Дырки)
+    // Эта функция вернет массив массивов: [ [Внешний1, Дырка1], [Внешний2], [Внешний3, Дырка3a, Дырка3b] ]
+    const groupedContours = consolidateContoursIntoObjects(rawContours);
 
-        const groups = [];
-        let currentGroup = {
-            name: null,
-            lines: []
-        };
+    const resultObjects = [];
 
-        // 1. Проход по строкам и разбивка на группы по заголовкам
-        lines.forEach(line => {
-            if (!line) return; // Пустые строки игнорируем на этом этапе (разрывы контуров внутри группы обработает parseCoordinatesFromText)
+    // 3. Создаем объекты на основе ГРУПП, а не отдельных линий
+    groupedContours.forEach((objectContours, idx) => {
+        // objectContours - это массив [ВнешнийКонтур, ...ВнутренниеКонтуры]
 
-            if (isCoordinateLine(line)) {
-                // Это координата -> добавляем в текущую группу
-                currentGroup.lines.push(line);
-            } else {
-                // Это НЕ координата -> значит это Заголовок (Имя) нового объекта
-                
-                // Если в текущей группе уже накоплены данные, сохраняем её
-                if (currentGroup.lines.length > 0) {
-                    groups.push(currentGroup);
-                }
-                
-                // Начинаем новую группу с этим именем
-                currentGroup = {
-                    name: line,
-                    lines: []
-                };
-            }
-        });
-
-        // Не забываем добавить последнюю группу после цикла
-        if (currentGroup.lines.length > 0) {
-            groups.push(currentGroup);
+        // Формируем имя для ГРУППЫ
+        let finalName;
+        if (nameBase) {
+            finalName = groupedContours.length > 1 ? `${nameBase} (${idx + 1})` : nameBase;
+        } else {
+            finalName = `Участок ${nextObjectIdPlaceholder} (${idx + 1})`;
         }
 
-        const resultObjects = [];
+        // Тип определяем по главному (внешнему) контуру
+        const mainContour = objectContours[0];
+        let objectType = 'point';
+        if (mainContour.length >= 3) {
+            const first = mainContour[0];
+            const last = mainContour[mainContour.length - 1];
+            if (Math.abs(first.x - last.x) < 0.001 && Math.abs(first.y - last.y) < 0.001) {
+                objectType = 'polygon';
+            } else {
+                objectType = 'line';
+            }
+        } else if (mainContour.length === 2) {
+            objectType = 'line';
+        }
 
-        // 2. Обработка каждой найденной группы отдельно
-        groups.forEach((group, groupIdx) => {
-            const coordinatesText = group.lines.join('\n');
-            
-            // Получаем сырые контуры только для этой группы
-            const rawContours = parseCoordinatesFromText(coordinatesText);
-            if (rawContours.length === 0) return;
-
-            // Применяем логику "Внешний контур + Дырки" ТОЛЬКО внутри этой группы
-            // Это гарантирует, что если у объекта есть заголовок, он не станет дыркой соседа
-            const consolidatedContours = consolidateContoursIntoObjects(rawContours);
-
-            consolidatedContours.forEach((objectContours, internalIdx) => {
-                // objectContours - это массив [Внешний, Дырка1, Дырка2...]
-                
-                // Формируем имя
-                let finalName;
-                if (group.name) {
-                    // Если объектов внутри группы получилось несколько (например, мультиконтур без заголовков внутри)
-                    // добавляем индекс, иначе оставляем имя как есть
-                    finalName = consolidatedContours.length > 1 
-                        ? `${group.name} (${internalIdx + 1})` 
-                        : group.name;
-                } else {
-                    // Если имени не было в самом начале текста (первая группа без заголовка)
-                    finalName = `Объект ${nextObjectIdPlaceholder} (${groupIdx + 1})`;
-                }
-
-                // Определяем тип (полигон, линия, точка)
-                const mainContour = objectContours[0];
-                let objectType = 'point';
-                if (mainContour.length >= 3) {
-                    const first = mainContour[0];
-                    const last = mainContour[mainContour.length - 1];
-                    // Проверка на замкнутость
-                    if (Math.abs(first.x - last.x) < 0.001 && Math.abs(first.y - last.y) < 0.001) {
-                        objectType = 'polygon';
-                    } else {
-                        objectType = 'line';
-                    }
-                } else if (mainContour.length === 2) {
-                    objectType = 'line';
-                }
-
-                resultObjects.push({
-                    contours: objectContours,
-                    name: finalName,
-                    type: objectType,
-                    color: defaultColor
-                });
-            });
+        resultObjects.push({
+            contours: objectContours, // Передаем ВСЮ группу (с дырками)
+            name: finalName,
+            type: objectType,
+            color: defaultColor
         });
+    });
 
-        return resultObjects;
-    }
+    return resultObjects;
+}
 
 
 
