@@ -12089,12 +12089,15 @@ async function exportMapToJson() {
             const cleanProperties = getSafeData(rawProperties);
             const cleanOptions = getSafeData(rawOptions);
 
-            // Дополнительная чистка options
+            // Дополнительная чистка options (удаляем Layout, т.к. это классы)
             delete cleanOptions.iconLayout; 
             delete cleanOptions.hintLayout;
 
+            // Определяем, был ли это кастомный лейаут (для меток ЗУ)
+            // Важно: проверяем до того, как удалили iconLayout из cleanOptions
             let isCustomLabel = false;
             try {
+                // Пытаемся получить текущее значение опции напрямую
                 const currentLayout = obj.options.get('iconLayout');
                 isCustomLabel = (obj instanceof ymaps.Placemark) && (currentLayout === customPlacemarkLayout);
             } catch (e) {
@@ -12127,11 +12130,12 @@ async function exportMapToJson() {
             mapData.features.push(serializedFeature);
         });
 
-        // Экспорт Draggable Text
+        // Экспорт Draggable Text (без изменений)
         draggableTexts.forEach(el => {
             const span = el.querySelector('span');
             if (!span) return;
             const rect = el.getBoundingClientRect();
+            // Защита от ошибок конвертации (если элемент вне экрана или удален)
             try {
                 const globalPx = map.converter.pageToGlobal([rect.left + rect.width/2, rect.top + rect.height/2]);
                 const geo = map.options.get('projection').fromGlobalPixels(globalPx, map.getZoom());
@@ -12152,23 +12156,10 @@ async function exportMapToJson() {
             }
         });
 
-        // --- НАЧАЛО ИЗМЕНЕНИЙ (Архивация) ---
         const jsonString = JSON.stringify(mapData, null, 2);
-        
-        const zip = new JSZip();
-        // Кладем JSON внутрь архива с фиксированным именем
-        zip.file("map_data.json", jsonString);
-
-        // Генерируем с максимальным сжатием
-        const blob = await zip.generateAsync({
-            type: "blob",
-            compression: "DEFLATE",
-            compressionOptions: { level: 9 }
-        });
-        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
+        const blob = new Blob([jsonString], {type: "application/json"});
         const dateStr = new Date().toISOString().slice(0,10);
-        saveAs(blob, `Map_Export_${dateStr}.map`); // Сохраняем как .map, но внутри это zip
+        saveAs(blob, `Map_Export_${dateStr}.map`);
         
         showNotification(`Экспортировано объектов: ${mapData.features.length + mapData.texts.length}`, 'success', 'file-export');
 
@@ -12185,47 +12176,11 @@ function handleMapJsonImport(event) {
     const file = event.target.files[0];
     if (!file) return;
 
-    // Считываем как ArrayBuffer для работы с ZIP
     const reader = new FileReader();
-    reader.readAsArrayBuffer(file); 
-
     reader.onload = async (e) => {
         try {
             showLoader('Импорт карты...');
-            const arrayBuffer = e.target.result;
-            let jsonContent;
-
-            // --- НАЧАЛО ИЗМЕНЕНИЙ (Распаковка) ---
-            try {
-                // Пытаемся открыть как ZIP
-                const zip = await JSZip.loadAsync(arrayBuffer);
-                // Ищем файл внутри (либо map_data.json, либо любой .json)
-                let jsonFile = zip.file("map_data.json");
-                if (!jsonFile) {
-                    const files = Object.keys(zip.files);
-                    const anyJson = files.find(name => name.endsWith('.json'));
-                    if (anyJson) jsonFile = zip.file(anyJson);
-                }
-
-                if (jsonFile) {
-                    jsonContent = await jsonFile.async("string");
-                } else {
-                    // Если это zip, но внутри нет json - ошибка
-                    throw new Error("В файле .map не найден JSON с данными");
-                }
-            } catch (zipError) {
-                // Если не удалось открыть как ZIP, пробуем как обычный текст (Legacy support)
-                // Используем TextDecoder для преобразования ArrayBuffer в строку
-                const decoder = new TextDecoder("utf-8");
-                jsonContent = decoder.decode(arrayBuffer);
-                
-                // Проверяем, похоже ли это на JSON
-                if (!jsonContent.trim().startsWith('{')) {
-                    throw new Error("Файл поврежден или имеет неверный формат");
-                }
-            }
-            // --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
+            const jsonContent = e.target.result;
             const mapData = JSON.parse(jsonContent);
 
             if (!mapData.type || mapData.type !== 'MapData') {
@@ -12332,23 +12287,28 @@ function handleMapJsonImport(event) {
                         // --- ЛОГИКА ВОССТАНОВЛЕНИЯ ДАННЫХ ДЛЯ САЙДБАРА ---
                         let featureData = props.featureData;
                         
-                        // Если featureData поврежден или отсутствует
+                        // Если featureData поврежден (нет properties) или отсутствует, восстанавливаем его
+                        // из плоских свойств JSON (address, cadastralNumber, areaText)
                         const isDataBroken = !featureData || !featureData.properties || Object.keys(featureData.properties).length === 0;
                         
                         if (isDataBroken && (props.cadastralNumber || props.address)) {
-                            if (!featureData) featureData = { type: "Feature", geometry: f.geometry };
+                            if (!featureData) featureData = { type: "Feature", geometry: f.geometry }; // Минимальная структура
                             featureData.properties = featureData.properties || {};
                             featureData.properties.options = featureData.properties.options || {};
 
+                            // 1. Кадастровый номер
                             featureData.properties.descr = props.cadastralNumber;
-                            featureData.properties.options.cad_num = props.cadastralNumber;
+                            featureData.properties.options.cad_num = props.cadastralNumber; // Для ОКС
+
+                            // 2. Адрес
                             featureData.properties.options.readable_address = props.address;
 
+                            // 3. Площадь (Парсим строку "1 137 м² (декларированная)")
                             if (props.areaText) {
-                                const areaRegex = /^([\d\s ]+)[^0-9]*\((.*?)\)$/;
+                                const areaRegex = /^([\d\s ]+)[^0-9]*\((.*?)\)$/; // Ищет число и тип в скобках
                                 const match = props.areaText.match(areaRegex);
                                 if (match) {
-                                    const rawVal = match[1].replace(/[\s ]/g, '');
+                                    const rawVal = match[1].replace(/[\s ]/g, ''); // Убираем пробелы
                                     const type = match[2];
                                     if (type.includes('декларированная')) {
                                         featureData.properties.options.land_record_area_declaration = rawVal;
@@ -12358,16 +12318,20 @@ function handleMapJsonImport(event) {
                                         featureData.properties.options.specified_area = rawVal;
                                     }
                                 } else {
+                                    // Если не распарсилось, пишем как есть
                                     featureData.properties.options.land_record_area = props.areaText.replace(/\D/g, '');
                                 }
                             }
 
+                            // 4. Стоимость и ВРИ
                             if (props.costIndex) featureData.properties.options.cost_index = props.costIndex;
                             if (props.vri) featureData.properties.options.permitted_use_established_by_document = props.vri;
                             
+                            // Обновляем свойство в объекте на карте
                             ymapsObj.properties.set('featureData', featureData);
                         }
 
+                        // Распределяем данные по массивам для тем и сайдбара
                         if (featureData) {
                             if (flags.isParcelInQuarter || flags.isFoundInArea) restoredParcelsData.push(featureData);
                             if (flags.isBuilding) restoredBuildingsData.push(featureData);
@@ -12380,15 +12344,20 @@ function handleMapJsonImport(event) {
                 });
                 
                 // --- ВТОРОЙ ПРОХОД: ВОССТАНОВЛЕНИЕ СВЯЗЕЙ ТОЧЕК ---
+                // Это решает проблему с невозможностью удаления точек
                 pendingVertexPoints.forEach(item => {
                     if (item.parentCn) {
+                        // Ищем полигон в массиве polygons по кадастровому номеру
                         const parentPolygon = polygons.find(p => 
                             p instanceof ymaps.Polygon && 
                             p.properties.get('cadastralNumber') === item.parentCn
                         );
                         
                         if (parentPolygon) {
+                            // Устанавливаем ЖИВУЮ ссылку на объект полигона
                             item.placemark.properties.set('relatedPolygon', parentPolygon);
+                            
+                            // Восстанавливаем флаг видимости на самом полигоне, чтобы кнопка знала, что точки включены
                             if (item.placemark.properties.get('isCoordLabel')) {
                                 parentPolygon.properties.set('coordsPointsVisible', true);
                             } else {
@@ -12428,12 +12397,15 @@ function handleMapJsonImport(event) {
                 });
             }
 
+            // Заполняем сайдбар восстановленными данными
             if (restoredParcelsData.length > 0) {
                 parcelFeaturesData = restoredParcelsData;
                 populateSidebarWithParcels(parcelFeaturesData, "Импорт JSON");
             }
             if (restoredBuildingsData.length > 0) {
                 buildingFeaturesData = restoredBuildingsData;
+                // Если нужно, можно добавить вызов populateSidebarWithFoundObjects для зданий, 
+                // но обычно при старте показываются участки
             }
             if (restoredStructuresData.length > 0) structureFeaturesData = restoredStructuresData;
             if (restoredZouitsData.length > 0) zouitFeaturesData = restoredZouitsData;
@@ -12449,6 +12421,7 @@ function handleMapJsonImport(event) {
             event.target.value = '';
         }
     };
+    reader.readAsText(file);
 }
 
 async function copyAllOks(oksArray) {
