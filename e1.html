@@ -12089,15 +12089,12 @@ async function exportMapToJson() {
             const cleanProperties = getSafeData(rawProperties);
             const cleanOptions = getSafeData(rawOptions);
 
-            // Дополнительная чистка options (удаляем Layout, т.к. это классы)
+            // Дополнительная чистка options
             delete cleanOptions.iconLayout; 
             delete cleanOptions.hintLayout;
 
-            // Определяем, был ли это кастомный лейаут (для меток ЗУ)
-            // Важно: проверяем до того, как удалили iconLayout из cleanOptions
             let isCustomLabel = false;
             try {
-                // Пытаемся получить текущее значение опции напрямую
                 const currentLayout = obj.options.get('iconLayout');
                 isCustomLabel = (obj instanceof ymaps.Placemark) && (currentLayout === customPlacemarkLayout);
             } catch (e) {
@@ -12121,6 +12118,8 @@ async function exportMapToJson() {
                     isManuallyDrawn: obj.properties.get('isManuallyDrawn'),
                     isAreaMeasurement: areaObjects.includes(obj),
                     isVertexPoint: obj.properties.get('isVertexPoint'),
+                     relatedPolygonCadastralNumber: obj.properties.get('relatedPolygon') ? 
+                        obj.properties.get('relatedPolygon').properties.get('cadastralNumber') : null,
                     isCustomLabel: isCustomLabel 
                 }
             };
@@ -12128,12 +12127,11 @@ async function exportMapToJson() {
             mapData.features.push(serializedFeature);
         });
 
-        // Экспорт Draggable Text (без изменений)
+        // Экспорт Draggable Text
         draggableTexts.forEach(el => {
             const span = el.querySelector('span');
             if (!span) return;
             const rect = el.getBoundingClientRect();
-            // Защита от ошибок конвертации (если элемент вне экрана или удален)
             try {
                 const globalPx = map.converter.pageToGlobal([rect.left + rect.width/2, rect.top + rect.height/2]);
                 const geo = map.options.get('projection').fromGlobalPixels(globalPx, map.getZoom());
@@ -12154,10 +12152,23 @@ async function exportMapToJson() {
             }
         });
 
+        // --- НАЧАЛО ИЗМЕНЕНИЙ (Архивация) ---
         const jsonString = JSON.stringify(mapData, null, 2);
-        const blob = new Blob([jsonString], {type: "application/json"});
+        
+        const zip = new JSZip();
+        // Кладем JSON внутрь архива с фиксированным именем
+        zip.file("map_data.json", jsonString);
+
+        // Генерируем с максимальным сжатием
+        const blob = await zip.generateAsync({
+            type: "blob",
+            compression: "DEFLATE",
+            compressionOptions: { level: 9 }
+        });
+        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
         const dateStr = new Date().toISOString().slice(0,10);
-        saveAs(blob, `Map_Export_${dateStr}.map`);
+        saveAs(blob, `Map_Export_${dateStr}.map`); // Сохраняем как .map, но внутри это zip
         
         showNotification(`Экспортировано объектов: ${mapData.features.length + mapData.texts.length}`, 'success', 'file-export');
 
@@ -12174,18 +12185,54 @@ function handleMapJsonImport(event) {
     const file = event.target.files[0];
     if (!file) return;
 
+    // Считываем как ArrayBuffer для работы с ZIP
     const reader = new FileReader();
+    reader.readAsArrayBuffer(file); 
+
     reader.onload = async (e) => {
         try {
             showLoader('Импорт карты...');
-            const jsonContent = e.target.result;
+            const arrayBuffer = e.target.result;
+            let jsonContent;
+
+            // --- НАЧАЛО ИЗМЕНЕНИЙ (Распаковка) ---
+            try {
+                // Пытаемся открыть как ZIP
+                const zip = await JSZip.loadAsync(arrayBuffer);
+                // Ищем файл внутри (либо map_data.json, либо любой .json)
+                let jsonFile = zip.file("map_data.json");
+                if (!jsonFile) {
+                    const files = Object.keys(zip.files);
+                    const anyJson = files.find(name => name.endsWith('.json'));
+                    if (anyJson) jsonFile = zip.file(anyJson);
+                }
+
+                if (jsonFile) {
+                    jsonContent = await jsonFile.async("string");
+                } else {
+                    // Если это zip, но внутри нет json - ошибка
+                    throw new Error("В файле .map не найден JSON с данными");
+                }
+            } catch (zipError) {
+                // Если не удалось открыть как ZIP, пробуем как обычный текст (Legacy support)
+                // Используем TextDecoder для преобразования ArrayBuffer в строку
+                const decoder = new TextDecoder("utf-8");
+                jsonContent = decoder.decode(arrayBuffer);
+                
+                // Проверяем, похоже ли это на JSON
+                if (!jsonContent.trim().startsWith('{')) {
+                    throw new Error("Файл поврежден или имеет неверный формат");
+                }
+            }
+            // --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
             const mapData = JSON.parse(jsonContent);
 
             if (!mapData.type || mapData.type !== 'MapData') {
                 throw new Error("Неверный формат файла (.map)");
             }
 
-            // Очищаем текущую карту
+            // Очищаем текущую карту и данные
             clearMapAndResetTheme();
 
             let importedCount = 0;
@@ -12193,6 +12240,9 @@ function handleMapJsonImport(event) {
             const restoredBuildingsData = [];
             const restoredStructuresData = [];
             const restoredZouitsData = [];
+            
+            // Временный массив для восстановления связей "Точка -> Полигон"
+            const pendingVertexPoints = []; 
 
             const applyOffset = (coord) => [
                 coord[0] - (mapOffsetY * 0.000008983),
@@ -12208,7 +12258,7 @@ function handleMapJsonImport(event) {
                     let opts = f.options || {};
                     let flags = f.appFlags || {};
 
-                    // Восстанавливаем координаты
+                    // Применяем смещение к координатам
                     let visualCoords;
                     if (type === 'Point') {
                         visualCoords = applyOffset(coords);
@@ -12218,60 +12268,59 @@ function handleMapJsonImport(event) {
                         visualCoords = coords.map(ring => ring.map(applyOffset));
                     }
 
-                    // --- СОЗДАНИЕ ОБЪЕКТОВ ---
+                    // --- Создание объектов ---
                     if (type === 'Point') {
                         ymapsObj = new ymaps.Placemark(visualCoords, props, opts);
                         
-                        // ИСПРАВЛЕНИЕ 1: Восстановление внешнего вида меток
-                        // Если был флаг isCustomLabel ИЛИ есть кадастровый номер в свойствах - это текстовая метка
+                        // Восстанавливаем внешний вид текстовых меток
                         if (flags.isCustomLabel || (props.cadastralNumber && !flags.isVertexPoint)) {
                             ymapsObj.options.set('iconLayout', customPlacemarkLayout);
                         }
                         
-                        // Если это точка вершины (редактирование полигона), восстанавливаем её спец. макеты
+                        // Восстанавливаем макеты для технических точек (н1, н2...)
                         if (flags.isVertexPoint) {
                              if (props.isCoordLabel) {
                                  ymapsObj.options.set('iconLayout', coordinateLabelLayout);
                              } else if (props.dotSize) {
-                                 // Это красная точка (у нее dotSize в свойствах)
                                  ymapsObj.options.set('iconLayout', redDotLayout);
                              } else if (props.fontSize) {
-                                 // Это подпись н1 (у нее fontSize)
                                  ymapsObj.options.set('iconLayout', numberedPointLayout);
                              }
+                             // Сохраняем во временный массив для связывания после создания всех полигонов
+                             pendingVertexPoints.push({
+                                 placemark: ymapsObj,
+                                 parentCn: flags.relatedPolygonCadastralNumber
+                             });
                         }
 
                     } else if (type === 'LineString') {
                         ymapsObj = new ymaps.Polyline(visualCoords, props, opts);
                     } else if (type === 'Polygon') {
                         ymapsObj = new ymaps.Polygon(visualCoords, props, opts);
-                        
-                        // ИСПРАВЛЕНИЕ 2: Умное восстановление подсказок (Hint)
-                        // Применяем кастомный макет ТОЛЬКО если hintContent - это объект (ЗУ, ОКС, ЗОУИТ)
-                        // Если hintContent - строка (Терр. зоны, ручные объекты), оставляем стандартный
+                        // Для полигонов восстанавливаем сложный хинт
                         if (props.hintContent && typeof props.hintContent === 'object') {
                             ymapsObj.options.set('hintLayout', customHintLayout);
                         }
                     }
 
                     if (ymapsObj) {
-                        // Восстанавливаем флаги
+                        // Восстанавливаем флаги приложения
                         Object.keys(flags).forEach(key => {
-                            ymapsObj.properties.set(key, flags[key]);
+                            if (key !== 'relatedPolygonCadastralNumber') {
+                                ymapsObj.properties.set(key, flags[key]);
+                            }
                         });
 
                         map.geoObjects.add(ymapsObj);
                         
-                        // Распределяем по массивам
                         if (flags.isAreaMeasurement) {
                             areaObjects.push(ymapsObj);
                         } else {
                             polygons.push(ymapsObj);
                         }
 
-                        // Если это метка ЗУ, добавляем в спец массив
+                        // Если это текстовая метка КН
                         if (type === 'Point' && flags.isCustomLabel) {
-                            // Ищем родительский полигон для связи
                             const parentPoly = polygons.find(p => 
                                 p instanceof ymaps.Polygon && 
                                 p.properties.get('cadastralNumber') === props.cadastralNumber
@@ -12280,16 +12329,46 @@ function handleMapJsonImport(event) {
                             parcelPlacemarks.push(ymapsObj);
                         }
                         
-                        // Восстанавливаем связи для вершин (точек редактирования)
-                        if (flags.isVertexPoint && props.relatedPolygonCadastralNumber) {
-                             // В props нужно было бы сохранять ID полигона, но это сложно.
-                             // Оставим пока без жесткой привязки, визуально точки будут на месте.
+                        // --- ЛОГИКА ВОССТАНОВЛЕНИЯ ДАННЫХ ДЛЯ САЙДБАРА ---
+                        let featureData = props.featureData;
+                        
+                        // Если featureData поврежден или отсутствует
+                        const isDataBroken = !featureData || !featureData.properties || Object.keys(featureData.properties).length === 0;
+                        
+                        if (isDataBroken && (props.cadastralNumber || props.address)) {
+                            if (!featureData) featureData = { type: "Feature", geometry: f.geometry };
+                            featureData.properties = featureData.properties || {};
+                            featureData.properties.options = featureData.properties.options || {};
+
+                            featureData.properties.descr = props.cadastralNumber;
+                            featureData.properties.options.cad_num = props.cadastralNumber;
+                            featureData.properties.options.readable_address = props.address;
+
+                            if (props.areaText) {
+                                const areaRegex = /^([\d\s ]+)[^0-9]*\((.*?)\)$/;
+                                const match = props.areaText.match(areaRegex);
+                                if (match) {
+                                    const rawVal = match[1].replace(/[\s ]/g, '');
+                                    const type = match[2];
+                                    if (type.includes('декларированная')) {
+                                        featureData.properties.options.land_record_area_declaration = rawVal;
+                                        featureData.properties.options.declared_area = rawVal;
+                                    } else {
+                                        featureData.properties.options.land_record_area_verified = rawVal;
+                                        featureData.properties.options.specified_area = rawVal;
+                                    }
+                                } else {
+                                    featureData.properties.options.land_record_area = props.areaText.replace(/\D/g, '');
+                                }
+                            }
+
+                            if (props.costIndex) featureData.properties.options.cost_index = props.costIndex;
+                            if (props.vri) featureData.properties.options.permitted_use_established_by_document = props.vri;
+                            
+                            ymapsObj.properties.set('featureData', featureData);
                         }
 
-                        // Сбор данных
-                        const featureData = props.featureData;
                         if (featureData) {
-                            ymapsObj.properties.set('featureData', featureData);
                             if (flags.isParcelInQuarter || flags.isFoundInArea) restoredParcelsData.push(featureData);
                             if (flags.isBuilding) restoredBuildingsData.push(featureData);
                             if (flags.isStructure) restoredStructuresData.push(featureData);
@@ -12299,9 +12378,28 @@ function handleMapJsonImport(event) {
                         importedCount++;
                     }
                 });
+                
+                // --- ВТОРОЙ ПРОХОД: ВОССТАНОВЛЕНИЕ СВЯЗЕЙ ТОЧЕК ---
+                pendingVertexPoints.forEach(item => {
+                    if (item.parentCn) {
+                        const parentPolygon = polygons.find(p => 
+                            p instanceof ymaps.Polygon && 
+                            p.properties.get('cadastralNumber') === item.parentCn
+                        );
+                        
+                        if (parentPolygon) {
+                            item.placemark.properties.set('relatedPolygon', parentPolygon);
+                            if (item.placemark.properties.get('isCoordLabel')) {
+                                parentPolygon.properties.set('coordsPointsVisible', true);
+                            } else {
+                                parentPolygon.properties.set('numberedPointsVisible', true);
+                            }
+                        }
+                    }
+                });
             }
 
-            // Восстановление текста (Draggable Text)
+            // Восстановление текста
             if (mapData.texts) {
                 mapData.texts.forEach(t => {
                     const visualPos = applyOffset(t.position);
@@ -12330,12 +12428,13 @@ function handleMapJsonImport(event) {
                 });
             }
 
-            // Восстановление данных приложения
             if (restoredParcelsData.length > 0) {
                 parcelFeaturesData = restoredParcelsData;
                 populateSidebarWithParcels(parcelFeaturesData, "Импорт JSON");
             }
-            if (restoredBuildingsData.length > 0) buildingFeaturesData = restoredBuildingsData;
+            if (restoredBuildingsData.length > 0) {
+                buildingFeaturesData = restoredBuildingsData;
+            }
             if (restoredStructuresData.length > 0) structureFeaturesData = restoredStructuresData;
             if (restoredZouitsData.length > 0) zouitFeaturesData = restoredZouitsData;
 
@@ -12350,7 +12449,6 @@ function handleMapJsonImport(event) {
             event.target.value = '';
         }
     };
-    reader.readAsText(file);
 }
 
 async function copyAllOks(oksArray) {
@@ -14370,7 +14468,20 @@ function buildReportHtml(mainObjectData, linkedOksResults, oksIntersectionResult
     const linkedOksRowGenerator = (cn) => `<tr><td>${cn}</td></tr>`;
     const structuresRowGenerator = (f) => { const o = f.properties.options; const l = (o.params_extension && isFinite(parseFloat(o.params_extension))) ? `${parseFloat(o.params_extension).toLocaleString('ru-RU')} м.` : '-'; return `<tr><td>${o.cad_number || '-'}</td><td>${o.params_name || '-'}</td><td>${l}</td><td>${o.params_purpose || '-'}</td></tr>`; };
     const zouitRowGenerator = (f) => { const o = f.properties.options; return `<tr><td>${o.reg_numb_border || '-'}</td><td>${o.name_by_doc || '-'}</td><td>${o.content_restrict_encumbrances || '-'}</td></tr>`; };
-    const terrZoneRowGenerator = (f) => { const o = f.properties.options; return `<tr><td>${o.reg_numb_border || '-'}</td><td>${o.name_by_doc || '-'}</td><td>${o.registration_date || '-'}</td></tr>`; };
+       const terrZoneRowGenerator = (item) => { 
+        const f = item.feature; 
+        const o = f.properties.options; 
+        const intersectionAreaFormatted = item.intersectionArea.toFixed(2);
+        const percentageFormatted = item.percentage.toFixed(2);
+        return `<tr>
+            <td>${o.reg_numb_border || '-'}</td>
+            <td>${o.name_by_doc || '-'}</td>
+            <td>${o.registration_date || '-'}</td>
+            <td>${intersectionAreaFormatted}</td>
+            <td>${percentageFormatted} %</td>
+        </tr>`; 
+    };
+    
     const settlementsRowGenerator = (f) => { const p = f.properties; const o = p.options || {}; return `<tr><td>${p.label || '-'}</td><td>${o.name || '-'}</td></tr>`; };
     const municipalRowGenerator = (f) => { const p = f.properties; return `<tr><td>${p.label || '-'}</td><td>${p.descr || '-'}</td></tr>`; };
     const forestryRowGenerator = (f) => { const o = f.properties.options; return `<tr><td>${o.reg_numb_border || '-'}</td><td>${o.name_by_doc || '-'}</td><td>${o.registration_date || '-'}</td></tr>`; };
@@ -14427,7 +14538,7 @@ function buildReportHtml(mainObjectData, linkedOksResults, oksIntersectionResult
 
         ${generateResultTable('3. Сооружения на объекте', structuresResults, ['Кадастровый номер', 'Наименование', 'Протяженность', 'Назначение'], structuresRowGenerator)}
         ${generateResultTable('4. Зоны с особыми условиями использования территории (ЗОУИТ)', zouitResults, ['Рег. номер', 'Наименование', 'Ограничения'], zouitRowGenerator, 'zouit-table')}
-        ${generateResultTable('5. Территориальные зоны', terrZoneResults, ['Рег. номер', 'Наименование', 'Дата рег.'], terrZoneRowGenerator)}
+        ${generateResultTable('5. Территориальные зоны', terrZoneResults, ['Рег. номер', 'Наименование', 'Дата рег.', 'Площадь наложения, м²', 'Процент'], terrZoneRowGenerator)}
         ${generateResultTable('6. Населенные пункты', settlementsResults, ['Тип', 'Наименование'], settlementsRowGenerator)}
         ${generateResultTable('7. Муниципальные образования', municipalResults, ['Наименование', 'Описание'], municipalRowGenerator)}
         ${generateResultTable('8. Лесничества', forestryResults, ['Рег. номер', 'Наименование', 'Дата рег.'], forestryRowGenerator)}
@@ -14749,8 +14860,53 @@ async function generateConsolidatedReport(targetObject) {
       await delay(100);
         
         // ID слоев: 36315 - тер. зоны, 36281 - населенные пункты, 36278 - мун. образования, 36314 - лесничества
-        const terrZoneResults = await searchContainingObjectByPoint(centerLat, centerLon, 36315, targetPolygon);
+         // 1. Поиск территориальных зон (пересечение)
+        const terrZoneRawResults = await searchFeaturesByGeometry(targetPolygon, 36315);
+        let terrZoneResults = [];
+        
+        if (terrZoneRawResults.length > 0) {
+            showLoader('Анализ пересечений с Территориальными зонами...');
+            const searchCoords = targetPolygon.geometry.getCoordinates()[0];
+            const searchTurfPoly = turf.polygon([searchCoords.map(c => [c[1], c[0]])]); // [lon, lat]
+
+            terrZoneRawResults.forEach(feature => {
+                if (!feature.geometry || !feature.geometry.coordinates || !['Polygon', 'MultiPolygon'].includes(feature.geometry.type)) return;
+                
+                // Получаем все полигоны геометрии зоны
+                const polygonsCoords = feature.geometry.type === 'Polygon' ? [feature.geometry.coordinates] : feature.geometry.coordinates;
+                
+                let totalIntersectionArea = 0;
+
+                polygonsCoords.forEach(poly => {
+                    // Конвертируем координаты зоны в WGS84 с учетом смещения пользователя
+                    const featureWgsCoordsWithOffset = poly[0].map(coord3857 => {
+                        const wgsCoord = proj4('EPSG:3857', 'EPSG:4326', coord3857);
+                        return [wgsCoord[0] - (mapOffsetX * 0.000008983), wgsCoord[1] - (mapOffsetY * 0.000008983)];
+                    });
+                    
+                    // Создаем Turf полигон зоны
+                    const targetTurfPoly = turf.polygon([featureWgsCoordsWithOffset]);
+                    
+                    try {
+                        const intersectionGeometry = turf.intersect(turf.featureCollection([searchTurfPoly, targetTurfPoly]));
+                        if (intersectionGeometry) {
+                            totalIntersectionArea += turf.area(intersectionGeometry);
+                        }
+                    } catch (e) {
+                        console.warn("Ошибка расчета пересечения для тер. зоны", e);
+                    }
+                });
+
+                if (totalIntersectionArea > 0.01) {
+                    const percentage = (totalIntersectionArea / mainObjectAreaInMeters) * 100;
+                    terrZoneResults.push({ feature, intersectionArea: totalIntersectionArea, percentage });
+                }
+            });
+        }
+        
         await delay(100);
+        
+        
         const settlementsResults = await searchContainingObjectByPoint(centerLat, centerLon, 36281, targetPolygon);
         await delay(100);
         const municipalResults = await searchContainingObjectByPoint(centerLat, centerLon, 36278, targetPolygon);
