@@ -433,25 +433,14 @@
             }
         }
 
-   async function fetchCadastralData(cadastralNumber) {
+        async function fetchCadastralData(cadastralNumber) {
             const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${cadastralNumber}`;
-            const data = await fetchNspd(url); // Использует функцию с (или без) прокси
-            
-            // Проверка на наличие данных
+            const data = await fetchNspd(url);
             if (!data.data || !data.data.features || data.data.features.length === 0) {
-                throw new Error('NOT_FOUND'); // Специальный код ошибки
+                throw new Error(`Объект с КН ${cadastralNumber} не найден в ЕГРН.`);
             }
-            
-            const feature = data.data.features[0];
-            
-            // Проверка на наличие геометрии
-            if (!feature.geometry || !feature.geometry.coordinates) {
-                throw new Error('NO_COORDS'); // Специальный код ошибки
-            }
-            
-            return feature;
+            return data.data.features[0];
         }
-
 
         async function performLocalConversion(sourceText, sourceSc, destSc) {
             resultArea.value = 'Локальная обработка координат...';
@@ -507,112 +496,111 @@
             }
         }
         
-   async function handleCadastralNumberConversion() {
-            const kns = sourceTextArea.value.trim().split('\n').filter(kn => kn.trim() !== '');
-            if (kns.length > 100) {
-                showNotification("Превышен лимит в 100 кадастровых номеров.");
-                return;
+async function handleCadastralNumberConversion() {
+    const kns = sourceTextArea.value.trim().split('\n').filter(kn => kn.trim() !== '');
+    if (kns.length > 100) {
+        showNotification("Превышен лимит в 100 кадастровых номеров.");
+        return;
+    }
+
+    isConversionInProgress = true;
+    convertBtn.disabled = true;
+    resultArea.value = '';
+    progressBarContainer.style.display = 'block';
+
+    sourceScSelect.value = "EPSG:3857";
+    sourceScSelect.dispatchEvent(new Event('change'));
+    
+    // --- НОВОЕ: Логика автоматического выбора целевой СК ---
+    if (autoLoadOffsetSwitch.checked && kns.length > 0) {
+        const firstKn = kns[0];
+        // Используем MskFinder из msk-data.js
+        const mskCode = MskFinder.findMskCode(firstKn);
+
+        if (mskCode) {
+            const searchString = `МСК ${mskCode}`; // Например, "МСК 16-2"
+            // Ищем в списке систем координат из sk.js
+            const foundSystem = COORDINATE_SYSTEMS.find(system => system.text.includes(searchString));
+            
+            if (foundSystem) {
+                destScSelect.value = foundSystem.value;
+                // Очень важно! Вызываем событие change, чтобы применились все настройки (включая смещение)
+                destScSelect.dispatchEvent(new Event('change')); 
+                showNotification(`Автоматически выбрана СК: ${mskCode}`);
+            } else {
+                 showNotification(`Не удалось найти СК для кода ${mskCode}`);
             }
-
-            isConversionInProgress = true;
-            convertBtn.disabled = true;
-            resultArea.value = '';
-            progressBarContainer.style.display = 'block';
-
-            sourceScSelect.value = "EPSG:3857";
-            sourceScSelect.dispatchEvent(new Event('change'));
-
-            // Логика автоматического выбора СК (как и было)
-            if (autoLoadOffsetSwitch.checked && kns.length > 0) {
-                const firstKn = kns[0];
-                const mskCode = MskFinder.findMskCode(firstKn);
-                if (mskCode) {
-                    const searchString = `МСК ${mskCode}`;
-                    const foundSystem = COORDINATE_SYSTEMS.find(system => system.text.includes(searchString));
-                    if (foundSystem) {
-                        destScSelect.value = foundSystem.value;
-                        destScSelect.dispatchEvent(new Event('change'));
-                        showNotification(`Автоматически выбрана СК: ${mskCode}`);
-                    }
-                }
-            }
-
-            const destScId = getScValue(destScSelect, destScInput);
-            const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destScId);
-            if (!destSystem || !destSystem.def) {
-                showNotification(`Не найдено определение для целевой СК: ${destScId}`);
-                isConversionInProgress = false;
-                convertBtn.disabled = false;
-                progressBarContainer.style.display = 'none';
-                return;
-            }
-            proj4.defs(destSystem.value, destSystem.def);
-            proj4.defs("EPSG:3857", COORDINATE_SYSTEMS.find(s => s.value === "EPSG:3857").def);
-
-            const allResults = [];
-            const destOffsetX = parseFloat((localStorage.getItem('offsetX') || '0').replace(',', '.')) || 0;
-            const destOffsetY = parseFloat((localStorage.getItem('offsetY') || '0').replace(',', '.')) || 0;
-            const decimalPlaces = (destScId === 'EPSG:3857' || destScId === 'EPSG:4326') ? 4 : 2;
-
-            for (let i = 0; i < kns.length; i++) {
-                const kn = kns[i].trim();
-                const progress = ((i + 1) / kns.length) * 100;
-                progressBarFill.style.width = `${progress}%`;
-                progressBarLabel.textContent = `Обработка: ${i + 1} из ${kns.length} (${kn})`;
-
-                try {
-                    const feature = await fetchCadastralData(kn);
-                    
-                    const allContoursText = [];
-                    const geometryType = feature.geometry.type;
-                    const polygonsData = geometryType === 'MultiPolygon' ? feature.geometry.coordinates : [feature.geometry.coordinates];
-
-                    polygonsData.forEach(polygonRings => {
-                        const contourCoordsText = [];
-                        polygonRings.forEach(ring => {
-                            const mskCoords = ring.map(coord_3857 => {
-                                const msk = proj4('EPSG:3857', destSystem.value, coord_3857);
-                                const finalX = msk[1] + destOffsetX;
-                                const finalY = msk[0] + destOffsetY;
-                                return `${finalX.toFixed(decimalPlaces)}\t${finalY.toFixed(decimalPlaces)}`;
-                            });
-                            contourCoordsText.push(mskCoords.join('\n'));
-                        });
-                        allContoursText.push(contourCoordsText.join('\n\n'));
-                    });
-                    allResults.push(allContoursText.join('\n\n'));
-
-                } catch (error) {
-                    console.error(`Ошибка для КН ${kn}:`, error); // В консоль пишем полную ошибку для отладки
-                    
-                    // Формируем понятное сообщение для пользователя
-                    let userMessage = "Неизвестная ошибка";
-                    
-                    if (error.message === 'NOT_FOUND') {
-                        userMessage = "Кадастровый номер не найден";
-                    } else if (error.message === 'NO_COORDS') {
-                        userMessage = "У объекта нет координат";
-                    } else {
-                        // Все остальные ошибки (сеть, 404, 500, прокси, DNS) считаем ошибкой запроса
-                        userMessage = "Ошибка запроса (нет связи с НСПД)";
-                    }
-                    
-                    allResults.push(`--- ${kn}: ${userMessage} ---`);
-                }
-
-                if (i < kns.length - 1) {
-                    await new Promise(resolve => setTimeout(resolve, 500));
-                }
-            }
-
-            resultArea.value = allResults.join('\n\n');
-            isConversionInProgress = false;
-            convertBtn.disabled = false;
-            progressBarContainer.style.display = 'none';
-            showNotification(`Обработка ${kns.length} КН завершена.`);
+        } else {
+            showNotification(`Не удалось определить код МСК для ${firstKn}`);
         }
-        
-        
+    }
+    // --- КОНЕЦ НОВОГО БЛОКА ---
+
+    const destScId = getScValue(destScSelect, destScInput);
+    const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destScId);
+    if (!destSystem || !destSystem.def) {
+        showNotification(`Не найдено определение для целевой СК: ${destScId}`);
+        isConversionInProgress = false;
+        convertBtn.disabled = false;
+        progressBarContainer.style.display = 'none';
+        return;
+    }
+    proj4.defs(destSystem.value, destSystem.def);
+    proj4.defs("EPSG:3857", COORDINATE_SYSTEMS.find(s => s.value === "EPSG:3857").def);
+    
+    const allResults = [];
+    const destOffsetX = parseFloat((localStorage.getItem('offsetX') || '0').replace(',', '.')) || 0;
+    const destOffsetY = parseFloat((localStorage.getItem('offsetY') || '0').replace(',', '.')) || 0;
+    const decimalPlaces = (destScId === 'EPSG:3857' || destScId === 'EPSG:4326') ? 4 : 2;
+
+    for (let i = 0; i < kns.length; i++) {
+        const kn = kns[i].trim();
+        const progress = ((i + 1) / kns.length) * 100;
+        progressBarFill.style.width = `${progress}%`;
+        progressBarLabel.textContent = `Обработка: ${i + 1} из ${kns.length} (${kn})`;
+
+        try {
+            const feature = await fetchCadastralData(kn);
+            if (!feature.geometry || !feature.geometry.coordinates) {
+                throw new Error('У объекта отсутствуют координаты в ЕГРН.');
+            }
+            
+            const allContoursText = [];
+            const geometryType = feature.geometry.type;
+            const polygonsData = geometryType === 'MultiPolygon' ? feature.geometry.coordinates : [feature.geometry.coordinates];
+
+            polygonsData.forEach(polygonRings => {
+                const contourCoordsText = [];
+                polygonRings.forEach(ring => {
+                    const mskCoords = ring.map(coord_3857 => {
+                        // --- ИЗМЕНЕНИЕ: Убран лишний шаг конвертации через WGS84 ---
+                        const msk = proj4('EPSG:3857', destSystem.value, coord_3857);
+                        const finalX = msk[1] + destOffsetX;
+                        const finalY = msk[0] + destOffsetY;
+                        return `${finalX.toFixed(decimalPlaces)}\t${finalY.toFixed(decimalPlaces)}`;
+                    });
+                    contourCoordsText.push(mskCoords.join('\n'));
+                });
+                allContoursText.push(contourCoordsText.join('\n\n'));
+            });
+            allResults.push(allContoursText.join('\n\n'));
+
+        } catch (error) {
+            console.error(`Ошибка для КН ${kn}:`, error);
+            allResults.push(`--- Ошибка для ${kn}: ${error.message} ---`);
+        }
+
+        if (i < kns.length - 1) {
+            await new Promise(resolve => setTimeout(resolve, 500)); // Уменьшил задержку для скорости
+        }
+    }
+
+    resultArea.value = allResults.join('\n\n');
+    isConversionInProgress = false;
+    convertBtn.disabled = false;
+    progressBarContainer.style.display = 'none';
+    showNotification(`Обработка ${kns.length} КН завершена.`);
+}
         async function performConversion() {
             if (isConversionInProgress) return;
             
