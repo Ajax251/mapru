@@ -1,0 +1,487 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Карта Татарстана (Geometry Fix)</title>
+    
+    <!-- Yandex Maps -->
+    <script src="https://api-maps.yandex.ru/2.1/?apikey=dde71a0e-b612-44b7-b53b-82533420240f&lang=ru_RU" type="text/javascript"></script>
+    
+    <!-- Supabase Client -->
+    <script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
+    
+    <!-- Гео-утилиты -->
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/proj4js/2.9.0/proj4.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        * { margin: 0; padding: 0; box-sizing: border-box; }
+        
+        html, body {
+            height: 100%; width: 100%;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: #1a1a2e; overflow: hidden;
+        }
+        
+        #map { width: 100%; height: 100%; position: absolute; top: 0; left: 0; z-index: 1; }
+        
+        /* ПАНЕЛЬ УПРАВЛЕНИЯ */
+        .control-panel {
+            position: absolute; top: 15px; left: 15px; z-index: 1000;
+            background: rgba(255,255,255,0.95); backdrop-filter: blur(10px);
+            padding: 15px; border-radius: 12px;
+            box-shadow: 0 8px 32px rgba(0,0,0,0.15);
+            display: flex; flex-direction: column; gap: 10px; width: 280px;
+        }
+        
+        .counter {
+            background: linear-gradient(135deg, #28a745 0%, #20883a 100%);
+            color: white; padding: 10px 16px; border-radius: 8px;
+            font-size: 14px; font-weight: 600; display: flex; align-items: center; gap: 8px;
+        }
+
+        .db-status {
+            font-size: 12px; color: #666; background: #f0f0f0;
+            padding: 8px; border-radius: 6px; text-align: center;
+        }
+        
+        .btn {
+            padding: 10px 16px; border: none; border-radius: 8px;
+            font-size: 13px; font-weight: 500; cursor: pointer;
+            transition: all 0.2s ease; display: flex; align-items: center; justify-content: center; gap: 8px; color: white;
+        }
+        .btn:hover { transform: translateY(-1px); box-shadow: 0 4px 12px rgba(0,0,0,0.2); }
+        .btn-danger { background: linear-gradient(135deg, #dc3545 0%, #c82333 100%); }
+        
+        /* КОНТЕКСТНОЕ МЕНЮ */
+        #context-menu {
+            position: absolute; display: none; z-index: 2000;
+            background: white; min-width: 260px; border-radius: 12px;
+            box-shadow: 0 10px 40px rgba(0,0,0,0.25); padding: 8px 0;
+        }
+        #context-menu ul { list-style: none; }
+        #context-menu li {
+            padding: 12px 18px; font-size: 14px; cursor: pointer;
+            display: flex; align-items: center; gap: 10px; color: #333;
+            transition: background 0.2s;
+        }
+        #context-menu li:hover { background: #f0f4f8; }
+        #context-menu .separator { height: 1px; background: #eee; margin: 4px 0; padding: 0; pointer-events: none; }
+        
+        .icon-db { color: #007bff; }
+        .icon-cloud { color: #fd7e14; }
+        
+        /* УВЕДОМЛЕНИЯ */
+        #notifications {
+            position: fixed; bottom: 20px; right: 20px; z-index: 9999;
+            display: flex; flex-direction: column; gap: 10px;
+        }
+        .notification {
+            padding: 14px 20px; border-radius: 10px; color: white;
+            font-size: 14px; font-weight: 500; box-shadow: 0 4px 20px rgba(0,0,0,0.2);
+            transform: translateX(120%); transition: transform 0.3s ease;
+            display: flex; align-items: center; gap: 10px; max-width: 400px;
+        }
+        .notification.show { transform: translateX(0); }
+        .notification.success { background: linear-gradient(135deg, #28a745 0%, #20883a 100%); }
+        .notification.error { background: linear-gradient(135deg, #dc3545 0%, #c82333 100%); }
+        .notification.info { background: linear-gradient(135deg, #17a2b8 0%, #138496 100%); }
+        .notification.warning { background: linear-gradient(135deg, #ffc107 0%, #e0a800 100%); color: #333; }
+        
+        /* ЛОАДЕР */
+        .loader-overlay {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0,0,0,0.6); display: none;
+            justify-content: center; align-items: center; z-index: 10000;
+        }
+        .loader-spinner {
+            width: 50px; height: 50px; border: 4px solid rgba(255,255,255,0.3);
+            border-top-color: white; border-radius: 50%;
+            animation: spin 1s linear infinite; margin-bottom: 10px;
+        }
+        .loader-content { text-align: center; color: white; }
+        @keyframes spin { to { transform: rotate(360deg); } }
+    </style>
+</head>
+<body>
+
+<div id="map"></div>
+
+<div class="control-panel">
+    <div class="counter">
+        <i class="fas fa-layer-group"></i>
+        <span id="counter-text">0 объектов на карте</span>
+    </div>
+    
+    <div class="db-status" id="db-status">
+        <i class="fas fa-database"></i> Подключение к Supabase...
+    </div>
+
+    <button class="btn btn-danger" id="btn-clear">
+        <i class="fas fa-eraser"></i> Очистить карту
+    </button>
+</div>
+
+<div id="context-menu">
+    <ul>
+        <li id="ctx-smart">
+            <i class="fas fa-magic icon-db"></i>
+            Умный поиск (Кэш + NSPD)
+        </li>
+        <li class="separator"></li>
+        <li id="ctx-force-nspd">
+            <i class="fas fa-cloud-download-alt icon-cloud"></i>
+            Прямой запрос к Росреестру
+        </li>
+    </ul>
+</div>
+
+<div id="notifications"></div>
+
+<div class="loader-overlay" id="loader">
+    <div class="loader-content">
+        <div class="loader-spinner"></div>
+        <div class="loader-text" id="loader-text">Загрузка...</div>
+    </div>
+</div>
+
+<script>
+// ============================================================
+// 1. КОНФИГУРАЦИЯ
+// ============================================================
+const CONFIG = {
+    supabase: {
+        url: 'https://qgycxcmxlbyrjpdikyyz.supabase.co',
+        key: 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFneWN4Y214bGJ5cmpwZGlreXl6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQzOTAxNTgsImV4cCI6MjA3OTk2NjE1OH0.UtamcsWCKPpMJwH1cWJhRhh8TL7Jb_NPA0-xLpyk_YU'
+    },
+    nspd: {
+        url: 'https://nspd.gov.ru/api/aeggis/v3',
+        layer: 36278
+    },
+    styles: {
+        district: { fillColor: 'rgba(0, 123, 255, 0.2)', strokeColor: '#0056b3', strokeWidth: 2 },
+        settlement: { fillColor: 'rgba(40, 167, 69, 0.3)', strokeColor: '#28a745', strokeWidth: 2 }
+    }
+};
+
+// Инициализация проекций
+proj4.defs('EPSG:3857', '+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=@null +wktext +no_defs');
+proj4.defs('EPSG:4326', '+proj=longlat +datum=WGS84 +no_defs');
+
+const supabaseClient = window.supabase.createClient(CONFIG.supabase.url, CONFIG.supabase.key);
+
+// ============================================================
+// 2. УТИЛИТЫ (ИСПРАВЛЕНО)
+// ============================================================
+const UI = {
+    notify(message, type = 'info') {
+        const container = document.getElementById('notifications');
+        const div = document.createElement('div');
+        div.className = `notification ${type}`;
+        const icons = { success: 'check-circle', error: 'exclamation-circle', warning: 'exclamation-triangle', info: 'info-circle' };
+        div.innerHTML = `<i class="fas fa-${icons[type] || 'info-circle'}"></i> ${message}`;
+        container.appendChild(div);
+        setTimeout(() => div.classList.add('show'), 10);
+        setTimeout(() => { div.classList.remove('show'); setTimeout(() => div.remove(), 300); }, 4000);
+    },
+    showLoader(text = 'Загрузка...') {
+        document.getElementById('loader-text').textContent = text;
+        document.getElementById('loader').style.display = 'flex';
+    },
+    hideLoader() { document.getElementById('loader').style.display = 'none'; },
+    updateCounter(count) { document.getElementById('counter-text').textContent = `${count} объектов`; },
+    updateStatus(text) { document.getElementById('db-status').innerHTML = `<i class="fas fa-database"></i> ${text}`; }
+};
+
+const GeoUtils = {
+    toMercator(latLon) { 
+        return proj4('EPSG:4326', 'EPSG:3857', [latLon[1], latLon[0]]); 
+    },
+    
+    // Конвертация координат из EPSG:3857 в EPSG:4326 (GeoJSON формат)
+    convertForDB(geometry) {
+        const processCoord = (coord) => {
+            const [lon, lat] = proj4('EPSG:3857', 'EPSG:4326', coord);
+            // Округляем до 9 знаков для избежания проблем с точностью
+            return [
+                Math.round(lon * 1e9) / 1e9, 
+                Math.round(lat * 1e9) / 1e9
+            ];
+        };
+        
+        const processRing = (ring) => ring.map(processCoord);
+        
+        // Создаем чистый GeoJSON без CRS и других лишних полей
+        if (geometry.type === 'Polygon') {
+            return {
+                type: 'Polygon',
+                coordinates: geometry.coordinates.map(processRing)
+            };
+        } else if (geometry.type === 'MultiPolygon') {
+            return {
+                type: 'MultiPolygon',
+                coordinates: geometry.coordinates.map(poly => poly.map(processRing))
+            };
+        }
+        
+        // Для других типов
+        return {
+            type: geometry.type,
+            coordinates: geometry.coordinates
+        };
+    },
+
+    // GeoJSON [lon, lat] -> Yandex [lat, lon]
+    convertForYandex(geometry) {
+        const swap = c => [c[1], c[0]];
+        const newGeom = JSON.parse(JSON.stringify(geometry));
+        if (newGeom.type === 'Polygon') {
+            newGeom.coordinates = newGeom.coordinates.map(r => r.map(swap));
+        } else if (newGeom.type === 'MultiPolygon') {
+            newGeom.coordinates = newGeom.coordinates.map(p => p.map(r => r.map(swap)));
+        }
+        return newGeom;
+    }
+};
+
+// ============================================================
+// 3. API СЛОЙ
+// ============================================================
+const DataService = {
+    async findInDB(lat, lon) {
+        const { data, error } = await supabaseClient.rpc('find_districts_at_point', { lat, lon });
+        if (error) throw new Error('Ошибка БД: ' + error.message);
+        return data || [];
+    },
+
+    async fetchFromNSPD(lat, lon) {
+        const [x, y] = GeoUtils.toMercator([lat, lon]);
+        const delta = 0.05;
+        const bbox = `${x - delta},${y - delta},${x + delta},${y + delta}`;
+        
+        const params = new URLSearchParams({
+            REQUEST: 'GetFeatureInfo', 
+            QUERY_LAYERS: CONFIG.nspd.layer, 
+            SERVICE: 'WMS', 
+            VERSION: '1.3.0',
+            FORMAT: 'image/png', 
+            STYLES: '', 
+            TRANSPARENT: 'true', 
+            LAYERS: CONFIG.nspd.layer,
+            RANDOM: Math.random(), 
+            INFO_FORMAT: 'application/json',
+            FEATURE_COUNT: '10', 
+            I: '256', J: '256', WIDTH: '512', HEIGHT: '512', 
+            CRS: 'EPSG:3857', 
+            BBOX: bbox
+        });
+        
+        const url = `${CONFIG.nspd.url}/${CONFIG.nspd.layer}/wms?${params}`;
+        console.log('Запрос URL:', url);
+        
+        const res = await fetch(url);
+        if (!res.ok) throw new Error(`НСПД вернул статус ${res.status}`);
+        const data = await res.json();
+        
+        if (data.code && data.message) {
+            throw new Error(`НСПД API Ошибка: ${data.message}`);
+        }
+        
+        return data.features || [];
+    },
+
+    // ИСПРАВЛЕННАЯ ФУНКЦИЯ
+    async saveToDB(features) {
+        if (!features.length) return [];
+        
+        const rows = features.map(f => {
+            const props = f.properties || {};
+            const cadastral = props.label || props.options?.label || props.options?.code;
+            const id = cadastral ? cadastral : `temp-${Date.now()}-${Math.random().toString(36).substr(2, 5)}`;
+            
+            return {
+                id: id,
+                name: props.name || props.options?.name || 'Без названия',
+                geom: GeoUtils.convertForDB(f.geometry), // Чистая геометрия
+                properties: props
+            };
+        });
+
+        // Используем RPC вместо прямого upsert
+        const { data, error } = await supabaseClient.rpc('upsert_districts', { 
+            districts_data: rows 
+        });
+        
+        if (error) throw new Error('Ошибка сохранения: ' + error.message);
+        
+        console.log('Сохранено:', data);
+        return rows;
+    }
+};
+// ============================================================
+// 4. ПРИЛОЖЕНИЕ
+// ============================================================
+const App = {
+    map: null,
+    clickedCoords: null,
+
+    init() {
+        UI.showLoader('Инициализация...');
+        ymaps.ready(() => {
+            this.map = new ymaps.Map('map', {
+                center: [55.35, 50.75], zoom: 7,
+                controls: ['zoomControl', 'typeSelector']
+            });
+            this.setupEvents();
+            this.checkConnection();
+            UI.hideLoader();
+        });
+    },
+
+    async checkConnection() {
+        const { error } = await supabaseClient.from('districts').select('id').limit(1);
+        if (error) UI.updateStatus('Ошибка подключения к БД');
+        else UI.updateStatus('Supabase подключен');
+    },
+
+    setupEvents() {
+        this.map.events.add('contextmenu', (e) => {
+            this.clickedCoords = e.get('coords');
+            const menu = document.getElementById('context-menu');
+            const [x, y] = e.get('position');
+            menu.style.left = x + 'px';
+            menu.style.top = y + 'px';
+            menu.style.display = 'block';
+        });
+
+        const hideMenu = () => document.getElementById('context-menu').style.display = 'none';
+        this.map.events.add('click', hideMenu);
+        document.getElementById('map').addEventListener('click', hideMenu);
+
+        document.getElementById('btn-clear').addEventListener('click', () => {
+            this.map.geoObjects.removeAll();
+            UI.updateCounter(0);
+            UI.notify('Карта очищена', 'info');
+        });
+
+        document.getElementById('ctx-smart').addEventListener('click', () => {
+            hideMenu();
+            this.handleSmartSearch(this.clickedCoords);
+        });
+
+        document.getElementById('ctx-force-nspd').addEventListener('click', () => {
+            hideMenu();
+            this.handleForceNSPDSearch(this.clickedCoords);
+        });
+    },
+
+    async handleSmartSearch([lat, lon]) {
+        UI.showLoader('Поиск в базе данных...');
+        try {
+            let districts = await DataService.findInDB(lat, lon);
+            
+            if (districts.length < 2) {
+                UI.showLoader('Запрос к Росреестру...');
+                const rawFeatures = await DataService.fetchFromNSPD(lat, lon);
+                
+                if (rawFeatures.length > 0) {
+                    await DataService.saveToDB(rawFeatures);
+                    districts = await DataService.findInDB(lat, lon);
+                    UI.notify(`Найдено и сохранено: ${rawFeatures.length}`, 'success');
+                } else {
+                    if (districts.length === 0) UI.notify('Ничего не найдено', 'warning');
+                }
+            } else {
+                UI.notify('Данные загружены из кэша', 'success');
+            }
+            this.renderDistricts(districts);
+        } catch (e) {
+            console.error(e);
+            UI.notify(e.message, 'error');
+        } finally {
+            UI.hideLoader();
+        }
+    },
+
+    async handleForceNSPDSearch([lat, lon]) {
+        UI.showLoader('Прямой запрос к Росреестру...');
+        try {
+            const rawFeatures = await DataService.fetchFromNSPD(lat, lon);
+            
+            if (rawFeatures.length > 0) {
+                UI.showLoader('Сохранение в базу...');
+                await DataService.saveToDB(rawFeatures);
+                const districts = await DataService.findInDB(lat, lon);
+                this.renderDistricts(districts);
+                UI.notify(`Загружено из НСПД: ${rawFeatures.length}`, 'success');
+            } else {
+                UI.notify('Росреестр не вернул данных', 'warning');
+            }
+        } catch (e) {
+            console.error(e);
+            UI.notify('Ошибка НСПД: ' + e.message, 'error');
+        } finally {
+            UI.hideLoader();
+        }
+    },
+
+    renderDistricts(districts) {
+    if (!districts.length) return;
+    
+    // Сортируем по размеру (большие снизу)
+    districts.sort((a, b) => JSON.stringify(b.geom).length - JSON.stringify(a.geom).length);
+
+    let addedCount = 0;
+    districts.forEach(d => {
+        // geom уже приходит как объект из БД (благодаря ST_AsGeoJSON::jsonb)
+        const rawGeom = d.geom;
+        
+        if (!rawGeom || !rawGeom.type) {
+            console.warn('Пропуск района без геометрии:', d.id);
+            return;
+        }
+        
+        const yandexGeom = GeoUtils.convertForYandex(rawGeom);
+        
+        const isDistrict = d.name.toLowerCase().includes('район') && 
+                          !d.name.toLowerCase().includes('поселение');
+        const style = isDistrict ? CONFIG.styles.district : CONFIG.styles.settlement;
+        const finalStyle = { ...style, opacity: 0.8 };
+
+        const polygon = new ymaps.GeoObject({
+            geometry: yandexGeom,
+            properties: {
+                hintContent: d.name,
+                balloonContentHeader: d.name,
+                balloonContentBody: `
+                    <div style="font-size:13px">
+                        <strong>Кадастровый ID:</strong> ${d.id}<br>
+                        <strong>Тип:</strong> ${isDistrict ? 'Муниципальный район' : 'Поселение'}<br>
+                        <hr style="margin:5px 0; border:0; border-top:1px solid #eee">
+                        <span style="color:#28a745"><i class="fas fa-check"></i> Сохранено в Supabase</span>
+                    </div>
+                `
+            }
+        }, finalStyle);
+
+        this.map.geoObjects.add(polygon);
+        addedCount++;
+    });
+
+    const total = this.map.geoObjects.getLength();
+    UI.updateCounter(total);
+    
+    if (addedCount > 0) {
+        this.map.setBounds(this.map.geoObjects.getBounds(), { 
+            checkZoomRange: true, 
+            duration: 300 
+        });
+    }
+}
+};
+
+App.init();
+</script>
+</body>
+</html>
