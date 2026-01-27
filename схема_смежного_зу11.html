@@ -740,7 +740,7 @@
             <button class="custom-button btn-copy" onclick="copyClickedCoords()"><i class="fas fa-copy icon"></i>Копировать</button>
             <button class="custom-button btn-csv" onclick="exportToCSV()"><i class="fas fa-file-excel icon"></i>Экспорт в CSV</button>
             <button class="custom-button" onclick="deleteSelectedLine()">Удалить строку</button>
-            <button class="custom-button btn-indigo" onclick="resetClickedCoords()"><i class="fas fa-undo icon"></i>Сбросить</button>
+            <button class="custom-button btn-indigo" onclick="resetClickedCoords()"><i class="fas fa-undo icon"></i>Отменить</button>
               <button class="custom-button btn-check" onclick="runVerification()">Проверить</button>
         </div>
     </div>
@@ -858,10 +858,8 @@ let manualSelectState = {
 };
 
 let isManualDragging = false;
-let manualDragTargetCheckboxClass = null;
-let manualDragSetValue = null;
-let manualDragStarted = false; // Флаг: было ли реальное перетаскивание
-let manualDragStartCheckbox = null; // Чекбокс, с которого началось
+let manualDragTargetCheckboxClass = null; // какой тип чекбокса переключаем
+let manualDragSetValue = null; // какое значение устанавливаем (true/false)
 
 let isDialogDragging = false;
 let dialogDragOffsetX = 0;
@@ -1278,6 +1276,10 @@ function runVerification() {
     }
 
     // 4. ОПРЕДЕЛЕНИЕ ПУТИ
+    // У нас два пути между Start и End:
+    // Path A: Start -> End (по возрастанию индексов)
+    // Path B: End -> Start (через замыкание массива)
+    
     const getPathIndices = (from, to, len) => {
         let indices = [];
         let curr = (from + 1) % len;
@@ -1288,30 +1290,32 @@ function runVerification() {
         return indices;
     };
 
-    const pathA_Indices = getPathIndices(startIdx, endIdx, initialPoints.length); // Путь от start к end
-    const pathB_Indices = getPathIndices(endIdx, startIdx, initialPoints.length); // Путь от end к start
+    const pathA_Indices = getPathIndices(startIdx, endIdx, initialPoints.length); // Путь вперед
+    const pathB_Indices = getPathIndices(endIdx, startIdx, initialPoints.length); // Путь назад
 
     const isDeleted = (p) => deletedPoints.some(d => Math.abs(d.x - p.x) < 0.01 && Math.abs(d.y - p.y) < 0.01);
 
+    // Считаем, сколько удаленных точек лежит на каждом пути
     let deletedCountA = pathA_Indices.filter(i => isDeleted(initialPoints[i])).length;
     let deletedCountB = pathB_Indices.filter(i => isDeleted(initialPoints[i])).length;
 
     let indicesToRemove = [];
     let indicesToKeep = [];
-    let needReverse = false; // НОВЫЙ ФЛАГ
 
+    // Логика: Тот путь, где есть удаленные точки — это путь, который мы ЗАМЕНЯЕМ.
+    // Если в нем остались НЕ удаленные точки — это ошибка.
+    
     if (deletedCountA > 0 && deletedCountB === 0) {
         indicesToRemove = pathA_Indices;
         indicesToKeep = pathB_Indices;
-        needReverse = false; // pathB уже идёт от end к start - правильное направление
     } else if (deletedCountB > 0 && deletedCountA === 0) {
         indicesToRemove = pathB_Indices;
         indicesToKeep = pathA_Indices;
-        needReverse = true; // pathA идёт от start к end - нужно развернуть
     } else {
+        // Если удаленных точек нет (или есть в обоих путях - странный случай), 
+        // используем старую логику: оставляем тот путь, который длиннее (или просто путь B по дефолту)
         indicesToRemove = pathA_Indices; 
         indicesToKeep = pathB_Indices;
-        needReverse = false;
     }
 
     // ПРОВЕРКА НА ЗАБЫТЫЕ ТОЧКИ
@@ -1320,22 +1324,17 @@ function runVerification() {
             problematicPoint = initialPoints[idx];
             logContainer.innerHTML += `<span style="color:red; font-weight:bold;">ОШИБКА: Точка ${idx + 1} (${initialPoints[idx].x}, ${initialPoints[idx].y}) находится внутри изменяемого участка, но НЕ удалена!</span><br>`;
             
+            // Рисуем подсветку ошибки
             drawContour(
                 document.getElementById('coordsInput1').value.split('\n'), 
                 document.getElementById('coordsInput2').value.split('\n')
             );
-            return;
+            return; // Прерываем проверку
         }
     }
 
     // 5. Сборка
-    let restoredPoints = indicesToKeep.map(i => initialPoints[i]);
-    
-    // ИСПРАВЛЕНИЕ: Разворачиваем если использовали pathA
-    if (needReverse) {
-        restoredPoints.reverse();
-    }
-    
+    const restoredPoints = indicesToKeep.map(i => initialPoints[i]);
     let finalContour = [...newSegmentPoints, ...restoredPoints];
 
     // Замыкание
@@ -2402,21 +2401,27 @@ function initManualMassSelect() {
     const list2 = document.getElementById('manualList2');
     
     setupMassSelect(list1, '.check-new');
-    setupMassSelect(list2, '.check-initial');
+    setupMassSelect(list2, '.check-initial'); // Только исходные для второго списка
 }
 
 function setupMassSelect(listContainer, checkboxSelector) {
     listContainer.addEventListener('mousedown', function(e) {
         const checkbox = e.target.closest(checkboxSelector);
-        if (!checkbox || checkbox.disabled) return;
+        if (!checkbox) return;
         
-        // Запоминаем начальное состояние, но НЕ меняем чекбокс сразу
+        e.preventDefault();
         isManualDragging = true;
-        manualDragStarted = false; // Пока не было движения
         manualDragTargetCheckboxClass = checkboxSelector;
-        manualDragStartCheckbox = checkbox;
-        // Значение будет установлено при первом движении мыши
-        manualDragSetValue = null;
+        // Инвертируем текущее состояние
+        manualDragSetValue = !checkbox.checked;
+        checkbox.checked = manualDragSetValue;
+        
+        // Для list2 снимаем галочку с "удаляемая" если ставим "исходная"
+        if (checkboxSelector === '.check-initial' && manualDragSetValue) {
+            const row = checkbox.closest('.manual-select-row');
+            const checkRemoved = row.querySelector('.check-removed');
+            if (checkRemoved) checkRemoved.checked = false;
+        }
         
         document.addEventListener('mousemove', onMassSelectMove);
         document.addEventListener('mouseup', onMassSelectEnd);
@@ -2433,28 +2438,9 @@ function onMassSelectMove(e) {
     if (!row) return;
     
     const checkbox = row.querySelector(manualDragTargetCheckboxClass);
-    if (!checkbox || checkbox.disabled) return;
+    if (!checkbox) return;
     
-    // Если это первое движение — инициализируем drag
-    if (!manualDragStarted) {
-        // Проверяем, что мышь ушла с начального чекбокса
-        if (checkbox === manualDragStartCheckbox) return;
-        
-        manualDragStarted = true;
-        // Определяем значение на основе начального чекбокса
-        manualDragSetValue = !manualDragStartCheckbox.checked;
-        // Устанавливаем значение на начальном чекбоксе
-        manualDragStartCheckbox.checked = manualDragSetValue;
-        
-        // Для list2 снимаем галочку с "удаляемая" если ставим "исходная"
-        if (manualDragTargetCheckboxClass === '.check-initial' && manualDragSetValue) {
-            const startRow = manualDragStartCheckbox.closest('.manual-select-row');
-            const checkRemoved = startRow.querySelector('.check-removed');
-            if (checkRemoved) checkRemoved.checked = false;
-        }
-    }
-    
-    // Устанавливаем значение на текущем чекбоксе
+    // Устанавливаем значение только если оно отличается
     if (checkbox.checked !== manualDragSetValue) {
         checkbox.checked = manualDragSetValue;
         
@@ -2471,15 +2457,9 @@ function onMassSelectMove(e) {
 }
 
 function onMassSelectEnd() {
-    // Если не было перетаскивания — обычный клик обработается браузером сам
-    // Ничего дополнительно делать не нужно
-    
     isManualDragging = false;
-    manualDragStarted = false;
     manualDragTargetCheckboxClass = null;
     manualDragSetValue = null;
-    manualDragStartCheckbox = null;
-    
     document.removeEventListener('mousemove', onMassSelectMove);
     document.removeEventListener('mouseup', onMassSelectEnd);
 }
@@ -2675,75 +2655,42 @@ function reverseContourCoords(inputId) {
 
 function saveManualSelection() {
     const coordsTextArea = document.getElementById('clickedCoords');
+    let newLines = [];
     
-    // Собираем данные из manualList2 (исходные и удаляемые)
-    const list2 = document.getElementById('manualList2');
-    const initialPoints = []; // Исходные точки в порядке появления
-    const removedPoints = []; // Удаляемые точки в порядке появления
-    
-    list2.querySelectorAll('.manual-select-row').forEach(row => {
-        const checkInitial = row.querySelector('.check-initial');
-        const checkRemoved = row.querySelector('.check-removed');
-        const pointData = {
-            number: row.dataset.index,
-            x: row.dataset.x,
-            y: row.dataset.y
-        };
-        
-        if (checkInitial && checkInitial.checked) {
-            initialPoints.push(pointData);
-            selectedPoints.push([parseFloat(pointData.x), parseFloat(pointData.y)]);
-        } else if (checkRemoved && checkRemoved.checked) {
-            removedPoints.push(pointData);
-        }
-    });
-    
-    // Собираем новые точки из manualList1 в порядке появления
+    // Собираем новые точки из coordsInput1
     const list1 = document.getElementById('manualList1');
-    const newPoints = [];
-    
     list1.querySelectorAll('.manual-select-row').forEach(row => {
         const checkbox = row.querySelector('.check-new');
         if (checkbox && checkbox.checked) {
-            const pointData = {
-                number: row.dataset.index,
-                x: row.dataset.x,
-                y: row.dataset.y
-            };
-            newPoints.push(pointData);
-            selectedPoints.push([parseFloat(pointData.x), parseFloat(pointData.y)]);
+            const x = row.dataset.x;
+            const y = row.dataset.y;
+            const pointNumber = row.dataset.index;
+            newLines.push(`н\t${pointNumber}\t\t\t${x}\t${y}`);
+            selectedPoints.push([parseFloat(x), parseFloat(y)]);
         }
     });
     
-    // Проверяем, что есть хотя бы что-то для сохранения
-    if (initialPoints.length === 0 && removedPoints.length === 0 && newPoints.length === 0) {
+    // Собираем исходные и удаляемые точки из coordsInput2
+    const list2 = document.getElementById('manualList2');
+    list2.querySelectorAll('.manual-select-row').forEach(row => {
+        const checkInitial = row.querySelector('.check-initial');
+        const checkRemoved = row.querySelector('.check-removed');
+        const x = row.dataset.x;
+        const y = row.dataset.y;
+        
+        if (checkInitial && checkInitial.checked) {
+            newLines.push(`\t${pointCounter}\t${x}\t${y}\t${x}\t${y}`);
+            pointCounter++;
+            selectedPoints.push([parseFloat(x), parseFloat(y)]);
+        } else if (checkRemoved && checkRemoved.checked) {
+            newLines.push(`\t${pointCounter}\t${x}\t${y}\tл\tл`);
+            pointCounter++;
+        }
+    });
+    
+    if (newLines.length === 0) {
         showNotification('Не выбрано ни одной точки');
         return;
-    }
-    
-    // Формируем строки в нужном порядке
-    const newLines = [];
-    
-    // 1. Первая исходная точка (если есть)
-    if (initialPoints.length > 0) {
-        const first = initialPoints[0];
-        newLines.push(`\t${first.number}\t${first.x}\t${first.y}\t${first.x}\t${first.y}`);
-    }
-    
-    // 2. Все удаляемые точки
-    removedPoints.forEach(point => {
-        newLines.push(`\t${point.number}\t${point.x}\t${point.y}\tл\tл`);
-    });
-    
-    // 3. Все новые точки
-    newPoints.forEach(point => {
-        newLines.push(`н\t${point.number}\t\t\t${point.x}\t${point.y}`);
-    });
-    
-    // 4. Последняя исходная точка (если их больше одной)
-    if (initialPoints.length > 1) {
-        const last = initialPoints[initialPoints.length - 1];
-        newLines.push(`\t${last.number}\t${last.x}\t${last.y}\t${last.x}\t${last.y}`);
     }
     
     // Добавляем в textarea
