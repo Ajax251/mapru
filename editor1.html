@@ -1541,83 +1541,88 @@ async function initializeApp() { // Сделана асинхронной
     }
 
     // --- ОБНОВЛЕННАЯ ФУНКЦИЯ ПАРСИНГА ---
-    function parseTextToObjects(text, defaultColor = null) {
+ function parseTextToObjects(text, defaultColor = null) {
         if (!text || !text.trim()) return [];
 
         const lines = text.trim().split('\n').map(l => l.trim());
         if (lines.length === 0) return [];
 
-        // ИСПОЛЬЗУЕМ Map ДЛЯ ГРУППИРОВКИ ПО ИМЕНИ
-        const groupsMap = new Map();
-        let currentName = null;
-        let unnamedCounter = 0;
+        const groups = [];
+        let currentGroup = {
+            name: null,
+            lines: []
+        };
 
+        // 1. Проход по строкам и разбивка на группы по заголовкам
         lines.forEach(line => {
-            // Игнорируем совсем пустые строки при чтении, разделители добавим сами логически
-            if (!line) return;
+            // ИСПРАВЛЕНИЕ: Не игнорируем пустые строки безусловно.
+            // Если строка пустая, она может служить разделителем контуров внутри группы координат.
+            if (!line) {
+                // Добавляем пустую строку-разделитель, только если в текущей группе уже есть координаты,
+                // чтобы не плодить пустые строки в начале.
+                if (currentGroup.lines.length > 0 && currentGroup.lines[currentGroup.lines.length - 1] !== '') {
+                    currentGroup.lines.push('');
+                }
+                return;
+            }
 
             if (isCoordinateLine(line)) {
-                // Если координаты пошли до первого заголовка
-                if (currentName === null) {
-                    unnamedCounter++;
-                    // Используем уникальный ключ для безымянных блоков, чтобы они не склеивались
-                    // Если нужно склеивать все безымянные в один, уберите _${unnamedCounter}
-                    currentName = `UNNAMED_BLOCK_${unnamedCounter}`; 
-                }
-
-                if (!groupsMap.has(currentName)) {
-                    groupsMap.set(currentName, { 
-                        displayName: currentName.startsWith('UNNAMED_BLOCK') ? null : currentName, // Реальное имя для отображения
-                        lines: [] 
-                    });
-                }
-                groupsMap.get(currentName).lines.push(line);
+                // Это координата -> добавляем в текущую группу
+                currentGroup.lines.push(line);
             } else {
-                // Это строка-заголовок (Имя / КН)
-                const newName = line;
+                // Это НЕ координата -> значит это Заголовок (Имя) нового объекта
                 
-                // Если мы встретили это имя, значит переключаемся на существующую группу
-                if (groupsMap.has(newName)) {
-                    // Добавляем разделитель (пустую строку), если в группе уже есть координаты,
-                    // чтобы отделить новый контур от предыдущего
-                    const group = groupsMap.get(newName);
-                    if (group.lines.length > 0 && group.lines[group.lines.length - 1] !== '') {
-                        group.lines.push('');
-                    }
+                // Если в текущей группе уже накоплены данные (реальные координаты), сохраняем её
+                const hasRealCoords = currentGroup.lines.some(l => l !== '');
+                if (hasRealCoords) {
+                    groups.push(currentGroup);
+                    // Начинаем новую группу с этим именем
+                    currentGroup = {
+                        name: line,
+                        lines: []
+                    };
+                } else {
+                    // Если предыдущая группа была пустой (только имя), просто обновляем имя
+                    // Это позволяет обрабатывать случаи, когда заголовок разбит на несколько строк или идет несколько заголовков подряд
+                    currentGroup.name = line;
                 }
-                
-                // Обновляем текущее имя, чтобы следующие координаты падали в нужную группу
-                currentName = newName;
             }
         });
 
+        // Не забываем добавить последнюю группу после цикла
+        if (currentGroup.lines.some(l => l !== '')) {
+            groups.push(currentGroup);
+        }
+
         const resultObjects = [];
 
-        // Обрабатываем каждую собранную группу
-        groupsMap.forEach((groupData) => {
-            const coordinatesText = groupData.lines.join('\n');
+        // 2. Обработка каждой найденной группы отдельно
+        groups.forEach((group, groupIdx) => {
+            const coordinatesText = group.lines.join('\n');
             
-            // Парсим все координаты для этого имени
+            // Получаем сырые контуры только для этой группы
+            // Теперь благодаря сохранению пустых строк parseCoordinatesFromText корректно разделит их
             const rawContours = parseCoordinatesFromText(coordinatesText);
             if (rawContours.length === 0) return;
 
-            // Применяем логику вложенности (дырок) ко всем контурам этого объекта
+            // Применяем логику "Внешний контур + Дырки" ТОЛЬКО внутри этой группы
             const consolidatedContours = consolidateContoursIntoObjects(rawContours);
 
             consolidatedContours.forEach((objectContours, internalIdx) => {
                 // objectContours - это массив [Внешний, Дырка1, Дырка2...]
                 
-                // Формируем финальное имя
+                // Формируем имя
                 let finalName;
-                if (groupData.displayName) {
-                    // Если исходный объект распался на несколько НЕВЛОЖЕННЫХ частей (мультиполигон)
+                if (group.name) {
                     finalName = consolidatedContours.length > 1 
-                        ? `${groupData.displayName} (${internalIdx + 1})` 
-                        : groupData.displayName;
+                        ? `${group.name} (${internalIdx + 1})` 
+                        : group.name;
                 } else {
-                    // Если имени не было вообще
-                    finalName = `Объект ${nextObjectIdPlaceholder} (${resultObjects.length + 1})`;
-                    if (groupsMap.size === 1 && consolidatedContours.length > 1) {
+                    // Если имени не было (случай из вашего примера)
+                    // internalIdx + 1 создаст нумерацию, если объектов получилось несколько из одного блока
+                    finalName = `Объект ${nextObjectIdPlaceholder} (${groupIdx * 100 + internalIdx + 1})`;
+                    // Упростим имя, если это просто список объектов без заголовков
+                    if (groups.length === 1 && consolidatedContours.length > 1) {
                          finalName = `Участок ${nextObjectIdPlaceholder} (${internalIdx + 1})`;
                     }
                 }
@@ -1628,7 +1633,7 @@ async function initializeApp() { // Сделана асинхронной
                 if (mainContour.length >= 3) {
                     const first = mainContour[0];
                     const last = mainContour[mainContour.length - 1];
-                    // Проверка на замкнутость
+                    // Проверка на замкнутость (теперь сработает корректно для каждого участка)
                     if (Math.abs(first.x - last.x) < 0.001 && Math.abs(first.y - last.y) < 0.001) {
                         objectType = 'polygon';
                     } else {
