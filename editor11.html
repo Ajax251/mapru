@@ -1541,109 +1541,115 @@ async function initializeApp() { // Сделана асинхронной
     }
 
     // --- ОБНОВЛЕННАЯ ФУНКЦИЯ ПАРСИНГА ---
-// --- ОБНОВЛЕННАЯ ФУНКЦИЯ ПАРСИНГА С ГРУППИРОВКОЙ ПО ИМЕНИ (FIX ДЛЯ СЛОЖНЫХ ПОЛИГОНОВ) ---
     function parseTextToObjects(text, defaultColor = null) {
         if (!text || !text.trim()) return [];
 
         const lines = text.trim().split('\n').map(l => l.trim());
         if (lines.length === 0) return [];
 
-        // 1. Группируем строки по заголовкам (Кадастровым номерам)
+        // ИСПОЛЬЗУЕМ Map ДЛЯ ГРУППИРОВКИ ПО ИМЕНИ
         const groupsMap = new Map();
         let currentName = null;
         let unnamedCounter = 0;
 
         lines.forEach(line => {
-            // Пропускаем пустые строки, но используем их как разделитель логики внутри парсера координат
+            // Игнорируем совсем пустые строки при чтении, разделители добавим сами логически
             if (!line) return;
 
             if (isCoordinateLine(line)) {
-                // Если координаты встретились до первого заголовка
+                // Если координаты пошли до первого заголовка
                 if (currentName === null) {
                     unnamedCounter++;
-                    currentName = `Объект без имени ${unnamedCounter}`; 
+                    // Используем уникальный ключ для безымянных блоков, чтобы они не склеивались
+                    // Если нужно склеивать все безымянные в один, уберите _${unnamedCounter}
+                    currentName = `UNNAMED_BLOCK_${unnamedCounter}`; 
                 }
 
                 if (!groupsMap.has(currentName)) {
                     groupsMap.set(currentName, { 
-                        displayName: currentName.startsWith('Объект без имени') ? null : currentName, 
+                        displayName: currentName.startsWith('UNNAMED_BLOCK') ? null : currentName, // Реальное имя для отображения
                         lines: [] 
                     });
                 }
                 groupsMap.get(currentName).lines.push(line);
             } else {
-                // Это строка-заголовок (КН или имя)
+                // Это строка-заголовок (Имя / КН)
                 const newName = line;
                 
-                // Если такое имя уже есть в Map, мы просто продолжим добавлять в него.
-                // Если нет - создадим новую запись.
-                if (!groupsMap.has(newName)) {
-                    groupsMap.set(newName, { 
-                        displayName: newName, 
-                        lines: [] 
-                    });
-                } else {
-                    // Если группа уже есть и в ней есть данные, добавляем разделитель,
-                    // чтобы парсер координат понял, что начался новый контур этого же объекта
+                // Если мы встретили это имя, значит переключаемся на существующую группу
+                if (groupsMap.has(newName)) {
+                    // Добавляем разделитель (пустую строку), если в группе уже есть координаты,
+                    // чтобы отделить новый контур от предыдущего
                     const group = groupsMap.get(newName);
-                    if (group.lines.length > 0) {
-                         group.lines.push(''); // Пустая строка как разделитель контуров
+                    if (group.lines.length > 0 && group.lines[group.lines.length - 1] !== '') {
+                        group.lines.push('');
                     }
                 }
                 
-                // Переключаем "курсор" на это имя
+                // Обновляем текущее имя, чтобы следующие координаты падали в нужную группу
                 currentName = newName;
             }
         });
 
         const resultObjects = [];
 
-        // 2. Создаем объекты. ВСЕ контуры одного имени попадают в ОДИН объект.
-        groupsMap.forEach((groupData, keyName) => {
+        // Обрабатываем каждую собранную группу
+        groupsMap.forEach((groupData) => {
             const coordinatesText = groupData.lines.join('\n');
             
-            // Парсим все контуры для этого имени
-            // Функция parseCoordinatesFromText сама разобьет их по разрывам координат
-            const allContours = parseCoordinatesFromText(coordinatesText);
-            
-            if (allContours.length === 0) return;
+            // Парсим все координаты для этого имени
+            const rawContours = parseCoordinatesFromText(coordinatesText);
+            if (rawContours.length === 0) return;
 
-            // Определяем тип объекта на основе первого контура
-            // (для сложной геометрии это обычно полигон)
-            const mainContour = allContours[0];
-            let objectType = 'point';
-            
-            if (mainContour.length >= 3) {
-                 // Проверка на замкнутость
-                const first = mainContour[0];
-                const last = mainContour[mainContour.length - 1];
-                if (Math.abs(first.x - last.x) < 0.001 && Math.abs(first.y - last.y) < 0.001) {
-                    objectType = 'polygon';
+            // Применяем логику вложенности (дырок) ко всем контурам этого объекта
+            const consolidatedContours = consolidateContoursIntoObjects(rawContours);
+
+            consolidatedContours.forEach((objectContours, internalIdx) => {
+                // objectContours - это массив [Внешний, Дырка1, Дырка2...]
+                
+                // Формируем финальное имя
+                let finalName;
+                if (groupData.displayName) {
+                    // Если исходный объект распался на несколько НЕВЛОЖЕННЫХ частей (мультиполигон)
+                    finalName = consolidatedContours.length > 1 
+                        ? `${groupData.displayName} (${internalIdx + 1})` 
+                        : groupData.displayName;
                 } else {
+                    // Если имени не было вообще
+                    finalName = `Объект ${nextObjectIdPlaceholder} (${resultObjects.length + 1})`;
+                    if (groupsMap.size === 1 && consolidatedContours.length > 1) {
+                         finalName = `Участок ${nextObjectIdPlaceholder} (${internalIdx + 1})`;
+                    }
+                }
+
+                // Определяем тип (полигон, линия, точка)
+                const mainContour = objectContours[0];
+                let objectType = 'point';
+                if (mainContour.length >= 3) {
+                    const first = mainContour[0];
+                    const last = mainContour[mainContour.length - 1];
+                    // Проверка на замкнутость
+                    if (Math.abs(first.x - last.x) < 0.001 && Math.abs(first.y - last.y) < 0.001) {
+                        objectType = 'polygon';
+                    } else {
+                        objectType = 'line';
+                    }
+                } else if (mainContour.length === 2) {
                     objectType = 'line';
                 }
-            } else if (mainContour.length === 2) {
-                objectType = 'line';
-            }
 
-            // Формируем имя
-            let finalName = groupData.displayName || keyName;
-            
-            // ВАЖНО: Мы НЕ вызываем здесь consolidateContoursIntoObjects для разделения.
-            // Мы передаем allContours как есть в один объект.
-            // Это заставит систему отрисовки (ctx.fill('evenodd')) корректно нарисовать "дырки",
-            // так как они будут частями одного пути (path).
-            
-            resultObjects.push({
-                contours: allContours, // Все части (внешние и внутренние) вместе
-                name: finalName,
-                type: objectType,
-                color: defaultColor
+                resultObjects.push({
+                    contours: objectContours,
+                    name: finalName,
+                    type: objectType,
+                    color: defaultColor
+                });
             });
         });
 
         return resultObjects;
     }
+
 
 
 
