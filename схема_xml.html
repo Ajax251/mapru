@@ -4499,24 +4499,35 @@ function initCadastralInput() {
 
 async function handleFastSearch() {
     const input = document.getElementById('cadastralInput');
-    const value = input.value.trim();
+    const rawValue = input.value.trim();
 
-    if (!value) return;
+    if (!rawValue) return;
 
-    // 1. Локальный поиск (если уже загружено - просто показываем)
-    if (isValidCadastralNumber(value)) {
-        if (findAndSelectByCadastralNumber(value)) return;
+    const normalizedValue = normalizeCadastralNumber(rawValue);
+    const valueToSearch = isValidCadastralNumber(rawValue) ? rawValue : normalizedValue;
+
+    // 1. Локальный поиск (ТИХИЙ РЕЖИМ)
+    if (isValidCadastralNumber(valueToSearch)) {
+        // Сначала ищем как есть
+        if (findAndSelectByCadastralNumber(valueToSearch, true)) {
+            return;
+        }
+        // Ищем нормализованный вариант ТОЛЬКО если он отличается от исходного
+        if (normalizedValue !== valueToSearch) {
+            if (findAndSelectByCadastralNumber(normalizedValue, true)) {
+                return;
+            }
+        }
     }
 
     // 2. Парсинг ввода
     let quarterToSearch = '';
-    let isObjectSearch = false; // Флаг: ищем конкретный объект или весь квартал
+    let isObjectSearch = false; 
 
-    if (isQuarterOrBlockFormat(value)) {
-        quarterToSearch = value.endsWith(':') ? value.slice(0, -1) : value;
-    } else if (isValidCadastralNumber(value)) {
-        const parts = value.split(':');
-        // ЕЗ или обычный ЗУ - берем квартал
+    if (isQuarterOrBlockFormat(valueToSearch)) {
+        quarterToSearch = valueToSearch.endsWith(':') ? valueToSearch.slice(0, -1) : valueToSearch;
+    } else if (isValidCadastralNumber(valueToSearch)) {
+        const parts = valueToSearch.split(':');
         quarterToSearch = parts.slice(0, 3).join(':');
         isObjectSearch = true; 
     } else {
@@ -4529,23 +4540,31 @@ async function handleFastSearch() {
     const loaderContainer = document.getElementById('loaderContainer');
     
     loaderContainer.style.display = 'flex';
-    updateLoaderProgress(0, 1, `Поиск КПТ для ${quarterToSearch}...`);
+    updateLoaderProgress(0, 1, `Поиск файла для ${quarterToSearch}...`);
 
     try {
-        // А. Запрос списка файлов
         const responseList = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}?search=${formattedQuarter}`);
         if (!responseList.ok) throw new Error('Ошибка связи с сервером');
         const fileList = await responseList.json();
         
-        const matchingFiles = fileList ? fileList.filter(file => file.name.startsWith(formattedQuarter)) : [];
-        // Берем самый свежий файл АВТОМАТИЧЕСКИ (без диалога выбора)
+        let matchingFiles = fileList ? fileList.filter(file => file.name.startsWith(formattedQuarter)) : [];
+
+        // --- ПРИОРИТЕТ JSON ДЛЯ НУЛЕВЫХ КВАРТАЛОВ ---
+        // Проверяем по имени файла или по номеру квартала
+        if (/_0{6,7}$/.test(formattedQuarter) || /^0+$/.test(normalizeCadastralNumber(quarterToSearch).split(':')[2])) {
+            const jsonFiles = matchingFiles.filter(f => f.name.toLowerCase().endsWith('.json.zip'));
+            if (jsonFiles.length > 0) {
+                console.log(`Быстрый поиск: для квартала ${quarterToSearch} выбран JSON.`);
+                matchingFiles = jsonFiles;
+            }
+        }
+
         const latestFile = findLatestKptFile(matchingFiles);
 
         if (!latestFile) {
-            throw new Error(`КПТ для ${quarterToSearch} не найден.`);
+            throw new Error(`Данные для ${quarterToSearch} не найдены.`);
         }
 
-        // Б. Скачивание
         updateLoaderProgress(0, 1, `Скачивание ${latestFile.name}...`);
         const responseFile = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}/${latestFile.name}`);
         if (!responseFile.ok) throw new Error('Ошибка скачивания файла');
@@ -4553,48 +4572,87 @@ async function handleFastSearch() {
         const blob = await responseFile.blob();
         const zip = await JSZip.loadAsync(blob);
         
-        // В. Поиск XML
-        let xmlFileEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.xml') && !f.dir);
-        if (!xmlFileEntry) throw new Error('XML не найден в архиве');
+        let fileContent = null;
+        let fileType = null;
 
-        updateLoaderProgress(blob.size, blob.size, 'Распаковка XML...');
-        const xmlContent = await xmlFileEntry.async('string');
+        let jsonFileEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.json') && !f.dir);
+        
+        if (jsonFileEntry) {
+            updateLoaderProgress(blob.size, blob.size, 'Распаковка JSON...');
+            fileContent = await jsonFileEntry.async('string');
+            fileType = 'json';
+        } else {
+            let xmlFileEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.xml') && !f.dir);
+            if (xmlFileEntry) {
+                updateLoaderProgress(blob.size, blob.size, 'Распаковка XML...');
+                fileContent = await xmlFileEntry.async('string');
+                fileType = 'xml';
+            }
+        }
 
-        // Г. ЛОГИКА ОБРАБОТКИ
+        if (!fileContent) throw new Error('В архиве не найден корректный файл (XML или JSON).');
+
         if (isObjectSearch) {
-            // === ЕСЛИ ИСКАЛИ ОБЪЕКТ ===
-            // Грузим ТОЛЬКО его (быстро, игнорируя остальные 5000 участков)
-            updateLoaderProgress(blob.size, blob.size, `Загрузка объекта ${value}...`);
+            // === ЗАГРУЗКА ОДНОГО ОБЪЕКТА ===
+            updateLoaderProgress(blob.size, blob.size, `Выборка объекта ${valueToSearch}...`);
             
             setTimeout(async () => {
                 try {
-                    // Используем processFilteredXMLContent с массивом из одного номера
-                    await processFilteredXMLContent(xmlContent, [value], latestFile.name);
+                    const searchIds = [valueToSearch];
+                    if (normalizedValue !== valueToSearch) searchIds.push(normalizedValue);
+
+                    if (fileType === 'xml') {
+                        await processFilteredXMLContent(fileContent, searchIds, latestFile.name);
+                    } else {
+                        await processFilteredJsonContent(fileContent, searchIds, latestFile.name);
+                    }
                     
-                    if (!findAndSelectByCadastralNumber(value)) {
-                        showNotification(`Объект ${value} отсутствует в файле ${latestFile.name}.`, 'warning');
+                    // --- ПРОВЕРКА РЕЗУЛЬТАТА ---
+                    let found = findAndSelectByCadastralNumber(valueToSearch, true);
+                    
+                    if (!found && normalizedValue !== valueToSearch) {
+                        found = findAndSelectByCadastralNumber(normalizedValue, true);
+                    }
+
+                    // Smart Fallback (если загрузился ровно один объект)
+                    if (!found) {
+                        const loadedParcels = allContours || [];
+                        const loadedBuildings = buildingsContours || [];
+                        const totalLoaded = loadedParcels.length + loadedBuildings.length;
+
+                        if (totalLoaded === 1) {
+                            const obj = loadedParcels[0] || loadedBuildings[0];
+                            console.log(`Smart fallback: выбран объект ${obj.cadastralNumber} вместо запрошенного ${valueToSearch}`);
+                            found = findAndSelectByCadastralNumber(obj.cadastralNumber, false); 
+                        }
+                    }
+
+                    if (!found) {
+                        showNotification(`Объект ${valueToSearch} отсутствует в файле ${latestFile.name}.`, 'warning');
                     } else {
                         showNotification('Объект загружен.', 'success');
                     }
                 } catch (e) {
-                    showNotification('Ошибка: ' + e.message, 'error');
+                    showNotification('Ошибка обработки: ' + e.message, 'error');
                 } finally {
                     loaderContainer.style.display = 'none';
                 }
             }, 50);
 
         } else {
-            // === ЕСЛИ ИСКАЛИ КВАРТАЛ ===
-            // Грузим ВСЁ "напролом" (минуя диалог "Большой файл")
+            // === ЗАГРУЗКА ВСЕГО КВАРТАЛА ===
             updateLoaderProgress(blob.size, blob.size, `Загрузка всего квартала...`);
             
             setTimeout(async () => {
                 try {
-                    // processXMLContent загрузит весь файл
-                    await processXMLContent(xmlContent, latestFile.name);
+                    if (fileType === 'xml') {
+                        await processXMLContent(fileContent, latestFile.name);
+                    } else {
+                        await handleJsonString(fileContent, latestFile.name);
+                    }
                     showNotification('Квартал загружен.', 'success');
                 } catch (e) {
-                    showNotification('Ошибка: ' + e.message, 'error');
+                    showNotification('Ошибка обработки: ' + e.message, 'error');
                 } finally {
                     loaderContainer.style.display = 'none';
                 }
@@ -5751,7 +5809,7 @@ function centerOnImportedObject(importedIndex) {
     }
     
 
-function findAndSelectByCadastralNumber(identifier) {
+function findAndSelectByCadastralNumber(identifier, silent = false) {
     console.log(`[findAndSelectByCadastralNumber] Запущен поиск для идентификатора: ${identifier}`);
     selectedCadastralNumber = null;
     selectedBuildingNumber = null;
@@ -5791,32 +5849,26 @@ function findAndSelectByCadastralNumber(identifier) {
         const foundZoneObject = zonesAndTerritoriesContours.find(z => z.regNumbBorder === identifier && z.zoneSubType !== 'quarter_boundary');
 
         if (identifier && identifier.startsWith('imported_')) {
-            // --- НАЧАЛО ИСПРАВЛЕНИЯ ---
             const parts = identifier.split('_');
             if (parts.length === 2) {
                 const index = parseInt(parts[1], 10);
                 if (!isNaN(index) && importedContours[index]) {
-                    console.log(`[findAndSelectByCadastralNumber] Найден импортированный объект: ${identifier}`);
                     selectedImportedObjectIndex = index;
-                    displayParcelInfo(null); // Обновляет UI, используя selectedImportedObjectIndex
+                    displayParcelInfo(null);
                     centerOnImportedObject(index);
                     objectFound = true;
                 }
             }
-            // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
         } else if (foundParcelObject) {
             console.log(`[findAndSelectByCadastralNumber] Найден земельный участок: ${identifier}`);
             selectedCadastralNumber = identifier;
             let parcelData = null;
             
             if (foundParcelObject.isParsedFromJson) {
-                console.log('[findAndSelectByCadastralNumber] Объект из JSON, используем данные напрямую из объекта.');
                 parcelData = { ...foundParcelObject, cadNumber: foundParcelObject.cadastralNumber };
             } else if (foundParcelObject.record) {
-                console.log('[findAndSelectByCadastralNumber] Объект из XML, извлекаем данные из record.');
                 parcelData = extractData(foundParcelObject.record); 
             } else if (window.xmlContent) {
-                console.log('[findAndSelectByCadastralNumber] Объект из XML (fallback), ищем record в xmlContent.');
                 const parser = new DOMParser(); 
                 const xmlDoc = parser.parseFromString(window.xmlContent, "text/xml"); 
                 let sourceElementForData = null; 
@@ -5847,13 +5899,10 @@ function findAndSelectByCadastralNumber(identifier) {
             centerOnSelectedBuilding(foundBuildingObject);
             objectFound = true;
 
-} else if (foundZoneObject && foundZoneObject.record) {
+        } else if (foundZoneObject && foundZoneObject.record) {
             console.log(`[findAndSelectByCadastralNumber] Найдена зона: ${identifier}`);
-            
-            // 1. Устанавливаем выбранный номер
             selectedZoneOrTerritoryRegNumber = identifier;
 
-            // 2. Включаем отображение слоя зон, если он выключен
             if (!showZones) {
                 showZones = true;
                 const zonesButton = document.getElementById('zonesBtn');
@@ -5863,25 +5912,16 @@ function findAndSelectByCadastralNumber(identifier) {
                 }
             }
 
-            // 3. Добавляем зону в список видимых (для фильтрации)
             if (!visibleZoneRegNumbers.has(identifier)) {
                 visibleZoneRegNumbers.add(identifier);
             }
             updateZonesButtonVisualState();
 
-            // 4. Извлекаем данные и обновляем панель информации
             const zoneData = extractZoneOrTerritoryData(foundZoneObject.record);
             displayZoneOrTerritoryInfo(zoneData);
-
-            // 5. Центрируем карту
             centerOnSelectedZoneOrTerritory(foundZoneObject);
-            
-            // 6. Ставим флаг, что объект найден (чтобы не сработал блок ошибки в конце функции)
             objectFound = true;
-
-        } else if (!isUnifiedLandUse && isCommonLandFormat(identifier)) {
-             // Логика для ЕЗ остается без изменений
-        }
+        } 
     } 
 
     if (objectFound) {
@@ -5889,9 +5929,13 @@ function findAndSelectByCadastralNumber(identifier) {
         const adjacentParcelsForImported = getAdjacentParcelsForImported();
         redraw(adjacentParcels, adjacentParcelsForImported, true);
     } else {
-        console.warn(`[findAndSelectByCadastralNumber] Объект ${identifier} не найден ни в одном из списков.`);
-        displayParcelInfo(null);
-        showNotification(`Объект с идентификатором ${identifier} не найден`, 'error', 'exclamation-circle');
+        // --- ИЗМЕНЕНИЕ ЗДЕСЬ: Используем параметр silent ---
+        if (!silent) {
+            console.warn(`[findAndSelectByCadastralNumber] Объект ${identifier} не найден ни в одном из списков.`);
+            displayParcelInfo(null);
+            showNotification(`Объект с идентификатором ${identifier} не найден`, 'error', 'exclamation-circle');
+        }
+        // В тихом режиме просто сбрасываем выделение, но не кричим
         const adjacentParcels = getAdjacentParcelsForSelected(null);
         const adjacentParcelsForImported = getAdjacentParcelsForImported();
         redraw(adjacentParcels, adjacentParcelsForImported, true);
@@ -9021,12 +9065,10 @@ async function handleBatchLoad(selectedNumbers) {
     // 1. Группируем номера по кварталам
     const quartersMap = {}; 
     
-    // Очищаем выбранные номера от мусора и пробелов
     const cleanSelectedNumbers = selectedNumbers.map(n => n.trim());
 
     cleanSelectedNumbers.forEach(num => {
         const parts = num.split(':');
-        // Берем квартал (первые 3 части)
         const quarter = parts.slice(0, 3).join(':');
         const formattedQuarter = quarter.replace(/:/g, '_');
         
@@ -9044,17 +9086,15 @@ async function handleBatchLoad(selectedNumbers) {
     
     console.log("--- НАЧАЛО ПАКЕТНОЙ ЗАГРУЗКИ ---");
     console.log("Запрошено объектов:", cleanSelectedNumbers.length);
-    console.log("Найдено уникальных кварталов:", uniqueQuarters.length);
     
     try {
         for (const [index, formattedQuarter] of uniqueQuarters.entries()) {
             const quarterDisplay = formattedQuarter.replace(/_/g, ':');
             const targetNumbers = quartersMap[formattedQuarter];
             
-            console.log(`[${index+1}/${uniqueQuarters.length}] Обработка квартала ${quarterDisplay}. Ищем объекты:`, targetNumbers);
+            console.log(`[${index+1}/${uniqueQuarters.length}] Обработка квартала ${quarterDisplay}.`);
             updateLoaderProgress(index, uniqueQuarters.length, `Квартал ${quarterDisplay}: поиск файла...`);
             
-            // 2. Ищем файл в хранилище
             const responseList = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}?search=${formattedQuarter}`);
             if (!responseList.ok) {
                 console.warn(`Ошибка запроса списка файлов для ${quarterDisplay}`);
@@ -9062,47 +9102,38 @@ async function handleBatchLoad(selectedNumbers) {
             }
             
             const fileList = await responseList.json();
-            // Ищем файлы, которые начинаются с имени квартала
             let matchingFiles = fileList ? fileList.filter(file => file.name.startsWith(formattedQuarter)) : [];
 
-            // --- ПРИОРИТЕТ JSON ДЛЯ НУЛЕВЫХ КВАРТАЛОВ ---
+            // Приоритет JSON для нулевых кварталов
             if (/_0{6,7}$/.test(formattedQuarter)) {
-                // Пытаемся найти именно .json.zip файлы
                 const jsonFiles = matchingFiles.filter(f => f.name.toLowerCase().endsWith('.json.zip'));
                 if (jsonFiles.length > 0) {
-                    console.log(`Для нулевого квартала ${quarterDisplay} включен приоритет JSON.`);
                     matchingFiles = jsonFiles;
                 }
             }
-            // -------------------------------------------
 
             const latestFile = findLatestKptFile(matchingFiles);
             
             if (!latestFile) {
-                console.warn(`Файл данных для квартала ${quarterDisplay} не найден в хранилище.`);
+                console.warn(`Файл для ${quarterDisplay} не найден.`);
                 continue;
             }
             
             console.log(`Скачивание файла: ${latestFile.name}`);
             
-            // 3. Скачиваем
             const responseFile = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}/${latestFile.name}`);
             const blob = await responseFile.blob();
-            
-            // 4. Распаковываем
             const zip = await JSZip.loadAsync(blob);
             
             let fileContent = null;
             let fileType = null;
             
-            // Сначала пробуем найти JSON (так как для нулевых кварталов мы могли скачать json.zip)
             let jsonEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.json') && !f.dir);
             
             if (jsonEntry) {
                 fileContent = await jsonEntry.async('string');
                 fileType = 'json';
             } else {
-                // Если JSON нет, ищем XML
                 let xmlEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.xml') && !f.dir);
                 if (xmlEntry) {
                     fileContent = await xmlEntry.async('string');
@@ -9111,14 +9142,12 @@ async function handleBatchLoad(selectedNumbers) {
             }
             
             if (!fileContent) {
-                console.error(`В архиве ${latestFile.name} не найден поддерживаемый файл (XML или JSON)`);
+                console.error(`В архиве ${latestFile.name} нет данных`);
                 continue;
             }
             
-            // 5. Парсим и добавляем
             const foundInThisFile = await appendObjectsFromContent(fileContent, fileType, targetNumbers);
             totalProcessedCount += foundInThisFile;
-            console.log(`В файле ${latestFile.name} [тип: ${fileType}] найдено и загружено объектов: ${foundInThisFile}`);
         }
         
         // 6. Финал
@@ -9143,36 +9172,40 @@ async function handleBatchLoad(selectedNumbers) {
         const missingList = [];
 
         cleanSelectedNumbers.forEach(reqNum => {
-            if (loadedIds.has(reqNum)) {
+            // Проверка нормализованных номеров для надежности
+            const normReq = normalizeCadastralNumber(reqNum);
+            // Ищем в загруженных (нужно проверять и точный, и нормализованный)
+            const found = Array.from(loadedIds).some(loaded => normalizeCadastralNumber(loaded) === normReq);
+            
+            if (found) {
                 successList.push(reqNum);
             } else {
                 missingList.push(reqNum);
             }
         });
 
-        // Логика отрисовки и уведомлений
+        // --- ОБНОВЛЕНИЕ ИНТЕРФЕЙСА ---
         if (allContours.length > 0 || buildingsContours.length > 0) {
-            // Принудительно вызываем расчет границ (false)
-            redraw(new Set(), new Set(), false); 
+            
+            // !!! ВАЖНОЕ ИЗМЕНЕНИЕ !!!
+            // Вызываем drawKPTScheme() вместо redraw(). 
+            // Это перезапускает инициализацию холста, вешает правильные обработчики событий (зум, клик)
+            // и корректно рассчитывает границы (minX, minY, scale).
+            drawKPTScheme(); 
             
             // Обновляем списки слева
             populateParcelsList();
             populateBuildingsList();
             
-            // 7. Сценарии результата
+            // Сценарии результата
             if (missingList.length === 0) {
-                // ВСЕ ХОРОШО
                 showNotification(`Успешно загружены все ${successList.length} объектов!`, 'success', 'check-circle');
             } else {
-                // ЕСТЬ ПОТЕРИ - ОТКРЫВАЕМ HTML ОТЧЕТ
                 showNotification(`Загружено: ${successList.length}. Не найдено: ${missingList.length}. Открывается отчет...`, 'warning', 'exclamation-triangle');
-                
-                // Вызов новой функции отчета
                 openHtmlReport(successList, missingList, cleanSelectedNumbers.length);
             }
         } else {
             showNotification('Ни один объект не был найден в загруженных файлах.', 'error');
-            // Если совсем ничего не загрузилось, тоже показываем отчет
             openHtmlReport([], missingList, cleanSelectedNumbers.length);
         }
         
@@ -9303,14 +9336,9 @@ function downloadTxtFile(content, filename) {
 
 function normalizeCadastralNumber(cn) {
     if (!cn) return '';
-    const parts = cn.split(':');
-    if (parts.length >= 3) {
-        // Убираем ведущие нули в квартале (3-я часть), но оставляем хотя бы один ноль если там "0"
-        parts[2] = parts[2].replace(/^0+(?=\d)/, '');
-    }
-    return parts.join(':');
-}
 
+    return cn.trim();
+}
 async function appendObjectsFromContent(content, type, targetIds) {
     // Создаем Set из НОРМАЛИЗОВАННЫХ искомых номеров
     const targetSet = new Set(targetIds.map(id => normalizeCadastralNumber(id.trim())));

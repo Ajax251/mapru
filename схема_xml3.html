@@ -9040,11 +9040,8 @@ async function handleBatchLoad(selectedNumbers) {
     const loaderContainer = document.getElementById('loaderContainer');
     loaderContainer.style.display = 'flex';
     
-    let processedCount = 0;
+    let totalProcessedCount = 0;
     
-    // Если на карте пусто, это первая загрузка - можно сбросить границы
-    const isFirstLoad = allContours.length === 0;
-
     console.log("--- НАЧАЛО ПАКЕТНОЙ ЗАГРУЗКИ ---");
     console.log("Запрошено объектов:", cleanSelectedNumbers.length);
     console.log("Найдено уникальных кварталов:", uniqueQuarters.length);
@@ -9055,7 +9052,7 @@ async function handleBatchLoad(selectedNumbers) {
             const targetNumbers = quartersMap[formattedQuarter];
             
             console.log(`[${index+1}/${uniqueQuarters.length}] Обработка квартала ${quarterDisplay}. Ищем объекты:`, targetNumbers);
-            updateLoaderProgress(0, 1, `Квартал ${quarterDisplay}: поиск КПТ...`);
+            updateLoaderProgress(index, uniqueQuarters.length, `Квартал ${quarterDisplay}: поиск файла...`);
             
             // 2. Ищем файл в хранилище
             const responseList = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}?search=${formattedQuarter}`);
@@ -9065,18 +9062,28 @@ async function handleBatchLoad(selectedNumbers) {
             }
             
             const fileList = await responseList.json();
-            // Ищем файл, который начинается с имени квартала
-            const matchingFiles = fileList ? fileList.filter(file => file.name.startsWith(formattedQuarter)) : [];
+            // Ищем файлы, которые начинаются с имени квартала
+            let matchingFiles = fileList ? fileList.filter(file => file.name.startsWith(formattedQuarter)) : [];
+
+            // --- ПРИОРИТЕТ JSON ДЛЯ НУЛЕВЫХ КВАРТАЛОВ ---
+            if (/_0{6,7}$/.test(formattedQuarter)) {
+                // Пытаемся найти именно .json.zip файлы
+                const jsonFiles = matchingFiles.filter(f => f.name.toLowerCase().endsWith('.json.zip'));
+                if (jsonFiles.length > 0) {
+                    console.log(`Для нулевого квартала ${quarterDisplay} включен приоритет JSON.`);
+                    matchingFiles = jsonFiles;
+                }
+            }
+            // -------------------------------------------
+
             const latestFile = findLatestKptFile(matchingFiles);
             
             if (!latestFile) {
-                console.warn(`КПТ для квартала ${quarterDisplay} не найден в хранилище.`);
-                showNotification(`КПТ для ${quarterDisplay} не найден`, 'warning');
+                console.warn(`Файл данных для квартала ${quarterDisplay} не найден в хранилище.`);
                 continue;
             }
             
             console.log(`Скачивание файла: ${latestFile.name}`);
-            updateLoaderProgress(0, 1, `Скачивание ${latestFile.name}...`);
             
             // 3. Скачиваем
             const responseFile = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}/${latestFile.name}`);
@@ -9088,47 +9095,85 @@ async function handleBatchLoad(selectedNumbers) {
             let fileContent = null;
             let fileType = null;
             
-            let xmlEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.xml') && !f.dir);
-            if (xmlEntry) {
-                fileContent = await xmlEntry.async('string');
-                fileType = 'xml';
+            // Сначала пробуем найти JSON (так как для нулевых кварталов мы могли скачать json.zip)
+            let jsonEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.json') && !f.dir);
+            
+            if (jsonEntry) {
+                fileContent = await jsonEntry.async('string');
+                fileType = 'json';
             } else {
-                let jsonEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.json') && !f.dir);
-                if (jsonEntry) {
-                    fileContent = await jsonEntry.async('string');
-                    fileType = 'json';
+                // Если JSON нет, ищем XML
+                let xmlEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.xml') && !f.dir);
+                if (xmlEntry) {
+                    fileContent = await xmlEntry.async('string');
+                    fileType = 'xml';
                 }
             }
             
             if (!fileContent) {
-                console.error(`В архиве ${latestFile.name} не найден XML или JSON`);
+                console.error(`В архиве ${latestFile.name} не найден поддерживаемый файл (XML или JSON)`);
                 continue;
             }
             
             // 5. Парсим и добавляем
             const foundInThisFile = await appendObjectsFromContent(fileContent, fileType, targetNumbers);
-            processedCount += foundInThisFile;
-            console.log(`В файле ${latestFile.name} найдено и загружено объектов: ${foundInThisFile}`);
+            totalProcessedCount += foundInThisFile;
+            console.log(`В файле ${latestFile.name} [тип: ${fileType}] найдено и загружено объектов: ${foundInThisFile}`);
         }
         
         // 6. Финал
-        updateLoaderProgress(1, 1, `Готово. Отрисовка...`);
+        updateLoaderProgress(uniqueQuarters.length, uniqueQuarters.length, `Готово. Проверка результатов...`);
         
-        console.log("Всего загружено объектов в память:", allContours.length);
+        // --- АВТОМАТИЧЕСКОЕ ВКЛЮЧЕНИЕ СЛОЯ ОКС ---
+        if (buildingsContours.length > 0 && !showBuildings) {
+            showBuildings = true;
+            const buildingsButton = document.getElementById('buildingsBtn');
+            if (buildingsButton) {
+                buildingsButton.classList.add('active');
+                buildingsButton.style.backgroundColor = '#3498db';
+            }
+        }
 
+        // --- ГЕНЕРАЦИЯ ОТЧЕТА ---
+        const loadedIds = new Set();
+        allContours.forEach(p => loadedIds.add(p.cadastralNumber));
+        buildingsContours.forEach(b => loadedIds.add(b.cadastralNumber));
+
+        const successList = [];
+        const missingList = [];
+
+        cleanSelectedNumbers.forEach(reqNum => {
+            if (loadedIds.has(reqNum)) {
+                successList.push(reqNum);
+            } else {
+                missingList.push(reqNum);
+            }
+        });
+
+        // Логика отрисовки и уведомлений
         if (allContours.length > 0 || buildingsContours.length > 0) {
             // Принудительно вызываем расчет границ (false)
-            const canvasEl = document.getElementById('kptSchemeCanvas');
-            // Центрируем камеру
             redraw(new Set(), new Set(), false); 
             
-            // Обновляем список слева
+            // Обновляем списки слева
             populateParcelsList();
             populateBuildingsList();
             
-            showNotification(`Успешно загружено объектов: ${processedCount}`, 'success');
+            // 7. Сценарии результата
+            if (missingList.length === 0) {
+                // ВСЕ ХОРОШО
+                showNotification(`Успешно загружены все ${successList.length} объектов!`, 'success', 'check-circle');
+            } else {
+                // ЕСТЬ ПОТЕРИ - ОТКРЫВАЕМ HTML ОТЧЕТ
+                showNotification(`Загружено: ${successList.length}. Не найдено: ${missingList.length}. Открывается отчет...`, 'warning', 'exclamation-triangle');
+                
+                // Вызов новой функции отчета
+                openHtmlReport(successList, missingList, cleanSelectedNumbers.length);
+            }
         } else {
-            showNotification('Объекты не найдены в загруженных КПТ.', 'warning');
+            showNotification('Ни один объект не был найден в загруженных файлах.', 'error');
+            // Если совсем ничего не загрузилось, тоже показываем отчет
+            openHtmlReport([], missingList, cleanSelectedNumbers.length);
         }
         
     } catch (e) {
@@ -9139,8 +9184,139 @@ async function handleBatchLoad(selectedNumbers) {
     }
 }
 
+function openHtmlReport(successList, missingList, totalCount) {
+    const successCount = successList.length;
+    const missingCount = missingList.length;
+    const dateStr = new Date().toLocaleString();
+
+    const htmlContent = `
+    <!DOCTYPE html>
+    <html lang="ru">
+    <head>
+        <meta charset="UTF-8">
+        <title>Отчет о загрузке объектов</title>
+        <style>
+            body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; background-color: #f4f7f6; padding: 20px; color: #333; }
+            .container { max-width: 900px; margin: 0 auto; background: white; padding: 30px; border-radius: 8px; box-shadow: 0 2px 10px rgba(0,0,0,0.1); }
+            h1 { color: #2c3e50; border-bottom: 2px solid #eee; padding-bottom: 10px; }
+            .summary { display: flex; gap: 20px; margin-bottom: 30px; background: #f8f9fa; padding: 15px; border-radius: 6px; }
+            .stat-box { flex: 1; text-align: center; padding: 10px; border-radius: 4px; border: 1px solid #ddd; }
+            .stat-number { font-size: 24px; font-weight: bold; display: block; margin-bottom: 5px; }
+            .stat-label { font-size: 12px; color: #777; text-transform: uppercase; letter-spacing: 1px; }
+            .stat-box.total { border-color: #3498db; color: #3498db; background: #ebf5fb; }
+            .stat-box.success { border-color: #27ae60; color: #27ae60; background: #e9f7ef; }
+            .stat-box.error { border-color: #c0392b; color: #c0392b; background: #fdedec; }
+            
+            h2 { font-size: 18px; margin-top: 30px; margin-bottom: 15px; display: flex; align-items: center; }
+            .badge { padding: 4px 8px; border-radius: 12px; font-size: 12px; margin-left: 10px; color: white; }
+            
+            table { width: 100%; border-collapse: collapse; margin-bottom: 20px; font-size: 14px; }
+            th, td { padding: 10px; text-align: left; border-bottom: 1px solid #eee; }
+            th { background-color: #f8f9fa; font-weight: 600; color: #555; }
+            tr:hover { background-color: #f1f1f1; }
+            
+            .section-error h2 { color: #c0392b; }
+            .section-error .badge { background-color: #c0392b; }
+            .section-success h2 { color: #27ae60; }
+            .section-success .badge { background-color: #27ae60; }
+            
+            .copy-btn { cursor: pointer; color: #3498db; border: none; background: none; font-size: 12px; text-decoration: underline; margin-left: 10px; }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <h1>Отчет о пакетной загрузке</h1>
+            <div style="margin-bottom: 20px; color: #777; font-size: 14px;">Дата формирования: ${dateStr}</div>
+
+            <div class="summary">
+                <div class="stat-box total">
+                    <span class="stat-number">${totalCount}</span>
+                    <span class="stat-label">Запрошено</span>
+                </div>
+                <div class="stat-box success">
+                    <span class="stat-number">${successCount}</span>
+                    <span class="stat-label">Загружено</span>
+                </div>
+                <div class="stat-box error">
+                    <span class="stat-number">${missingCount}</span>
+                    <span class="stat-label">Не найдено</span>
+                </div>
+            </div>
+
+            ${missingCount > 0 ? `
+            <div class="section-error">
+                <h2>
+                    Не найдены в файлах 
+                    <span class="badge">${missingCount}</span>
+                </h2>
+                <div style="background-color: #fdedec; padding: 15px; border-left: 4px solid #c0392b; border-radius: 4px; margin-bottom: 20px;">
+                    <strong>Внимание!</strong> Следующие объекты отсутствуют в загруженных файлах КПТ (XML/JSON). Проверьте правильность номеров или попробуйте загрузить другой файл для соответствующего квартала.
+                </div>
+                <table>
+                    <thead><tr><th>№</th><th>Кадастровый номер</th><th>Примечание</th></tr></thead>
+                    <tbody>
+                        ${missingList.map((num, i) => `<tr><td>${i+1}</td><td><strong>${num}</strong></td><td style="color:#e74c3c">Отсутствует в файле</td></tr>`).join('')}
+                    </tbody>
+                </table>
+            </div>
+            ` : ''}
+
+            ${successCount > 0 ? `
+            <div class="section-success">
+                <h2>
+                    Успешно загружены 
+                    <span class="badge">${successCount}</span>
+                </h2>
+                <table>
+                    <thead><tr><th>№</th><th>Кадастровый номер</th><th>Статус</th></tr></thead>
+                    <tbody>
+                        ${successList.map((num, i) => `<tr><td>${i+1}</td><td>${num}</td><td style="color:#27ae60">ОК</td></tr>`).join('')}
+                    </tbody>
+                </table>
+            </div>
+            ` : ''}
+        </div>
+    </body>
+    </html>
+    `;
+
+    const newWindow = window.open('', '_blank');
+    if (newWindow) {
+        newWindow.document.write(htmlContent);
+        newWindow.document.close();
+        newWindow.focus();
+    } else {
+        alert('Браузер заблокировал всплывающее окно с отчетом. Пожалуйста, разрешите всплывающие окна для этого сайта.');
+    }
+}
+
+// Вспомогательная функция для скачивания текстового файла
+function downloadTxtFile(content, filename) {
+    const blob = new Blob([content], { type: "text/plain;charset=utf-8" });
+    const link = document.createElement("a");
+    link.href = URL.createObjectURL(blob);
+    link.download = filename;
+    document.body.appendChild(link);
+    link.click();
+    document.body.removeChild(link);
+}
+
+function normalizeCadastralNumber(cn) {
+    if (!cn) return '';
+    const parts = cn.split(':');
+    if (parts.length >= 3) {
+        // Убираем ведущие нули в квартале (3-я часть), но оставляем хотя бы один ноль если там "0"
+        parts[2] = parts[2].replace(/^0+(?=\d)/, '');
+    }
+    return parts.join(':');
+}
+
 async function appendObjectsFromContent(content, type, targetIds) {
-    const targetSet = new Set(targetIds);
+    // Создаем Set из НОРМАЛИЗОВАННЫХ искомых номеров
+    const targetSet = new Set(targetIds.map(id => normalizeCadastralNumber(id.trim())));
+    
+    console.log("Ищем (нормализованные):", Array.from(targetSet));
+
     let addedCount = 0;
     
     if (type === 'xml') {
@@ -9149,20 +9325,23 @@ async function appendObjectsFromContent(content, type, targetIds) {
         
         // 1. ЗУ (Land Records)
         const landRecords = xmlDoc.querySelectorAll('land_record');
-        // console.log(`В XML найдено всего ЗУ: ${landRecords.length}`);
-
+        
         landRecords.forEach((record) => {
-            // Получаем номер и чистим от пробелов
             const rawNum = getElementValue(record, 'object > common_data > cad_number');
-            const cadNumber = rawNum ? rawNum.trim() : null;
+            if (!rawNum) return;
+
+            // Нормализуем номер из XML перед проверкой
+            const normalizedXmlNum = normalizeCadastralNumber(rawNum.trim());
             
-            if (cadNumber && targetSet.has(cadNumber)) {
+            // Сравниваем нормализованные версии
+            if (targetSet.has(normalizedXmlNum)) {
                 let contours = extractCoordinatesFromXML(record);
                 if (contours.length > 0) {
                     const areaInfo = getAreaInfo(record);
                     allContours.push({
                         parcelIndex: allContours.length,
-                        cadastralNumber: cadNumber,
+                        // Сохраняем ОРИГИНАЛЬНЫЙ номер из XML для корректного отображения
+                        cadastralNumber: rawNum.trim(), 
                         contours: contours,
                         isDeclaredArea: areaInfo.isDeclaredArea,
                         isIsolatedParcel: false,
@@ -9170,24 +9349,48 @@ async function appendObjectsFromContent(content, type, targetIds) {
                     });
                     addedCount++;
                 } else {
-                    console.warn(`Объект ${cadNumber} найден, но нет координат!`);
+                    console.warn(`Объект ${rawNum} найден, но нет координат!`);
                 }
             }
         });
         
-        // 2. ОКС (Building Records)
+        // 2. ОКС - Здания (Building Records)
         const buildRecords = xmlDoc.querySelectorAll('build_record');
         buildRecords.forEach(record => {
             const rawNum = getElementValue(record, 'object > common_data > cad_number');
-            const cadNumber = rawNum ? rawNum.trim() : null;
+            if (!rawNum) return;
 
-            if (cadNumber && targetSet.has(cadNumber)) {
+            const normalizedXmlNum = normalizeCadastralNumber(rawNum.trim());
+
+            if (targetSet.has(normalizedXmlNum)) {
                 let contours = extractBuildingCoordinatesFromXML(record);
                 if (contours.length > 0) {
                     buildingsContours.push({
-                        cadastralNumber: cadNumber,
+                        cadastralNumber: rawNum.trim(),
                         contours: contours,
                         type: 'building',
+                        record: record
+                    });
+                    addedCount++;
+                }
+            }
+        });
+
+        // 3. ОКС - Сооружения (Construction Records) - ДОБАВЛЕН ЭТОТ БЛОК
+        const constructionRecords = xmlDoc.querySelectorAll('construction_record');
+        constructionRecords.forEach(record => {
+            const rawNum = getElementValue(record, 'object > common_data > cad_number');
+            if (!rawNum) return;
+
+            const normalizedXmlNum = normalizeCadastralNumber(rawNum.trim());
+
+            if (targetSet.has(normalizedXmlNum)) {
+                let contours = extractBuildingCoordinatesFromXML(record);
+                if (contours.length > 0) {
+                    buildingsContours.push({
+                        cadastralNumber: rawNum.trim(),
+                        contours: contours,
+                        type: 'construction',
                         record: record
                     });
                     addedCount++;
@@ -9199,7 +9402,11 @@ async function appendObjectsFromContent(content, type, targetIds) {
         const jsonData = JSON.parse(content);
         if (jsonData.objects) {
             jsonData.objects.forEach((obj) => {
-                if (obj.id && targetSet.has(obj.id) && obj.contours) {
+                if (!obj.id) return;
+                
+                const normalizedJsonNum = normalizeCadastralNumber(obj.id.trim());
+
+                if (targetSet.has(normalizedJsonNum) && obj.contours) {
                     const internalContours = obj.contours.map(contour =>
                         contour.map(point => ({ x: point.x, y: point.y }))
                     );
