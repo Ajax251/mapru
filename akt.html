@@ -1081,7 +1081,7 @@
             }
         }
 
-        async function handleLoadParcel() {
+async function handleLoadParcel() {
             const fullCadNumber = cadastralInput.value.trim();
             if (!isValidCadastralNumber(fullCadNumber)) {
                 showError("Неверный формат кадастрового номера. Ожидается XX:XX:XXXXXX(X):YY", 'xml');
@@ -1096,14 +1096,32 @@
                 showLoaderXML(true, null, 0);
                 parcelInfoSectionXMLDiv.style.display = 'block';
                 try {
-                    const { xmlContent, kptFileName } = await fetchAndProcessKPT(quarterNumber, fullCadNumber);
-                    showLoaderXML(true, null, 95);
-                    const { parcelData, parcelContours } = await processXMLData(xmlContent, fullCadNumber, kptFileName);
+                    // ИЗМЕНЕНИЕ: Получаем не только контент, но и флаг типа файла
+                    const { fileContent, kptFileName, isJson } = await fetchAndProcessKPT(quarterNumber, fullCadNumber);
+                    
+                    showLoaderXML(true, isJson ? "Обработка JSON..." : "Обработка XML...", 95);
+                    
+                    let resultData;
+                    if (isJson) {
+                        // ИЗМЕНЕНИЕ: Обработка JSON
+                        resultData = processJSONData(fileContent, fullCadNumber, kptFileName);
+                        // Меняем заголовок, чтобы было понятно, что данные из JSON
+                        document.getElementById('h2XMLHeader').textContent = "Данные из JSON (Оптимизация)";
+                    } else {
+                        // Стандартная обработка XML
+                        resultData = await processXMLData(fileContent, fullCadNumber, kptFileName);
+                        document.getElementById('h2XMLHeader').textContent = "XML КПТ";
+                    }
+
+                    const { parcelData, parcelContours } = resultData;
+                    
                     currentParcelDataXML = parcelData;
                     displayParcelInfoTableXML(currentParcelDataXML);
+                    
                     if (currentParcelDataXML) {
-                        makeHeaderClickable(document.querySelector('#h2XMLHeader'), 'схема_xml.html', 'схему XML');
+                        makeHeaderClickable(document.querySelector('#h2XMLHeader'), 'схема_xml.html', 'схему');
                     }
+                    
                     if (currentParcelContoursXML && currentParcelContoursXML.length > 0 && currentParcelContoursXML.some(c => c.length > 0)) {
                         drawingSectionXMLDiv.style.display = 'block';
                         drawParcelOnCanvasXML(currentParcelContoursXML);
@@ -1114,15 +1132,15 @@
                         setExportButtonsState(false);
                         exportSectionXMLDiv.style.display = 'none';
                         if (currentParcelDataXML) {
-                            showError(`Координаты для участка ${fullCadNumber} не найдены или пусты в XML`, 'xml');
+                            showError(`Координаты для участка ${fullCadNumber} не найдены или пусты в файле`, 'xml');
                         }
                     }
                     showLoaderXML(true, ``, 100);
                     await new Promise(resolve => setTimeout(resolve, 500));
                     return { success: true };
                 } catch (error) {
-                    console.error("Error in XML processing:", error);
-                    showError(error.message || "Произошла ошибка при загрузке XML данных", 'xml');
+                    console.error("Error in File processing:", error);
+                    showError(error.message || "Произошла ошибка при загрузке данных", 'xml');
                     setExportButtonsState(false);
                     exportSectionXMLDiv.style.display = 'none';
                     drawingSectionXMLDiv.style.display = 'none';
@@ -1165,6 +1183,7 @@
 
             await Promise.allSettled([xmlProcessingPromise(), egrnProcessingPromise()]);
 
+            // Логика сравнения работает идентично для JSON и XML, так как формат currentParcelContoursXML унифицирован
             if (currentParcelContoursXML && convertedEgrnContours) {
                 if (currentRecordType === 'construction') {
                     lastComparisonResult = compareConstructionCoordinates(currentParcelContoursXML, convertedEgrnContours);
@@ -1211,8 +1230,13 @@
             loaderEGRNDiv.style.display = show ? 'flex' : 'none';
         }
 
-        async function fetchAndProcessKPT(quarterNumber, fullCadNumber) {
+async function fetchAndProcessKPT(quarterNumber, fullCadNumber) {
             const serverQuarterPrefix = quarterNumber.replace(/:/g, '_');
+            
+            // ИЗМЕНЕНИЕ: Проверка на "нулевой" квартал  (6 или 7 нулей в номере квартала)
+            // Ищем паттерн :000000: или :0000000: или в конце строки
+            const isZeroQuarter = /:0{6,7}$/.test(quarterNumber) || /:0{6,7}:/.test(fullCadNumber);
+
             showLoaderXML(true, null, 10);
             const responseList = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}?search=${serverQuarterPrefix}`);
             if (!responseList.ok) throw new Error(`Ошибка получения списка файлов: ${responseList.statusText}`);
@@ -1220,11 +1244,37 @@
             if (!fileList || fileList.length === 0) throw new Error(`КПТ для квартала ${quarterNumber} не найдены на сервере.`);
             showLoaderXML(true, null, 25);
 
-            const matchingFiles = fileList.filter(file => file.name.startsWith(serverQuarterPrefix) && file.name.toLowerCase().endsWith('.zip'));
-            if (matchingFiles.length === 0) throw new Error(`ZIP-архивы КПТ для квартала ${quarterNumber} не найдены.`);
+            let matchingFiles = [];
+            let preferJson = false;
+
+            // ИЗМЕНЕНИЕ: Логика приоритета JSON
+            if (isZeroQuarter) {
+                // Пытаемся найти .json.zip
+                const jsonFiles = fileList.filter(file => file.name.startsWith(serverQuarterPrefix) && file.name.toLowerCase().endsWith('.json.zip'));
+                if (jsonFiles.length > 0) {
+                    matchingFiles = jsonFiles;
+                    preferJson = true;
+                    // Выводим уведомление об оптимизации
+                    const errorDiv = document.getElementById('errorMessagesXML');
+                    errorDiv.innerHTML = '<i class="fas fa-bolt"></i> Обнаружен массивный объект (нулевой квартал).<br>Для ускорения используется JSON-формат.';
+                    errorDiv.style.display = 'block';
+                    errorDiv.style.backgroundColor = '#ecfdf5'; // Зеленоватый фон
+                    errorDiv.style.color = '#047857';
+                    errorDiv.style.borderColor = '#6ee7b7';
+                }
+            }
+
+            // Если JSON не нужен или не найден, ищем обычный ZIP (XML)
+            if (matchingFiles.length === 0) {
+                matchingFiles = fileList.filter(file => file.name.startsWith(serverQuarterPrefix) && file.name.toLowerCase().endsWith('.zip') && !file.name.toLowerCase().endsWith('.json.zip'));
+            }
+
+            if (matchingFiles.length === 0) throw new Error(`Подходящие архивы КПТ для квартала ${quarterNumber} не найдены.`);
+            
             const latestFile = findLatestKptFile(matchingFiles);
             if (!latestFile) throw new Error("Не удалось определить последний файл КПТ.");
-            showLoaderXML(true, null, 40);
+            
+            showLoaderXML(true, `Загрузка ${latestFile.name}...`, 40);
 
             const responseDownload = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}/${latestFile.name}`);
             if (!responseDownload.ok) throw new Error(`Ошибка загрузки файла ${latestFile.name}: ${responseDownload.statusText}`);
@@ -1233,13 +1283,133 @@
             showLoaderXML(true, null, 65);
 
             const zip = await JSZip.loadAsync(blob);
-            let xmlFileEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.xml') && !f.dir);
-            if (!xmlFileEntry) throw new Error("XML-файл не найден в архиве КПТ.");
-            showLoaderXML(true, null, 85);
-            const xmlContent = await xmlFileEntry.async('string');
-            return { xmlContent, kptFileName: latestFile.name };
-        }
+            
+            let fileContent = null;
+            let isJsonResult = false;
 
+            // ИЗМЕНЕНИЕ: Распаковка в зависимости от типа
+            if (preferJson) {
+                const jsonEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.json') && !f.dir);
+                if (jsonEntry) {
+                    fileContent = await jsonEntry.async('string');
+                    isJsonResult = true;
+                }
+            }
+
+            // Если JSON не найден (или не искали), ищем XML
+            if (!fileContent) {
+                const xmlFileEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.xml') && !f.dir);
+                if (xmlFileEntry) {
+                    fileContent = await xmlFileEntry.async('string');
+                    isJsonResult = false;
+                }
+            }
+
+            if (!fileContent) throw new Error("В архиве не найдены файлы данных (XML или JSON).");
+            
+            showLoaderXML(true, null, 85);
+            return { fileContent, kptFileName: latestFile.name, isJson: isJsonResult };
+        }
+        
+        function processJSONData(jsonContent, fullCadNumber, kptFileName) {
+            let data;
+            try {
+                data = JSON.parse(jsonContent);
+            } catch (e) {
+                throw new Error("Ошибка парсинга JSON файла.");
+            }
+
+            // Ищем объект по ID (кадастровому номеру)
+            const targetObj = data.objects.find(o => o.id === fullCadNumber);
+            
+            if (!targetObj) {
+                throw new Error(`Объект ${fullCadNumber} не найден в JSON файле ${kptFileName}.`);
+            }
+
+            // Парсим метаданные файла (для отображения даты/номера КПТ)
+            // В JSON обычно source_xml_name_in_zip хранит имя, из него можно вытащить дату
+            if (kptFileName) {
+                const dateMatch = kptFileName.match(/(\d{4})[_-](\d{2})[_-](\d{2})/);
+                if (dateMatch) {
+                    kptDate = `${dateMatch[3]}.${dateMatch[2]}.${dateMatch[1]}`;
+                } else {
+                    kptDate = 'из имени файла';
+                }
+                kptRegNum = 'JSON выписка';
+            }
+
+            // Определяем тип записи
+            if (targetObj.type === 'parcel') currentRecordType = 'land';
+            else if (targetObj.type === 'building') currentRecordType = 'build';
+            else if (targetObj.type === 'construction') currentRecordType = 'construction';
+            else currentRecordType = 'land';
+
+            // Извлекаем контуры
+            // Формат в JSON обычно: [[{x,y, ord_nmb, delta}, ...], [...]]
+            // Нам нужно: [[{x,y}, ...], ...] (delta обрабатываем отдельно для статистики)
+            const allDeltas = [];
+            currentParcelContoursXML = targetObj.contours.map(contour => {
+                return contour.map(point => {
+                    if (point.delta !== undefined && point.delta !== null) {
+                        allDeltas.push(parseFloat(point.delta));
+                    }
+                    return { x: point.x, y: point.y };
+                });
+            });
+
+            xmlTotalPointCount = currentParcelContoursXML ? currentParcelContoursXML.reduce((sum, contour) => sum + contour.length, 0) : 0;
+
+            // Формируем parcelData
+            const opts = targetObj.options || {};
+            const parcelData = {};
+
+            parcelData.cadNumber = targetObj.id;
+            
+            // Тип объекта
+            if (opts.land_record_type) parcelData.objectType = opts.land_record_type;
+            else if (targetObj.type === 'building') parcelData.objectType = 'Здание';
+            else if (targetObj.type === 'construction') parcelData.objectType = 'Сооружение';
+            else parcelData.objectType = 'Земельный участок';
+
+            parcelData.address = opts.readable_address || 'Нет данных';
+
+            // Площадь
+            let areaVal = opts.area || opts.specified_area || opts.land_record_area_verified || opts.declared_area || opts.build_record_area;
+            if (currentRecordType === 'construction' && opts.params_area) areaVal = opts.params_area;
+            
+            parcelData.areaNumeric = areaVal ? parseFloat(String(areaVal).replace(',', '.')) : null;
+            
+            // Определение декларированной площади (для ЗУ)
+            const isDeclared = (targetObj.type === 'parcel') && 
+                               (opts.specified_area === null || opts.specified_area === undefined) && 
+                               (opts.land_record_area_verified === null || opts.land_record_area_verified === undefined);
+            
+            if (parcelData.areaNumeric !== null) {
+                const inaccuracy = opts.inaccuracy || opts.area_inaccuracy;
+                if (currentRecordType === 'land') {
+                    parcelData.areaString = isDeclared 
+                        ? `Декларированная: ${formatNumberWithSpaces(parcelData.areaNumeric)} кв.м.` 
+                        : `Уточненная: ${formatNumberWithSpaces(parcelData.areaNumeric)} ${inaccuracy ? '±' + inaccuracy : ''} кв.м.`;
+                } else {
+                    parcelData.areaString = `${formatNumberWithSpaces(parcelData.areaNumeric)} кв.м.`;
+                }
+            } else {
+                parcelData.areaString = 'Нет данных';
+            }
+
+            // Прочие поля
+            parcelData.permittedUse = opts.permitted_use_established_by_document || opts.purpose || opts.params_purpose || 'Нет данных';
+            parcelData.category = opts.land_record_category_type || (opts.floors ? `Этажность: ${opts.floors}` : 'Нет данных');
+            
+            const cost = opts.cost_value;
+            parcelData.cadastralValue = cost ? parseFloat(cost).toLocaleString('ru-RU') + ' руб.' : 'Нет данных';
+
+            // Погрешность (max delta)
+            parcelData.maxDeltaGeopoint = allDeltas.length > 0 ? Math.max(...allDeltas).toString() : '—';
+
+            return { parcelData, parcelContours: currentParcelContoursXML };
+        }
+        
         async function processXMLData(xmlContent, fullCadNumber, kptFileName) {
             const parser = new DOMParser();
             const xmlDoc = parser.parseFromString(xmlContent, "text/xml");
