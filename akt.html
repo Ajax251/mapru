@@ -2065,8 +2065,8 @@ async function fetchAndProcessKPT(quarterNumber, fullCadNumber) {
             return { match: overallMatch, comparisonTable, isConstruction: true };
         }
 
-        // ===== СТАНДАРТНОЕ СРАВНЕНИЕ КООРДИНАТ =====
-   function compareParcelCoordinates(xmlContours, egrnContours) {
+     // ===== ОБНОВЛЕННОЕ СРАВНЕНИЕ (С УЧЕТОМ НАПРАВЛЕНИЯ И ПОИСКОМ ПОТЕРЯННЫХ ТОЧЕК) =====
+        function compareParcelCoordinates(xmlContours, egrnContours) {
             const comparisonTable = [];
             let strictMatchCount = 0;
             let looseMatchCount = 0;
@@ -2074,7 +2074,6 @@ async function fetchAndProcessKPT(quarterNumber, fullCadNumber) {
             const tolerance = 0.02; // Допуск 2 см
 
             // 1. Создаем плоский список всех точек ЕГРН для поиска "потеряшек"
-            // Храним координаты и информацию, откуда они (номер контура, номер точки)
             const flatEgrnPoints = [];
             egrnContours.forEach((contour, cIndex) => {
                 contour.forEach((point, pIndex) => {
@@ -2082,20 +2081,68 @@ async function fetchAndProcessKPT(quarterNumber, fullCadNumber) {
                         x: point.x,
                         y: point.y,
                         contourId: cIndex + 1,
-                        pointId: pIndex + 1,
-                        used: false // Флаг, чтобы не "матчить" одну точку ЕГРН дважды (опционально)
+                        pointId: pIndex + 1
                     });
                 });
             });
 
-            // Общий счетчик точек для сквозной нумерации в таблице
             let globalPointIndex = 0;
 
             // 2. Проходим по всем контурам XML
             for (let i = 0; i < xmlContours.length; i++) {
                 const xmlContour = xmlContours[i];
-                // Пытаемся найти соответствующий контур в ЕГРН по индексу (для строгого сравнения)
-                const egrnContourStrict = egrnContours[i] || [];
+                let egrnContourStrict = egrnContours[i] || [];
+
+                // --- ЛОГИКА АВТОМАТИЧЕСКОГО РАЗВОРОТА (REVERSE) ---
+                if (egrnContourStrict.length > 0 && xmlContour.length === egrnContourStrict.length) {
+                    // 1. Считаем совпадения для прямого порядка
+                    let normalMatches = 0;
+                    for (let k = 0; k < xmlContour.length; k++) {
+                        const dx = Math.abs(xmlContour[k].x - egrnContourStrict[k].x);
+                        const dy = Math.abs(xmlContour[k].y - egrnContourStrict[k].y);
+                        if (Math.sqrt(dx * dx + dy * dy) <= tolerance) normalMatches++;
+                    }
+
+                    // 2. Считаем совпадения для обратного порядка
+                    // Вариант А: Простой реверс массива
+                    const reversedArr = [...egrnContourStrict].reverse();
+                    let reverseMatches = 0;
+                    for (let k = 0; k < xmlContour.length; k++) {
+                        const dx = Math.abs(xmlContour[k].x - reversedArr[k].x);
+                        const dy = Math.abs(xmlContour[k].y - reversedArr[k].y);
+                        if (Math.sqrt(dx * dx + dy * dy) <= tolerance) reverseMatches++;
+                    }
+
+                    // Вариант Б: Реверс для замкнутого контура (первая точка остается на месте, остальные разворачиваются)
+                    // Это нужно, если в XML и ЕГРН начало контура совпадает, но направление разное
+                    let reverseClosedMatches = 0;
+                    let reversedClosedArr = [];
+                    if (egrnContourStrict.length > 2) {
+                        reversedClosedArr = [
+                            egrnContourStrict[0], 
+                            ...egrnContourStrict.slice(1, -1).reverse(), 
+                            egrnContourStrict[egrnContourStrict.length - 1]
+                        ];
+                        // Если контур не замкнут геометрически (первая != последняя), этот метод может исказить данные,
+                        // но мы просто считаем совпадения, так что это безопасно для выбора лучшего варианта.
+                        for (let k = 0; k < xmlContour.length; k++) {
+                            if (!reversedClosedArr[k]) break;
+                            const dx = Math.abs(xmlContour[k].x - reversedClosedArr[k].x);
+                            const dy = Math.abs(xmlContour[k].y - reversedClosedArr[k].y);
+                            if (Math.sqrt(dx * dx + dy * dy) <= tolerance) reverseClosedMatches++;
+                        }
+                    }
+
+                    // Выбираем лучший вариант
+                    // Если реверс дает больше совпадений, чем прямой порядок, используем его
+                    if (reverseMatches > normalMatches && reverseMatches >= reverseClosedMatches) {
+                        egrnContourStrict = reversedArr;
+                    } else if (reverseClosedMatches > normalMatches && reverseClosedMatches > reverseMatches) {
+                        egrnContourStrict = reversedClosedArr;
+                    }
+                    // Иначе оставляем прямой порядок
+                }
+                // --- КОНЕЦ ЛОГИКИ РАЗВОРОТА ---
 
                 for (let j = 0; j < xmlContour.length; j++) {
                     globalPointIndex++;
@@ -2115,8 +2162,7 @@ async function fetchAndProcessKPT(quarterNumber, fullCadNumber) {
                         }
                     }
 
-                    // Б. Если строгого совпадения нет, ищем "свободное" совпадение во всем ЕГРН
-                    let isLooseMatch = false;
+                    // Б. Если строгого совпадения нет (даже после разворота), ищем "свободное"
                     let looseDelta = null;
                     let foundLocation = '';
 
@@ -2126,7 +2172,7 @@ async function fetchAndProcessKPT(quarterNumber, fullCadNumber) {
                             index: globalPointIndex,
                             xml: `${xmlP.x.toFixed(2)}, ${xmlP.y.toFixed(2)}`,
                             egrn: `${egrnContourStrict[j].x.toFixed(2)}, ${egrnContourStrict[j].y.toFixed(2)}`,
-                            matchType: 'strict', // 'strict', 'loose', 'none'
+                            matchType: 'strict', 
                             delta: strictDelta.toFixed(3)
                         });
                     } else {
@@ -2144,8 +2190,6 @@ async function fetchAndProcessKPT(quarterNumber, fullCadNumber) {
 
                         if (foundPoint) {
                             looseMatchCount++;
-                            isLooseMatch = true;
-                            // Формируем сообщение, где нашлась точка
                             foundLocation = `(Контур ${foundPoint.contourId}, т.${foundPoint.pointId})`;
                             
                             comparisonTable.push({
@@ -2174,13 +2218,10 @@ async function fetchAndProcessKPT(quarterNumber, fullCadNumber) {
             if (mismatchCount === 0 && looseMatchCount === 0) {
                 overallStatus = 'match';
             } else if (mismatchCount === 0 && looseMatchCount > 0) {
-                overallStatus = 'warning'; // Новый статус: порядок отличается, но координаты есть
+                overallStatus = 'warning'; 
             }
 
-            // Проверка на лишние точки в ЕГРН (которых нет в XML)
-            // Если в ЕГРН точек больше, чем в XML, это тоже расхождение
             if (flatEgrnPoints.length > globalPointIndex) {
-                 // Можно добавить логику отображения "лишних" точек ЕГРН, но пока просто пометим как warning/mismatch
                  if (overallStatus === 'match') overallStatus = 'warning';
             }
 
