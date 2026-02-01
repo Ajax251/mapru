@@ -2157,6 +2157,7 @@ async function fetchEgrnCoordinates(cadNumber) {
 
 
 
+
 async function fetchOksInfo(cadNumber) {
     try {
         const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(cadNumber)}`;
@@ -2177,13 +2178,27 @@ async function fetchOksInfo(cadNumber) {
         const options = feature.properties?.options || {};
         const categoryName = feature.properties?.categoryName || '';
         
+        // Определяем тип объекта
         let objectType = 'ОКС';
-        if (categoryName.includes('Здания')) objectType = 'Здание';
-        else if (categoryName.includes('Сооружения')) objectType = 'Сооружение';
-        else if (categoryName.includes('Помещения')) objectType = 'Помещение';
+        if (categoryName.includes('Здания')) {
+            objectType = 'Здание';
+        } else if (categoryName.includes('Сооружения')) {
+            objectType = 'Сооружение';
+        } else if (categoryName.includes('Помещения')) {
+            objectType = 'Помещение';
+        }
         
-        const address = options.readable_address || options.address_readable_address || options.address || null;
-        const name = options.building_name || options.params_name || options.name || null;
+        // Получаем адрес (разные поля для разных типов)
+        const address = options.readable_address || 
+                       options.address_readable_address || 
+                       options.address || 
+                       null;
+        
+        // Получаем наименование
+        const name = options.building_name || 
+                    options.params_name || 
+                    options.name || 
+                    null;
         
         return {
             found: true,
@@ -2196,42 +2211,47 @@ async function fetchOksInfo(cadNumber) {
         
     } catch (error) {
         console.error(`Ошибка загрузки данных ОКС ${cadNumber}:`, error);
-        return { found: false, cadNumber: cadNumber, address: null, type: null, error: error.message };
+        return {
+            found: false,
+            cadNumber: cadNumber,
+            address: null,
+            type: null,
+            error: error.message
+        };
     }
 }
 
 
+// ===== ОБНОВЛЁННАЯ ФУНКЦИЯ: fetchLinkedOksFromRegistry =====
 
 async function fetchLinkedOksFromRegistry(cadNumber, loadDetails = true) {
-    if (!cadNumber) {
-        return { success: false, error: 'Кадастровый номер не указан', oks: [], errorType: 'no_input' };
-    }
+    if (!cadNumber) return { success: false, error: 'Кадастровый номер не указан', oks: [], errorType: 'no_input' };
     
     try {
+        // Шаг 1: Поиск основного объекта для получения внутренних ID
         const searchUrl = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(cadNumber)}`;
         const searchResponse = await fetch(searchUrl);
         
-        // Сначала парсим JSON (NSPD возвращает 200 даже при отсутствии объекта)
-        let searchData;
-        try {
-            searchData = await searchResponse.json();
-        } catch (e) {
-            // Если не удалось распарсить JSON - это ошибка сервера
-            return { 
-                success: false, 
-                error: `Сервер ЕГРН вернул некорректный ответ. Попробуйте позже.`, 
-                oks: [],
-                errorType: 'server_error'
-            };
-        }
+        // Обрабатываем ответ
+        const searchData = await searchResponse.json();
         
-        // Проверяем на "объект не найден" (код 204 в теле ответа)
+        // Проверяем на "не найдено" (код 204 в теле ответа)
         if (searchData.code === 204 || !searchData.data?.features?.length) {
             return { 
                 success: false, 
                 error: `Земельный участок ${cadNumber} не найден в ЕГРН. Проверьте правильность кадастрового номера.`, 
                 oks: [],
                 errorType: 'not_found'
+            };
+        }
+        
+        // Проверяем HTTP статус
+        if (!searchResponse.ok) {
+            return { 
+                success: false, 
+                error: `Не удалось получить данные из ЕГРН (ошибка сервера). Попробуйте позже.`, 
+                oks: [],
+                errorType: 'server_error'
             };
         }
         
@@ -2242,7 +2262,7 @@ async function fetchLinkedOksFromRegistry(cadNumber, loadDetails = true) {
         const registersId = options.registersId;
         const categoryId = props.category;
         
-        // Формируем URL для запроса связей
+        // Шаг 2: Запрос списка связанных ОКС
         let linksUrl;
         if (registersId) {
             linksUrl = `https://nspd.gov.ru/api/geoportal/v1/tab-group-data?tabClass=objectsList&objdocId=${geomId}&registersId=${registersId}`;
@@ -2263,6 +2283,7 @@ async function fetchLinkedOksFromRegistry(cadNumber, loadDetails = true) {
         const linksResponse = await fetch(linksUrl);
         
         if (!linksResponse.ok) {
+            // Запрос связей не удался, но основной объект найден
             return { 
                 success: true, 
                 error: null, 
@@ -2274,7 +2295,7 @@ async function fetchLinkedOksFromRegistry(cadNumber, loadDetails = true) {
         
         const linksData = await linksResponse.json();
         
-        // Извлекаем список ОКС
+        // Извлекаем список ОКС из ответа
         const linkedOksList = [];
         
         if (linksData?.object && Array.isArray(linksData.object)) {
@@ -2299,7 +2320,7 @@ async function fetchLinkedOksFromRegistry(cadNumber, loadDetails = true) {
             });
         }
         
-        // Загружаем детальную информацию по каждому ОКС
+        // Шаг 3: Загружаем детальную информацию по каждому ОКС
         const oksWithDetails = [];
         
         if (loadDetails && linkedOksList.length > 0) {
@@ -2325,8 +2346,8 @@ async function fetchLinkedOksFromRegistry(cadNumber, loadDetails = true) {
     } catch (error) {
         console.error('Ошибка получения связанных ОКС из реестра:', error);
         
-        let userFriendlyError = 'Не удалось подключиться к серверу ЕГРН. Проверьте интернет-соединение.';
-        let errorType = 'network_error';
+        // Определяем тип ошибки для понятного сообщения
+        let userFriendlyError = 'Не удалось подключиться к серверу ЕГРН. Проверьте интернет-соединение и попробуйте снова.';
         
         if (error.message.includes('Failed to fetch') || error.message.includes('NetworkError')) {
             userFriendlyError = 'Ошибка сети. Проверьте подключение к интернету.';
@@ -2334,18 +2355,182 @@ async function fetchLinkedOksFromRegistry(cadNumber, loadDetails = true) {
             userFriendlyError = 'Сервер ЕГРН не отвечает. Попробуйте позже.';
         }
         
-        return { success: false, error: userFriendlyError, oks: [], errorType };
+        return { 
+            success: false, 
+            error: userFriendlyError, 
+            oks: [],
+            errorType: 'network_error'
+        };
     }
 }
 
 
+// ===== МОДИФИЦИРОВАННАЯ ФУНКЦИЯ: checkOksInEgrn =====
+
+async function fetchOksInfo(cadNumber) {
+    try {
+        const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(cadNumber)}`;
+        const response = await fetch(url);
+        const data = await response.json();
+        
+        if (data.code === 204 || !data.data?.features?.length) {
+            return {
+                found: false,
+                cadNumber: cadNumber,
+                address: null,
+                type: null,
+                name: null
+            };
+        }
+        
+        const feature = data.data.features[0];
+        const options = feature.properties?.options || {};
+        const categoryName = feature.properties?.categoryName || '';
+        
+        // Определяем тип объекта
+        let objectType = 'ОКС';
+        if (categoryName.includes('Здания')) {
+            objectType = 'Здание';
+        } else if (categoryName.includes('Сооружения')) {
+            objectType = 'Сооружение';
+        } else if (categoryName.includes('Помещения')) {
+            objectType = 'Помещение';
+        }
+        
+        // Получаем адрес (разные поля для разных типов)
+        const address = options.readable_address || 
+                       options.address_readable_address || 
+                       options.address || 
+                       null;
+        
+        // Получаем наименование
+        const name = options.building_name || 
+                    options.params_name || 
+                    options.name || 
+                    null;
+        
+        return {
+            found: true,
+            cadNumber: cadNumber,
+            address: address,
+            type: objectType,
+            name: name,
+            status: options.status || options.common_data_status || null
+        };
+        
+    } catch (error) {
+        console.error(`Ошибка загрузки данных ОКС ${cadNumber}:`, error);
+        return {
+            found: false,
+            cadNumber: cadNumber,
+            address: null,
+            type: null,
+            error: error.message
+        };
+    }
+}
 
 
+// ===== ОБНОВЛЁННАЯ ФУНКЦИЯ: fetchLinkedOksFromRegistry =====
 
-
-
-
-
+async function fetchLinkedOksFromRegistry(cadNumber, loadDetails = true) {
+    if (!cadNumber) return { success: false, error: 'Кадастровый номер не указан', oks: [] };
+    
+    try {
+        // Шаг 1: Поиск основного объекта для получения внутренних ID
+        const searchUrl = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(cadNumber)}`;
+        const searchResponse = await fetch(searchUrl);
+        
+        if (!searchResponse.ok) {
+            throw new Error(`Ошибка поиска ЗУ: ${searchResponse.status}`);
+        }
+        
+        const searchData = await searchResponse.json();
+        
+        if (searchData.code === 204 || !searchData.data?.features?.length) {
+            return { success: false, error: `ЗУ ${cadNumber} не найден в ЕГРН`, oks: [] };
+        }
+        
+        const feature = searchData.data.features[0];
+        const geomId = feature.id;
+        const props = feature.properties || {};
+        const options = props.options || {};
+        const registersId = options.registersId;
+        const categoryId = props.category;
+        
+        // Шаг 2: Запрос списка связанных ОКС
+        let linksUrl;
+        if (registersId) {
+            linksUrl = `https://nspd.gov.ru/api/geoportal/v1/tab-group-data?tabClass=objectsList&objdocId=${geomId}&registersId=${registersId}`;
+        } else if (categoryId && geomId) {
+            linksUrl = `https://nspd.gov.ru/api/geoportal/v1/tab-group-data?tabClass=objectsList&categoryId=${categoryId}&geomId=${geomId}`;
+        } else {
+            return { success: false, error: 'Не удалось определить параметры для запроса связей', oks: [] };
+        }
+        
+        await delay(500);
+        
+        const linksResponse = await fetch(linksUrl);
+        
+        if (!linksResponse.ok) {
+            return { success: true, error: null, oks: [], noLinksData: true };
+        }
+        
+        const linksData = await linksResponse.json();
+        
+        // Извлекаем список ОКС из ответа
+        const linkedOksList = [];
+        
+        if (linksData?.object && Array.isArray(linksData.object)) {
+            linksData.object.forEach(obj => {
+                if (obj.value && Array.isArray(obj.value)) {
+                    obj.value.forEach(val => {
+                        if (typeof val === 'string' && val.match(/^\d{2}:\d{2}:\d{6,7}:\d+$/)) {
+                            linkedOksList.push(val);
+                        } else if (typeof val === 'object' && val.cad_number) {
+                            linkedOksList.push(val.cad_number);
+                        }
+                    });
+                }
+            });
+        }
+        
+        if (linkedOksList.length === 0 && linksData?.value && Array.isArray(linksData.value)) {
+            linksData.value.forEach(val => {
+                if (typeof val === 'string' && val.match(/^\d{2}:\d{2}:\d{6,7}:\d+$/)) {
+                    linkedOksList.push(val);
+                }
+            });
+        }
+        
+        // Шаг 3: Загружаем детальную информацию по каждому ОКС
+        const oksWithDetails = [];
+        
+        if (loadDetails && linkedOksList.length > 0) {
+            for (let i = 0; i < linkedOksList.length; i++) {
+                if (i > 0) await delay(300);
+                const oksInfo = await fetchOksInfo(linkedOksList[i]);
+                oksWithDetails.push(oksInfo);
+            }
+        } else {
+            linkedOksList.forEach(kn => {
+                oksWithDetails.push({ cadNumber: kn, found: null, address: null, type: null });
+            });
+        }
+        
+        return { 
+            success: true, 
+            error: null, 
+            oks: oksWithDetails,
+            geomId,
+            registersId 
+        };
+        
+    } catch (error) {
+        console.error('Ошибка получения связанных ОКС из реестра:', error);
+        return { success: false, error: error.message, oks: [] };
+    }
+}
 
 
 // ===== ПОЛНОСТЬЮ ОБНОВЛЁННАЯ ФУНКЦИЯ: checkOksInEgrn =====
