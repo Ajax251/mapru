@@ -2140,106 +2140,159 @@
             return { x: sumX / count, y: sumY / count };
         }
 
-
-function cleanAddress(address) {
-    if (!address) return address;
-    
-    const unwantedPhrases = [
-        '«Местоположение установлено относительно ориентира, расположенного в границах участка. Почтовый адрес ориентира:',
-        'Местоположение установлено относительно ориентира, расположенного в границах участка. Почтовый адрес ориентира:',
-        '«Местоположение установлено относительно ориентира, расположенного за пределами участка. Почтовый адрес ориентира:',
-        'Местоположение установлено относительно ориентира, расположенного за пределами участка. Почтовый адрес ориентира:',
-    ];
-    
-    let cleaned = address;
-    for (const phrase of unwantedPhrases) {
-        cleaned = cleaned.replace(phrase, '');
-    }
-    
-    // Удалить закрывающие кавычки и скобки в конце
-    cleaned = cleaned.replace(/»\s*$/, '').replace(/«\s*$/, '');
-    
-    // Убрать лишние пробелы
-    cleaned = cleaned.replace(/\s+/g, ' ').trim();
-    
-    return cleaned;
-}
-
-    async function getCoordinatesFromNSPD(cadastralNumber) {
+async function getCoordinatesFromNSPD(cadastralNumber, returnAllCoords = false) {
     try {
-        const apiUrl = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(cadastralNumber)}`;
+        const apiUrl = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${cadastralNumber}`;
         const response = await fetch(apiUrl);
         const data = await response.json();
         
-        if (data.code === 204 || !data.data?.features?.length) {
-            return null;
-        }
+        if (data.code === 204 || !data.data?.features?.length) return null;
         
         const feature = data.data.features[0];
         const geometry = feature.geometry;
-        const properties = feature.properties;
+        const address = feature.properties?.options?.readable_address || null;
         
-        let coordinates;
+        // Возвращаем все координаты для меток
+        if (returnAllCoords) {
+            let allCoords = [];
+            
+            if (geometry.type === 'Polygon') {
+                const ring = geometry.coordinates[0];
+                for (let i = 0; i < ring.length - 1; i++) { // -1 чтобы не дублировать замыкающую точку
+                    const coord = ring[i];
+                    if (!coord[0].toString().includes("5632576")) {
+                        const converted = convertCoordinates(coord[0], coord[1]);
+                        allCoords.push(converted);
+                    }
+                }
+            } else if (geometry.type === 'MultiPolygon') {
+                for (let polygon of geometry.coordinates) {
+                    const ring = polygon[0];
+                    for (let i = 0; i < ring.length - 1; i++) {
+                        const coord = ring[i];
+                        if (!coord[0].toString().includes("5632576")) {
+                            const converted = convertCoordinates(coord[0], coord[1]);
+                            allCoords.push(converted);
+                        }
+                    }
+                }
+            } else if (geometry.type === 'Point') {
+                if (!geometry.coordinates[0].toString().includes("5632576")) {
+                    const converted = convertCoordinates(geometry.coordinates[0], geometry.coordinates[1]);
+                    allCoords.push(converted);
+                }
+            }
+            
+            // Ограничиваем количество меток (URL имеет лимит длины)
+            const maxMarkers = 50;
+            if (allCoords.length > maxMarkers) {
+                const step = Math.ceil(allCoords.length / maxMarkers);
+                allCoords = allCoords.filter((_, index) => index % step === 0);
+            }
+            
+            return { coords: allCoords, address };
+        }
+        
+        // Оригинальная логика для центра
+        let x, y;
         if (geometry.type === 'Polygon') {
-            coordinates = geometry.coordinates[0][0];
+            const center = calculatePolygonCenter(geometry.coordinates);
+            x = center.x;
+            y = center.y;
         } else if (geometry.type === 'Point') {
-            coordinates = geometry.coordinates;
+            x = geometry.coordinates[0];
+            y = geometry.coordinates[1];
         } else if (geometry.type === 'MultiPolygon') {
-            coordinates = geometry.coordinates[0][0][0];
+            const firstPolygon = geometry.coordinates[0];
+            const center = calculatePolygonCenter(firstPolygon);
+            x = center.x;
+            y = center.y;
         } else {
             return null;
         }
         
-        const [x, y] = coordinates;
+        if (x.toString().includes("5632576") || y.toString().includes("5632576")) {
+            return { address };
+        }
         
-        // Конвертация из EPSG:3857 в WGS84
-        const lon = (x * 180) / 20037508.34;
-        const lat = (Math.atan(Math.exp((y * Math.PI) / 20037508.34)) * 360) / Math.PI - 90;
-        
-        // Очистка адреса
-        const rawAddress = properties?.options?.find(opt => opt.key === 'Адрес')?.value || 
-                          properties?.address || '';
-        const address = cleanAddress(rawAddress);
-        
-        return { lat, lon, address };
+        const coords = convertCoordinates(x, y);
+        return { lat: coords.lat, lon: coords.lon, address };
     } catch (error) {
-        console.error('Ошибка получения координат:', error);
         return null;
     }
 }
 
-function openYandexMaps(lat, lon, label) {
-    let url = `https://yandex.ru/maps/?pt=${lon},${lat}&z=17&l=sat,skl`;
-    if (label) {
-        url += `&text=${encodeURIComponent(label)}`;
+function openYandexMapsMultiple(coords) {
+    if (!coords || coords.length === 0) return;
+    
+    // Формируем строку меток: lon,lat,pm2rdm~lon,lat,pm2rdm~...
+    const markers = coords.map((c, i) => {
+        // pm2rdl - синяя метка, pm2rdm - красная, pm2grm - зеленая
+        const color = i === 0 ? 'pm2rdl' : 'pm2grm'; // первая - синяя, остальные - зеленые
+        return `${c.lon},${c.lat},${color}`;
+    }).join('~');
+    
+    // Вычисляем центр для позиционирования карты
+    const centerLat = coords.reduce((sum, c) => sum + c.lat, 0) / coords.length;
+    const centerLon = coords.reduce((sum, c) => sum + c.lon, 0) / coords.length;
+    
+    // Определяем зум на основе разброса координат
+    const latSpread = Math.max(...coords.map(c => c.lat)) - Math.min(...coords.map(c => c.lat));
+    const lonSpread = Math.max(...coords.map(c => c.lon)) - Math.min(...coords.map(c => c.lon));
+    const maxSpread = Math.max(latSpread, lonSpread);
+    let zoom = 17;
+    if (maxSpread > 0.01) zoom = 14;
+    else if (maxSpread > 0.005) zoom = 15;
+    else if (maxSpread > 0.001) zoom = 16;
+    
+    const url = `https://yandex.ru/maps/?pt=${markers}&ll=${centerLon},${centerLat}&z=${zoom}&l=sat,skl`;
+    window.open(url, '_blank', 'noopener,noreferrer');
+}
+
+// Новая функция для Google Карт с несколькими метками
+function openGoogleMapsMultiple(coords) {
+    if (!coords || coords.length === 0) return;
+    
+    // Вычисляем центр
+    const centerLat = coords.reduce((sum, c) => sum + c.lat, 0) / coords.length;
+    const centerLon = coords.reduce((sum, c) => sum + c.lon, 0) / coords.length;
+    
+    // Google Maps поддерживает несколько меток через data URL или embed
+    // Простой вариант - использовать режим направлений для отображения точек
+    if (coords.length <= 10) {
+        // Для небольшого количества точек - режим waypoints
+        const waypoints = coords.map(c => `${c.lat},${c.lon}`).join('/');
+        const url = `https://www.google.com/maps/dir/${waypoints}`;
+        window.open(url, '_blank', 'noopener,noreferrer');
+    } else {
+        // Для большого количества - открыть карту с центром и предложить KML
+        // Альтернатива: использовать Google My Maps API
+        const markersParam = coords.slice(0, 10).map(c => `markers=${c.lat},${c.lon}`).join('&');
+        const url = `https://maps.google.com/maps?${markersParam}&z=17`;
+        window.open(url, '_blank', 'noopener,noreferrer');
     }
-    window.open(url, '_blank', 'noopener,noreferrer');
 }
 
-function openGoogleMaps(lat, lon, label) {
-    // Google Maps не поддерживает кастомные подписи через URL
-    // Используем координаты с маркером
-    const url = `https://www.google.com/maps?q=${lat},${lon}&z=17`;
-    window.open(url, '_blank', 'noopener,noreferrer');
-}
 
-function openBingMaps(lat, lon, label) {
-    let url = `https://www.bing.com/maps?cp=${lat}~${lon}&lvl=17&style=h`;
-    if (label) {
-        url += `&sp=point.${lat}_${lon}_${encodeURIComponent(label)}`;
-    }
-    window.open(url, '_blank', 'noopener,noreferrer');
-}
-
+        function openYandexMaps(lat, lon) {
+            window.open(`https://yandex.ru/maps/?pt=${lon},${lat}&z=17&l=sat,skl`, '_blank', 'noopener,noreferrer');
+        }
 
         function openYandexMapsByAddress(address) {
             window.open(`https://yandex.ru/maps/?text=${encodeURIComponent(address)}`, '_blank', 'noopener,noreferrer');
         }
 
+       function openGoogleMaps(lat, lon) {
+    window.open(`https://www.google.com/maps?q=${lat},${lon}&z=17`, '_blank', 'noopener,noreferrer');
+}
+
         function openGoogleMapsByAddress(address) {
             window.open(`https://www.google.com/maps/search/${encodeURIComponent(address)}`, '_blank', 'noopener,noreferrer');
         }
 
+     function openBingMaps(lat, lon) {
+    window.open(`https://www.bing.com/maps?q=${lat},${lon}&lvl=17&style=h`, '_blank', 'noopener,noreferrer');
+}
 
         function openBingMapsByAddress(address) {
             window.open(`https://www.bing.com/maps?q=${encodeURIComponent(address)}`, '_blank', 'noopener,noreferrer');
@@ -2247,45 +2300,60 @@ function openBingMaps(lat, lon, label) {
 
 async function handleYandexMapsClick() {
     const text = document.getElementById('searchText').value.trim();
+    
     if (!isValidCadastralNumber(text)) {
         openYandexMapsByAddress(text);
         return;
     }
-    const result = await getCoordinatesFromNSPD(text);
-    if (result && result.lat && result.lon) {
-        openYandexMaps(result.lat, result.lon, result.address);
+    
+    // Получаем все координаты контура
+    const result = await getCoordinatesFromNSPD(text, true);
+    
+    if (result && result.coords && result.coords.length > 0) {
+        openYandexMapsMultiple(result.coords);
+    } else if (result && result.address) {
+        openYandexMapsByAddress(result.address);
     } else {
         openYandexMapsByAddress(text);
     }
 }
 
+// Обновленный обработчик для Google Карт
 async function handleGoogleMapsClick() {
     const text = document.getElementById('searchText').value.trim();
+    
     if (!isValidCadastralNumber(text)) {
         openGoogleMapsByAddress(text);
         return;
     }
-    const result = await getCoordinatesFromNSPD(text);
-    if (result && result.lat && result.lon) {
-        openGoogleMaps(result.lat, result.lon);
+    
+    // Получаем все координаты контура
+    const result = await getCoordinatesFromNSPD(text, true);
+    
+    if (result && result.coords && result.coords.length > 0) {
+        openGoogleMapsMultiple(result.coords);
+    } else if (result && result.address) {
+        openGoogleMapsByAddress(result.address);
     } else {
         openGoogleMapsByAddress(text);
     }
 }
 
-async function handleBingMapsClick() {
-    const text = document.getElementById('searchText').value.trim();
-    if (!isValidCadastralNumber(text)) {
-        openBingMapsByAddress(text);
-        return;
-    }
-    const result = await getCoordinatesFromNSPD(text);
-    if (result && result.lat && result.lon) {
-        openBingMaps(result.lat, result.lon, result.address);
-    } else {
-        openBingMapsByAddress(text);
-    }
-}
+        async function handleBingMapsClick() {
+            const text = document.getElementById('searchText').value.trim();
+            if (!isValidCadastralNumber(text)) {
+                openBingMapsByAddress(text);
+                return;
+            }
+            const result = await getCoordinatesFromNSPD(text);
+            if (result && result.lat && result.lon) {
+                openBingMaps(result.lat, result.lon);
+            } else if (result && result.address) {
+                openBingMapsByAddress(result.address);
+            } else {
+                openBingMapsByAddress(text);
+            }
+        }
 
         function openSite(baseUrl, isAddress) {
             const text = document.getElementById('searchText').value;
