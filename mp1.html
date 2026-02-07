@@ -2809,31 +2809,35 @@ function drawOksSchemaCanvas() {
     const ctx = canvas.getContext('2d');
     const infoDiv = document.getElementById('oksSchemaInfo');
     const container = canvas.parentElement;
-
+    
     const parcelContours = extractParcelContoursFromXml();
     const xmlOks = currentOksData ? currentOksData.filter(o => o.hasCoords) : [];
     const nspdOks = currentNspdOksData ? currentNspdOksData.filter(o => o.hasCoords) : [];
     const xmlCadNumbers = (currentOksData || []).map(o => o.cadNumber.toLowerCase());
     const nspdOnlyOks = nspdOks.filter(o => !xmlCadNumbers.includes(o.cadNumber.toLowerCase()));
-
-    // Собираем все точки для масштабирования
+    
+    // Собираем все точки
     const allPoints = [];
     parcelContours.forEach(contour => contour.forEach(p => allPoints.push(p)));
     xmlOks.forEach(oks => oks.contours.forEach(contour => contour.forEach(p => allPoints.push(p))));
     nspdOnlyOks.forEach(oks => oks.contours.forEach(contour => contour.forEach(p => allPoints.push(p))));
-
+    
     if (allPoints.length === 0) {
         infoDiv.innerHTML = '<div style="color:var(--error-color);">Нет данных для отображения</div>';
         return;
     }
-
-    // Вычисляем размеры и трансформации
+    
+    // Вычисляем размеры контейнера
     const containerRect = container.getBoundingClientRect();
     const padding = 16;
     const availableWidth = containerRect.width - padding * 2;
     const availableHeight = containerRect.height - padding * 2;
+    
+    // Ограничиваем минимальные и максимальные размеры
     const displayWidth = Math.max(Math.min(availableWidth, 1400), 200);
     const displayHeight = Math.max(Math.min(availableHeight, 900), 150);
+    
+    // Настраиваем canvas с учётом devicePixelRatio
     const dpr = window.devicePixelRatio || 1;
     canvas.width = displayWidth * dpr;
     canvas.height = displayHeight * dpr;
@@ -2841,20 +2845,19 @@ function drawOksSchemaCanvas() {
     canvas.style.height = displayHeight + 'px';
     ctx.scale(dpr, dpr);
     ctx.clearRect(0, 0, displayWidth, displayHeight);
-
+    
+    // Вычисляем трансформации
     const transforms = calculateSchemaTransforms(allPoints, displayWidth, displayHeight);
-    const {
-        scale,
-        offsetX_canvas,
-        offsetY_canvas,
-        maxGeoX
-    } = transforms;
+    const { minGeoX, maxGeoX, minGeoY, scale, offsetX_canvas, offsetY_canvas } = transforms;
+    
     const toCanvas = (point) => ({
         x: offsetX_canvas + (point.y - transforms.minGeoY) * scale,
         y: offsetY_canvas + (maxGeoX - point.x) * scale
     });
+    
+    // Адаптивные размеры линий
     const baseLineWidth = Math.max(1, Math.min(3, displayWidth / 400));
-
+    
     // Рисуем контур ЗУ
     ctx.strokeStyle = '#2563eb';
     ctx.lineWidth = baseLineWidth + 1;
@@ -2864,55 +2867,87 @@ function drawOksSchemaCanvas() {
         ctx.beginPath();
         const canvasPoints = contour.map(toCanvas);
         canvasPoints.forEach((cp, i) => i === 0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y));
-        if (contour.length > 2) {
+        const isClosed = contour.length > 2 && 
+            Math.abs(contour[0].x - contour[contour.length - 1].x) < 1e-3 && 
+            Math.abs(contour[0].y - contour[contour.length - 1].y) < 1e-3;
+        if (isClosed) {
             ctx.closePath();
             ctx.fill();
         }
         ctx.stroke();
     });
-
-    // --- НАЧАЛО ИЗМЕНЕНИЙ ---
-    // Вспомогательная функция для корректной отрисовки сложных объектов
-    const drawOksObject = (contours, strokeColor, fillColor, lineDash = []) => {
-        if (!contours || contours.length === 0) return;
-        ctx.strokeStyle = strokeColor;
-        ctx.lineWidth = baseLineWidth;
-        ctx.fillStyle = fillColor;
-        ctx.setLineDash(lineDash);
-        ctx.beginPath();
-        contours.forEach(contour => {
-            if (contour.length < 2) return;
-            const canvasPoints = contour.map(toCanvas);
-            canvasPoints.forEach((cp, i) => (i === 0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y)));
-            ctx.closePath();
-        });
-        ctx.fill('evenodd');
-        ctx.stroke();
-        ctx.setLineDash([]);
-    };
-    // --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
+    
+    // Рисуем ОКС из XML
+    const oksColors = ['#ef4444', '#f97316', '#ec4899', '#14b8a6', '#84cc16'];
     let infoHtml = '';
+    
     const mainParcel = lastXmlDoc?.querySelector('NewParcel, SpecifyParcel > ExistParcel');
     const parcelCadNum = mainParcel?.getAttribute('CadastralNumber') || mainParcel?.getAttribute('Definition') || 'Земельный участок';
-    infoHtml = `<div class="oks-info-item"><div class="color-marker" style="background:#2563eb;"></div><strong>${parcelCadNum}</strong> — ЗУ из межевого плана</div>`;
-
-    const oksColors = ['#ef4444', '#f97316', '#ec4899', '#14b8a6', '#84cc16'];
+    infoHtml = `<div class="oks-info-item">
+        <div class="color-marker" style="background:#2563eb;"></div>
+        <strong>${parcelCadNum}</strong> — ЗУ из межевого плана
+    </div>`;
+    
     xmlOks.forEach((oks, index) => {
         const color = oksColors[index % oksColors.length];
-        const r = parseInt(color.slice(1, 3), 16),
-            g = parseInt(color.slice(3, 5), 16),
-            b = parseInt(color.slice(5, 7), 16);
-        drawOksObject(oks.contours, color, `rgba(${r}, ${g}, ${b}, 0.3)`);
-        infoHtml += `<div class="oks-info-item"><div class="color-marker" style="background:${color};"></div><strong>${oks.cadNumber}</strong> — ${oks.address || 'ОКС'} <span style="color:#10b981;">(в XML)</span></div>`;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = baseLineWidth;
+        const r = parseInt(color.slice(1, 3), 16);
+        const g = parseInt(color.slice(3, 5), 16);
+        const b = parseInt(color.slice(5, 7), 16);
+        ctx.fillStyle = `rgba(${r}, ${g}, ${b}, 0.3)`;
+        
+        oks.contours.forEach(contour => {
+            if (contour.length < 2) return;
+            ctx.beginPath();
+            const canvasPoints = contour.map(toCanvas);
+            canvasPoints.forEach((cp, i) => i === 0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y));
+            const isClosed = contour.length > 2 && 
+                Math.abs(contour[0].x - contour[contour.length - 1].x) < 1e-3 && 
+                Math.abs(contour[0].y - contour[contour.length - 1].y) < 1e-3;
+            if (isClosed) {
+                ctx.closePath();
+                ctx.fill();
+            }
+            ctx.stroke();
+        });
+        
+        infoHtml += `<div class="oks-info-item">
+            <div class="color-marker" style="background:${color};"></div>
+            <strong>${oks.cadNumber}</strong> — ${oks.address || 'ОКС'} <span style="color:#10b981;">(в XML)</span>
+        </div>`;
     });
-
+    
+    // Рисуем ОКС из NSPD, которых нет в XML
     nspdOnlyOks.forEach((oks) => {
         const color = '#f59e0b';
-        drawOksObject(oks.contours, color, 'rgba(245, 158, 11, 0.2)', [5, 5]);
-        infoHtml += `<div class="oks-info-item"><div class="color-marker" style="background:${color}; border: 2px dashed #b45309;"></div><strong>${oks.cadNumber}</strong> — ${oks.address || 'ОКС'} <span style="color:#ef4444; font-weight:600;">(НЕ в XML!)</span></div>`;
+        ctx.strokeStyle = color;
+        ctx.lineWidth = baseLineWidth;
+        ctx.setLineDash([5, 5]);
+        ctx.fillStyle = 'rgba(245, 158, 11, 0.2)';
+        
+        oks.contours.forEach(contour => {
+            if (contour.length < 2) return;
+            ctx.beginPath();
+            const canvasPoints = contour.map(toCanvas);
+            canvasPoints.forEach((cp, i) => i === 0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y));
+            const isClosed = contour.length > 2 && 
+                Math.abs(contour[0].x - contour[contour.length - 1].x) < 1e-3 && 
+                Math.abs(contour[0].y - contour[contour.length - 1].y) < 1e-3;
+            if (isClosed) {
+                ctx.closePath();
+                ctx.fill();
+            }
+            ctx.stroke();
+        });
+        ctx.setLineDash([]);
+        
+        infoHtml += `<div class="oks-info-item">
+            <div class="color-marker" style="background:${color}; border: 2px dashed #b45309;"></div>
+            <strong>${oks.cadNumber}</strong> — ${oks.address || 'ОКС'} <span style="color:#ef4444; font-weight:600;">(НЕ в XML!)</span>
+        </div>`;
     });
-
+    
     infoDiv.innerHTML = infoHtml;
 }
 
