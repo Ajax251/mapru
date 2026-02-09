@@ -19989,7 +19989,6 @@ async function exportParcelsToExcel() { // <-- Добавлено async
 }
 
 // Draw found parcels on the map
-// Draw found parcels on the map
 async function drawFoundParcels(parcels, markAsFoundInArea = false) {
     let combinedBounds = null;
     const drawnParcelObjects = []; // Keep track of objects drawn in this call
@@ -20022,92 +20021,72 @@ async function drawFoundParcels(parcels, markAsFoundInArea = false) {
             }
 
             const geometryType = feature.geometry.type;
-            
-            // --- ИЗМЕНЕНИЕ: Собираем полные структуры полигонов (включая внутренние контуры) ---
-            let polygonsRingsList = [];
-            
-            if (geometryType === 'Polygon' && feature.geometry.coordinates) {
-                // Для Polygon coordinates - это массив колец [ [outer], [inner1], [inner2]... ]
-                polygonsRingsList.push(feature.geometry.coordinates); 
-            } else if (geometryType === 'MultiPolygon' && Array.isArray(feature.geometry.coordinates)) {
-                // Для MultiPolygon coordinates - это массив полигонов
-                polygonsRingsList = feature.geometry.coordinates;
-            } else {
-                continue; 
-            }
+            let allContours = [];
+            if (geometryType === 'Polygon' && feature.geometry.coordinates?.[0]) { allContours = [feature.geometry.coordinates[0]]; }
+            else if (geometryType === 'MultiPolygon' && Array.isArray(feature.geometry.coordinates)) { feature.geometry.coordinates.forEach(poly => { if (Array.isArray(poly?.[0])) allContours.push(poly[0]) }); }
+            else { continue; } // Skip unsupported or empty geometries
 
-            // Перебираем каждый полигон (который может состоять из нескольких колец)
-            for (const singlePolyRings of polygonsRingsList) {
-                 if (!Array.isArray(singlePolyRings) || singlePolyRings.length === 0) continue;
+            for (const contour of allContours) {
+                 if (!Array.isArray(contour) || contour.length < 3) { continue; } // Skip invalid contours
 
-                 // Обрабатываем ВСЕ кольца (внешнее + внутренние)
-                 const allProcessedRings = singlePolyRings.map(ring => {
-                     if (!Array.isArray(ring) || ring.length < 3) return null;
-
-                     // --- Coordinate Conversion ---
-                     const coordinates = ring.map(coord => {
-                         if (!Array.isArray(coord) || coord.length !== 2 || typeof coord[0] !== 'number' || typeof coord[1] !== 'number') return null;
-                         try { 
-                             const p = proj4('EPSG:3857', 'EPSG:4326', coord); 
-                             return (!p || !isFinite(p[0]) || !isFinite(p[1])) ? null : [p[1], p[0]]; 
-                         } catch { return null; }
-                     }).filter(p => p !== null);
-                     
-                     if (coordinates.length < 3) return null; 
-                     
-                     // Применяем смещение
-                     return coordinates.map(coord => [coord[0] - mapOffsetY * 0.000008983, coord[1] - mapOffsetX * 0.000008983]);
-                 }).filter(r => r !== null);
-
-                 if (allProcessedRings.length === 0) continue;
+                 // --- Coordinate Conversion ---
+                 const coordinates = contour.map(coord => {
+                     if (!Array.isArray(coord) || coord.length !== 2 || typeof coord[0] !== 'number' || typeof coord[1] !== 'number') return null;
+                     try { const p = proj4('EPSG:3857', 'EPSG:4326', coord); return (!p || !isFinite(p[0]) || !isFinite(p[1])) ? null : [p[1], p[0]]; } catch { return null; }
+                 }).filter(p => p !== null);
+                 if (coordinates.length < 3) { continue; } // Need at least 3 valid points
+                 const offsetCoordinates = coordinates.map(coord => [coord[0] - mapOffsetY * 0.000008983, coord[1] - mapOffsetX * 0.000008983]);
 
                  // --- Extract Properties ---
                  const cadastralNumber = feature.properties.descr;
                  const parcelOptions = feature.properties.options || {};
                  const address = parcelOptions.readable_address || 'Адрес не указан';
-                 const areaText = getAreaText(parcelOptions); 
+                 const areaText = getAreaText(parcelOptions); // Assumes getAreaText helper exists
                  const costIndex = parcelOptions.cost_index !== undefined && parcelOptions.cost_index !== null && isFinite(parseFloat(parcelOptions.cost_index)) ? parseFloat(parcelOptions.cost_index) : null;
                  const vri = parcelOptions.permitted_use_established_by_document || null;
-                 const ownershipType = parcelOptions.ownership_type || '-';
+                 // Extract ownership info
+                const ownershipType = parcelOptions.ownership_type || '-';
                  const rightType = parcelOptions.right_type || '-';
 
                  const isDeclared = !parcelOptions.specified_area && !parcelOptions.land_record_area_verified && !parcelOptions.land_record_area && (parcelOptions.land_record_area_declaration || parcelOptions.declared_area);
                  const strokeColor = isDeclared ? polygonStyle.declaredParcelsColor : polygonStyle.parcelsColor;
 
-                 const hintContent = {
+                 // Create hint content including ownership
+             const hintContent = {
                      cadastralNumber: `${cadastralNumber}`,
                      address: `${address}`,
                      area: `Площадь: ${areaText}`,
                      cost: costIndex !== null ? costIndex.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) : null,
                      vri: vri,
+                     // --- НАЧАЛО ИЗМЕНЕНИЙ: Добавляем поля для макета ---
                      ownershipType: ownershipType,
                      rightType: rightType
+                     // --- КОНЕЦ ИЗМЕНЕНИЙ ---
                  };
                  
                  // --- Create Polygon ---
                  const polygonProperties = {
-                     hintContent: hintContent,
+                     hintContent: hintContent, // Use updated hintContent
                      cadastralNumber: cadastralNumber,
                      address: address,
                      areaText: areaText,
                      costIndex: costIndex,
                      vri: vri,
-                     featureData: feature 
+                     featureData: feature // Store raw feature
                  };
                  if (markAsFoundInArea) {
-                     polygonProperties.isFoundInArea = true; 
+                     polygonProperties.isFoundInArea = true; // Mark as found by area search
                  }
 
-                 // Передаем массив массивов координат (allProcessedRings), чтобы Яндекс отрисовал полигон с дырками
-                 const parcelPolygon = new ymaps.Polygon(allProcessedRings, polygonProperties, {
+                 const parcelPolygon = new ymaps.Polygon([offsetCoordinates], polygonProperties, {
                      strokeColor: strokeColor,
-                     strokeWidth: polygonStyle.width - 1, 
-                     strokeOpacity: loadedObjectOpacity,
-                     fillColor: '#00000000', 
-                     hintLayout: customHintLayout, 
+                     strokeWidth: polygonStyle.width - 1, // Slightly thinner
+                    strokeOpacity: loadedObjectOpacity,
+                     fillColor: '#00000000', // No fill initially
+                     hintLayout: customHintLayout, // Use custom layout
                      hintOpenTimeout: 100, hintCloseTimeout: 50,
                      cursor: 'pointer',
-                     zIndex: 800 
+                     zIndex: 800 // Below potential search object
                  });
 
                  // Add event listeners
@@ -20118,6 +20097,7 @@ async function drawFoundParcels(parcels, markAsFoundInArea = false) {
                          let balloonContent = `<strong>${hintData.cadastralNumber}</strong><br>${hintData.address}<br>${hintData.area}`;
                          if (hintData.cost) balloonContent += `<br>Стоимость: ${hintData.cost} руб./м²`;
                          if (hintData.vri) balloonContent += `<br>Разрешенное использование: ${hintData.vri}`;
+                         // Add ownership info to balloon if desired
                          if (hintData.ownershipInfo) balloonContent += `<br>Собственность: ${hintData.ownershipInfo}`;
                          map.balloon.open(e.get('coords'), balloonContent);
                      }
@@ -20128,8 +20108,8 @@ async function drawFoundParcels(parcels, markAsFoundInArea = false) {
                  });
 
                  map.geoObjects.add(parcelPolygon);
-                 polygons.push(parcelPolygon); 
-                 drawnParcelObjects.push(parcelPolygon); 
+                 polygons.push(parcelPolygon); // Add to global tracking
+                 drawnParcelObjects.push(parcelPolygon); // Add to tracking for *this call*
 
                  // --- Update Combined Bounds for *this call* ---
                  const parcelBounds = parcelPolygon.geometry.getBounds();
@@ -20147,28 +20127,28 @@ async function drawFoundParcels(parcels, markAsFoundInArea = false) {
 
                      const labelProperties = {
                          iconContent: displayNumber,
-                         hintContent: hintContent,
+                         hintContent: hintContent, // Pass updated hintContent to label
                          cadastralNumber: cadastralNumber
                      };
                      if (markAsFoundInArea) {
-                         labelProperties.isFoundInArea = true; 
+                         labelProperties.isFoundInArea = true; // Mark label too
                      }
 
                      const parcelText = new ymaps.Placemark(parcelCenterGeo, labelProperties, {
-                         iconLayout: customPlacemarkLayout, 
-                         hintLayout: customHintLayout, 
+                         iconLayout: customPlacemarkLayout, // Use custom layout
+                         hintLayout: customHintLayout, // Use custom layout for hint
                          hasBalloon: false,
                          draggable: false,
                          visible: map.getZoom() > 14,
-                         zIndex: 850 
+                         zIndex: 850 // Below potential search object labels
                      });
-                     parcelText.polygon = parcelPolygon; 
+                     parcelText.polygon = parcelPolygon; // Link label to polygon
                      map.geoObjects.add(parcelText);
-                     parcelPlacemarks.push(parcelText); 
-                     polygons.push(parcelText); 
+                     parcelPlacemarks.push(parcelText); // Add to label tracking
+                     polygons.push(parcelText); // Add to global tracking
                      drawnParcelObjects.push(parcelText);
                   }
-            } // End polygonsRingsList loop
+            } // End contour loop
         } catch (error) {
             console.error('Ошибка при отрисовке найденного земельного участка:', error, feature);
         }
@@ -20189,25 +20169,26 @@ async function drawFoundParcels(parcels, markAsFoundInArea = false) {
         }
 
         if (shouldSetBounds) {
-            const latMargin = (combinedBounds[1][0] - combinedBounds[0][0]) * 0.15 || 0.0005; 
+            const latMargin = (combinedBounds[1][0] - combinedBounds[0][0]) * 0.15 || 0.0005; // Add padding
             const lonMargin = (combinedBounds[1][1] - combinedBounds[0][1]) * 0.15 || 0.0005;
             const viewBounds = [[combinedBounds[0][0] - latMargin, combinedBounds[0][1] - lonMargin], [combinedBounds[1][0] + latMargin, combinedBounds[1][1] + lonMargin]];
             try { map.setBounds(viewBounds, { checkZoomRange: true, duration: 300 }); }
             catch (setBoundsError) { console.error("Ошибка установки границ:", setBoundsError, viewBounds); }
         }
     } else if (drawnParcelObjects.length === 1 && drawnParcelObjects[0] instanceof ymaps.Placemark) {
+         // Center on single placemark if that's all that was drawn
          map.setCenter(drawnParcelObjects[0].geometry.getCoordinates(), map.getZoom() > 16 ? map.getZoom() : 17);
     }
 
     // --- Update UI ---
     updatePlacemarksVisibility();
-    applyCurrentTheme(); 
+    applyCurrentTheme(); // Apply active theme styles
     
       if (isGlobalFillActive) {
         applyGlobalFill();
     }
 
-    return drawnParcelObjects; 
+    return drawnParcelObjects; // Return objects added in this call
 }
 
 
