@@ -4357,12 +4357,10 @@ function searchInTabs(text) {
     return coordinates;
 }
 
-
 function importGeo(text) {
     const lines = text.split('\n');
     const coordinates = [];
-    // Добавил пробел в разделители, так как иногда CSV бывает разделен пробелами
-    const separators = /[,;\t\s]+/;  
+    const separators = /[,;\t]/;  // разделители: запятая, точка с запятой, табуляция
     
     let currentContour = [];
     let previousLineHadCoords = false;
@@ -4378,34 +4376,26 @@ function importGeo(text) {
             continue;
         }
         
+        // Разбиваем строку по разделителям
         const parts = line.split(separators);
         
-        let foundNumbers = [];
+        // Ищем два числа больше 10000
+          let foundCoords = [];
         for (let part of parts) {
             const num = parseFloat(part.replace(',', '.'));
-            if (!isNaN(num)) {
-                foundNumbers.push(num);
+            // ИЗМЕНЕНИЕ: Порог снижен с 10000 до 100
+            if (!isNaN(num) && Math.abs(num) >= 100) {
+                foundCoords.push(num);
+                if (foundCoords.length === 2) break;
             }
         }
-
-        // --- НОВАЯ ЛОГИКА ТУТ ТОЖЕ ---
-        if (foundNumbers.length > 2) {
-             // Аналогично: ищем два самых больших числа
-             const indexed = foundNumbers.map((val, idx) => ({ val, idx }));
-             indexed.sort((a, b) => Math.abs(b.val) - Math.abs(a.val));
-             const topTwo = [indexed[0], indexed[1]];
-             topTwo.sort((a, b) => a.idx - b.idx);
-             foundNumbers = topTwo.map(item => item.val);
-        }
-        // -----------------------------
         
-        // Фильтруем по минимуму (>= 100), чтобы исключить мусор, если он попал в топ-2
-        const validCoords = foundNumbers.filter(n => Math.abs(n) >= 100);
-
-        if (validCoords.length === 2) {
-            const [x, y] = validCoords[0] < validCoords[1] ? 
-                [validCoords[0], validCoords[1]] : 
-                [validCoords[1], validCoords[0]];
+        // Если нашли две координаты
+        if (foundCoords.length === 2) {
+            // Сортируем координаты (X всегда меньше Y)
+            const [x, y] = foundCoords[0] < foundCoords[1] ? 
+                [foundCoords[0], foundCoords[1]] : 
+                [foundCoords[1], foundCoords[0]];
             currentContour.push(`${x.toFixed(2)}\t${y.toFixed(2)}`);
             previousLineHadCoords = true;
         } else {
@@ -4417,6 +4407,7 @@ function importGeo(text) {
         }
     }
     
+    // Добавляем последний контур, если есть
     if (currentContour.length > 0) {
         coordinates.push(...currentContour);
     }
@@ -6095,7 +6086,6 @@ function processMIFContour(contour, coordinates) {
 function extractCoordinatesFromText(content) {
     const lines = content.split('\n');
     const coordinates = [];
-    // Регулярка для поиска чисел
     const numberRegex = /[-+]?[0-9]*[.,]?[0-9]+/g;
     let lastLineHadCoordinates = false;
 
@@ -6103,72 +6093,55 @@ function extractCoordinatesFromText(content) {
         const line = lines[i].trim();
         
         if (line === '') {
+             // If current line is empty and the previous one had coordinates,
+             // it signifies the end of a contour.
             if (lastLineHadCoordinates && coordinates.length > 0 && coordinates[coordinates.length - 1] !== '') {
                 coordinates.push('');
             }
-            lastLineHadCoordinates = false;
-            continue;
+            lastLineHadCoordinates = false; // Reset flag for empty line
+            continue; // Skip empty lines
         }
 
         const numbers = line.match(numberRegex);
-        // Фильтруем совсем мелкие числа и мусор, но порог 100 оставим для местных систем
-        let potentialCoords = numbers ? numbers.map(n => parseFloat(n.replace(',', '.')))
-                                                 .filter(n => !isNaN(n) && Math.abs(n) >= 1) // Снизил порог, фильтрация будет дальше
+        const potentialCoords = numbers ? numbers.map(n => parseFloat(n.replace(',', '.')))
+                                                 .filter(n => Math.abs(n) >= 100)
                                         : [];
 
-        // --- НОВАЯ ЛОГИКА: Выбор двух наиболее вероятных координат ---
-        if (potentialCoords.length > 2) {
-            // Если чисел больше 2 (например: ID, X, Y, H), выбираем два самых больших по модулю.
-            // Это отсеет номера точек (обычно 1-10000) и высоты, если координаты в МСК (100000+).
-            
-            // 1. Сохраняем исходные индексы, чтобы не перепутать X и Y местами после сортировки
-            const indexedCoords = potentialCoords.map((val, idx) => ({ val, idx }));
-            
-            // 2. Сортируем по убыванию значения (по модулю)
-            indexedCoords.sort((a, b) => Math.abs(b.val) - Math.abs(a.val));
-            
-            // 3. Берем топ-2 самых "жирных" числа
-            const topTwo = [indexedCoords[0], indexedCoords[1]];
-            
-            // 4. Сортируем их обратно по индексу, чтобы сохранить порядок (кто был левее, тот остался левее)
-            topTwo.sort((a, b) => a.idx - b.idx);
-            
-            potentialCoords = topTwo.map(item => item.val);
-        }
-        // -------------------------------------------------------------
-
-        // Проверяем порог валидности для координат (например, >= 100 для МСК)
-        // Если после отбора остались маленькие числа (например ID=1, H=2), они могут не пройти
-        const validCoords = potentialCoords.filter(n => Math.abs(n) >= 100);
-
-        if (validCoords.length >= 2) {
-            // Логика сортировки X < Y, которая была у тебя в коде
-            // (обычно в геодезии X (север) < Y (восток) для большинства зон РФ, но бывает по-разному)
-            const [x, y] = validCoords[0] < validCoords[1] 
-                ? [validCoords[0], validCoords[1]]
-                : [validCoords[1], validCoords[0]];
+        if (potentialCoords.length >= 2) {
+            const [x, y] = potentialCoords[0] < potentialCoords[1] 
+                ? [potentialCoords[0], potentialCoords[1]]
+                : [potentialCoords[1], potentialCoords[0]];
 
             coordinates.push(`${x.toFixed(2)}\t${y.toFixed(2)}`);
             lastLineHadCoordinates = true;
         } else {
+            // If current line has text but no coordinates, and previous had coords,
+            // it also signifies the end of a contour (text as description).
             if (lastLineHadCoordinates && coordinates.length > 0 && coordinates[coordinates.length - 1] !== '') {
-                coordinates.push(''); 
+                coordinates.push(''); // Add contour separator
             }
-            lastLineHadCoordinates = false; 
+            lastLineHadCoordinates = false; // Reset flag as this line didn't have coords
         }
     }
 
+    // Remove trailing empty lines
     while (coordinates.length > 0 && coordinates[coordinates.length - 1] === '') {
         coordinates.pop();
     }
 
-    const hasTextCoords = coordinates.some(c => c.trim() !== '');
-    if (hasTextCoords) {
+    // If coordinates were found using the text parsing logic, return them.
+    // Otherwise, try the importGeo logic as a fallback.
+    // Note: This might be problematic if text contains both formats.
+    // A better approach might be to try all parsers and merge results,
+    // but that's more complex. For now, prioritize text/tab/description parsing,
+    // then fall back to importGeo if nothing was found.
+     const hasTextCoords = coordinates.some(c => c.trim() !== '');
+     if (hasTextCoords) {
          return coordinates;
-    } else {
+     } else {
          console.log("extractCoordinatesFromText: No text/tab/description coords found, trying importGeo.");
          return importGeo(content);
-    }
+     }
 }
 
 
