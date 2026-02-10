@@ -4156,65 +4156,48 @@ async function handleContextMenu(e) {
         }
     }
 
-function computeUnion(polyA, polyB) {
-    console.log("  [computeUnion] polyA:", polyA.length, "pts, polyB:", polyB.length, "pts");
-    
-    const areaA = calculatePolygonArea(polyA);
-    const areaB = calculatePolygonArea(polyB);
-    
-    console.log("  [computeUnion] areaA:", areaA.toFixed(2), "areaB:", areaB.toFixed(2));
-    
-    const normA = areaA < 0 ? reverseContour(polyA) : polyA;
-    const normB = areaB < 0 ? reverseContour(polyB) : polyB;
-    
-    const intersections = findIntersectionsRobust(normA, normB);
-    console.log("  [computeUnion] intersections after norm:", intersections.length);
-    
-    if (intersections.length === 0) {
-        const aInB = isPointInPolygonRobust(normA[0], normB);
-        const bInA = isPointInPolygonRobust(normB[0], normA);
-        console.log("  [computeUnion] No intersections! A in B:", aInB, "B in A:", bInA);
+    function computeUnion(subject, clipper) {
+        const intersections = findIntersectionsRobust(subject, clipper);
         
-        if (aInB) return [normB];
-        if (bInA) return [normA];
-        return [normA, normB];
+        // Если пересечений нет
+        if (intersections.length === 0) {
+            // Если clipper внутри subject -> результат subject (clipper поглощен)
+            if (isPointInPolygonRobust(clipper[0], subject, true)) return [subject]; 
+            // Если subject внутри clipper -> результат clipper (subject поглощен)
+            if (isPointInPolygonRobust(subject[0], clipper, true)) return [clipper];
+            // Иначе они раздельные
+            return [subject, clipper]; 
+        }
+
+        const subjWithInt = insertPointsAndMark(subject, intersections, true);
+        const clipWithInt = insertPointsAndMark(clipper, intersections, false);
+
+        const subjArcs = splitByIntersections(subjWithInt);
+        const clipArcs = splitByIntersections(clipWithInt);
+
+        const finalArcs = [];
+
+        // Логика Union:
+        // Берем части Subject, которые СНАРУЖИ Clipper
+        subjArcs.forEach(arc => {
+            const mid = getArcMidpoint(arc);
+            // boundaryResult=true означает "включая границу". 
+            // !true = false. То есть общая граница удаляется.
+            if (!isPointInPolygonRobust(mid, clipper, true)) { 
+                finalArcs.push(arc);
+            }
+        });
+
+        // Берем части Clipper, которые СНАРУЖИ Subject
+        clipArcs.forEach(arc => {
+            const mid = getArcMidpoint(arc);
+            if (!isPointInPolygonRobust(mid, subject, true)) {
+                finalArcs.push(arc);
+            }
+        });
+
+        return stitchArcs(finalArcs);
     }
-
-    const polyAWithInt = insertPointsAndMark(normA, intersections, true);
-    const polyBWithInt = insertPointsAndMark(normB, intersections, false);
-
-    const arcsA = splitByIntersections(polyAWithInt);
-    const arcsB = splitByIntersections(polyBWithInt);
-    
-    console.log("  [computeUnion] arcsA:", arcsA.length, "arcsB:", arcsB.length);
-
-    const finalArcs = [];
-
-    arcsA.forEach((arc, i) => {
-        const mid = getArcMidpoint(arc);
-        const inside = isPointInPolygonRobust(mid, normB, false);
-        console.log(`    arcA[${i}]: mid=(${mid.x.toFixed(2)},${mid.y.toFixed(2)}) insideB=${inside} -> ${inside ? 'SKIP' : 'KEEP'}`);
-        if (!inside) {
-            finalArcs.push(arc);
-        }
-    });
-
-    arcsB.forEach((arc, i) => {
-        const mid = getArcMidpoint(arc);
-        const inside = isPointInPolygonRobust(mid, normA, false);
-        console.log(`    arcB[${i}]: mid=(${mid.x.toFixed(2)},${mid.y.toFixed(2)}) insideA=${inside} -> ${inside ? 'SKIP' : 'KEEP'}`);
-        if (!inside) {
-            finalArcs.push(arc);
-        }
-    });
-
-    console.log("  [computeUnion] finalArcs:", finalArcs.length);
-    
-    const result = stitchArcs(finalArcs);
-    console.log("  [computeUnion] stitched polygons:", result.length);
-    
-    return result;
-}
 
 
     function comparePolygons(p1, p2) {
@@ -5851,210 +5834,130 @@ function closeIntersectionDialog() {
     //Split
     
 function executeCutOperation(targetIdx, cutterIdx) {
-    const targetObj = userObjects[targetIdx];
-    const cutterObj = userObjects[cutterIdx];
+        console.log(`[CUT-OP] Начинаем операцию Weiler-Atherton.`);
+        const targetObj = userObjects[targetIdx];
+        const cutterObj = userObjects[cutterIdx];
 
-    if (!targetObj || !cutterObj) return;
+        if (!targetObj || !cutterObj) return;
 
-    if (editingObjectIndex !== targetIdx) editingObjectIndex = targetIdx;
-    saveGeometryStateForUndo(targetIdx);
+        if (editingObjectIndex !== targetIdx) editingObjectIndex = targetIdx;
+        saveGeometryStateForUndo(targetIdx);
 
-    try {
-        ensureClosed(targetObj.contours);
-        ensureClosed(cutterObj.contours);
+        try {
+            // 1. Предварительная очистка
+            ensureClosed(targetObj.contours);
+            ensureClosed(cutterObj.contours);
 
-        const subjectOuter = deepCloneContours(targetObj.contours)[0]; 
-        const subjectHoles = deepCloneContours(targetObj.contours).slice(1);
-        let cutterPoly = deepCloneContours(cutterObj.contours)[0];
+            // Работаем с копиями
+            const subjectPolys = deepCloneContours(targetObj.contours);
+            const clipperPolys = deepCloneContours(cutterObj.contours);
 
-        if (!subjectOuter || !cutterPoly) return;
+            let currentSubjectList = subjectPolys;
 
-        console.log("=== CUT OPERATION START ===");
-        console.log("Subject outer points:", subjectOuter.length);
-        console.log("Subject holes count:", subjectHoles.length);
-        console.log("Cutter points:", cutterPoly.length);
-
-        const remainingHoles = [];
-        
-        for (let i = 0; i < subjectHoles.length; i++) {
-            const hole = subjectHoles[i];
-            if (!hole || hole.length < 3) continue;
-            
-            console.log(`\n--- Processing hole ${i} (${hole.length} points) ---`);
-            
-            const intersections = findIntersectionsRobust(hole, cutterPoly);
-            console.log(`Intersections with cutter: ${intersections.length}`);
-            
-            if (intersections.length > 0) {
-                const holeReversed = reverseContour(hole);
-                
-                console.log("Calling computeUnion...");
-                const merged = computeUnion(cutterPoly, holeReversed);
-                
-                console.log(`computeUnion returned ${merged ? merged.length : 0} polygon(s)`);
-                
-                if (merged && merged.length > 0) {
-                    // === ИСПРАВЛЕНИЕ: берём САМЫЙ БОЛЬШОЙ полигон ===
-                    let bestPoly = merged[0];
-                    let bestArea = Math.abs(calculatePolygonArea(merged[0]));
-                    
-                    for (let j = 1; j < merged.length; j++) {
-                        const area = Math.abs(calculatePolygonArea(merged[j]));
-                        if (area > bestArea) {
-                            bestArea = area;
-                            bestPoly = merged[j];
-                        }
+            clipperPolys.forEach(clipperRing => {
+                if (clipperRing.length < 3) return;
+                const nextPassList = [];
+                currentSubjectList.forEach(subjectRing => {
+                    const diff = computeDifference(subjectRing, clipperRing);
+                    if (diff && diff.length > 0) {
+                        nextPassList.push(...diff);
                     }
-                    
-                    console.log(`Selected polygon with ${bestPoly.length} points (area: ${bestArea.toFixed(2)})`);
-                    cutterPoly = bestPoly;
-                } else {
-                    console.log("ERROR: computeUnion returned empty!");
-                }
+                });
+                currentSubjectList = nextPassList;
+            });
+
+            // Присваиваем результат
+            targetObj.contours = currentSubjectList;
+
+            // 2. ФИНАЛЬНАЯ ЧИСТКА (Удаление дублей и микро-полигонов)
+            console.log("[DEBUG-CLEAN] Запуск финальной очистки...");
+            cleanObjectContours(targetObj);
+            
+            if (targetObj.contours.length === 0) {
+                showNotification("Объект исчез в результате резки.", "warning");
             } else {
-                const holeInCutter = isPointInPolygonRobust(hole[0], cutterPoly);
-                const cutterInHole = isPointInPolygonRobust(cutterPoly[0], hole);
-                
-                console.log(`No intersections. Hole[0] in cutter: ${holeInCutter}, Cutter[0] in hole: ${cutterInHole}`);
-                
-                if (holeInCutter) {
-                    console.log("Hole completely inside cutter - will be removed");
-                } else if (cutterInHole) {
-                    console.log("Cutter inside hole - hole remains");
-                    remainingHoles.push(hole);
-                } else {
-                    console.log("No overlap - hole remains");
-                    remainingHoles.push(hole);
-                }
+                updateObjectMetrics(targetObj);
+                showNotification("Рассечение выполнено.", "success", "cut");
             }
+            
+            // ЛОГ РЕЗУЛЬТАТА
+            targetObj.contours.forEach((c, i) => {
+                console.log(`[DEBUG-RESULT] Контур #${i}: ${c.length} точек.`);
+            });
+
+            displayObjectInfo(targetIdx);
+            redraw(true);
+
+        } catch (e) {
+            console.error("CUT ERROR:", e);
+            showNotification("Ошибка: " + e.message, "error");
         }
+    }
 
-        console.log(`\n--- Final cutter has ${cutterPoly.length} points ---`);
-        console.log("Calling computeDifference...");
+    // --- УЛУЧШЕННАЯ ФУНКЦИЯ ОЧИСТКИ ---
+
+    function cleanObjectContours(obj) {
+        if (!obj.contours) return;
         
-        const diffPolygons = computeDifference(subjectOuter, cutterPoly);
+        const validContours = [];
         
-        console.log(`computeDifference returned ${diffPolygons.length} polygon(s)`);
-        diffPolygons.forEach((p, i) => console.log(`  Polygon ${i}: ${p.length} points`));
-
-        let finalCandidates = [...diffPolygons];
-        console.log(`Remaining holes to check: ${remainingHoles.length}`);
-
-        remainingHoles.forEach((hole, idx) => {
-            let added = false;
-            for (const poly of diffPolygons) {
-                if (isPointInPolygonRobust(hole[0], poly)) {
-                    finalCandidates.push(hole);
-                    added = true;
-                    break;
+        obj.contours.forEach((contour, cIdx) => {
+            if (!contour || contour.length === 0) return;
+            
+            // Шаг 1: Удаляем соседние дубликаты
+            const unique = [];
+            unique.push(contour[0]);
+            
+            for (let i = 1; i < contour.length; i++) {
+                const prev = unique[unique.length - 1];
+                const curr = contour[i];
+                // Дистанция > 1мм
+                if ((prev.x - curr.x)**2 + (prev.y - curr.y)**2 > 0.000001) {
+                    unique.push(curr);
                 }
             }
-            console.log(`Hole ${idx}: ${added ? 'kept' : 'discarded'}`);
+
+            // Шаг 2: Проверка на вырожденность (минимум 3 уникальные точки для полигона)
+            let checkPoly = [...unique];
+            if (checkPoly.length > 1) {
+                const f = checkPoly[0];
+                const l = checkPoly[checkPoly.length - 1];
+                if ((f.x - l.x)**2 + (f.y - l.y)**2 < 0.000001) {
+                    checkPoly.pop();
+                }
+            }
+
+            if (checkPoly.length < 3) {
+                console.log(`[DEBUG-CLEAN] Контур #${cIdx} удален: мало точек.`);
+                return; 
+            }
+
+            // Шаг 3: Проверка ПЛОЩАДИ
+            let area = 0;
+            for (let i = 0; i < checkPoly.length; i++) {
+                const p1 = checkPoly[i];
+                const p2 = checkPoly[(i + 1) % checkPoly.length];
+                area += (p1.x * p2.y - p2.x * p1.y);
+            }
+            area = Math.abs(area / 2.0);
+
+            if (area < 0.0001) { 
+                console.log(`[DEBUG-CLEAN] Контур #${cIdx} удален: микро-площадь.`);
+                return; 
+            }
+
+            // Замыкаем корректно
+            const first = unique[0];
+            const last = unique[unique.length - 1];
+            if ((first.x - last.x)**2 + (first.y - last.y)**2 > 0.000001) {
+                unique.push({ x: first.x, y: first.y });
+            }
+            
+            validContours.push(unique);
         });
 
-        console.log(`\nFinal candidates: ${finalCandidates.length}`);
-        
-        const consolidated = consolidateContoursIntoObjects(finalCandidates);
-        console.log(`After consolidation: ${consolidated.length} group(s)`);
-        consolidated.forEach((g, i) => console.log(`  Group ${i}: ${g.length} contour(s)`));
-
-        const flatContours = [];
-        consolidated.forEach(group => flatContours.push(...group));
-
-        console.log(`Final contours: ${flatContours.length}`);
-        console.log("=== CUT OPERATION END ===\n");
-
-        targetObj.contours = flatContours;
-        
-        // Вызываем очистку, если функция существует
-        if (typeof cleanObjectContours === 'function') {
-            cleanObjectContours(targetObj);
-        }
-        
-        updateObjectMetrics(targetObj);
-        redraw(true);
-
-    } catch (e) {
-        console.error("CUT ERROR:", e);
-        console.error(e.stack);
+        obj.contours = validContours;
     }
-}
-
-// --- ДОБАВЬТЕ эту функцию ---
-
-function reverseContour(contour) {
-    if (!contour || contour.length === 0) return contour;
-    
-    // Проверяем, замкнут ли контур
-    const first = contour[0];
-    const last = contour[contour.length - 1];
-    const isClosed = (first.x - last.x)**2 + (first.y - last.y)**2 < 0.000001;
-    
-    if (isClosed) {
-        // Убираем замыкающую точку, разворачиваем, добавляем обратно
-        const core = contour.slice(0, -1).reverse();
-        core.push({ x: core[0].x, y: core[0].y });
-        return core;
-    } else {
-        return contour.slice().reverse();
-    }
-}
-
-// --- ТАКЖЕ исправьте computeUnion - добавьте нормализацию направления ---
-
-function computeUnion(polyA, polyB) {
-    // Нормализуем направление обхода (оба должны быть CCW)
-    const areaA = calculatePolygonArea(polyA);
-    const areaB = calculatePolygonArea(polyB);
-    
-    const normA = areaA < 0 ? reverseContour(polyA) : polyA;
-    const normB = areaB < 0 ? reverseContour(polyB) : polyB;
-    
-    const intersections = findIntersectionsRobust(normA, normB);
-    
-    if (intersections.length === 0) {
-        if (isPointInPolygonRobust(normA[0], normB)) return [normB];
-        if (isPointInPolygonRobust(normB[0], normA)) return [normA];
-        return [normA, normB];
-    }
-
-    const polyAWithInt = insertPointsAndMark(normA, intersections, true);
-    const polyBWithInt = insertPointsAndMark(normB, intersections, false);
-
-    const arcsA = splitByIntersections(polyAWithInt);
-    const arcsB = splitByIntersections(polyBWithInt);
-
-    const finalArcs = [];
-
-    arcsA.forEach(arc => {
-        const mid = getArcMidpoint(arc);
-        if (!isPointInPolygonRobust(mid, normB, false)) {
-            finalArcs.push(arc);
-        }
-    });
-
-    arcsB.forEach(arc => {
-        const mid = getArcMidpoint(arc);
-        if (!isPointInPolygonRobust(mid, normA, false)) {
-            finalArcs.push(arc);
-        }
-    });
-
-    return stitchArcs(finalArcs);
-}
-
-// --- Убедитесь что calculatePolygonArea возвращает знаковую площадь ---
-
-function calculatePolygonArea(poly) {
-    if (!poly || poly.length < 3) return 0;
-    let area = 0;
-    for (let i = 0; i < poly.length; i++) {
-        const p1 = poly[i];
-        const p2 = poly[(i + 1) % poly.length];
-        area += (p1.x * p2.y - p2.x * p1.y);
-    }
-    return area / 2; // Положительная = CCW, отрицательная = CW
-}
 
     function ensureClosed(contours) {
         contours.forEach(c => {
@@ -6079,61 +5982,50 @@ function calculatePolygonArea(poly) {
     // --- АЛГОРИТМ РАЗНОСТИ ---
 
 function computeDifference(subject, clipper) {
-    const intersections = findIntersectionsRobust(subject, clipper);
-    
-    console.log("  [computeDiff] intersections found:", intersections.length);
-    
-    if (intersections.length === 0) {
-        if (isPointInPolygonRobust(clipper[0], subject)) {
-            return [subject, clipper];
+        const intersections = findIntersectionsRobust(subject, clipper);
+        
+        if (intersections.length === 0) {
+            // 1. Если Исходный объект полностью внутри Резака -> удаляем его (возвращаем пусто)
+            if (isPointInPolygonRobust(subject[0], clipper)) return [];
+            
+            // 2. ИЗМЕНЕНИЕ: Если Резак полностью внутри Исходного объекта -> возвращаем оба контура
+            // Система отрисовки и расчета площади сама поймет, что внутренний контур — это дырка
+            if (isPointInPolygonRobust(clipper[0], subject)) {
+                // Возвращаем [Внешний, Дырка]
+                // Копируем массивы для безопасности
+                return [ [...subject], [...clipper] ];
+            }
+
+            // 3. Если пересечений и вложенности нет -> возвращаем исходный объект как есть
+            return [subject];
         }
-        if (isPointInPolygonRobust(subject[0], clipper)) {
-            return [];
-        }
-        return [subject];
+
+        const subjWithInt = insertPointsAndMark(subject, intersections, true);
+        const clipWithInt = insertPointsAndMark(clipper, intersections, false);
+
+        const subjArcs = splitByIntersections(subjWithInt);
+        const clipArcs = splitByIntersections(clipWithInt);
+
+        const finalArcs = [];
+
+        // Дуги цели (снаружи резака)
+        subjArcs.forEach(arc => {
+            const mid = getArcMidpoint(arc);
+            if (!isPointInPolygonRobust(mid, clipper, false)) { 
+                finalArcs.push(arc);
+            }
+        });
+
+        // Дуги резака (внутри цели) - РАЗВОРОТ
+        clipArcs.forEach(arc => {
+            const mid = getArcMidpoint(arc);
+            if (isPointInPolygonRobust(mid, subject, true)) {
+                finalArcs.push(arc.reverse());
+            }
+        });
+
+        return stitchArcs(finalArcs);
     }
-
-    const subjWithInt = insertPointsAndMark(subject, intersections, true);
-    const clipWithInt = insertPointsAndMark(clipper, intersections, false);
-
-    const subjArcs = splitByIntersections(subjWithInt);
-    const clipArcs = splitByIntersections(clipWithInt);
-
-    console.log(`  [computeDiff] subjArcs: ${subjArcs.length}, clipArcs: ${clipArcs.length}`);
-
-    const finalArcs = [];
-
-    // Subject: части СНАРУЖИ clipper
-    subjArcs.forEach((arc, i) => {
-        const mid = getArcMidpoint(arc);
-        const inside = isPointInPolygonRobust(mid, clipper, false);
-        if (!inside) {
-            console.log(`    subjArc[${i}]: KEEP (outside clipper)`);
-            finalArcs.push(arc);
-        }
-    });
-
-    // Clipper: части ВНУТРИ subject — БЕЗ РАЗВОРОТА!
-    clipArcs.forEach((arc, i) => {
-        const mid = getArcMidpoint(arc);
-        const inside = isPointInPolygonRobust(mid, subject, true);
-        if (inside) {
-            console.log(`    clipArc[${i}]: KEEP as-is (inside subject)`);
-            finalArcs.push(arc);  // ← НЕТ reverse()!
-        }
-    });
-
-    // Логируем финальные дуги
-    console.log(`  [computeDiff] finalArcs total: ${finalArcs.length}`);
-    finalArcs.forEach((arc, i) => {
-        const h = arc[0];
-        const t = arc[arc.length - 1];
-        console.log(`    finalArc[${i}]: (${h.x.toFixed(2)},${h.y.toFixed(2)})->(${t.x.toFixed(2)},${t.y.toFixed(2)})`);
-    });
-
-    return stitchArcs(finalArcs);
-}
-
 
     function findIntersectionsRobust(poly1, poly2) {
         const intersects = [];
@@ -6195,50 +6087,32 @@ function computeDifference(subject, clipper) {
         return result;
     }
 
-function splitByIntersections(pointsWithFlags) {
-    const arcs = [];
-    let startIndex = pointsWithFlags.findIndex(p => p.isIntersection);
-    
-    console.log(`    [split] input: ${pointsWithFlags.length} pts, first intersection at: ${startIndex}`);
-    
-    if (startIndex === -1) {
-        console.log(`    [split] No intersections, returning whole contour`);
-        return [pointsWithFlags.map(p => ({x:p.x, y:p.y}))];
-    }
-
-    const uniquePoints = pointsWithFlags.slice(0, pointsWithFlags.length - 1);
-    const rotated = [
-        ...uniquePoints.slice(startIndex),
-        ...uniquePoints.slice(0, startIndex),
-        uniquePoints[startIndex]
-    ];
-    
-    // Логируем все точки пересечения в rotated
-    const intIndices = [];
-    rotated.forEach((p, i) => { if (p.isIntersection) intIndices.push(i); });
-    console.log(`    [split] rotated: ${rotated.length} pts, intersections at indices: [${intIndices.join(', ')}]`);
-    
-    let currentArc = [{x: rotated[0].x, y: rotated[0].y}];
-    
-    for (let i = 1; i < rotated.length; i++) {
-        const p = rotated[i];
-        currentArc.push({x: p.x, y: p.y});
+    function splitByIntersections(pointsWithFlags) {
+        const arcs = [];
+        let startIndex = pointsWithFlags.findIndex(p => p.isIntersection);
         
-        if (p.isIntersection) {
-            arcs.push(currentArc);
-            currentArc = [{x: p.x, y: p.y}];
+        if (startIndex === -1) return [pointsWithFlags.map(p => ({x:p.x, y:p.y}))];
+
+        const uniquePoints = pointsWithFlags.slice(0, pointsWithFlags.length - 1);
+        const rotated = [
+            ...uniquePoints.slice(startIndex),
+            ...uniquePoints.slice(0, startIndex),
+            uniquePoints[startIndex]
+        ];
+        
+        let currentArc = [{x: rotated[0].x, y: rotated[0].y}];
+        
+        for (let i = 1; i < rotated.length; i++) {
+            const p = rotated[i];
+            currentArc.push({x: p.x, y: p.y});
+            
+            if (p.isIntersection && i < rotated.length) {
+                arcs.push(currentArc);
+                currentArc = [{x: p.x, y: p.y}];
+            }
         }
+        return arcs;
     }
-    
-    // ВАЖНО: если осталась незавершённая дуга с >1 точкой, добавляем её
-    if (currentArc.length > 1) {
-        console.log(`    [split] Adding remaining arc with ${currentArc.length} pts`);
-        arcs.push(currentArc);
-    }
-    
-    console.log(`    [split] output: ${arcs.length} arcs`);
-    return arcs;
-}
 
     function getArcMidpoint(arc) {
         const midIdx = Math.floor(arc.length / 2);
@@ -6250,79 +6124,56 @@ function splitByIntersections(pointsWithFlags) {
         return { x: (p1.x + p2.x)/2, y: (p1.y + p2.y)/2 };
     }
 
-function stitchArcs(arcs) {
-    console.log("  [stitchArcs] Input arcs:", arcs.length);
-    
-    if (arcs.length === 0) return [];
-    
-    // Логируем начало/конец каждой дуги
-    arcs.forEach((arc, i) => {
-        const head = arc[0];
-        const tail = arc[arc.length - 1];
-        console.log(`    Arc ${i}: (${head.x.toFixed(2)},${head.y.toFixed(2)}) -> (${tail.x.toFixed(2)},${tail.y.toFixed(2)}) [${arc.length} pts]`);
-    });
-    
-    const polygons = [];
-    const used = new Array(arcs.length).fill(false);
-    const tolerance = 0.01; // УВЕЛИЧИЛ TOLERANCE!
-
-    while(true) {
-        const startIdx = used.findIndex(u => !u);
-        if (startIdx === -1) break;
-
-        const poly = [];
-        let currIdx = startIdx;
-        let watchdog = 0;
+    function stitchArcs(arcs) {
+        if (arcs.length === 0) return [];
         
-        console.log(`    Starting chain from arc ${startIdx}`);
-        
-        while (currIdx !== -1 && !used[currIdx] && watchdog < arcs.length * 2) {
-            used[currIdx] = true;
-            const arc = arcs[currIdx];
-            watchdog++;
+        const polygons = [];
+        const used = new Array(arcs.length).fill(false);
+        const tolerance = 0.0001; 
+
+        while(true) {
+            const startIdx = used.findIndex(u => !u);
+            if (startIdx === -1) break;
+
+            const poly = [];
+            let currIdx = startIdx;
+            let watchdog = 0;
             
-            poly.push(...arc.slice(0, arc.length - 1));
-            
-            const tail = arc[arc.length - 1];
-            
-            let nextIdx = -1;
-            let minDist = Infinity;
-            
-            for (let i = 0; i < arcs.length; i++) {
-                if (!used[i]) {
-                    const head = arcs[i][0];
-                    const dist = (head.x - tail.x)**2 + (head.y - tail.y)**2;
-                    if (dist < tolerance && dist < minDist) {
-                        minDist = dist;
-                        nextIdx = i;
+            while (currIdx !== -1 && !used[currIdx] && watchdog < arcs.length * 2) {
+                used[currIdx] = true;
+                const arc = arcs[currIdx];
+                watchdog++;
+                
+                poly.push(...arc.slice(0, arc.length - 1));
+                
+                const tail = arc[arc.length - 1];
+                
+                let nextIdx = -1;
+                for (let i = 0; i < arcs.length; i++) {
+                    if (!used[i]) {
+                        const head = arcs[i][0];
+                        if ((head.x - tail.x)**2 + (head.y - tail.y)**2 < tolerance) {
+                            nextIdx = i;
+                            break;
+                        }
                     }
                 }
+                
+                if (nextIdx !== -1) {
+                    currIdx = nextIdx;
+                } else {
+                    poly.push(tail);
+                    const first = poly[0];
+                    if ((first.x - tail.x)**2 + (first.y - tail.y)**2 > tolerance) {
+                        poly.push({x: first.x, y: first.y});
+                    }
+                    currIdx = -1;
+                }
             }
-            
-            console.log(`      Arc ${currIdx} tail: (${tail.x.toFixed(2)},${tail.y.toFixed(2)}), next: ${nextIdx}, minDist: ${minDist.toFixed(6)}`);
-            
-            if (nextIdx !== -1) {
-                currIdx = nextIdx;
-            } else {
-                poly.push(tail);
-                currIdx = -1;
-            }
+            if (poly.length >= 3) polygons.push(poly);
         }
-        
-        if (poly.length >= 3) {
-            const first = poly[0];
-            const last = poly[poly.length-1];
-            if ((first.x - last.x)**2 + (first.y - last.y)**2 > tolerance) {
-                 poly.push({x: first.x, y: first.y});
-            }
-            console.log(`    Completed polygon with ${poly.length} points`);
-            polygons.push(poly);
-        }
+        return polygons;
     }
-    
-    console.log("  [stitchArcs] Output polygons:", polygons.length);
-    return polygons;
-}
 
    function saveProjectToJson() {
         if (userObjects.length === 0) {
