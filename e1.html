@@ -10,7 +10,7 @@
 
    <link rel="stylesheet" href="webfonts/all.min.css" />
     <script src="webfonts/proj4.js"></script>
-       <script src="webfonts/xlsx.full.min.js"></script>
+       <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
        <script src="webfonts/jszip.min.js"></script>
        <script src="webfonts/html2canvas.min.js"></script>
 <script src="webfonts/FileSaver.min.js"></script>
@@ -6222,6 +6222,10 @@ contextMenu.innerHTML = `
   <div class="custom-context-menu-item" id="parcels-nearby-menu-item">
                 <i class="fas fa-bullseye"></i>Земельные участки рядом 
             </div>
+            
+              <div class="custom-context-menu-item" id="parcels-on-object-menu-item">
+                <i class="fas fa-layer-group"></i>Земельные участки на объекте
+            </div>
 
         <div class="custom-context-menu-item" id="egrn-html-menu-item">
             <i class="fas fa-file-alt"></i>ЕГРН
@@ -7099,6 +7103,14 @@ if (event.target.id === 'quarter-msk-xml-menu-item') {
             const lat = parseFloat(contextMenu.dataset.lat);
             const lon = parseFloat(contextMenu.dataset.lon);
             await getParcelsNearby(lat, lon);
+            contextMenu.style.display = 'none';
+        }
+        
+        
+          if (event.target.id === 'parcels-on-object-menu-item') {
+            const lat = parseFloat(contextMenu.dataset.lat);
+            const lon = parseFloat(contextMenu.dataset.lon);
+            await getParcelsOnObject(lat, lon);
             contextMenu.style.display = 'none';
         }
         
@@ -9814,9 +9826,16 @@ async function populateSidebarWithFoundObjects(features, objectType) {
         copyFilteredBtn.onclick = copyFilteredCadnums;
     }
     
-    // === ВАЖНОЕ ИСПРАВЛЕНИЕ: ДОБАВЛЕН ОБРАБОТЧИК ===
+    // === ИСПРАВЛЕНИЕ ПРИВЯЗКИ ===
+  
     if (exportBtn) {
-        exportBtn.onclick = exportSidebarToExcel;
+        exportBtn.onclick = null;
+        exportBtn.onclick = function() {
+             console.log("[Click] Нажата кнопка экспорта в сайдбаре (FoundObjects)");
+             exportSidebarToExcel();
+        };
+    } else {
+         console.error("Кнопка export-sidebar-btn не найдена в DOM при вызове populateSidebarWithFoundObjects");
     }
 }
 
@@ -10308,7 +10327,7 @@ function populateSidebarWithParcels(features, loadDate = null) {
          if(footer) footer.style.display = 'none';
      }
 
-     sidebar.classList.remove('hidden', 'collapsed');
+        sidebar.classList.remove('hidden', 'collapsed');
      toggleBtn.innerHTML = '<i class="fas fa-chevron-right"></i>';
      isSidebarCollapsed = false;
 
@@ -10322,9 +10341,17 @@ function populateSidebarWithParcels(features, loadDate = null) {
         copyFilteredBtn.addEventListener('click', copyFilteredCadnums);
      }
 
-     // === ВАЖНОЕ ИСПРАВЛЕНИЕ: ДОБАВЛЕН ОБРАБОТЧИК ===
+     // === ИСПРАВЛЕНИЕ ПРИВЯЗКИ ===
+  
      if (exportBtn) {
-         exportBtn.onclick = exportSidebarToExcel;
+         // Удаляем старый обработчик, чтобы не дублировать (хотя onclick перезаписывает, но для надежности)
+         exportBtn.onclick = null; 
+         exportBtn.onclick = function() {
+             console.log("[Click] Нажата кнопка экспорта в сайдбаре (Parcels)");
+             exportSidebarToExcel();
+         };
+     } else {
+         console.error("Кнопка export-sidebar-btn не найдена в DOM при вызове populateSidebarWithParcels");
      }
 }
 
@@ -11935,6 +11962,47 @@ function updateLoaderWithRadiusButtons(lat, lon) {
 
         buttonsContainer.appendChild(btn);
     });
+}
+
+
+async function getParcelsOnObject(lat, lon) {
+    showLoader("Поиск контура объекта...");
+
+    try {
+        // 1. Находим полигон под точкой клика (используем существующую функцию)
+        const targetPolygon = findPolygonAtPoint(lat, lon);
+        
+        if (!targetPolygon) {
+            showNotification('В точке клика не найден полигон (контур) для поиска', 'warning');
+            return;
+        }
+
+        showLoader("Поиск земельных участков в границах объекта...");
+
+        // 2. Используем существующую функцию поиска пересечений
+        // ID категории 36368 - Земельные участки
+        const foundFeatures = await searchFeaturesByGeometry(targetPolygon, 36368);
+
+        if (!foundFeatures || foundFeatures.length === 0) {
+            showNotification('Земельные участки на объекте не найдены', 'warning');
+            return;
+        }
+
+        // 3. Отрисовываем найденные участки
+        // Второй аргумент true помечает их флагом isFoundInArea (красный цвет)
+        await drawFoundParcels(foundFeatures, true);
+
+        // 4. Заполняем боковую панель
+        await populateSidebarWithFoundObjects(foundFeatures, 'ЗУ (на объекте)');
+
+        showNotification(`Найдено участков: ${foundFeatures.length}`, 'success');
+
+    } catch (error) {
+        console.error('Ошибка при поиске участков на объекте:', error);
+        showNotification(`Ошибка поиска: ${error.message}`, 'error');
+    } finally {
+        hideLoader();
+    }
 }
 
 async function getParcelsNearby(lat, lon) {
@@ -20116,18 +20184,22 @@ function exportBuildingsToExcel() {
 
 
 async function exportSidebarToExcel() {
+    console.log(">>> [Export] Запуск функции экспорта в Excel...");
+
     const contentDiv = document.getElementById('parcel-list-content');
     if (!contentDiv) return;
 
+    // Ищем видимые элементы (исключаем отфильтрованные)
     const visibleItems = contentDiv.querySelectorAll('.sidebar-item:not(.filtered-out)');
     if (visibleItems.length === 0) {
         showNotification('Нет видимых объектов для экспорта', 'warning');
         return;
     }
 
-    showLoader('Подготовка экспорта...');
+    showLoader('Формирование таблицы...');
 
     try {
+        // 1. СБОР ДАННЫХ
         const dataToExport = Array.from(visibleItems).map(item => {
             const pTags = item.querySelectorAll('p');
             const record = {
@@ -20135,49 +20207,62 @@ async function exportSidebarToExcel() {
                 address: '',
                 areaValue: '',
                 areaType: '',
-                ezNumber: null
+                ezNumber: null // По умолчанию null
             };
 
             pTags.forEach(p => {
                 const text = p.innerText.trim();
-                if (/^\d+\.\s*\d{2}:\d{2}:\d{6,7}:\d+/.test(text)) {
+                
+                // Парсинг кадастрового номера
+                if (/^\d+\.\s/.test(text)) { 
+                    // Убираем "1. " в начале
                     record.cadNumber = text.replace(/^\d+\.\s*/, '');
-                } else if (text.includes('Единое землепользование:')) {
+                } 
+                // Парсинг номера ЕЗ (ищем в тексте карточки)
+                else if (text.includes('Единое землепользование:')) {
                     const lines = text.split('\n');
+                    // Обычно формат: "Единое землепользование:\n16:..."
                     if (lines.length > 1 && lines[1].trim()) {
                         record.ezNumber = lines[1].trim();
                     }
-                } else if (text.includes('м²')) {
-                    const areaRegex = /^([\d\s, ]+)\s*м²\s*\((.*?)\)$/;
+                } 
+                // Парсинг площади
+                else if (text.includes('м²')) {
+                    const areaRegex = /^([\d\s ]+)[\s ]*м²\s*\((.*?)\)$/;
                     const match = text.match(areaRegex);
                     if (match) {
-                        record.areaValue = match[1].replace(/[\s ]/g, '').replace(',', '.');
+                        record.areaValue = match[1].replace(/[\s ]/g, '').replace(',', '.');
                         record.areaType = match[2];
                     }
-                } else if (text !== '-' && !record.address) {
+                } 
+                // Парсинг адреса
+                else if (text !== '-' && !record.address && !text.includes('Единое землепользование')) {
                     record.address = text;
                 }
             });
             return record;
         });
 
+        // 2. СОРТИРОВКА (сначала ЕЗ, потом остальные)
         dataToExport.sort((a, b) => {
-            const aHasEz = a.ezNumber !== null;
-            const bHasEz = b.ezNumber !== null;
+            const aHasEz = !!a.ezNumber;
+            const bHasEz = !!b.ezNumber;
             if (aHasEz && bHasEz) {
                 if (a.ezNumber !== b.ezNumber) return a.ezNumber.localeCompare(b.ezNumber, undefined, { numeric: true });
                 return a.cadNumber.localeCompare(b.cadNumber, undefined, { numeric: true });
-            } else if (aHasEz) return -1;
-            else if (bHasEz) return 1;
-            else return a.cadNumber.localeCompare(b.cadNumber, undefined, { numeric: true });
+            }
+            if (aHasEz) return -1;
+            if (bHasEz) return 1;
+            return a.cadNumber.localeCompare(b.cadNumber, undefined, { numeric: true });
         });
 
+        // 3. ПОДГОТОВКА ДАННЫХ ДЛЯ EXCEL
         const headers = ["ЕЗП", "Кадастровый номер", "Адрес/Описание", "Площадь, м²", "Тип площади"];
         const sheetData = [headers];
 
         dataToExport.forEach(record => {
             const row = [
-                record.ezNumber || '',
+                record.ezNumber || '', // Если null, ставим пустую строку
                 record.cadNumber,
                 record.address,
                 record.areaValue ? parseFloat(record.areaValue) : '',
@@ -20186,25 +20271,39 @@ async function exportSidebarToExcel() {
             sheetData.push(row);
         });
 
-        // --- БЛОК СТАТИСТИКИ ---
+        // --- 4. РАСЧЕТ СТАТИСТИКИ (ВАШ ЗАПРОС) ---
+        
+        // А. Всего участков включая обособленные (считаем колонку "Кадастровый номер")
+        // Фильтруем пустые, на всякий случай
         const totalParcelsCount = dataToExport.filter(r => r.cadNumber && r.cadNumber.trim() !== '').length;
 
+        // Б. Единых землепользований (уникальные значения в колонке ЕЗП)
         const uniqueEzSet = new Set(
             dataToExport
                 .map(r => r.ezNumber)
-                .filter(ez => ez && ez.trim() !== '')
+                .filter(ez => ez && ez.trim() !== '') // Берем только не пустые
         );
         const uniqueEzCount = uniqueEzSet.size;
 
+        // В. Участков не в составе ЕЗ (исключаем те, у которых есть ezNumber)
         const independentParcelsCount = dataToExport.filter(r => 
-            r.cadNumber && (!r.ezNumber || r.ezNumber.trim() === '')
+            !r.ezNumber || r.ezNumber.trim() === ''
         ).length;
 
-        sheetData.push([]); 
-        const statsString = `Статистика: Всего участков включая обособленные: ${totalParcelsCount}, единых землепользований: ${uniqueEzCount}, участков не в составе единого землепользования: ${independentParcelsCount}`;
-        sheetData.push([statsString]);
-        // -----------------------
+        console.log(`[Stats] Всего ЗУ: ${totalParcelsCount}`);
+        console.log(`[Stats] Уникальных ЕЗ: ${uniqueEzCount}`);
+        console.log(`[Stats] Обособленных (без ЕЗ): ${independentParcelsCount}`);
 
+        // Добавляем пустую строку для отступа
+        sheetData.push([""]); 
+        
+        // Формируем итоговую строку
+        const statsString = `Статистика: Всего участков, включая обособленные: ${totalParcelsCount}, единых землепользований: ${uniqueEzCount}, участков не в составе единого землепользования: ${independentParcelsCount}`;
+        
+        // Добавляем строку статистики в данные
+        sheetData.push([statsString]);
+
+        // 5. ГЕНЕРАЦИЯ ФАЙЛА
         if (typeof XLSX === 'undefined') {
             throw new Error("Библиотека XLSX не загружена!");
         }
@@ -20212,7 +20311,8 @@ async function exportSidebarToExcel() {
         const wb = XLSX.utils.book_new();
         const ws = XLSX.utils.aoa_to_sheet(sheetData);
 
-        ws['!cols'] = [ {wch:20}, {wch:20}, {wch:60}, {wch:15}, {wch:15} ];
+        // Настройка ширины колонок
+        ws['!cols'] = [ {wch:20}, {wch:25}, {wch:50}, {wch:15}, {wch:15} ];
         
         XLSX.utils.book_append_sheet(wb, ws, "Экспорт");
         
@@ -20221,16 +20321,15 @@ async function exportSidebarToExcel() {
         
         XLSX.writeFile(wb, filename);
 
-        showNotification(`Экспортировано ${visibleItems.length} объектов`, 'success');
+        showNotification(`Экспортировано ${totalParcelsCount} объектов`, 'success');
 
     } catch (error) {
-        console.error(error);
-        showNotification('Ошибка при экспорте', 'error');
+        console.error("[Export] Ошибка:", error);
+        showNotification('Ошибка при экспорте: ' + error.message, 'error');
     } finally {
         hideLoader();
     }
 }
-
 
 
 async function exportParcelsToExcel() { // <-- Добавлено async
@@ -21893,6 +21992,25 @@ function copyFilteredCadnums() {
         });
 }
 
+
+document.addEventListener('DOMContentLoaded', () => {
+    const exportBtn = document.getElementById('export-sidebar-btn');
+    if (exportBtn) {
+        // Удаляем старые обработчики (клон элемента удаляет listener-ы)
+        const newExportBtn = exportBtn.cloneNode(true);
+        exportBtn.parentNode.replaceChild(newExportBtn, exportBtn);
+        
+        // Вешаем новый гарантированный обработчик
+        newExportBtn.addEventListener('click', function(e) {
+            e.preventDefault();
+            console.log(">>> [Click] Кнопка экспорта нажата (Глобальный обработчик)");
+            exportSidebarToExcel();
+        });
+        console.log(">>> [Init] Кнопка экспорта успешно инициализирована");
+    } else {
+        console.error(">>> [Init] ОШИБКА: Кнопка export-sidebar-btn не найдена в HTML!");
+    }
+});
 
 
 
