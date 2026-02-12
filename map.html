@@ -10,7 +10,7 @@
 
    <link rel="stylesheet" href="webfonts/all.min.css" />
     <script src="webfonts/proj4.js"></script>
-       <script src="https://cdn.sheetjs.com/xlsx-0.20.1/package/dist/xlsx.full.min.js"></script>
+       <script src="webfonts/xlsx.full.min.js"></script>
        <script src="webfonts/jszip.min.js"></script>
        <script src="webfonts/html2canvas.min.js"></script>
 <script src="webfonts/FileSaver.min.js"></script>
@@ -11968,33 +11968,68 @@ function updateLoaderWithRadiusButtons(lat, lon) {
 
 
 async function getParcelsOnObject(lat, lon) {
-    showLoader("Поиск контура объекта...");
+    // 1. Сначала проверяем, есть ли уже выделенная линия
+    let targetObject = selectedLine;
+
+    // 2. Если нет, ищем полигон под курсором
+    if (!targetObject) {
+        targetObject = findPolygonAtPoint(lat, lon);
+    }
+    
+    // 3. Если нет, ищем линию под курсором
+    if (!targetObject) {
+        targetObject = findLineAtPoint(lat, lon);
+    }
+
+    // 4. Если конкретный объект найден — выполняем поиск сразу
+    if (targetObject) {
+        await executeParcelsOnObjectSearch(targetObject);
+        return;
+    }
+
+    // 5. Если клик был "в молоко", собираем ВСЕ подходящие объекты с карты
+    const candidateObjects = polygons.filter(obj => {
+        const isPoly = obj instanceof ymaps.Polygon;
+        const isLine = obj instanceof ymaps.Polyline && obj.properties.get('isDrawableLine');
+        return isPoly || isLine;
+    });
+
+    if (candidateObjects.length === 0) {
+        showNotification('В точке клика пусто, и на карте нет доступных объектов для поиска.', 'warning');
+        return;
+    }
+
+    // 6. Показываем список с правильным заголовком
+    showPolygonSelectionModal(
+        candidateObjects, 
+        async (selectedObj) => {
+            if (selectedObj) {
+                await executeParcelsOnObjectSearch(selectedObj);
+            }
+        }, 
+        "Выберите объект для поиска наложений" // <--- НОВЫЙ ЗАГОЛОВОК
+    );
+}
+
+// Вспомогательная функция для выполнения запроса (вынесена отдельно)
+async function executeParcelsOnObjectSearch(targetObject) {
+    const objType = (targetObject instanceof ymaps.Polyline) ? 'линейном объекте' : 'контуре объекта';
+    showLoader(`Поиск земельных участков на ${objType}...`);
 
     try {
-        // 1. Находим полигон под точкой клика (используем существующую функцию)
-        const targetPolygon = findPolygonAtPoint(lat, lon);
-        
-        if (!targetPolygon) {
-            showNotification('В точке клика не найден полигон (контур) для поиска', 'warning');
-            return;
-        }
-
-        showLoader("Поиск земельных участков в границах объекта...");
-
-        // 2. Используем существующую функцию поиска пересечений
+        // Используем функцию поиска пересечений (которая уже поддерживает LineString)
         // ID категории 36368 - Земельные участки
-        const foundFeatures = await searchFeaturesByGeometry(targetPolygon, 36368);
+        const foundFeatures = await searchFeaturesByGeometry(targetObject, 36368);
 
         if (!foundFeatures || foundFeatures.length === 0) {
-            showNotification('Земельные участки на объекте не найдены', 'warning');
+            showNotification(`Земельные участки на ${objType} не найдены`, 'warning');
             return;
         }
 
-        // 3. Отрисовываем найденные участки
-        // Второй аргумент true помечает их флагом isFoundInArea (красный цвет)
+        // Отрисовываем найденные участки
         await drawFoundParcels(foundFeatures, true);
 
-        // 4. Заполняем боковую панель
+        // Заполняем боковую панель
         await populateSidebarWithFoundObjects(foundFeatures, 'ЗУ (на объекте)');
 
         showNotification(`Найдено участков: ${foundFeatures.length}`, 'success');
@@ -14122,79 +14157,63 @@ function showHistoryModal() {
 
 
 async function getAllZouitsInObject(lat, lon) {
-    showLoader("Поиск объекта на карте...");
+    let targetObject = selectedLine;
+
+    if (!targetObject) {
+        targetObject = findPolygonAtPoint(lat, lon);
+    }
+    
+    if (!targetObject) {
+        targetObject = findLineAtPoint(lat, lon);
+    }
+
+    if (targetObject) {
+        await executeZouitsOnObjectSearch(targetObject);
+        return;
+    }
+
+    const candidateObjects = polygons.filter(obj => {
+        const isPoly = obj instanceof ymaps.Polygon;
+        const isLine = obj instanceof ymaps.Polyline && obj.properties.get('isDrawableLine');
+        return isPoly || isLine;
+    });
+
+    if (candidateObjects.length === 0) {
+        showNotification('В точке клика пусто, и на карте нет доступных объектов для поиска.', 'warning');
+        return;
+    }
+
+    showPolygonSelectionModal(
+        candidateObjects, 
+        async (selectedObj) => {
+            if (selectedObj) {
+                await executeZouitsOnObjectSearch(selectedObj);
+            }
+        }, 
+        "Выберите объект для поиска наложений"
+    );
+}
+
+async function executeZouitsOnObjectSearch(targetObject) {
+    const objType = (targetObject instanceof ymaps.Polyline) ? 'линейном объекте' : 'контуре объекта';
+    showLoader(`Поиск ЗОУИТ на ${objType}...`);
+
     try {
-        const targetPolygon = findPolygonAtPoint(lat, lon);
-        if (!targetPolygon) {
-            throw new Error('Объект (полигон) в точке клика не найден.');
-        }
-        
-        const cadNumber = targetPolygon.properties.get('cadastralNumber') || 'выбранный объект';
-        showLoader(`Подготовка геометрии для запроса по ${cadNumber}...`);
+        const foundFeatures = await searchFeaturesByGeometry(targetObject, 36940);
 
-        const geometryType = targetPolygon.geometry.getType();
-        const allCoordRings = targetPolygon.geometry.getCoordinates();
-        let outerRing;
-
-        if (geometryType === 'Polygon') {
-            outerRing = allCoordRings[0];
-        } else if (geometryType === 'MultiPolygon') {
-            outerRing = allCoordRings[0][0];
-        } else {
-            throw new Error(`Неподдерживаемый тип геометрии для поиска: ${geometryType}`);
-        }
-
-        if (!outerRing || outerRing.length < 3) {
-            throw new Error('Не удалось получить корректный контур объекта для поиска.');
-        }
-
-        const transformedOuterRing = outerRing.map(coord => {
-            const trueLat = coord[0] + (mapOffsetY * 0.000008983);
-            const trueLon = coord[1] + (mapOffsetX * 0.000008983);
-            return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
-        });
-        
-        const geometryForApi = {
-            "crs": { "type": "name", "properties": { "name": "EPSG:3857" } },
-            "type": "Polygon",
-            "coordinates": [transformedOuterRing]
-        };
-
-        showLoader(`Поиск ЗОУИТ на объекте ${cadNumber}...`); // <-- Текст изменен
-
-        const requestBody = {
-            "geom": { "type": "FeatureCollection", "features": [{ "type": "Feature", "geometry": geometryForApi, "properties": {} }] },
-            "categories": [{ "id": 36940 }]
-        };
-
-        const response = await fetchNspd('https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestBody)
-        });
-
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => null);
-            const errorMessage = errorData?.message || `Ошибка запроса к НСПД: ${response.status}`;
-            throw new Error(errorMessage);
-        }
-        
-        const zouitsData = await response.json();
-        const foundZouits = zouitsData.features || [];
-
-        if (foundZouits.length === 0) {
-            showNotification('Пересекающихся ЗОУИТ с выбранным объектом не найдено.', 'info');
+        if (!foundFeatures || foundFeatures.length === 0) {
+            showNotification(`ЗОУИТ на ${objType} не найдены`, 'warning');
             return;
         }
 
-        await processAndDrawZouits(foundZouits);
-        await populateSidebarWithFoundObjects(foundZouits, 'ЗОУИТ (на объекте)'); // <-- Текст изменен
+        await processAndDrawZouits(foundFeatures);
+        await populateSidebarWithFoundObjects(foundFeatures, 'ЗОУИТ (на объекте)');
 
-        showNotification(`Найдено пересекающихся ЗОУИТ: ${foundZouits.length}`, 'success');
+        showNotification(`Найдено ЗОУИТ: ${foundFeatures.length}`, 'success');
 
     } catch (error) {
-        console.error('Ошибка в функции getAllZouitsInObject:', error);
-        showNotification(`Ошибка: ${error.message}`, 'error', 'exclamation-circle');
+        console.error('Ошибка при поиске ЗОУИТ на объекте:', error);
+        showNotification(`Ошибка поиска: ${error.message}`, 'error');
     } finally {
         hideLoader();
     }
@@ -14202,140 +14221,127 @@ async function getAllZouitsInObject(lat, lon) {
 
 
 async function getAllOksInObject(lat, lon) {
-    showLoader("Поиск объекта на карте...");
+    let targetObject = selectedLine;
+
+    if (!targetObject) {
+        targetObject = findPolygonAtPoint(lat, lon);
+    }
+    
+    if (!targetObject) {
+        targetObject = findLineAtPoint(lat, lon);
+    }
+
+    if (targetObject) {
+        await executeOksOnObjectSearch(targetObject);
+        return;
+    }
+
+    const candidateObjects = polygons.filter(obj => {
+        const isPoly = obj instanceof ymaps.Polygon;
+        const isLine = obj instanceof ymaps.Polyline && obj.properties.get('isDrawableLine');
+        return isPoly || isLine;
+    });
+
+    if (candidateObjects.length === 0) {
+        showNotification('В точке клика пусто, и на карте нет доступных объектов для поиска.', 'warning');
+        return;
+    }
+
+    showPolygonSelectionModal(
+        candidateObjects, 
+        async (selectedObj) => {
+            if (selectedObj) {
+                await executeOksOnObjectSearch(selectedObj);
+            }
+        }, 
+        "Выберите объект для поиска наложений"
+    );
+}
+
+
+async function executeOksOnObjectSearch(targetObject) {
+    const objType = (targetObject instanceof ymaps.Polyline) ? 'линейном объекте' : 'контуре объекта';
+    showLoader(`Поиск ОКС на ${objType}...`);
+
     try {
-        const targetPolygon = findPolygonAtPoint(lat, lon);
-        if (!targetPolygon) {
-            throw new Error('Объект (полигон) в точке клика не найден.');
-        }
-        
-        const cadNumber = targetPolygon.properties.get('cadastralNumber') || 'выбранный объект';
-        showLoader(`Поиск ОКС на объекте ${cadNumber}...`);
+        const foundFeatures = await searchFeaturesByGeometry(targetObject, 36369);
 
-        const geometryType = targetPolygon.geometry.getType();
-        const allCoordRings = targetPolygon.geometry.getCoordinates();
-        let outerRing;
-
-        if (geometryType === 'Polygon') outerRing = allCoordRings[0];
-        else if (geometryType === 'MultiPolygon') outerRing = allCoordRings[0][0];
-        else throw new Error(`Неподдерживаемый тип геометрии: ${geometryType}`);
-
-        if (!outerRing || outerRing.length < 3) {
-            throw new Error('Не удалось получить корректный контур объекта.');
-        }
-
-        const transformedOuterRing = outerRing.map(coord => {
-            const trueLat = coord[0] + (mapOffsetY * 0.000008983);
-            const trueLon = coord[1] + (mapOffsetX * 0.000008983);
-            return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
-        });
-        
-        const geometryForApi = {
-            "crs": { "type": "name", "properties": { "name": "EPSG:3857" } },
-            "type": "Polygon",
-            "coordinates": [transformedOuterRing]
-        };
-
-        const requestBody = {
-            "geom": { "type": "FeatureCollection", "features": [{ "type": "Feature", "geometry": geometryForApi, "properties": {} }] },
-            "categories": [{ "id": 36369 }] // <-- ID ДЛЯ ЗДАНИЙ (ОКС)
-        };
-
-        const response = await fetchNspd('https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody)
-        });
-
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => null);
-            throw new Error(errorData?.message || `Ошибка запроса к НСПД: ${response.status}`);
-        }
-        
-        const buildingsData = await response.json();
-        const foundBuildings = buildingsData.features || [];
-
-        if (foundBuildings.length === 0) {
-            showNotification('ОКС, пересекающихся с выбранным объектом, не найдено.', 'info');
+        if (!foundFeatures || foundFeatures.length === 0) {
+            showNotification(`ОКС на ${objType} не найдены`, 'warning');
             return;
         }
 
-        await processAndDrawBuildings(foundBuildings); // <-- Вызываем функцию для отрисовки ЗДАНИЙ
-        await populateSidebarWithFoundObjects(foundBuildings, 'Здания (на объекте)'); // <-- Вызываем сайдбар для ЗДАНИЙ
+        await processAndDrawBuildings(foundFeatures);
+        await populateSidebarWithFoundObjects(foundFeatures, 'Здания (на объекте)');
 
-        showNotification(`Найдено пересекающихся ОКС: ${foundBuildings.length}`, 'success');
+        showNotification(`Найдено ОКС: ${foundFeatures.length}`, 'success');
 
     } catch (error) {
-        console.error('Ошибка в функции getAllOksInObject:', error);
-        showNotification(`Ошибка: ${error.message}`, 'error', 'exclamation-circle');
+        console.error('Ошибка при поиске ОКС на объекте:', error);
+        showNotification(`Ошибка поиска: ${error.message}`, 'error');
     } finally {
         hideLoader();
     }
 }
 
 async function getAllStructuresInObject(lat, lon) {
-    showLoader("Поиск объекта на карте...");
+    let targetObject = selectedLine;
+
+    if (!targetObject) {
+        targetObject = findPolygonAtPoint(lat, lon);
+    }
+    
+    if (!targetObject) {
+        targetObject = findLineAtPoint(lat, lon);
+    }
+
+    if (targetObject) {
+        await executeStructuresOnObjectSearch(targetObject);
+        return;
+    }
+
+    const candidateObjects = polygons.filter(obj => {
+        const isPoly = obj instanceof ymaps.Polygon;
+        const isLine = obj instanceof ymaps.Polyline && obj.properties.get('isDrawableLine');
+        return isPoly || isLine;
+    });
+
+    if (candidateObjects.length === 0) {
+        showNotification('В точке клика пусто, и на карте нет доступных объектов для поиска.', 'warning');
+        return;
+    }
+
+    showPolygonSelectionModal(
+        candidateObjects, 
+        async (selectedObj) => {
+            if (selectedObj) {
+                await executeStructuresOnObjectSearch(selectedObj);
+            }
+        }, 
+        "Выберите объект для поиска наложений"
+    );
+}
+
+async function executeStructuresOnObjectSearch(targetObject) {
+    const objType = (targetObject instanceof ymaps.Polyline) ? 'линейном объекте' : 'контуре объекта';
+    showLoader(`Поиск сооружений на ${objType}...`);
+
     try {
-        const targetPolygon = findPolygonAtPoint(lat, lon);
-        if (!targetPolygon) {
-            throw new Error('Объект (полигон) в точке клика не найден.');
-        }
-        
-        const cadNumber = targetPolygon.properties.get('cadastralNumber') || 'выбранный объект';
-        showLoader(`Поиск Сооружений на объекте ${cadNumber}...`);
+        const foundFeatures = await searchFeaturesByGeometry(targetObject, 36383);
 
-        const geometryType = targetPolygon.geometry.getType();
-        const allCoordRings = targetPolygon.geometry.getCoordinates();
-        let outerRing;
-
-        if (geometryType === 'Polygon') outerRing = allCoordRings[0];
-        else if (geometryType === 'MultiPolygon') outerRing = allCoordRings[0][0];
-        else throw new Error(`Неподдерживаемый тип геометрии: ${geometryType}`);
-
-        if (!outerRing || outerRing.length < 3) {
-            throw new Error('Не удалось получить корректный контур объекта.');
-        }
-
-        const transformedOuterRing = outerRing.map(coord => {
-            const trueLat = coord[0] + (mapOffsetY * 0.000008983);
-            const trueLon = coord[1] + (mapOffsetX * 0.000008983);
-            return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
-        });
-        
-        const geometryForApi = {
-            "crs": { "type": "name", "properties": { "name": "EPSG:3857" } },
-            "type": "Polygon",
-            "coordinates": [transformedOuterRing]
-        };
-
-        const requestBody = {
-            "geom": { "type": "FeatureCollection", "features": [{ "type": "Feature", "geometry": geometryForApi, "properties": {} }] },
-            "categories": [{ "id": 36383 }] // <-- ID ДЛЯ СООРУЖЕНИЙ
-        };
-
-        const response = await fetchNspd('https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody)
-        });
-
-        if (!response.ok) {
-            const errorData = await response.json().catch(() => null);
-            throw new Error(errorData?.message || `Ошибка запроса к НСПД: ${response.status}`);
-        }
-        
-        const structuresData = await response.json();
-        const foundStructures = structuresData.features || [];
-
-        if (foundStructures.length === 0) {
-            showNotification('Сооружений, пересекающихся с выбранным объектом, не найдено.', 'info');
+        if (!foundFeatures || foundFeatures.length === 0) {
+            showNotification(`Сооружения на ${objType} не найдены`, 'warning');
             return;
         }
 
-        await processAndDrawStructures(foundStructures); // <-- Вызываем функцию для отрисовки СООРУЖЕНИЙ
-        await populateSidebarWithFoundObjects(foundStructures, 'Сооружения (на объекте)'); // <-- Вызываем сайдбар для СООРУЖЕНИЙ
+        await processAndDrawStructures(foundFeatures);
+        await populateSidebarWithFoundObjects(foundFeatures, 'Сооружения (на объекте)');
 
-        showNotification(`Найдено пересекающихся Сооружений: ${foundStructures.length}`, 'success');
+        showNotification(`Найдено сооружений: ${foundFeatures.length}`, 'success');
 
     } catch (error) {
-        console.error('Ошибка в функции getAllStructuresInObject:', error);
-        showNotification(`Ошибка: ${error.message}`, 'error', 'exclamation-circle');
+        console.error('Ошибка при поиске сооружений на объекте:', error);
+        showNotification(`Ошибка поиска: ${error.message}`, 'error');
     } finally {
         hideLoader();
     }
@@ -14817,28 +14823,51 @@ function buildReportHtml(mainObjectData, linkedOksResults, oksIntersectionResult
     return { html, scriptContent };
 }
 
-async function searchFeaturesByGeometry(targetPolygon, categoryId) {
+async function searchFeaturesByGeometry(targetObject, categoryId) {
     try {
-        const geometryType = targetPolygon.geometry.getType();
-        const allCoordRings = targetPolygon.geometry.getCoordinates();
-        let outerRing;
-        
-        if (geometryType === 'Polygon') outerRing = allCoordRings[0];
-        else if (geometryType === 'MultiPolygon') outerRing = allCoordRings[0][0];
-        else return [];
+        const geometryType = targetObject.geometry.getType(); // 'Polygon', 'MultiPolygon' или 'LineString'
+        let geometryForApi;
 
-        if (!outerRing || outerRing.length < 3) return [];
+        if (geometryType === 'LineString') {
+            // Обработка линейного объекта
+            const coords = targetObject.geometry.getCoordinates();
+            if (!coords || coords.length < 2) return [];
 
-        const transformedOuterRing = outerRing.map(coord => {
-            const trueLat = coord[0] + (mapOffsetY * 0.000008983);
-            const trueLon = coord[1] + (mapOffsetX * 0.000008983);
-            return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
-        });
-        
-        const geometryForApi = {
-            "crs": { "type": "name", "properties": { "name": "EPSG:3857" } },
-            "type": "Polygon", "coordinates": [transformedOuterRing]
-        };
+            const transformedCoords = coords.map(coord => {
+                const trueLat = coord[0] + (mapOffsetY * 0.000008983);
+                const trueLon = coord[1] + (mapOffsetX * 0.000008983);
+                return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
+            });
+
+            geometryForApi = {
+                "crs": { "type": "name", "properties": { "name": "EPSG:3857" } },
+                "type": "LineString",
+                "coordinates": transformedCoords
+            };
+
+        } else {
+            // Обработка полигонов (существующая логика)
+            const allCoordRings = targetObject.geometry.getCoordinates();
+            let outerRing;
+            
+            if (geometryType === 'Polygon') outerRing = allCoordRings[0];
+            else if (geometryType === 'MultiPolygon') outerRing = allCoordRings[0][0];
+            else return [];
+
+            if (!outerRing || outerRing.length < 3) return [];
+
+            const transformedOuterRing = outerRing.map(coord => {
+                const trueLat = coord[0] + (mapOffsetY * 0.000008983);
+                const trueLon = coord[1] + (mapOffsetX * 0.000008983);
+                return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
+            });
+            
+            geometryForApi = {
+                "crs": { "type": "name", "properties": { "name": "EPSG:3857" } },
+                "type": "Polygon", 
+                "coordinates": [transformedOuterRing]
+            };
+        }
 
         const requestBody = {
             "geom": { "type": "FeatureCollection", "features": [{ "type": "Feature", "geometry": geometryForApi, "properties": {} }] },
@@ -14861,7 +14890,6 @@ async function searchFeaturesByGeometry(targetPolygon, categoryId) {
         return [];
     }
 }
-
 
 
 
@@ -15457,7 +15485,7 @@ function getTextColorForBackground(hexColor) {
     }
 }
 
-function showPolygonSelectionModal(polygons, onSelect) {
+function showPolygonSelectionModal(polygons, onSelect, customTitle = "Выберите объект для изменения") {
     const modal = document.createElement('div');
     modal.className = 'color-modal';
     modal.style.width = '500px';
@@ -15465,18 +15493,36 @@ function showPolygonSelectionModal(polygons, onSelect) {
 
     let modalContentHTML = `
         <div class="color-modal-content">
-            <h3 style="margin-top: 5px; margin-bottom: 15px; font-size: 1.3rem; color: #333;">Выберите объект для изменения</h3>
+            <h3 style="margin-top: 5px; margin-bottom: 15px; font-size: 1.3rem; color: #333;">${customTitle}</h3>
             <div style="max-height: 40vh; overflow-y: auto; margin-bottom: 20px; width: 100%; border: 1px solid #eee; border-radius: 8px; padding: 5px;">`;
 
-    polygons.forEach((polygon, index) => {
-        const cadNumber = polygon.properties.get('cadastralNumber') ||
-                          polygon.properties.get('hintContent')?.cadastralNumber ||
-                          `Полигон ${index + 1}`;
+    polygons.forEach((obj, index) => {
+        // Пытаемся получить имя из свойств
+        let displayName = obj.properties.get('cadastralNumber');
         
-        const strokeColor = polygon.options.get('strokeColor') || polygonStyle.color || '#f0f0f0';
+        // Если кадастрового номера нет, пробуем hintContent (очищаем от лишнего)
+        if (!displayName) {
+            const hint = obj.properties.get('hintContent');
+            if (hint && typeof hint === 'object' && hint.cadastralNumber) {
+                displayName = hint.cadastralNumber;
+            } else if (typeof hint === 'string') {
+                displayName = hint;
+            }
+        }
+
+        // Если имени всё еще нет, даем техническое название в зависимости от типа
+        if (!displayName) {
+            if (obj instanceof ymaps.Polyline) {
+                displayName = `Линия ${index + 1}`;
+            } else {
+                displayName = `Полигон ${index + 1}`;
+            }
+        }
+        
+        const strokeColor = obj.options.get('strokeColor') || polygonStyle.color || '#f0f0f0';
         const textColor = getTextColorForBackground(strokeColor);
 
-        modalContentHTML += `<button class="polygon-select-button" data-index="${index}" style="background-color: ${strokeColor}; color: ${textColor};">${cadNumber}</button>`;
+        modalContentHTML += `<button class="polygon-select-button" data-index="${index}" style="background-color: ${strokeColor}; color: ${textColor};">${displayName}</button>`;
     });
 
     modalContentHTML += `
@@ -15488,6 +15534,7 @@ function showPolygonSelectionModal(polygons, onSelect) {
 
     modal.innerHTML = modalContentHTML;
 
+    // ... (остальной код функции без изменений: стили и обработчики)
     const styleSheet = document.createElement("style");
     styleSheet.textContent = `
         .polygon-select-button { 
