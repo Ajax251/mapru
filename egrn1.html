@@ -1740,55 +1740,6 @@ button:active::after {
     filter: grayscale(0%);
 }
 
-#mskSelectionModal .modal-content {
-    max-width: 500px;
-    text-align: left;
-}
-
-.msk-list {
-    display: flex;
-    flex-direction: column;
-    gap: 10px;
-    max-height: 400px;
-    overflow-y: auto;
-    padding-right: 5px;
-    margin-top: 15px;
-}
-
-.msk-list-item {
-    padding: 12px 16px;
-    background: #f8fafc;
-    border: 1px solid var(--border-color);
-    border-radius: 8px;
-    cursor: pointer;
-    transition: all 0.2s ease;
-    font-size: 15px;
-    display: flex;
-    align-items: center;
-    gap: 10px;
-    color: var(--text-color);
-}
-
-.msk-list-item:hover {
-    background: #e0eaff;
-    border-color: var(--primary-color);
-    transform: translateX(2px);
-    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
-}
-
-.msk-list-item i {
-    color: var(--primary-color);
-}
-
-.msk-region-title {
-    font-size: 14px;
-    color: #666;
-    margin-bottom: 10px;
-    border-bottom: 1px solid var(--border-color);
-    padding-bottom: 5px;
-}
-
-
 </style>
 
 </head>
@@ -2088,17 +2039,6 @@ button:active::after {
 </div>
 
     <div id="notification-container"></div>
-    
-<div id="mskSelectionModal" class="modal">
-    <div class="modal-content">
-        <span class="close-modal" onclick="closeSpecificModal('mskSelectionModal')">×</span>
-        <h4 style="margin-top: 0; color: var(--primary-color);"><i class="fas fa-globe"></i> Выбор системы координат</h4>
-        <div class="msk-region-title">Не удалось определить зону автоматически. Выберите подходящую МСК для региона <span id="mskRegionDisplay" style="font-weight: bold; color: #333;"></span>:</div>
-        <div id="mskListContainer" class="msk-list">
-            <!-- Список генерируется через JS -->
-        </div>
-    </div>
-</div>
 
       
     <script>
@@ -2123,9 +2063,6 @@ let lastRawJsonResponse = null;
 let originalAddressSearchResults = []; 
 let isRefineFilterActive = false;   
 let searchAbortController = null;
-let userSelectedMsk = null; 
-
-let lastSuccessfulZoneType = 5;
 // Список регионов с 7 знаками после второго двоеточия
 //const sevenDigitsRegions = ['24','63', '66', '77', '78','91'];
 
@@ -2180,191 +2117,9 @@ function cancelCurrentSearch() {
 }
 
 
-async function fetchZoneByRegistryNumber(zoneNumber) {
-    // Определяем порядок запросов на основе последнего успешного типа
-    const searchOrder = lastSuccessfulZoneType === 5 ? [5, 7] : [7, 5];
-    
-    for (const searchType of searchOrder) {
-        const path = `/api/geoportal/v2/search/geoportal?query=${encodeURIComponent(zoneNumber)}&thematicSearchId=${searchType}`;
-        
-        try {
-            const response = await fetchWithFallback(path);
-            
-            if (response.status === 204) {
-                continue; // Не найдено, пробуем следующий тип
-            }
-            
-            if (!response.ok) {
-                throw new Error(`HTTP error! status: ${response.status}`);
-            }
-            
-            const data = await response.json();
-            
-            if (data.data && data.data.features && data.data.features.length > 0) {
-                // Успешно нашли, обновляем приоритет для следующего поиска
-                lastSuccessfulZoneType = searchType;
-                return { data, searchType };
-            }
-        } catch (error) {
-            console.error(`Ошибка при запросе зоны с thematicSearchId=${searchType}:`, error);
-            continue; // Пробуем следующий тип
-        }
-    }
-    
-    // Ничего не нашли ни в ЗОУИТ, ни в терр.зонах
-    return null;
-}
-
-
-// --- НОВАЯ ФУНКЦИЯ: Умный поиск МСК ---
-function identifyMskSystem(text) {
-    if (!text) return null;
-    
-    let mskCode = null;
-    let lookupText = text;
-
-    // ХАК: Если это номер зоны (например 16:03-6.1857), превращаем его в фейковый КН (16:03:000000:1),
-    // чтобы MskFinder смог определить район.
-    const zoneMatch = text.match(/^(\d{2})[:\.](\d{2})[-]/);
-    if (zoneMatch) {
-        // Превращаем "16:03-" в "16:03:000000:1" для поиска
-        lookupText = `${zoneMatch[1]}:${zoneMatch[2]}:000000:1`;
-    } else if (/^\d{2}:\d{2}$/.test(text)) {
-        // Если введен просто квартал "16:03"
-        lookupText = `${text}:000000:1`;
-    }
-
-    // 1. Попытка через MskFinder
-    if (typeof MskFinder !== 'undefined') {
-        mskCode = MskFinder.findMskCode(lookupText);
-    }
-
-    // 2. Если код найден, ищем систему в справочнике
-    if (mskCode) {
-        return COORDINATE_SYSTEMS.find(s => 
-            s.value === mskCode || 
-            s.text === mskCode || 
-            s.text.includes(`МСК-${mskCode}`) || 
-            s.text.includes(`МСК ${mskCode}`)
-        );
-    }
-
-    return null;
-}
-
-
-
-function displayZoneData(feature, searchType) {
-    const properties = feature.properties;
-    const options = properties.options || {};
-    const geometry = feature.geometry;
-    
-    const tableBody = document.querySelector('#resultTable tbody');
-    tableBody.innerHTML = '';
-    
-    const zoneTypeName = searchType === 5 ? 'ЗОУИТ' : 'Территориальная зона';
-    const categoryName = properties.categoryName || zoneTypeName;
-    
-    // Определяем МСК для отображения
-   const zoneNumber = options.reg_numb_border || properties.descr;
-    
-    let mskName = 'Не определена (выберите при конвертации)';
-    
-    if (userSelectedMsk) {
-        mskName = `${userSelectedMsk.text} (выбрана вручную)`;
-    } else {
-        const mskSystem = identifyMskSystem(zoneNumber);
-        if (mskSystem) {
-            mskName = mskSystem.text;
-        }
-    }
-
-    const data = [
-        { field: 'Категория', value: categoryName },
-        { field: 'Реестровый номер', value: zoneNumber },
-        { field: 'Кадастровый округ', value: options.cadastral_district },
-        { field: 'Тип зоны', value: options.type_zone },
-        { field: 'Наименование', value: options.name_by_doc },
-        { field: 'Дата регистрации', value: formatDate(options.registration_date) },
-        { 
-            field: 'Ограничения', 
-            value: options.content_restrict_encumbrances ? 
-                   options.content_restrict_encumbrances.replace(/(\r\n|\n|\r)/gm, " ").trim() : null
-        },
-        { 
-            field: 'Документ-основание', 
-            value: [
-                options.legal_act_document_name,
-                options.legal_act_document_number ? `№${options.legal_act_document_number}` : '',
-                options.legal_act_document_date ? `от ${options.legal_act_document_date}` : ''
-            ].filter(Boolean).join(' ') || null
-        },
-        { field: 'Орган, выдавший документ', value: options.legal_act_document_issuer },
-        { field: 'Дата обновления', value: formatDate(properties.systemInfo?.updated) },
-        { field: 'Дата внесения', value: formatDate(properties.systemInfo?.inserted) },
-        // ДОБАВЛЕНА СТРОКА С МСК
-        { field: 'Система координат', value: mskName } 
-    ];
-    
-    const filteredData = data.filter(item => {
-        const value = typeof item.value === 'function' ? item.value() : item.value;
-        return value !== null && value !== undefined && value !== '' && value !== '-';
-    });
-    
-    filteredData.forEach(row => {
-        const tr = document.createElement('tr');
-        const value = typeof row.value === 'function' ? row.value() : row.value;
-        
-        tr.innerHTML = `<td>${row.field}</td>
-                        <td>
-                            <strong>${value}</strong>
-                            <button class="copy-icon-button" onclick="copyRowContent(this)">
-                                <i class="fas fa-copy"></i>
-                            </button>
-                        </td>`;
-        
-        tableBody.appendChild(tr);
-    });
-    
-    // Обрабатываем геометрию и координаты
-    if (geometry && geometry.coordinates && geometry.coordinates.length > 0) {
-        currentCoords = geometry.coordinates;
-        
-        if (geometry.type !== "Point") {
-            document.querySelector('.content-container').style.display = 'grid';
-            document.querySelector('.scheme-container').style.display = 'block';
-            setTimeout(() => drawScheme(), 0);
-        } else {
-            document.querySelector('.content-container').style.display = 'block';
-            document.querySelector('.scheme-container').style.display = 'none';
-            clearCanvas();
-        }
-    } else {
-        document.querySelector('.content-container').style.display = 'block';
-        document.querySelector('.scheme-container').style.display = 'none';
-        clearCanvas();
-    }
-    
-    document.getElementById('resultTable').style.display = 'table';
-}
-
-
 function isZoneNumber(text) {
-  
+    // В этом выражении [.:] означает "либо точка, либо двоеточие"
     const pattern = /^\d{2}[.:]\d{2}-\d+\.\d+$/;
-    return pattern.test(text.trim());
-}
-
-
-function normalizeRegistryZoneNumber(text) {
-
-    return text.trim().replace(',', '.');
-}
-
-
-function isRegistryZoneNumber(text) {
-   
-    const pattern = /^\d{2}:\d{2}-\d+[.,]\d+$/; 
     return pattern.test(text.trim());
 }
 
@@ -2649,208 +2404,49 @@ async function handleSchemeButtonClick() {
     }
 }
 
-async function convertToMskAndOpenScheme() {
-    if (!currentCoords || currentCoords.length === 0) {
-        showNotification('Нет координат для конвертации', 'error');
-        return;
-    }
-
-    const cadastralNumberInput = document.getElementById('cadastralNumber');
-    let cadastralNumber = cadastralNumberInput.value.trim();
-
-    if (!cadastralNumber) {
-        const rows = document.querySelectorAll('#resultTable tbody tr');
-        for (let row of rows) {
-             if (row.cells[0].textContent.includes('Кадастровый номер') || row.cells[0].textContent.includes('Реестровый номер')) {
-                 cadastralNumber = row.cells[1].textContent.trim().replace(/<[^>]*>?/gm, '');
-                 break;
-             }
-        }
-    }
-
-    try {
-        let targetSystem = userSelectedMsk;
-        let regionCode = null;
-
-        if (!targetSystem) {
-            targetSystem = identifyMskSystem(cadastralNumber);
-        }
-
-        const regionMatch = cadastralNumber ? cadastralNumber.match(/^(\d{2})[:\.]/) : null;
-        if (regionMatch) {
-            regionCode = regionMatch[1];
-        }
-
-        if (!targetSystem && regionCode) {
-            const candidates = COORDINATE_SYSTEMS.filter(s => {
-                const text = s.text.toUpperCase();
-                const search1 = `МСК-${regionCode}`;
-                const search2 = `МСК ${regionCode}`;
-                
-                if (text.includes(search1)) {
-                    const charAfter = text.split(search1)[1].charAt(0);
-                    return !/\d/.test(charAfter);
-                }
-                if (text.includes(search2)) {
-                    const charAfter = text.split(search2)[1].charAt(0);
-                    return !/\d/.test(charAfter);
-                }
-                return false;
-            });
-
-            if (candidates.length > 0) {
-                try {
-                    targetSystem = await promptUserForMsk(candidates, regionCode);
-                } catch (e) {
-                    return; 
-                }
-            }
-        }
-
-        if (!targetSystem) {
-             throw new Error(`Не удалось определить МСК для номера ${cadastralNumber}.`);
-        }
-
-        if (!proj4.defs(targetSystem.value)) {
-            proj4.defs(targetSystem.value, targetSystem.def);
-        }
-        
-        const { offsetX = 0, offsetY = 0 } = targetSystem;
-
-        const mskCoords = [];
-        const convertPoint = (point) => {
-            const [lon, lat] = proj4('EPSG:3857', targetSystem.value, point);
-            return { x: lat + offsetX, y: lon + offsetY };
-        };
-
-        if (currentCoords[0] && Array.isArray(currentCoords[0][0]) && Array.isArray(currentCoords[0][0][0])) { 
-            currentCoords.forEach(polygon => polygon.forEach(ring => ring.forEach(coord => mskCoords.push(convertPoint(coord)))));
-        } else if (currentCoords[0] && Array.isArray(currentCoords[0][0])) { 
-            currentCoords.forEach(ring => ring.forEach(coord => mskCoords.push(convertPoint(coord))));
-        } else if (currentCoords[0] && Array.isArray(currentCoords[0])) { 
-            currentCoords.forEach(line => line.forEach(coord => mskCoords.push(convertPoint(coord))));
-        } else { 
-             mskCoords.push(convertPoint(currentCoords[0]));
-        }
-        
-        if (mskCoords.length === 0) throw new Error('Не удалось конвертировать координаты.');
-
-        mskCoords.reverse();
-
-        const coordsString = mskCoords
-            .map(coord => `${coord.x.toFixed(2)}\t${coord.y.toFixed(2)}`)
-            .join('\n');
-
-        await navigator.clipboard.writeText(coordsString);
-        showNotification(`Координаты (${targetSystem.text}) скопированы!`, 'success');
-        window.open('схема.html', '_blank');
-
-    } catch (error) {
-        console.error("Ошибка при конвертации координат:", error);
-        showNotification(error.message || 'Ошибка конвертации', 'error');
-    }
-}
-
+// --- НОВАЯ ФУНКЦИЯ: ОБРАБОТЧИК ДЛЯ ГЕОРЕДАКТОРА ---
 async function handleEditorButtonClick() {
+    const cadastralNumberInput = document.getElementById('cadastralNumber');
+    const cadastralNumber = cadastralNumberInput.value.trim();
+
+    if (!isValidCadastralNumber(cadastralNumber)) {
+        showNotification('Введите корректный кадастровый номер', 'error');
+        return;
+    }
+
     if (!currentCoords || currentCoords.length === 0) {
         showNotification('Нет координат для конвертации', 'error');
         return;
     }
 
-    const cadastralNumberInput = document.getElementById('cadastralNumber');
-    let cadastralNumber = cadastralNumberInput.value.trim();
-
-    if (!cadastralNumber) {
-        const rows = document.querySelectorAll('#resultTable tbody tr');
-        for (let row of rows) {
-             if (row.cells[0].textContent.includes('Кадастровый номер') || row.cells[0].textContent.includes('Реестровый номер')) {
-                 cadastralNumber = row.cells[1].textContent.trim().replace(/<[^>]*>?/gm, '');
-                 break;
-             }
-        }
-    }
-
     try {
-        let targetSystem = userSelectedMsk;
-        let regionCode = null;
+        const mskCode = MskFinder.findMskCode(cadastralNumber);
+        if (!mskCode) throw new Error(`Не удалось определить регион МСК для номера ${cadastralNumber}`);
 
-        if (!targetSystem) {
-            targetSystem = identifyMskSystem(cadastralNumber);
+        let targetSystem = COORDINATE_SYSTEMS.find(s => s.text.includes(`МСК-${mskCode}`));
+        if (!targetSystem) targetSystem = COORDINATE_SYSTEMS.find(s => s.text.includes(`МСК ${mskCode}`));
+        if (!targetSystem) targetSystem = COORDINATE_SYSTEMS.find(s => s.text.includes(mskCode));
+
+        if (!targetSystem) throw new Error(`Система координат для МСК-${mskCode} не найдена в справочнике.`);
+
+        pendingTargetSystem = targetSystem;
+
+        const hasOffsetConfigured = (targetSystem.offsetX !== undefined && targetSystem.offsetY !== undefined) && 
+                                    (targetSystem.offsetX !== 0 || targetSystem.offsetY !== 0);
+
+        if (!hasOffsetConfigured) {
+            const warningModal = document.getElementById('offsetWarningModal');
+            // ВАЖНО: Привязываем кнопку "Продолжить" к функции РЕДАКТОРА
+            const confirmBtn = warningModal.querySelector('.btn-confirm');
+            confirmBtn.onclick = proceedWithEditorConversion;
+            warningModal.style.display = 'block';
+        } else {
+            proceedWithEditorConversion();
         }
-
-        const regionMatch = cadastralNumber ? cadastralNumber.match(/^(\d{2})[:\.]/) : null;
-        if (regionMatch) {
-            regionCode = regionMatch[1];
-        }
-
-        if (!targetSystem && regionCode) {
-            const candidates = COORDINATE_SYSTEMS.filter(s => {
-                const text = s.text.toUpperCase();
-                const search1 = `МСК-${regionCode}`;
-                const search2 = `МСК ${regionCode}`;
-                
-                if (text.includes(search1)) {
-                    const charAfter = text.split(search1)[1].charAt(0);
-                    return !/\d/.test(charAfter);
-                }
-                if (text.includes(search2)) {
-                    const charAfter = text.split(search2)[1].charAt(0);
-                    return !/\d/.test(charAfter);
-                }
-                return false;
-            });
-
-            if (candidates.length > 0) {
-                try {
-                    targetSystem = await promptUserForMsk(candidates, regionCode);
-                } catch (e) {
-                    return; 
-                }
-            }
-        }
-
-        if (!targetSystem) {
-             throw new Error(`Не удалось определить МСК для номера ${cadastralNumber}.`);
-        }
-
-        if (!proj4.defs(targetSystem.value)) {
-            proj4.defs(targetSystem.value, targetSystem.def);
-        }
-        
-        const { offsetX = 0, offsetY = 0 } = targetSystem;
-
-        const mskCoords = [];
-        const convertPoint = (point) => {
-            const [lon, lat] = proj4('EPSG:3857', targetSystem.value, point);
-            return { x: lat + offsetX, y: lon + offsetY };
-        };
-
-        if (currentCoords[0] && Array.isArray(currentCoords[0][0]) && Array.isArray(currentCoords[0][0][0])) { 
-            currentCoords.forEach(polygon => polygon.forEach(ring => ring.forEach(coord => mskCoords.push(convertPoint(coord)))));
-        } else if (currentCoords[0] && Array.isArray(currentCoords[0][0])) { 
-            currentCoords.forEach(ring => ring.forEach(coord => mskCoords.push(convertPoint(coord))));
-        } else if (currentCoords[0] && Array.isArray(currentCoords[0])) { 
-            currentCoords.forEach(line => line.forEach(coord => mskCoords.push(convertPoint(coord))));
-        } else { 
-             mskCoords.push(convertPoint(currentCoords[0]));
-        }
-        
-        if (mskCoords.length === 0) throw new Error('Не удалось конвертировать координаты.');
-
-        mskCoords.reverse();
-
-        const coordsString = mskCoords
-            .map(coord => `${coord.x.toFixed(2)}\t${coord.y.toFixed(2)}`)
-            .join('\n');
-
-        await navigator.clipboard.writeText(coordsString);
-        showNotification(`Координаты (${targetSystem.text}) скопированы!`, 'success');
-        
-        window.open('editor.html', '_blank');
 
     } catch (error) {
-        console.error("Ошибка при открытии редактора:", error);
-        showNotification(error.message || 'Ошибка обработки данных', 'error');
+        console.error("Ошибка подготовки к редактору:", error);
+        showNotification(error.message, 'error');
     }
 }
 
@@ -3019,33 +2615,29 @@ function insertFromClipboard() {
 
 function openSchemeMap() {
     const cadastralNumberInput = document.getElementById('cadastralNumber');
-    const inputValue = cadastralNumberInput.value.trim();
+    const cadastralNumber = cadastralNumberInput.value.trim();
 
-    if (!inputValue) {
-        showNotification('Номер не введен', 'error');
+    if (!cadastralNumber) {
+        showNotification('Кадастровый номер не введен', 'error');
         return;
     }
 
-    const isCadastral = isValidCadastralNumber(inputValue);
-    const isZone = isRegistryZoneNumber(inputValue);
-
-    if (!isCadastral && !isZone) {
-        showNotification('Некорректный номер', 'error');
+    if (!isValidCadastralNumber(cadastralNumber)) {
+        showNotification('Некорректный кадастровый номер', 'error');
         return;
     }
 
-    const numberType = isCadastral ? 'Кадастровый номер' : 'Реестровый номер зоны';
 
-    // Копируем номер в буфер обмена
-    navigator.clipboard.writeText(inputValue)
+    // Копируем кадастровый номер в буфер обмена
+    navigator.clipboard.writeText(cadastralNumber)
         .then(() => {
-            showNotification(`${numberType} скопирован в буфер обмена`, 'success');
+            showNotification('Кадастровый номер скопирован в буфер обмена', 'success');
             // Открываем сайт со схемой в новом окне
             window.open('map.html', '_blank');
         })
         .catch(err => {
-            console.error('Ошибка при копировании:', err);
-            showNotification(`Не удалось скопировать ${numberType.toLowerCase()}`, 'error');
+            console.error('Ошибка при копировании кадастрового номера:', err);
+            showNotification('Не удалось скопировать кадастровый номер', 'error');
         });
 }
 
@@ -3976,45 +3568,7 @@ function handleSuccessfulResponse(data) {
     }
 }
 
-function updateTableMskRow(mskName) {
-    const rows = document.querySelectorAll('#resultTable tbody tr');
-    let found = false;
-    
-    // Ищем существующую строку
-    for (let row of rows) {
-        if (row.cells[0].textContent.trim() === 'Система координат') {
-            // Обновляем ячейку и добавляем иконку, если нужно
-            row.cells[1].innerHTML = `<strong>${mskName} (выбрана вручную)</strong>
-                                      <button class="copy-icon-button" onclick="copyRowContent(this)">
-                                          <i class="fas fa-copy"></i>
-                                      </button>`;
-            // Добавляем эффект подсветки
-            row.style.backgroundColor = '#e8f5e9'; 
-            setTimeout(() => row.style.backgroundColor = '', 1000);
-            found = true;
-            break;
-        }
-    }
-
-    // Если строки нет (например, её не было при первой отрисовке), добавляем её
-    if (!found) {
-        const tableBody = document.querySelector('#resultTable tbody');
-        const tr = document.createElement('tr');
-        tr.innerHTML = `<td>Система координат</td>
-                        <td>
-                            <strong>${mskName} (выбрана вручную)</strong>
-                            <button class="copy-icon-button" onclick="copyRowContent(this)">
-                                <i class="fas fa-copy"></i>
-                            </button>
-                        </td>`;
-        tr.style.backgroundColor = '#e8f5e9';
-        tableBody.appendChild(tr);
-        setTimeout(() => tr.style.backgroundColor = '', 1000);
-    }
-}
-
 async function fetchData() {
-      userSelectedMsk = null;
     document.getElementById('archiveInfo').style.display = 'none';
 
     const cadastralNumberInput = document.getElementById('cadastralNumber');
@@ -4030,45 +3584,6 @@ async function fetchData() {
         return; 
     }
 
-    // НОВАЯ ПРОВЕРКА: Реестровый номер зоны
-if (isRegistryZoneNumber(inputValue)) {
-        // Нормализуем номер (заменяем запятую на точку)
-        const normalizedZoneNumber = normalizeRegistryZoneNumber(inputValue);
-        
-        // Обновляем значение в поле ввода
-        cadastralNumberInput.value = normalizedZoneNumber;
-        
-        document.title = `${normalizedZoneNumber}`;
-        
-        const signal = showLoader(`Поиск зоны: ${normalizedZoneNumber}`);
-        
-        try {
-            const result = await fetchZoneByRegistryNumber(normalizedZoneNumber);
-            
-            if (!result) {
-                showNotification('Зона не найдена ни в ЗОУИТ, ни в территориальных зонах', 'error');
-                return;
-            }
-            
-            const { data, searchType } = result;
-            const feature = data.data.features[0];
-            
-            displayZoneData(feature, searchType);
-            
-            const zoneTypeName = searchType === 5 ? 'ЗОУИТ' : 'территориальной зоне';
-            showNotification(`Объект найден в ${zoneTypeName}`, 'success');
-            
-        } catch (error) {
-            if (error.name === 'AbortError') return;
-            console.error("Ошибка при поиске зоны:", error);
-            showNotification('Ошибка при поиске зоны', 'error');
-        } finally {
-            hideLoader();
-        }
-        return;
-    }
-
-    // Существующий код для кадастровых номеров
     if (isValidCadastralNumber(inputValue)) {
         document.title = `${inputValue}`;
         
@@ -4102,7 +3617,6 @@ if (isRegistryZoneNumber(inputValue)) {
         }
 
     } else {
-        // Существующий код для поиска по адресу
         const tokens = inputValue.split(/[\s,.]+/).filter(t => t.length > 0);
         const isValidAddress = tokens.length >= 3;
 
@@ -4251,9 +3765,83 @@ function searchOnYandexMap() {
 }
 
 
+async function convertToMskAndOpenScheme() {
+    // 1. Получаем кадастровый номер и проверяем наличие координат
+    const cadastralNumberInput = document.getElementById('cadastralNumber');
+    const cadastralNumber = cadastralNumberInput.value.trim();
 
+    if (!isValidCadastralNumber(cadastralNumber)) {
+        showNotification('Введите корректный кадастровый номер', 'error');
+        return;
+    }
 
+    if (!currentCoords || currentCoords.length === 0) {
+        showNotification('Нет координат для конвертации и открытия схемы', 'error');
+        return;
+    }
 
+    try {
+        // 2. Определяем МСК и получаем параметры проекции из sk.js
+        const mskCode = MskFinder.findMskCode(cadastralNumber);
+        if (!mskCode) {
+            throw new Error(`Не удалось определить МСК для кадастрового номера.`);
+        }
+
+        // Улучшенный поиск системы координат
+        let targetSystem = COORDINATE_SYSTEMS.find(s => s.text.includes(`МСК-${mskCode}`));
+        if (!targetSystem) {
+            targetSystem = COORDINATE_SYSTEMS.find(s => s.text.includes(`МСК ${mskCode}`));
+        }
+        if (!targetSystem) {
+             targetSystem = COORDINATE_SYSTEMS.find(s => s.text.includes(mskCode));
+        }
+        
+        if (!targetSystem) {
+            throw new Error(`Определение для МСК-${mskCode} не найдено в справочнике.`);
+        }
+
+        proj4.defs(targetSystem.value, targetSystem.def);
+        const { offsetX = 0, offsetY = 0 } = targetSystem;
+
+        // 3. Конвертируем все доступные координаты
+        const mskCoords = [];
+        const convertPoint = (point) => {
+            const [lon, lat] = proj4('EPSG:3857', targetSystem.value, point);
+            // Во многих российских СК север (X) соответствует второму значению (lat),
+            // а восток (Y) - первому (lon) из вывода proj4.
+            return { x: lat + offsetX, y: lon + offsetY };
+        };
+
+        // Обрабатываем разные типы геометрии из currentCoords
+        if (currentCoords[0] && Array.isArray(currentCoords[0][0]) && Array.isArray(currentCoords[0][0][0])) { // MultiPolygon
+            currentCoords.forEach(polygon => polygon.forEach(ring => ring.forEach(coord => mskCoords.push(convertPoint(coord)))));
+        } else if (currentCoords[0] && Array.isArray(currentCoords[0][0])) { // Polygon
+            currentCoords.forEach(ring => ring.forEach(coord => mskCoords.push(convertPoint(coord))));
+        } else if (currentCoords[0] && Array.isArray(currentCoords[0])) { // MultiLineString
+            currentCoords.forEach(line => line.forEach(coord => mskCoords.push(convertPoint(coord))));
+        } else { // Point
+             mskCoords.push(convertPoint(currentCoords[0]));
+        }
+        
+        if (mskCoords.length === 0) {
+            throw new Error('Не удалось конвертировать координаты.');
+        }
+
+        // 4. Форматируем для буфера обмена в формате "X<tab>Y"
+        const coordsString = mskCoords
+            .map(coord => `${coord.x.toFixed(2)}\t${coord.y.toFixed(2)}`)
+            .join('\n');
+
+        // 5. Копируем в буфер обмена и открываем схема.html
+        await navigator.clipboard.writeText(coordsString);
+        showNotification('Координаты в МСК скопированы в буфер обмена', 'success');
+        window.open('схема.html', '_blank');
+
+    } catch (error) {
+        console.error("Ошибка при конвертации координат:", error);
+        showNotification(error.message || 'Ошибка конвертации координат', 'error');
+    }
+}
 
 
 // Обновление данных в таблице
@@ -4395,19 +3983,30 @@ function updatePropertyData(options, properties, oknList = null, landParcelList 
     const categoryName = properties.categoryName;
     let data = [];
 
+    // --- БЛОК ОПРЕДЕЛЕНИЯ МСК ---
     const cadastralNumberForMsk = options.cad_num || options.cad_number;
     let mskName = 'Не определена'; 
 
-    if (userSelectedMsk) {
-        mskName = `${userSelectedMsk.text} (выбрана вручную)`;
-    } else {
-        const mskSystem = identifyMskSystem(cadastralNumberForMsk);
-        if (mskSystem) {
-            mskName = mskSystem.text;
+    if (cadastralNumberForMsk && typeof MskFinder !== 'undefined' && typeof COORDINATE_SYSTEMS !== 'undefined') {
+        try {
+            const mskCode = MskFinder.findMskCode(cadastralNumberForMsk);
+            if (mskCode) {
+                let targetSystem = COORDINATE_SYSTEMS.find(s => s.text.includes(`МСК-${mskCode}`));
+                if (!targetSystem) {
+                    targetSystem = COORDINATE_SYSTEMS.find(s => s.text.includes(`МСК ${mskCode}`));
+                }
+                if (!targetSystem) {
+                    targetSystem = COORDINATE_SYSTEMS.find(s => s.text.includes(mskCode));
+                }
+                if (targetSystem) {
+                    mskName = targetSystem.text;
+                }
+            }
+        } catch (e) {
+            console.error("Ошибка при определении МСК:", e);
         }
     }
-    
-  
+    // --- КОНЕЦ БЛОКА ОПРЕДЕЛЕНИЯ МСК ---
 
     data.push({ field: 'Категория', value: categoryName });
 
@@ -4511,12 +4110,13 @@ function updatePropertyData(options, properties, oknList = null, landParcelList 
         }
         data.push(commonFields[0]);
         data.push(commonFields[1]);
-       
+       // ИЗМЕНЕНИЕ: Поддержка registration_date если нет land_record_reg_date
         const dateAssigned = options.land_record_reg_date || options.registration_date;
         if (dateAssigned) {
             data.push({ field: 'Дата присвоения', value: formatDate(dateAssigned) });
         }
 
+        // ИЗМЕНЕНИЕ: Добавлен вывод кадастрового квартала
         if (options.quarter_cad_number) {
             data.push({ field: 'Кадастровый номер квартала', value: options.quarter_cad_number });
         }
@@ -4541,6 +4141,7 @@ function updatePropertyData(options, properties, oknList = null, landParcelList 
         data.push(commonFields[5]);
         data.push({ field: 'Дата внесения', value: formatDate(properties.systemInfo?.inserted) || '' });
 
+    // ИЗМЕНЕНИЕ: Добавлена проверка на "Помещения ЕГРН"
     } else if (categoryName === "Помещения" || categoryName === "Помещения ЕГРН") {
         data.push(commonFields[0]);
         data.push(commonFields[1]);
@@ -4565,9 +4166,11 @@ function updatePropertyData(options, properties, oknList = null, landParcelList 
         data.push(commonFields[5]);
         data.push({ field: 'Дата внесения', value: formatDate(properties.systemInfo?.inserted) || '' });
 
+    // ИЗМЕНЕНИЕ: Добавлена проверка на "Сооружения ЕГРН"
     } else if (categoryName === "Сооружения" || categoryName === "Сооружения ЕГРН") {
         data.push(commonFields[0]);
         
+        // ИЗМЕНЕНИЕ: Добавлен вывод Вида объекта
         if (options.object_type_value) {
             data.push({ field: 'Вид', value: options.object_type_value });
         }
@@ -4592,19 +4195,22 @@ function updatePropertyData(options, properties, oknList = null, landParcelList 
         data.push({ field: 'Глубина залегания', value: options.params_occurence_depth ? `${options.params_occurence_depth} м` : 'Нет данных' });
         data.push({ field: 'Объем', value: options.params_volume ? `${options.params_volume} м³` : 'Нет данных' });
         
+        // Добавляем проверку на просто extension, так как в примере JSON оно есть и без префикса
         const ext = options.params_extension || options.extension;
         data.push({ field: 'Протяженность', value: ext ? `${ext} м` : 'Нет данных' });
         
         data.push({ field: 'Количество этажей', value: options.params_floors || 'Нет данных' });
         data.push({ field: 'Количество подземных этажей', value: options.params_underground_floors || 'Нет данных' });
-        data.push({ field: 'Кадастровый номер квартала', value: options.quarter_cad_number || 'Нет данных' });
+  data.push({ field: 'Кадастровый номер квартала', value: options.quarter_cad_number || 'Нет данных' });
         
+        // ИЗМЕНЕНИЕ: Добавлен вывод Разрешенного использования
         data.push({ field: 'Разрешенное использование', value: options.permitted_uses_name });
 
         data.push(commonFields[5]);
         data.push({ field: 'Дата внесения', value: formatDate(properties.systemInfo?.inserted) || '' });
 
-    } else if (categoryName === "Здания" || categoryName === "Здания ЕГРН") {
+    // ИЗМЕНЕНИЕ: Добавлена проверка на "Здания ЕГРН"
+} else if (categoryName === "Здания" || categoryName === "Здания ЕГРН") {
         data.push(commonFields[0]);
         data.push(commonFields[1]);
         data.push({ field: 'Площадь', value: options.area ? `${options.area} м²` : '' });
@@ -4612,12 +4218,17 @@ function updatePropertyData(options, properties, oknList = null, landParcelList 
         data.push(commonFields[3]);
         data.push(commonFields[4]);
         
+        // --- НОВЫЕ ПОЛЯ ПО СТОИМОСТИ ---
         data.push({ field: 'УПКС', value: options.cost_index });
         data.push({ field: 'Дата применения КС', value: formatDate(options.cost_application_date) });
         data.push({ field: 'Дата внесения КС', value: formatDate(options.cost_registration_date) });
+        // Основание часто длинное, лучше выводить в конце или если есть место
+        // data.push({ field: 'Основание КС', value: options.determination_couse }); 
+        // -------------------------------
 
         data.push({ field: 'Назначение', value: options.purpose });
         data.push({ field: 'Наименование', value: options.name || options.building_name });
+        // Новое поле: Вид объекта
         data.push({ field: 'Вид объекта', value: options.build_record_type_value }); 
 
         data.push({
@@ -4628,13 +4239,14 @@ function updatePropertyData(options, properties, oknList = null, landParcelList 
         data.push({ field: 'Количество этажей', value: options.floors });
         data.push({ field: 'Год постройки', value: options.year_built });
         
+        // ИЗМЕНЕНИЕ: Год ввода в эксплуатацию
         data.push({ field: 'Год ввода в эксплуатацию', value: options.year_commissioning || options.year_commisioning });
 
         data.push({ field: 'Площадь здания', value: options.build_record_area ? `${options.build_record_area} м²` : '' });
         data.push({ field: 'Дата регистрации здания', value: formatDate(options.build_record_registration_date) });
         data.push({ field: 'Материалы здания', value: options.materials });
         data.push({ field: 'Разрешенное использование', value: options.permitted_use_name });
-        data.push({ field: 'Культурное наследие', value: options.cultural_heritage_val }); 
+        data.push({ field: 'Культурное наследие', value: options.cultural_heritage_val }); // Новое поле
         data.push({ field: 'Кадастровый номер квартала', value: options.quarter_cad_number });
         data.push({ field: 'Количество подземных этажей', value: options.underground_floors });
         data.push({ field: 'Объединенные кадастровые номера', value: options.united_cad_numbers });
@@ -4643,10 +4255,10 @@ function updatePropertyData(options, properties, oknList = null, landParcelList 
     }
     
     data.push({ field: 'Система координат', value: mskName });
-
-    if (geometry && geometry.type === 'Point' && Array.isArray(geometry.coordinates)) {
+      if (geometry && geometry.type === 'Point' && Array.isArray(geometry.coordinates)) {
         const x = geometry.coordinates[0];
         const y = geometry.coordinates[1];
+        // Форматируем красиво с пробелами
         data.push({ 
             field: 'Координаты (X, Y)', 
             value: `${formatNumberWithSpaces(x)}; ${formatNumberWithSpaces(y)}` 
@@ -5048,11 +4660,6 @@ function clearCanvas() {
 
 // Функция для форматирования кадастрового номера с учетом настройки
 function formatCadastralNumber(input) {
- 
-    if (input.value.includes('-')) {
-        return;
-    }
-
     let value = input.value.replace(/\D/g, ''); // Убираем все нецифровые символы
     let formatted = '';
 
@@ -5071,54 +4678,37 @@ function formatCadastralNumber(input) {
         formatted += ':' + value.slice(isSixDigits ? 10 : 11); // Остальные цифры
     }
 
-    input.value = formatted; 
+    input.value = formatted; // Обновляем значение поля ввода
 }
 
 function showCoordinates() {
-    // Проверяем наличие координат
-    if (!currentCoords || currentCoords.length === 0) {
-        // Нет координат - открываем batch модалку
-        const batchModal = document.getElementById('batchCadastralModal');
-        batchModal.style.display = 'block';
-        return;
+    // --- ИЗМЕНЕНИЕ: Условие открытия окна стало более строгим,
+    // чтобы избежать показа координат от предыдущего запроса.
+
+    // 1. Получаем номер из поля ввода.
+    const cadNumFromInput = document.getElementById('cadastralNumber').value;
+
+    // 2. Получаем номер из уже отображенной таблицы результатов.
+    let cadNumFromTable = null;
+    const tableRows = document.querySelectorAll('#resultTable tbody tr');
+    for (let row of tableRows) {
+        if (row.cells && row.cells.length > 1 && row.cells[0].textContent.trim() === 'Кадастровый номер') {
+            const valueCell = row.cells[1];
+            const strongTag = valueCell.querySelector('strong');
+            cadNumFromTable = strongTag ? strongTag.textContent.trim() : valueCell.textContent.trim();
+            break;
+        }
     }
 
-    const cadNumFromInput = document.getElementById('cadastralNumber').value.trim();
-    
-    // Проверяем, что данные соответствуют введенному номеру
-    let dataMatchesInput = false;
-    
-    // Для кадастровых номеров - проверяем совпадение номеров из таблицы
-    if (isValidCadastralNumber(cadNumFromInput)) {
-        const tableRows = document.querySelectorAll('#resultTable tbody tr');
-        for (let row of tableRows) {
-            if (row.cells && row.cells.length > 1 && row.cells[0].textContent.trim() === 'Кадастровый номер') {
-                const valueCell = row.cells[1];
-                const strongTag = valueCell.querySelector('strong');
-                const cadNumFromTable = strongTag ? strongTag.textContent.trim() : valueCell.textContent.trim();
-                dataMatchesInput = cadNumFromInput === cadNumFromTable;
-                break;
-            }
-        }
-    } else if (isRegistryZoneNumber(cadNumFromInput)) {
-        // Для реестровых номеров зон - проверяем строку "Реестровый номер"
-        const tableRows = document.querySelectorAll('#resultTable tbody tr');
-        for (let row of tableRows) {
-            if (row.cells && row.cells.length > 1 && row.cells[0].textContent.trim() === 'Реестровый номер') {
-                const valueCell = row.cells[1];
-                const strongTag = valueCell.querySelector('strong');
-                const zoneNumFromTable = strongTag ? strongTag.textContent.trim() : valueCell.textContent.trim();
-                dataMatchesInput = normalizeRegistryZoneNumber(cadNumFromInput) === normalizeRegistryZoneNumber(zoneNumFromTable);
-                break;
-            }
-        }
-    } else {
-        // Для адреса или других случаев - показываем всегда
-        dataMatchesInput = true;
-    }
+    // 3. Проверяем, что данные загружены и соответствуют тому, что введено в поле.
+    const dataIsReadyAndMatches =
+        currentCoords &&
+        currentCoords.length > 0 &&
+        isValidCadastralNumber(cadNumFromInput) &&
+        cadNumFromInput === cadNumFromTable;
 
-    if (dataMatchesInput) {
-        // Показываем окно с координатами
+    if (dataIsReadyAndMatches) {
+        // --- Показываем окно с координатами ---
         const modal = document.getElementById('coordinatesModal');
         const tbody = document.querySelector('#modalCoordinatesTable tbody');
         tbody.innerHTML = ''; // Очищаем предыдущие строки
@@ -5126,7 +4716,7 @@ function showCoordinates() {
         let pointIndex = 1;
 
         // MultiPolygon
-        if (currentCoords[0] && Array.isArray(currentCoords[0][0]) && Array.isArray(currentCoords[0][0][0])) {
+             if (currentCoords[0] && Array.isArray(currentCoords[0][0]) && Array.isArray(currentCoords[0][0][0])) {
             currentCoords.forEach(polygon => {
                 polygon.forEach(ring => {
                     ring.forEach(coord => {
@@ -5145,7 +4735,7 @@ function showCoordinates() {
                     tbody.appendChild(tr);
                 });
             });
-        // MultiLineString
+        // MultiLineString - ИЗМЕНЕННОЕ УСЛОВИЕ НИЖЕ
         } else if (currentCoords[0] && Array.isArray(currentCoords[0]) && Array.isArray(currentCoords[0][0])) {
             currentCoords.forEach(line => {
                 line.forEach(coord => {
@@ -5157,13 +4747,14 @@ function showCoordinates() {
         // Point
         } else {
             const tr = document.createElement('tr');
+            // Для точки мы берем координаты так, так как currentCoords = [[x, y]]
             tr.innerHTML = `<td>${pointIndex++}</td><td>${currentCoords[0][0]}</td><td>${currentCoords[0][1]}</td>`;
             tbody.appendChild(tr);
         }
 
         modal.style.display = 'block'; // Показываем модальное окно с координатами
     } else {
-        // Данные не соответствуют введенному номеру - открываем batch модалку
+        // --- Во всех остальных случаях (нет данных, неверный номер, несоответствие) открываем окно "Запрос данных по списку" ---
         const batchModal = document.getElementById('batchCadastralModal');
         batchModal.style.display = 'block';
     }
@@ -5224,27 +4815,17 @@ function copyCoordinates() {
 
 
 function checkClipboardForCadastralNumber() {
-    if (!navigator.clipboard) return; // Защита если API недоступно
-
     navigator.clipboard.readText()
         .then(text => {
             const input = document.getElementById('cadastralNumber');
-            const cleanText = text.trim();
 
-            if (cleanText.length > 50) return; // Слишком длинный текст игнорируем
-
-            // ИЗМЕНЕНИЕ: Сначала проверяем, похож ли текст на номер зоны (XX:XX-...)
-            // Регулярка ловит: 2 цифры, разделитель, 2 цифры, тире
-            const isZone = /^\d{2}[:\.]\d{2}-/.test(cleanText);
-
-            if (isZone) {
-                // Если это зона, вставляем как есть (очистив от лишних пробелов) и ищем
-                input.value = cleanText;
-                document.querySelector('.search-button').click();
-                return; // Выходим, чтобы не сработало форматирование КН ниже
+            // 1. Проверяем длину текста из буфера обмена ПЕРЕД вставкой
+            if (text.trim().length > 25) {
+           //     showNotification('Номер в буфере обмена слишком длинный', 'error');
+                return; // Прерываем выполнение, ничего не вставляем
             }
 
-            // Стандартная логика для кадастрового номера
+            // Функция для форматирования и проверки
             const tryFormat = (isSixDigits) => {
                 let value = text.replace(/\D/g, '');
                 let formatted = '';
@@ -5261,17 +4842,21 @@ function checkClipboardForCadastralNumber() {
                 }
 
                 if (isValidCadastralNumber(formatted)) {
-                    return formatted; 
+                    return formatted; // Возвращаем отформатированный номер
                 }
-                return null; 
+                return null; // Если невалидный, возвращаем null
             };
             
+            // Пытаемся отформатировать, сначала с 7 знаками (стандарт), потом с 6
             let formattedNumber = tryFormat(false) || tryFormat(true);
 
+            // 2. Если форматирование удалось, вставляем номер и запускаем поиск
             if (formattedNumber) {
                 input.value = formattedNumber;
                 document.querySelector('.search-button').click();
             }
+            // Если форматирование не удалось, ничего не делаем.
+            // Проблемный блок 'if (!inserted) { input.value = text; }' удален.
         })
         .catch(err => {
             console.error('Ошибка при чтении буфера обмена:', err);
@@ -5477,19 +5062,15 @@ function openMap() {
 
 document.getElementById('cadastralNumber').addEventListener('input', function(e) {
     const val = e.target.value;
-    const trimmedVal = val.trim();
-
-    const isAddress = /[а-яА-Яa-zA-Z]/.test(val);
     
-   
-    const isZoneNumber = /^\d{2}[:\.]\d{2}-/.test(trimmedVal) || val.includes('-');
+ 
+    const isAddress = /[а-яА-Яa-zA-Z]/.test(val); 
 
     if (isAddress) {
-     
-    } else if (isZoneNumber) {
-  
+        // Режим адреса: не форматируем, просто даем вводить
+        // Можно добавить логику очистки, если нужно
     } else {
-     
+        // Режим кадастрового номера: применяем маску
         formatCadastralNumber(e.target);
     }
 
@@ -5497,6 +5078,7 @@ document.getElementById('cadastralNumber').addEventListener('input', function(e)
         document.title = 'ЕГРН';
     }
 });
+
 
 document.getElementById('cadastralNumber').addEventListener('keydown', function(event) {
     if (event.key === 'Enter') {
@@ -6955,59 +6537,6 @@ async function generatePrintLayout() {
         hideLoader();
     }
 }
-
-
-function promptUserForMsk(candidates, regionCode) {
-    return new Promise((resolve, reject) => {
-        const modal = document.getElementById('mskSelectionModal');
-        const listContainer = document.getElementById('mskListContainer');
-        const regionDisplay = document.getElementById('mskRegionDisplay');
-        const closeBtn = modal.querySelector('.close-modal');
-
-        regionDisplay.textContent = regionCode;
-        listContainer.innerHTML = '';
-
-        const cleanup = () => {
-            modal.style.display = 'none';
-            closeBtn.onclick = null;
-            window.onclick = null;
-        };
-
-        candidates.forEach(sys => {
-            const item = document.createElement('div');
-            item.className = 'msk-list-item';
-            item.innerHTML = `<i class="fas fa-map-marker-alt"></i> ${sys.text}`;
-            
-            item.onclick = () => {
-                cleanup();
-                
-                // --- НОВАЯ ЛОГИКА ---
-                userSelectedMsk = sys; // Сохраняем в глобальную переменную
-                updateTableMskRow(sys.text); // Обновляем таблицу моментально
-                // --------------------
-                
-                resolve(sys);
-            };
-            
-            listContainer.appendChild(item);
-        });
-
-        closeBtn.onclick = () => {
-            cleanup();
-            reject(new Error('User cancelled'));
-        };
-
-        window.onclick = (event) => {
-            if (event.target == modal) {
-                cleanup();
-                reject(new Error('User cancelled'));
-            }
-        };
-
-        modal.style.display = 'block';
-    });
-}
-
 
 
 
