@@ -11890,115 +11890,14 @@ async function executeParcelsOnObjectSearch(targetObject) {
     showLoader(`Поиск земельных участков на ${objType}...`);
 
     try {
-        // 1. Получаем кандидатов от API (API возвращает всё, что касается bounding box или границ)
-        const rawFeatures = await searchFeaturesByGeometry(targetObject, 36368);
+        // Используем функцию поиска пересечений (которая уже поддерживает LineString)
+        // ID категории 36368 - Земельные участки
+        const foundFeatures = await searchFeaturesByGeometry(targetObject, 36368);
 
-        if (!rawFeatures || rawFeatures.length === 0) {
+        if (!foundFeatures || foundFeatures.length === 0) {
             showNotification(`Земельные участки на ${objType} не найдены`, 'warning');
             return;
         }
-
-        // --- НАЧАЛО ИЗМЕНЕНИЙ: Фильтрация результатов ---
-        // Отсеиваем объекты, которые имеют только общие точки/границы, но не имеют площади наложения > 0.005 кв.м.
-        
-        const foundFeatures = [];
-        let targetTurfGeom = null;
-        
-        // Подготовка геометрии ЦЕЛЕВОГО объекта для Turf.js (в координатах карты)
-        const targetCoords = targetObject.geometry.getCoordinates();
-        if (targetObject instanceof ymaps.Polygon) {
-            // Для полигона берем внешний контур, меняем [lat, lon] -> [lon, lat] для Turf
-            const ring = targetCoords[0].map(c => [c[1], c[0]]);
-            targetTurfGeom = turf.polygon([ring]);
-        } else if (targetObject instanceof ymaps.Polyline) {
-            const line = targetCoords.map(c => [c[1], c[0]]);
-            targetTurfGeom = turf.lineString(line);
-        }
-
-        if (targetTurfGeom) {
-            for (const feature of rawFeatures) {
-                try {
-                    if (!feature.geometry || !feature.geometry.coordinates) continue;
-
-                    // Подготовка геометрии КАНДИДАТА (из API)
-                    // Конвертируем из EPSG:3857 -> WGS84 -> Применяем смещение карты
-                    // Это нужно, чтобы координаты кандидата совпали с системой координат targetObject на карте
-                    const featureGeometryType = feature.geometry.type;
-                    let featurePolygons = []; // Массив полигонов кандидата для проверки
-
-                    const processRingToMapCoords = (ring3857) => {
-                        return ring3857.map(coord => {
-                            const wgs = proj4('EPSG:3857', 'EPSG:4326', coord);
-                            // Применяем вычитание смещения (как при отрисовке на карте)
-                            const lat = wgs[1] - mapOffsetY * 0.000008983;
-                            const lon = wgs[0] - mapOffsetX * 0.000008983;
-                            return [lon, lat]; // Turf ожидает [lon, lat]
-                        });
-                    };
-
-                    if (featureGeometryType === 'Polygon') {
-                        featurePolygons.push(processRingToMapCoords(feature.geometry.coordinates[0]));
-                    } else if (featureGeometryType === 'MultiPolygon') {
-                        feature.geometry.coordinates.forEach(poly => {
-                            featurePolygons.push(processRingToMapCoords(poly[0]));
-                        });
-                    }
-
-                    // Проверка пересечения
-                    let isIntersecting = false;
-
-                    for (const polyRing of featurePolygons) {
-                        // Создаем полигон кандидата
-                        const featureTurfPoly = turf.polygon([polyRing]);
-
-                        if (targetObject instanceof ymaps.Polygon) {
-                            // Площадное пересечение (Полигон с Полигоном)
-                            // Используем turf.intersect
-                            const intersection = turf.intersect(turf.featureCollection([targetTurfGeom, featureTurfPoly]));
-                            
-                            // Считаем пересечением, только если площадь наложения > 0.005 м²
-                            if (intersection && turf.area(intersection) > 0.005) {
-                                isIntersecting = true;
-                                break;
-                            }
-                        } else if (targetObject instanceof ymaps.Polyline) {
-                            // Линейное пересечение (Линия и Полигон)
-                            // Линия пересекает полигон ИЛИ линия полностью внутри полигона
-                            if (turf.booleanCrosses(targetTurfGeom, featureTurfPoly) || turf.booleanWithin(targetTurfGeom, featureTurfPoly)) {
-                                isIntersecting = true;
-                                break;
-                            }
-                            // Доп. проверка: если хотя бы одна точка линии внутри полигона
-                            // (booleanCrosses иногда не ловит, если конец линии внутри)
-                            const linePoints = targetTurfGeom.geometry.coordinates;
-                            for (const pt of linePoints) {
-                                if (turf.booleanPointInPolygon(turf.point(pt), featureTurfPoly)) {
-                                    isIntersecting = true;
-                                    break;
-                                }
-                            }
-                            if (isIntersecting) break;
-                        }
-                    }
-
-                    if (isIntersecting) {
-                        foundFeatures.push(feature);
-                    }
-
-                } catch (e) {
-                    console.error("Ошибка при фильтрации пересечений:", e);
-                }
-            }
-        } else {
-            // Fallback, если не удалось создать геометрию цели
-            foundFeatures.push(...rawFeatures);
-        }
-
-        if (foundFeatures.length === 0) {
-            showNotification(`Земельные участки на ${objType} не найдены (исключены касательные)`, 'warning');
-            return;
-        }
-        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         // Отрисовываем найденные участки
         await drawFoundParcels(foundFeatures, true);
