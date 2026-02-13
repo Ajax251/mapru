@@ -9292,10 +9292,34 @@ async function generateLinearObjectReport(targetObject) {
         const oksResults = findLinearIntersections(turfLines, oksInArea);
         const zouitResults = findLinearIntersections(turfLines, zouitsInArea);
 
+        const drawnZouits = [];
+        const coveringZouits = [];
+        
+        for (const item of zouitResults) {
+            const feature = item.feature;
+            let isCovering = false;
+            
+            if (feature.geometry.type === 'MultiPolygon' || (feature.geometry.type === 'Polygon' && feature.geometry.coordinates.length > 1)) {
+                isCovering = false;
+            } else {
+                try {
+                    if (item.percentage && item.percentage > 99.9) {
+                         isCovering = true;
+                    }
+                } catch(e) {}
+            }
+
+            if (isCovering) {
+                coveringZouits.push(item);
+            } else {
+                drawnZouits.push(item);
+            }
+        }
+
         const allIntersectedObjectsForMainScheme = [
             ...underlyingParcelsResults.map(r => r.feature), 
             ...oksResults.map(r => r.feature),
-            ...zouitResults.map(r => r.feature)
+            ...drawnZouits.map(r => r.feature)
         ];
         const { image, coordsTable } = await drawLinearObjectToCanvas(lines, allIntersectedObjectsForMainScheme);
         
@@ -9305,13 +9329,11 @@ async function generateLinearObjectReport(targetObject) {
             oksScheme = generatedOksScheme;
         }
         
-       const { html } = buildLinearReportHtml(mainObjectData, underlyingParcelsResults, oksResults, zouitResults, image, oksScheme, coordsTable);
+       const { html } = buildLinearReportHtml(mainObjectData, underlyingParcelsResults, oksResults, drawnZouits, image, oksScheme, coordsTable, coveringZouits);
         
         const reportWindow = window.open('', '_blank');
         if (reportWindow) {
-            // Сначала пишем только HTML
             reportWindow.document.write(html);
-            // Закрываем документ, так как скрипта для добавления нет
             reportWindow.document.close();
         } else {
             throw new Error('Не удалось открыть новое окно. Возможно, оно заблокировано браузером.');
@@ -9326,9 +9348,6 @@ async function generateLinearObjectReport(targetObject) {
 }
 
 
-/**
- * Универсальная функция для поиска объектов по области.
- */
 async function searchObjectsByArea(searchPolygonCoordsEPSG3857, categoryId) {
     const requestBody = {
         "geom": { "type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"crs": { "type": "name", "properties": { "name": "EPSG:3857" } }, "type": "Polygon", "coordinates": [searchPolygonCoordsEPSG3857]}, "properties": {}}] },
@@ -14653,7 +14672,7 @@ async function searchIntersectingObjects(targetPolygon, categoryId) {
     }
 }
 
-function buildReportHtml(mainObjectData, linkedOksResults, oksIntersectionResults, structuresResults, zouitResults, underlyingParcelsResults, terrZoneResults, settlementsResults, municipalResults, forestryResults, schemeImageWithPoints, schemeImageWithoutPoints, parcelsSchemeWithPoints, parcelsSchemeWithoutPoints, oksSchemeWithPoints, oksSchemeWithoutPoints, coordsTableHtml, zouitSchemeImage) {
+function buildReportHtml(mainObjectData, linkedOksResults, oksIntersectionResults, structuresResults, zouitResults, underlyingParcelsResults, terrZoneResults, settlementsResults, municipalResults, forestryResults, schemeImageWithPoints, schemeImageWithoutPoints, parcelsSchemeWithPoints, parcelsSchemeWithoutPoints, oksSchemeWithPoints, oksSchemeWithoutPoints, coordsTableHtml, zouitSchemeImage, coveringZouits = []) {
     const reportDate = new Date().toLocaleDateString('ru-RU');
 
     const generateMainInfoRows = () => {
@@ -14804,7 +14823,21 @@ function buildReportHtml(mainObjectData, linkedOksResults, oksIntersectionResult
     ${oksSchemeWithoutPoints ? `<div class="scheme-container"><div class="section-title">Схема пересекаемых ОКС</div><div class="scheme-wrapper"><img src="${oksSchemeWithoutPoints}" class="scheme-without-points" alt="Схема пересечений ОКС"><img src="${oksSchemeWithPoints}" class="scheme-with-points" alt="Схема пересечений ОКС с точками"></div></div>` : ''}
 
     ${generateResultTable('3. Сооружения на объекте', structuresResults, ['Кадастровый номер', 'Наименование', 'Протяженность', 'Назначение'], structuresRowGenerator)}
-    ${generateResultTable('4. Зоны с особыми условиями использования территории (ЗОУИТ)', zouitResults, ['Рег. номер', 'Наименование', 'Ограничения'], zouitRowGenerator, 'zouit-table')}
+    ${generateResultTable('4. Зоны с особыми условиями (отображены на схеме)', zouitResults, ['Рег. номер', 'Наименование', 'Ограничения'], zouitRowGenerator, 'zouit-table')}
+    
+    ${coveringZouits.length > 0 ? `
+        <div class="section-title">ЗОУИТ, полностью покрывающие объект (реестровые номера)</div>
+        <table class="zouit-table">
+            <thead><tr><th>Реестровый номер</th><th>Наименование</th></tr></thead>
+            <tbody>
+                ${coveringZouits.map(f => {
+                    const o = f.properties.options || {};
+                    return `<tr><td>${o.reg_numb_border || f.properties.descr || '-'}</td><td>${o.name_by_doc || '-'}</td></tr>`;
+                }).join('')}
+            </tbody>
+        </table>
+    ` : ''}
+
     ${generateResultTable('5. Территориальные зоны (в центре объекта)', terrZoneResults, ['Рег. номер', 'Наименование', 'Дата рег.'], terrZoneRowGenerator)}
     ${generateResultTable('6. Населенные пункты', settlementsResults, ['Тип', 'Наименование'], settlementsRowGenerator)}
     ${generateResultTable('7. Муниципальные образования', municipalResults, ['Наименование', 'Описание'], municipalRowGenerator)}
@@ -14847,7 +14880,6 @@ function buildReportHtml(mainObjectData, linkedOksResults, oksIntersectionResult
             }
         }
         function saveReportToHtml() {
-            // Клонируем документ, чтобы не испортить текущее окно (хотя мы работаем с outerHTML)
             const htmlContent = "<!DOCTYPE html>" + document.documentElement.outerHTML;
             const blob = new Blob([htmlContent], {type: "text/html"});
             const url = URL.createObjectURL(blob);
@@ -14862,6 +14894,116 @@ function buildReportHtml(mainObjectData, linkedOksResults, oksIntersectionResult
     `;
 
     return { html, scriptContent };
+}
+
+function buildLinearReportHtml(mainObjectData, parcelsResults, oksResults, zouitResults, schemeImage, oksSchemeImage, coordsTableHtml, coveringZouits = []) {
+    const reportDate = new Date().toLocaleDateString('ru-RU');
+
+    const generateResultTable = (title, items, headers, rowGenerator) => {
+        let tableHtml = `<div class="section-title">${title}</div>`;
+        if (!items || items.length === 0) return tableHtml + '<p style="text-align: center; margin: 10px 0;">Объекты не найдены.</p>';
+        
+        tableHtml += `<table><thead><tr>`;
+        headers.forEach(h => tableHtml += `<th>${h}</th>`);
+        tableHtml += '</tr></thead><tbody>';
+        items.forEach(item => tableHtml += rowGenerator(item));
+        tableHtml += '</tbody></table>';
+        return tableHtml;
+    };
+    
+    const parcelRowGenerator = (item) => `<tr>
+        <td>${item.feature.properties.descr || '-'}</td>
+        <td colspan="2">${item.feature.properties.options.readable_address || '-'}</td>
+    </tr>`;
+
+    const oksRowGenerator = (item) => `<tr>
+        <td>${item.feature.properties.options.cad_num || '-'}</td>
+        <td colspan="2">${item.feature.properties.options.purpose || item.feature.properties.descr || '-'}</td>
+    </tr>`;
+
+    const zouitRowGenerator = (item) => `<tr>
+        <td>${item.feature.properties.options.reg_numb_border || '-'}</td>
+        <td colspan="2">${item.feature.properties.options.name_by_doc || '-'}</td>
+    </tr>`;
+
+    const html = `<!DOCTYPE html><html lang="ru"><head><meta charset="UTF-8"><title>Отчет по линейному объекту</title><link rel="icon" href="img/report.png">
+    <style>
+        body{font-family: 'Liberation Serif', 'Times New Roman', Times, serif; margin: 0; background: #e9ecef; color: #212224; font-size: 11pt; line-height: 1.5;}
+        .page{background: white; box-shadow: 0 4px 16px rgba(0,0,0,0.1); margin: 20px auto; padding: 20mm; box-sizing: border-box; width: 210mm; max-width: 98%;}
+        table{width: 100%; border-collapse: collapse; margin: 15px 0 20px 0; table-layout: fixed;}
+        th, td{border: 1px solid #ccc; padding: 8px 10px; text-align: left; vertical-align: middle; word-break: break-word;}
+        th{background-color: #eaf0ff; color: #002a5c; font-weight: bold; text-align: center;}
+        tbody tr:nth-child(even){background-color: #f8f9fa;}
+        .main-info-table td:first-child{width: 35%; font-weight: bold; background-color: #f4f8ff;}
+        .header{text-align: center; margin-bottom: 30px; padding-top: 15px; border-top: 4px solid #003366;}
+        .header h3{font-size: 16pt; color: #002a5c; margin: 10px 0 5px 0; font-weight: 600; letter-spacing: 0.5px;}
+        .header h4{font-size: 11pt; font-weight: normal; color: #555; margin: 0; font-style: italic;}
+        .section-title{text-align: center; font-weight: bold; margin: 35px 0 15px 0; font-size: 12pt; page-break-after: avoid; color: #002a5c; border-bottom: 1px solid #d6e4ff; padding-bottom: 8px; text-transform: uppercase; letter-spacing: 1px;}
+        .scheme-container{text-align: center; margin-top: 25px; page-break-inside: avoid;}
+        .scheme-container img{max-width: 100%; border: 1px solid #ccc;}
+        #saveHtmlBtn { display: inline-block; margin: 20px auto; padding: 10px 20px; font-family: 'Liberation Serif', 'Times New Roman', serif; font-size: 11pt; cursor: pointer; border-radius: 5px; border: none; background-color: #4CAF50; color: white; transition: background-color 0.2s; box-shadow: 0 2px 5px rgba(0,0,0,0.2); }
+        #saveHtmlBtn:hover { background-color: #45a049; }
+        @media print{body{background: none;}.page{box-shadow: none; border: none; margin: 0; padding: 15mm; width: 100%;} #saveHtmlBtn { display: none; }}
+    </style>
+    </head>
+    <body><div class="page">
+        <div class="header">
+            <h3>Отчет по линейному объекту</h3>
+            <h4>сформирован ${reportDate}</h4>
+        </div>
+        <div class="section-title">Общие характеристики</div>
+        <table class="main-info-table">
+            <tr><td>Тип объекта</td><td>${mainObjectData.type}</td></tr>
+            <tr><td>Общая протяженность</td><td>${mainObjectData.totalLength} м</td></tr>
+            <tr><td>Количество поворотных точек</td><td>${mainObjectData.pointsCount}</td></tr>
+        </table>
+        ${generateResultTable('Пересекаемые земельные участки', parcelsResults, ['Кадастровый номер', 'Адрес'], parcelRowGenerator)}
+        ${generateResultTable('Пересекаемые ОКС', oksResults, ['Кадастровый номер', 'Назначение'], oksRowGenerator)}
+        
+        ${generateResultTable('Пересекаемые ЗОУИТ (частичное наложение)', zouitResults, ['Рег. номер', 'Наименование'], (item) => {
+             const o = item.feature.properties.options;
+             return `<tr><td>${o.reg_numb_border || '-'}</td><td>${o.name_by_doc || '-'}</td></tr>`;
+        })}
+
+        ${coveringZouits.length > 0 ? `
+            <div class="section-title">ЗОУИТ, полностью покрывающие объект</div>
+            <table>
+                <thead><tr><th>Реестровый номер</th><th>Наименование</th></tr></thead>
+                <tbody>
+                    ${coveringZouits.map(item => {
+                        const o = item.feature.properties.options || {};
+                        return `<tr><td>${o.reg_numb_border || '-'}</td><td>${o.name_by_doc || '-'}</td></tr>`;
+                    }).join('')}
+                </tbody>
+            </table>
+        ` : ''}
+        
+        <div class="scheme-container"><div class="section-title">Общая схема расположения</div><img src="${schemeImage}" alt="Общая схема расположения"></div>
+        ${oksSchemeImage ? `<div class="scheme-container"><div class="section-title">Схема пересекаемых ОКС</div><img src="${oksSchemeImage}" alt="Схема пересекаемых ОКС"></div>` : ''}
+
+        ${coordsTableHtml}
+        
+        <div style="text-align: center;">
+            <button onclick="saveReportToHtml()" id="saveHtmlBtn">Сохранить отчет в HTML</button>
+        </div>
+        
+        <script>
+            function saveReportToHtml() {
+                const htmlContent = "<!DOCTYPE html>" + document.documentElement.outerHTML;
+                const blob = new Blob([htmlContent], {type: "text/html"});
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = "Otchet_Линейный_" + new Date().toISOString().slice(0,10) + ".html";
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+            }
+        ${'<'}/script>
+    </div></body></html>`;
+
+    return { html };
 }
 
 async function searchFeaturesByGeometry(targetObject, categoryId) {
@@ -15039,7 +15181,6 @@ async function generateConsolidatedReport(targetObject) {
         if (isRealObject) {
             const featureData = targetPolygon.properties.get('featureData');
             if (!featureData) throw new Error('Не удалось получить исходные данные из выбранного объекта.');
-
             const opts = featureData.properties.options || {};
             mainObjectData = {
                 cadastralNumber: featureData.properties.descr, 
@@ -15051,146 +15192,84 @@ async function generateConsolidatedReport(targetObject) {
                 ownershipType: opts.ownership_type, 
                 rightType: opts.right_type
             };
-
             const coordsForArea = targetPolygon.geometry.getCoordinates()[0];
             const turfPolyForArea = turf.polygon([coordsForArea.map(c => [c[1], c[0]])]);
             mainObjectAreaInMeters = turf.area(turfPolyForArea);
 
-            showLoader('Поиск наложений с ЗУ...');
             const boundsForSearch = targetPolygon.geometry.getBounds();
-            const bufferedBoundsForSearch = [
-                [boundsForSearch[0][0] - 0.00005, boundsForSearch[0][1] - 0.00005],
-                [boundsForSearch[1][0] + 0.00005, boundsForSearch[1][1] + 0.00005]
-            ];
-            const searchPolygonForApi = [
-                [bufferedBoundsForSearch[0][1], bufferedBoundsForSearch[0][0]], 
-                [bufferedBoundsForSearch[1][1], bufferedBoundsForSearch[0][0]],
-                [bufferedBoundsForSearch[1][1], bufferedBoundsForSearch[1][0]], 
-                [bufferedBoundsForSearch[0][1], bufferedBoundsForSearch[1][0]],
-                [bufferedBoundsForSearch[0][1], bufferedBoundsForSearch[0][0]]
-            ].map(coord => proj4("EPSG:4326", "EPSG:3857", coord));
-
+            const bufferedBoundsForSearch = [[boundsForSearch[0][0]-0.00005, boundsForSearch[0][1]-0.00005],[boundsForSearch[1][0]+0.00005, boundsForSearch[1][1]+0.00005]];
+            const searchPolygonForApi = [[bufferedBoundsForSearch[0][1], bufferedBoundsForSearch[0][0]],[bufferedBoundsForSearch[1][1], bufferedBoundsForSearch[0][0]],[bufferedBoundsForSearch[1][1], bufferedBoundsForSearch[1][0]],[bufferedBoundsForSearch[0][1], bufferedBoundsForSearch[1][0]],[bufferedBoundsForSearch[0][1], bufferedBoundsForSearch[0][0]]].map(coord => proj4("EPSG:4326", "EPSG:3857", coord));
+            
+            showLoader('Поиск наложений с ЗУ...');
             const fetchedCandidateFeatures = await searchParcelsByArea(searchPolygonForApi);
-
             if (fetchedCandidateFeatures.length > 0) {
                 let searchTurfPoly = turf.polygon([coordsForArea.map(c => [c[1], c[0]])]);
-                const bufferedSearchPoly = turf.buffer(searchTurfPoly, -0.005, { units: 'meters' });
-                if (bufferedSearchPoly) searchTurfPoly = bufferedSearchPoly;
-
                 fetchedCandidateFeatures.forEach(feature => {
                     if (feature.properties.descr === mainObjectData.cadastralNumber) return;
-                    if (!feature.geometry || !feature.geometry.coordinates || feature.geometry.type !== 'Polygon') return;
-
+                    if (!feature.geometry || feature.geometry.type !== 'Polygon') return;
                     const featureWgsCoordsWithOffset = feature.geometry.coordinates[0].map(coord3857 => {
                         const wgsCoord = proj4('EPSG:3857', 'EPSG:4326', coord3857);
                         return [wgsCoord[0] - (mapOffsetX * 0.000008983), wgsCoord[1] - (mapOffsetY * 0.000008983)];
                     });
                     const targetTurfPoly = turf.polygon([featureWgsCoordsWithOffset]);
-
                     const intersectionGeometry = turf.intersect(turf.featureCollection([searchTurfPoly, targetTurfPoly]));
-
-                    if (intersectionGeometry) {
-                        const intersectionArea = turf.area(intersectionGeometry);
-                        if (intersectionArea > 0.01) {
-                            const percentage = (intersectionArea / mainObjectAreaInMeters) * 100;
-                            underlyingParcelsResults.push({ feature, intersectionArea, percentage });
-                        }
+                    if (intersectionGeometry && turf.area(intersectionGeometry) > 0.01) {
+                        const percentage = (turf.area(intersectionGeometry) / mainObjectAreaInMeters) * 100;
+                        underlyingParcelsResults.push({ feature, intersectionArea: turf.area(intersectionGeometry), percentage });
                     }
                 });
             }
             linkedOksResults = await fetchLinkedOks(mainObjectData.cadastralNumber);
-
         } else if (isManualObject) {
-            const coords = targetPolygon.geometry.getCoordinates()[0];
-            const unbufferedTurfPoly = turf.polygon([coords.map(c => [c[1], c[0]])]);
-            mainObjectAreaInMeters = turf.area(unbufferedTurfPoly);
-
-            mainObjectData = {
-                cadastralNumber: 'Созданный объект', 
-                address: 'Координаты указаны вручную',
-                areaText: `${Math.round(mainObjectAreaInMeters).toLocaleString('ru-RU')} м² (примерно по географическим координатам)`,
-            };
-
-            showLoader('Загрузка участков в области...');
-            const bounds = targetPolygon.geometry.getBounds();
-            const bufferedBounds = [
-                [bounds[0][0] - 0.00005, bounds[0][1] - 0.00005],
-                [bounds[1][0] + 0.00005, bounds[1][1] + 0.00005]
-            ];
-            const searchPolygonForApi = [
-                [bufferedBounds[0][1], bufferedBounds[0][0]], 
-                [bufferedBounds[1][1], bufferedBounds[0][0]],
-                [bufferedBounds[1][1], bufferedBounds[1][0]], 
-                [bufferedBounds[0][1], bufferedBounds[1][0]],
-                [bufferedBounds[0][1], bufferedBounds[0][0]]
-            ].map(coord => proj4("EPSG:4326", "EPSG:3857", coord));
-
-            const fetchedCandidateFeatures = await searchParcelsByArea(searchPolygonForApi);
-
-            if (fetchedCandidateFeatures.length > 0) {
+             const coords = targetPolygon.geometry.getCoordinates()[0];
+             const unbufferedTurfPoly = turf.polygon([coords.map(c => [c[1], c[0]])]);
+             mainObjectAreaInMeters = turf.area(unbufferedTurfPoly);
+             mainObjectData = { cadastralNumber: 'Созданный объект', address: 'Координаты указаны вручную', areaText: `${Math.round(mainObjectAreaInMeters).toLocaleString('ru-RU')} м²` };
+             
+             showLoader('Загрузка участков в области...');
+             const bounds = targetPolygon.geometry.getBounds();
+             const bufferedBounds = [[bounds[0][0]-0.00005, bounds[0][1]-0.00005],[bounds[1][0]+0.00005, bounds[1][1]+0.00005]];
+             const searchPolygonForApi = [[bufferedBounds[0][1], bufferedBounds[0][0]],[bufferedBounds[1][1], bufferedBounds[0][0]],[bufferedBounds[1][1], bufferedBounds[1][0]],[bufferedBounds[0][1], bufferedBounds[1][0]],[bufferedBounds[0][1], bufferedBounds[0][0]]].map(coord => proj4("EPSG:4326", "EPSG:3857", coord));
+             const fetchedCandidateFeatures = await searchParcelsByArea(searchPolygonForApi);
+             
+             if (fetchedCandidateFeatures.length > 0) {
                 showLoader('Поиск наложений...');
-
                 let searchTurfPoly = turf.polygon([coords.map(c => [c[1], c[0]])]);
                 const bufferedSearchPoly = turf.buffer(searchTurfPoly, -0.005, { units: 'meters' });
                 if (bufferedSearchPoly) searchTurfPoly = bufferedSearchPoly;
 
                 fetchedCandidateFeatures.forEach(feature => {
                     if (!feature.geometry || !feature.geometry.coordinates || feature.geometry.type !== 'Polygon') return;
-
                     const featureWgsCoordsWithOffset = feature.geometry.coordinates[0].map(coord3857 => {
                         const wgsCoord = proj4('EPSG:3857', 'EPSG:4326', coord3857);
                         return [wgsCoord[0] - (mapOffsetX * 0.000008983), wgsCoord[1] - (mapOffsetY * 0.000008983)];
                     });
                     const targetTurfPoly = turf.polygon([featureWgsCoordsWithOffset]);
-
                     const intersectionGeometry = turf.intersect(turf.featureCollection([searchTurfPoly, targetTurfPoly]));
-
-                    if (intersectionGeometry) {
-                        const intersectionArea = turf.area(intersectionGeometry);
-                        if (intersectionArea > 0.01) {
-                            const percentage = (intersectionArea / mainObjectAreaInMeters) * 100;
-                            underlyingParcelsResults.push({ feature, intersectionArea, percentage });
-                        }
+                    if (intersectionGeometry && turf.area(intersectionGeometry) > 0.01) {
+                        const percentage = (turf.area(intersectionGeometry) / mainObjectAreaInMeters) * 100;
+                        underlyingParcelsResults.push({ feature, intersectionArea: turf.area(intersectionGeometry), percentage });
                     }
                 });
             }
-            await delay(100);
-        } else {
-            throw new Error('Не удалось определить тип выбранного объекта.');
         }
 
         const bounds = targetPolygon.geometry.getBounds();
-        if (!bounds) throw new Error('Не удалось определить границы объекта для поиска.');
-
         const centerLat = (bounds[0][0] + bounds[1][0]) / 2;
         const centerLon = (bounds[0][1] + bounds[1][1]) / 2;
 
         const oksResults = await searchFeaturesByGeometry(targetPolygon, 36369);
-
         if (oksResults.length > 0) {
-            showLoader('Анализ наложений с ОКС...');
-            const searchCoords = targetPolygon.geometry.getCoordinates()[0];
-            const searchTurfPoly = turf.polygon([searchCoords.map(c => [c[1], c[0]])]);
-
-            oksResults.forEach(feature => {
-                if (!feature.geometry || !feature.geometry.coordinates || feature.geometry.type !== 'Polygon') return;
-
-                const featureWgsCoordsWithOffset = feature.geometry.coordinates[0].map(coord3857 => {
-                    const wgsCoord = proj4('EPSG:3857', 'EPSG:4326', coord3857);
-                    return [wgsCoord[0] - (mapOffsetX * 0.000008983), wgsCoord[1] - (mapOffsetY * 0.000008983)];
-                });
-                const targetTurfPoly = turf.polygon([featureWgsCoordsWithOffset]);
-
-                const intersectionGeometry = turf.intersect(turf.featureCollection([searchTurfPoly, targetTurfPoly]));
-
-                if (intersectionGeometry) {
-                    const intersectionArea = turf.area(intersectionGeometry);
-                    if (intersectionArea > 0.01) {
-                        const percentage = (intersectionArea / mainObjectAreaInMeters) * 100;
-                        oksIntersectionResults.push({ feature, intersectionArea, percentage });
-                    }
-                }
-            });
+             showLoader('Анализ наложений с ОКС...');
+             const searchCoords = targetPolygon.geometry.getCoordinates()[0];
+             const searchTurfPoly = turf.polygon([searchCoords.map(c => [c[1], c[0]])]);
+             oksResults.forEach(feature => {
+                 if (!feature.geometry || !feature.geometry.coordinates || feature.geometry.type !== 'Polygon') return;
+                 const featureWgsCoordsWithOffset = feature.geometry.coordinates[0].map(c => { const w = proj4('EPSG:3857', 'EPSG:4326', c); return [w[0]-(mapOffsetX*0.000008983), w[1]-(mapOffsetY*0.000008983)]; });
+                 const targetTurfPoly = turf.polygon([featureWgsCoordsWithOffset]);
+                 const intersectionGeometry = turf.intersect(turf.featureCollection([searchTurfPoly, targetTurfPoly]));
+                 if (intersectionGeometry) { oksIntersectionResults.push({ feature, intersectionArea: turf.area(intersectionGeometry), percentage: (turf.area(intersectionGeometry)/mainObjectAreaInMeters)*100 }); }
+             });
         }
 
         await delay(100);
@@ -15198,6 +15277,42 @@ async function generateConsolidatedReport(targetObject) {
         await delay(100);
         const zouitResults = await searchFeaturesByGeometry(targetPolygon, 36940);
         await delay(100);
+
+        const drawnZouits = [];
+        const coveringZouits = [];
+        const mainCoords = targetPolygon.geometry.getCoordinates()[0];
+        const mainTurfPoly = turf.polygon([mainCoords.map(c => [c[1], c[0]])]);
+        
+        for (const feature of zouitResults) {
+            let isCovering = false;
+            try {
+                if (feature.geometry.type === 'MultiPolygon') {
+                    isCovering = false; 
+                } else if (feature.geometry.type === 'Polygon') {
+                    if (feature.geometry.coordinates.length > 1) {
+                        isCovering = false;
+                    } else {
+                        const wgsRing = feature.geometry.coordinates[0].map(c => {
+                            const wgs = proj4('EPSG:3857', 'EPSG:4326', c);
+                            return [wgs[0] - (mapOffsetX * 0.000008983), wgs[1] - (mapOffsetY * 0.000008983)];
+                        });
+                        const featureTurf = turf.polygon([wgsRing]);
+                        
+                        if (turf.booleanContains(featureTurf, mainTurfPoly)) {
+                            isCovering = true;
+                        }
+                    }
+                }
+            } catch (e) {
+                isCovering = false;
+            }
+
+            if (isCovering) {
+                coveringZouits.push(feature);
+            } else {
+                drawnZouits.push(feature);
+            }
+        }
 
         const terrZoneResults = await searchContainingObjectByPoint(centerLat, centerLon, 36315, targetPolygon);
         await delay(100);
@@ -15236,8 +15351,8 @@ async function generateConsolidatedReport(targetObject) {
         }
 
         let zouitScheme = null;
-        if (zouitResults.length > 0) {
-            const zouitsForDrawing = zouitResults.map(f => {
+        if (drawnZouits.length > 0) {
+            const zouitsForDrawing = drawnZouits.map(f => {
                 const clone = JSON.parse(JSON.stringify(f));
                 if (!clone.properties) clone.properties = {};
                 clone.properties._report_type = 'zouit';
@@ -15249,13 +15364,14 @@ async function generateConsolidatedReport(targetObject) {
         }
 
         const { html, scriptContent } = buildReportHtml(
-            mainObjectData, linkedOksResults, oksIntersectionResults, structuresResults, zouitResults,
+            mainObjectData, linkedOksResults, oksIntersectionResults, structuresResults, drawnZouits,
             underlyingParcelsResults, terrZoneResults, settlementsResults, municipalResults, forestryResults,
             mainSchemeWithPoints, mainSchemeWithoutPoints,
             parcelsSchemeWithPoints, parcelsSchemeWithoutPoints,
             oksSchemeWithPoints, oksSchemeWithoutPoints,
             coordsTable,
-            zouitScheme
+            zouitScheme,
+            coveringZouits
         );
 
         const reportWindow = window.open('', '_blank');
@@ -19517,17 +19633,17 @@ async function drawAllObjectsToCanvas(mainObject, otherObjects, showPoints = tru
     const underlyingCadNumbers = new Set((underlyingParcels || []).map(f => f.properties.descr));
 
     const processObject = (obj) => {
-        if (!obj) {
-            return null;
-        }
+        if (!obj) return null;
 
-        let cadNum, type, color, geometry, isYmapsObject = false;
+        let cadNum, type, color, geometryType, rawCoordinates, isYmapsObject = false;
 
         if (obj instanceof ymaps.Polygon) {
             isYmapsObject = true;
-            geometry = obj.geometry.getCoordinates();
+            geometryType = 'Polygon';
+            rawCoordinates = obj.geometry.getCoordinates();
         } else if (obj.type === 'Feature' && obj.geometry) {
-            geometry = obj.geometry.type === 'Polygon' ? [obj.geometry.coordinates] : obj.geometry.coordinates;
+            geometryType = obj.geometry.type;
+            rawCoordinates = obj.geometry.coordinates;
         } else {
             return null;
         }
@@ -19560,21 +19676,31 @@ async function drawAllObjectsToCanvas(mainObject, otherObjects, showPoints = tru
             color = '#FFA500';
         }
 
-        const projectedRings = [];
-        geometry.forEach(ringOrPolygon => {
-            const ring = Array.isArray(ringOrPolygon[0][0]) ? ringOrPolygon[0] : ringOrPolygon;
-            projectedRings.push(ring.map(coord => {
-                if (isYmapsObject) {
-                    const trueLat = coord[0] + (mapOffsetY * 0.000008983);
-                    const trueLon = coord[1] + (mapOffsetX * 0.000008983);
-                    return { projected: proj4('EPSG:4326', 'EPSG:3857', [trueLon, trueLat]), original: [trueLat, trueLon] };
-                } else {
-                    return { projected: coord, original: proj4('EPSG:3857', 'EPSG:4326', coord).reverse() };
-                }
-            }));
+        const projectedPolygons = [];
+        let polygonsArray = [];
+        
+        if (geometryType === 'Polygon') {
+            polygonsArray.push(rawCoordinates);
+        } else if (geometryType === 'MultiPolygon') {
+            polygonsArray = rawCoordinates;
+        }
+
+        polygonsArray.forEach(polyRings => {
+            const processedPoly = polyRings.map(ring => {
+                return ring.map(coord => {
+                    if (isYmapsObject) {
+                        const trueLat = coord[0] + (mapOffsetY * 0.000008983);
+                        const trueLon = coord[1] + (mapOffsetX * 0.000008983);
+                        return { projected: proj4('EPSG:4326', 'EPSG:3857', [trueLon, trueLat]), original: [trueLat, trueLon] };
+                    } else {
+                        return { projected: coord, original: proj4('EPSG:3857', 'EPSG:4326', coord).reverse() };
+                    }
+                });
+            });
+            projectedPolygons.push(processedPoly);
         });
 
-        return { name: cadNum, type, color, projectedRings, isZouit };
+        return { name: cadNum, type, color, projectedPolygons, isZouit };
     };
 
     const mainObjectInfo = processObject(mainObject);
@@ -19582,8 +19708,8 @@ async function drawAllObjectsToCanvas(mainObject, otherObjects, showPoints = tru
     const objectDrawInfo = [mainObjectInfo, ...otherObjectsInfo].filter(Boolean);
 
     let bboxCoords = [];
-    if (mainObjectInfo && mainObjectInfo.projectedRings) {
-        mainObjectInfo.projectedRings.forEach(ring => ring.forEach(p => bboxCoords.push(p.projected)));
+    if (mainObjectInfo && mainObjectInfo.projectedPolygons) {
+        mainObjectInfo.projectedPolygons.forEach(poly => poly.forEach(ring => ring.forEach(p => bboxCoords.push(p.projected))));
     }
 
     if (bboxCoords.length === 0) { return { image: null, coordsTable: '' }; }
@@ -19595,7 +19721,6 @@ async function drawAllObjectsToCanvas(mainObject, otherObjects, showPoints = tru
 
     const projectedWidth = maxX - minX;
     const projectedHeight = maxY - minY;
-
     const effectiveWidth = projectedWidth > 0 ? projectedWidth : 1;
 
     const scale = (canvasWidth - padding * 2) / effectiveWidth;
@@ -19619,240 +19744,158 @@ async function drawAllObjectsToCanvas(mainObject, otherObjects, showPoints = tru
         const isMain = idx === 0;
         if (isMain && !drawMain) return;
 
-        const { projectedRings, color, name, type, isZouit } = info;
+        const { projectedPolygons, color, name, type, isZouit } = info;
         let pointCounterForObject = 1;
         let currentObjectTableBody = '';
+        
+        let allCanvasPointsForLabel = [];
 
-        projectedRings.forEach(ring => {
+        projectedPolygons.forEach(polyRings => {
             ctx.beginPath();
-            let canvasPoints = [];
 
-            ring.forEach((pointData, index) => {
-                const { projected, original } = pointData;
-                const x = cOffsetX + (projected[0] - minX) * scale;
-                const y = canvas.height - (cOffsetY + (projected[1] - minY) * scale);
+            polyRings.forEach((ring, ringIndex) => {
+                ring.forEach((pointData, index) => {
+                    const { projected } = pointData;
+                    const x = cOffsetX + (projected[0] - minX) * scale;
+                    const y = canvas.height - (cOffsetY + (projected[1] - minY) * scale);
 
-                canvasPoints.push({ x, y });
+                    if (ringIndex === 0) allCanvasPointsForLabel.push({ x, y });
 
-                if (index === 0) ctx.moveTo(x, y); else ctx.lineTo(x, y);
-
-                const mskCoords = convertWgs84ToMskWithOffset([[original[1], original[0]]], destSc, destSystem.def, mskOffsetX, mskOffsetY).split('\t');
-
-                if (showPoints) {
-                    ctx.fillStyle = '#000000';
-                    ctx.fillRect(x - 2, y - 2, 4, 4);
-                    ctx.font = '10px Arial';
-                    ctx.fillText(`${pointCounterForObject}`, x + 5, y - 5);
-                    currentObjectTableBody += `<tr><td>${pointCounterForObject}</td><td>${mskCoords[0]}</td><td>${mskCoords[1]}</td></tr>`;
-                } else {
-                    currentObjectTableBody += `<tr><td>${mskCoords[0]}</td><td>${mskCoords[1]}</td></tr>`;
-                }
-                pointCounterForObject++;
+                    if (index === 0) ctx.moveTo(x, y); 
+                    else ctx.lineTo(x, y);
+                });
+                ctx.closePath();
             });
 
-            ctx.closePath();
+            ctx.fillStyle = `${color}33`;
+            ctx.fill('evenodd');
+            
             ctx.strokeStyle = color;
             ctx.lineWidth = 2;
-
-            if (isZouit) {
-                ctx.setLineDash([5, 3]);
-            } else {
-                ctx.setLineDash([]);
-            }
-
+            if (isZouit) ctx.setLineDash([5, 3]);
+            else ctx.setLineDash([]);
+            
             ctx.stroke();
-            ctx.fillStyle = `${color}33`;
-            ctx.fill();
-
             ctx.setLineDash([]);
+        });
 
-            if (name && name !== 'Объект') {
-                ctx.font = 'bold 12px Arial';
-                ctx.textAlign = 'center';
-                ctx.textBaseline = 'middle';
-
-                const textMetrics = ctx.measureText(name);
-                const labelWidth = textMetrics.width + 12;
-                const labelHeight = 20;
-                const labelPadH = 6;
-                const labelPadV = 5;
-
-                const isOverlapping = (x, y) => {
-                    const newLabelBox = { 
-                        left: x - labelWidth / 2 - labelPadH, 
-                        right: x + labelWidth / 2 + labelPadH, 
-                        top: y - labelHeight / 2 - labelPadV, 
-                        bottom: y + labelHeight / 2 + labelPadV 
-                    };
-                    for (const box of drawnLabelBounds) {
-                        if (newLabelBox.left < box.right && newLabelBox.right > box.left && 
-                            newLabelBox.top < box.bottom && newLabelBox.bottom > box.top) return true;
-                    }
-                    return false;
-                };
-
-                const visiblePoints = canvasPoints.filter(p => p.x >= 0 && p.x <= canvas.width && p.y >= 0 && p.y <= canvas.height);
-                if (visiblePoints.length === 0) return;
-
-                const visMinX = Math.min(...visiblePoints.map(p => p.x));
-                const visMaxX = Math.max(...visiblePoints.map(p => p.x));
-                const visMinY = Math.min(...visiblePoints.map(p => p.y));
-                const visMaxY = Math.max(...visiblePoints.map(p => p.y));
-                const centerX = (visMinX + visMaxX) / 2;
-                const centerY = (visMinY + visMaxY) / 2;
-
-                const isSkinny = (visMaxX - visMinX < labelWidth) || (visMaxY - visMinY < labelHeight);
-                const centerIsOffscreen = centerX < padding || centerX > canvas.width - padding || centerY < padding || centerY > canvas.height - padding;
-
-                let finalX, finalY;
-                let anchorPoint = { x: centerX, y: centerY };
-                let needsLeaderLine = isSkinny || centerIsOffscreen;
-
-                if (!needsLeaderLine) {
-                    const offsets = [{ x: 0, y: 0 }, { x: 0, y: -20 }, { x: 0, y: 20 }, { x: -30, y: 0 }, { x: 30, y: 0 }];
-                    for (const offset of offsets) {
-                        if (!isOverlapping(centerX + offset.x, centerY + offset.y)) {
-                            finalX = centerX + offset.x;
-                            finalY = centerY + offset.y;
-                            break;
-                        }
-                    }
-                    if (finalX === undefined) {
-                        needsLeaderLine = true;
-                    }
-                }
-
-                if (needsLeaderLine) {
-                    let closestVisiblePoint = visiblePoints[0];
-                    let minDistanceSq = Infinity;
-                    visiblePoints.forEach(p => {
-                        const distSq = Math.pow(p.x - centerX, 2) + Math.pow(p.y - centerY, 2);
-                        if (distSq < minDistanceSq) {
-                            minDistanceSq = distSq;
-                            closestVisiblePoint = p;
-                        }
+        if (showPoints) {
+             projectedPolygons.forEach(polyRings => {
+                polyRings.forEach(ring => {
+                    ring.forEach((pointData) => {
+                        const { projected, original } = pointData;
+                        const x = cOffsetX + (projected[0] - minX) * scale;
+                        const y = canvas.height - (cOffsetY + (projected[1] - minY) * scale);
+                        
+                        ctx.fillStyle = '#000000';
+                        ctx.fillRect(x - 2, y - 2, 4, 4);
+                        ctx.font = '10px Arial';
+                        ctx.fillText(`${pointCounterForObject}`, x + 5, y - 5);
+                        
+                        const mskCoords = convertWgs84ToMskWithOffset([[original[1], original[0]]], destSc, destSystem.def, mskOffsetX, mskOffsetY).split('\t');
+                        currentObjectTableBody += `<tr><td>${pointCounterForObject}</td><td>${mskCoords[0]}</td><td>${mskCoords[1]}</td></tr>`;
+                        pointCounterForObject++;
                     });
-                    anchorPoint = closestVisiblePoint;
-
-                    const targetX = anchorPoint.x > canvas.width / 2 ? canvas.width - padding : padding;
-                    const targetY = anchorPoint.y > canvas.height / 2 ? canvas.height - padding : padding;
-
-                    for (let i = 0; i < 5; i++) {
-                        let testX = targetX + (i % 2 === 0 ? i * 15 : -i * 15);
-                        let testY = targetY;
-                        if (!isOverlapping(testX, testY)) {
-                            finalX = testX;
-                            finalY = testY;
-                            break;
-                        }
-                    }
-                }
-
-                if (finalX !== undefined) {
-                    const halfW = (labelWidth + labelPadH * 2) / 2;
-    const halfH = (labelHeight + labelPadV * 2) / 2;
-
-    finalX = Math.max(halfW + 2, Math.min(canvas.width - halfW - 2, finalX));
-    finalY = Math.max(halfH + 2, Math.min(canvas.height - halfH - 2, finalY));
-    
-                    if (needsLeaderLine) {
-                        ctx.beginPath();
-                        ctx.moveTo(anchorPoint.x, anchorPoint.y);
-                        ctx.lineTo(finalX, finalY);
-                        ctx.strokeStyle = 'rgba(100, 100, 100, 0.6)';
-                        ctx.lineWidth = 1;
-                        ctx.setLineDash([3, 2]);
-                        ctx.stroke();
-                        ctx.setLineDash([]);
-                    }
-
-                    const bgX = finalX - labelWidth / 2 - labelPadH;
-                    const bgY = finalY - labelHeight / 2 - labelPadV;
-                    const bgW = labelWidth + labelPadH * 2;
-                    const bgH = labelHeight + labelPadV * 2;
-
-                    ctx.shadowColor = 'rgba(0, 0, 0, 0.25)';
-                    ctx.shadowBlur = 4;
-                    ctx.shadowOffsetX = 2;
-                    ctx.shadowOffsetY = 2;
-
-                    ctx.fillStyle = '#FFFFFF';
-                    ctx.strokeStyle = color;
-                    ctx.lineWidth = 2;
-                    ctx.setLineDash([]);
-
-                    const radius = 5;
-                    ctx.beginPath();
-                    ctx.moveTo(bgX + radius, bgY);
-                    ctx.lineTo(bgX + bgW - radius, bgY);
-                    ctx.quadraticCurveTo(bgX + bgW, bgY, bgX + bgW, bgY + radius);
-                    ctx.lineTo(bgX + bgW, bgY + bgH - radius);
-                    ctx.quadraticCurveTo(bgX + bgW, bgY + bgH, bgX + bgW - radius, bgY + bgH);
-                    ctx.lineTo(bgX + radius, bgY + bgH);
-                    ctx.quadraticCurveTo(bgX, bgY + bgH, bgX, bgY + bgH - radius);
-                    ctx.lineTo(bgX, bgY + radius);
-                    ctx.quadraticCurveTo(bgX, bgY, bgX + radius, bgY);
-                    ctx.closePath();
-                    
-                    ctx.fill();
-                    ctx.stroke();
-
-                    ctx.shadowColor = 'transparent';
-                    ctx.shadowBlur = 0;
-                    ctx.shadowOffsetX = 0;
-                    ctx.shadowOffsetY = 0;
-
-                    ctx.font = 'bold 12px Arial';
-                    ctx.textAlign = 'center';
-                    ctx.textBaseline = 'middle';
-                    
-                    ctx.strokeStyle = '#FFFFFF';
-                    ctx.lineWidth = 3;
-                    ctx.lineJoin = 'round';
-                    ctx.miterLimit = 2;
-                    ctx.strokeText(name, finalX, finalY);
-                    
-                    ctx.fillStyle = '#000000';
-                    ctx.fillText(name, finalX, finalY);
-
-                    drawnLabelBounds.push({
-                        left: bgX,
-                        right: bgX + bgW,
-                        top: bgY,
-                        bottom: bgY + bgH
+                });
+             });
+        } else {
+             projectedPolygons.forEach(polyRings => {
+                polyRings.forEach(ring => {
+                    ring.forEach((pointData) => {
+                        const { original } = pointData;
+                        const mskCoords = convertWgs84ToMskWithOffset([[original[1], original[0]]], destSc, destSystem.def, mskOffsetX, mskOffsetY).split('\t');
+                        currentObjectTableBody += `<tr><td>${mskCoords[0]}</td><td>${mskCoords[1]}</td></tr>`;
                     });
+                });
+             });
+        }
+
+        if (name && name !== 'Объект') {
+            ctx.font = 'bold 12px Arial';
+            ctx.textAlign = 'center';
+            ctx.textBaseline = 'middle';
+
+            const textMetrics = ctx.measureText(name);
+            const labelWidth = textMetrics.width + 12;
+            const labelHeight = 20;
+            const labelPadH = 6; const labelPadV = 5;
+
+            const isOverlapping = (x, y) => {
+                const box = { left: x - labelWidth/2 - labelPadH, right: x + labelWidth/2 + labelPadH, top: y - labelHeight/2 - labelPadV, bottom: y + labelHeight/2 + labelPadV };
+                return drawnLabelBounds.some(b => box.left < b.right && box.right > b.left && box.top < b.bottom && box.bottom > b.top);
+            };
+
+            const visiblePoints = allCanvasPointsForLabel.filter(p => p.x >= 0 && p.x <= canvas.width && p.y >= 0 && p.y <= canvas.height);
+            
+            let anchorPoint;
+            if (visiblePoints.length === 0) {
+                anchorPoint = { x: canvas.width / 2, y: canvas.height / 2 };
+            } else {
+                const xs = visiblePoints.map(p => p.x);
+                const ys = visiblePoints.map(p => p.y);
+                const centerX = (Math.min(...xs) + Math.max(...xs)) / 2;
+                const centerY = (Math.min(...ys) + Math.max(...ys)) / 2;
+                
+                anchorPoint = visiblePoints.reduce((prev, curr) => {
+                    const prevDist = Math.pow(prev.x - centerX, 2) + Math.pow(prev.y - centerY, 2);
+                    const currDist = Math.pow(curr.x - centerX, 2) + Math.pow(curr.y - centerY, 2);
+                    return (currDist < prevDist) ? curr : prev;
+                });
+            }
+
+            let finalX, finalY;
+            const offsets = [{x:0,y:0}, {x:0,y:-20}, {x:0,y:20}, {x:-30,y:0}, {x:30,y:0}];
+            for (const offset of offsets) {
+                if (!isOverlapping(anchorPoint.x + offset.x, anchorPoint.y + offset.y)) {
+                    finalX = anchorPoint.x + offset.x; finalY = anchorPoint.y + offset.y; break;
                 }
             }
-        });
+            if (finalX === undefined) { finalX = anchorPoint.x; finalY = anchorPoint.y; }
+
+            const halfW = (labelWidth + labelPadH * 2) / 2;
+            const halfH = (labelHeight + labelPadV * 2) / 2;
+            finalX = Math.max(halfW + 2, Math.min(canvas.width - halfW - 2, finalX));
+            finalY = Math.max(halfH + 2, Math.min(canvas.height - halfH - 2, finalY));
+
+            const bgX = finalX - labelWidth / 2 - labelPadH;
+            const bgY = finalY - labelHeight / 2 - labelPadV;
+            const bgW = labelWidth + labelPadH * 2;
+            const bgH = labelHeight + labelPadV * 2;
+
+            ctx.shadowColor = 'rgba(0, 0, 0, 0.25)';
+            ctx.shadowBlur = 4; ctx.shadowOffsetX = 2; ctx.shadowOffsetY = 2;
+            ctx.fillStyle = '#FFFFFF';
+            ctx.strokeStyle = color;
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.roundRect(bgX, bgY, bgW, bgH, 5);
+            ctx.fill();
+            ctx.stroke();
+            ctx.shadowColor = 'transparent';
+
+            ctx.fillStyle = '#000000';
+            ctx.fillText(name, finalX, finalY);
+
+            drawnLabelBounds.push({ left: bgX, right: bgX + bgW, top: bgY, bottom: bgY + bgH });
+        }
 
         if (currentObjectTableBody && !isZouit) {
             const tableHeaders = showPoints
                 ? `<thead><tr><th class="point-col">Номер точки</th><th>X (${mskName})</th><th>Y (${mskName})</th></tr></thead>`
                 : `<thead><tr><th>X (${mskName})</th><th>Y (${mskName})</th></tr></thead>`;
-
-            allTablesHtml += `
-                <div class="section-title">Каталог координат: ${name} (${type})</div>
-                <table>
-                    ${tableHeaders}
-                    <tbody>${currentObjectTableBody}</tbody>
-                </table>`;
+            allTablesHtml += `<div class="section-title">Каталог координат: ${name} (${type})</div><table>${tableHeaders}<tbody>${currentObjectTableBody}</tbody></table>`;
         }
     });
 
     if (linkedOksList && linkedOksList.length > 0) {
         const itemHeight = 16;
         const maxItemsInColumn = 10;
-        
         const columns = [];
-        for (let i = 0; i < linkedOksList.length; i += maxItemsInColumn) {
-            columns.push(linkedOksList.slice(i, i + maxItemsInColumn));
-        }
-        
+        for (let i = 0; i < linkedOksList.length; i += maxItemsInColumn) columns.push(linkedOksList.slice(i, i + maxItemsInColumn));
         const columnWidth = 180;
         const totalWidth = columns.length * columnWidth + 20;
         const legendHeight = Math.min(linkedOksList.length, maxItemsInColumn) * itemHeight + 35;
-        const legendPadding = 10;
-
+        
         const checkOverlap = (boxLeft, boxTop, boxWidth, boxHeight) => {
             for (const label of drawnLabelBounds) {
                 if (boxLeft < label.right && (boxLeft + boxWidth) > label.left && 
@@ -19864,10 +19907,10 @@ async function drawAllObjectsToCanvas(mainObject, otherObjects, showPoints = tru
         };
 
         const positions = [
-            { x: 20 - legendPadding, y: canvas.height - legendHeight, name: 'bottom-left' },
-            { x: canvas.width - totalWidth - legendPadding, y: canvas.height - legendHeight, name: 'bottom-right' },
-            { x: 20 - legendPadding, y: 20, name: 'top-left' },
-            { x: canvas.width - totalWidth - legendPadding, y: 20, name: 'top-right' }
+            { x: 10, y: canvas.height - legendHeight - 10 },
+            { x: canvas.width - totalWidth - 10, y: canvas.height - legendHeight - 10 },
+            { x: 10, y: 10 },
+            { x: canvas.width - totalWidth - 10, y: 10 }
         ];
 
         let bestPosition = positions[0];
@@ -19875,89 +19918,44 @@ async function drawAllObjectsToCanvas(mainObject, otherObjects, showPoints = tru
 
         for (const pos of positions) {
             const hasOverlap = checkOverlap(pos.x, pos.y, totalWidth, legendHeight);
-            
             if (!hasOverlap) {
                 bestPosition = pos;
                 break;
             }
-
             let overlapArea = 0;
             for (const label of drawnLabelBounds) {
                 const overlapWidth = Math.max(0, Math.min(pos.x + totalWidth, label.right) - Math.max(pos.x, label.left));
                 const overlapHeight = Math.max(0, Math.min(pos.y + legendHeight, label.bottom) - Math.max(pos.y, label.top));
                 overlapArea += overlapWidth * overlapHeight;
             }
-
             if (overlapArea < minOverlapArea) {
                 minOverlapArea = overlapArea;
                 bestPosition = pos;
             }
         }
 
-        const legendX = bestPosition.x + legendPadding;
+        const legendX = bestPosition.x;
         const legendY = bestPosition.y;
         
-        ctx.shadowColor = 'rgba(0, 0, 0, 0.15)';
-        ctx.shadowBlur = 6;
-        ctx.shadowOffsetX = 2;
-        ctx.shadowOffsetY = 2;
-        
         ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
-        ctx.fillRect(bestPosition.x, legendY, totalWidth, legendHeight);
-        
-        ctx.shadowColor = 'transparent';
-        ctx.shadowBlur = 0;
-        ctx.shadowOffsetX = 0;
-        ctx.shadowOffsetY = 0;
-        
-        ctx.strokeStyle = '#2563eb';
-        ctx.lineWidth = 2;
-        ctx.strokeRect(bestPosition.x, legendY, totalWidth, legendHeight);
-        
-        ctx.fillStyle = '#1e40af';
-        ctx.font = 'bold 12px Arial';
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-        ctx.fillText('Связанные ОКС:', legendX, legendY + 8);
-        
-        ctx.beginPath();
-        ctx.moveTo(legendX - 5, legendY + 25);
-        ctx.lineTo(legendX + totalWidth - 15, legendY + 25);
-        ctx.strokeStyle = '#cbd5e1';
-        ctx.lineWidth = 1;
-        ctx.stroke();
-        
-        ctx.font = '10px Arial';
-        ctx.fillStyle = '#334155';
-        
+        ctx.fillRect(legendX, legendY, totalWidth, legendHeight);
+        ctx.strokeStyle = '#2563eb'; ctx.lineWidth = 2;
+        ctx.strokeRect(legendX, legendY, totalWidth, legendHeight);
+        ctx.fillStyle = '#1e40af'; ctx.font = 'bold 12px Arial'; ctx.textAlign = 'left'; ctx.textBaseline = 'top';
+        ctx.fillText('Связанные ОКС:', legendX + 10, legendY + 8);
+        ctx.font = '10px Arial'; ctx.fillStyle = '#334155';
         columns.forEach((column, colIndex) => {
             column.forEach((cadNum, rowIndex) => {
-                const x = legendX + (colIndex * columnWidth);
-                const y = legendY + 32 + (rowIndex * itemHeight);
-                
-                ctx.fillStyle = '#2563eb';
-                ctx.beginPath();
-                ctx.arc(x + 2, y + 5, 2, 0, Math.PI * 2);
-                ctx.fill();
-                
-                ctx.fillStyle = '#334155';
-                ctx.fillText(cadNum, x + 10, y);
+                ctx.fillText(cadNum, legendX + 10 + (colIndex * columnWidth), legendY + 32 + (rowIndex * itemHeight));
             });
-        });
-
-        drawnLabelBounds.push({
-            left: bestPosition.x,
-            right: bestPosition.x + totalWidth,
-            top: legendY,
-            bottom: legendY + legendHeight
         });
     }
 
     return { image: canvas.toDataURL('image/png'), coordsTable: allTablesHtml };
 }
 
-// Вспомогательная функция для создания временных полигонов Я.Карт для схемы
-// (нужна для объектов, которые не были добавлены на карту, например, ОКС из отчета)
+
+
 function createTemporaryYmapsPolygon(feature) {
     if (!feature?.geometry?.coordinates) return null;
 
