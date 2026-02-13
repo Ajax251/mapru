@@ -15170,7 +15170,8 @@ async function generateConsolidatedReport(targetObject) {
 
         const targetPolygon = targetObject;
         const isRealObject = targetPolygon.properties.get('isParcelInQuarter') || targetPolygon.properties.get('isFoundInArea') || targetPolygon.properties.get('isParcelFromSingleSearch');
-        
+        const isManualObject = targetPolygon.properties.get('isManuallyDrawn');
+
         let mainObjectData;
         let underlyingParcelsResults = [];
         let oksIntersectionResults = [];
@@ -15180,7 +15181,6 @@ async function generateConsolidatedReport(targetObject) {
         if (isRealObject) {
             const featureData = targetPolygon.properties.get('featureData');
             if (!featureData) throw new Error('Не удалось получить исходные данные из выбранного объекта.');
-
             const opts = featureData.properties.options || {};
             mainObjectData = {
                 cadastralNumber: featureData.properties.descr, 
@@ -15192,83 +15192,44 @@ async function generateConsolidatedReport(targetObject) {
                 ownershipType: opts.ownership_type, 
                 rightType: opts.right_type
             };
-
             const coordsForArea = targetPolygon.geometry.getCoordinates()[0];
             const turfPolyForArea = turf.polygon([coordsForArea.map(c => [c[1], c[0]])]);
             mainObjectAreaInMeters = turf.area(turfPolyForArea);
 
-            showLoader('Поиск наложений с ЗУ...');
             const boundsForSearch = targetPolygon.geometry.getBounds();
-            const bufferedBoundsForSearch = [
-                [boundsForSearch[0][0] - 0.00005, boundsForSearch[0][1] - 0.00005],
-                [boundsForSearch[1][0] + 0.00005, boundsForSearch[1][1] + 0.00005]
-            ];
-            const searchPolygonForApi = [
-                [bufferedBoundsForSearch[0][1], bufferedBoundsForSearch[0][0]], 
-                [bufferedBoundsForSearch[1][1], bufferedBoundsForSearch[0][0]],
-                [bufferedBoundsForSearch[1][1], bufferedBoundsForSearch[1][0]], 
-                [bufferedBoundsForSearch[0][1], bufferedBoundsForSearch[1][0]],
-                [bufferedBoundsForSearch[0][1], bufferedBoundsForSearch[0][0]]
-            ].map(coord => proj4("EPSG:4326", "EPSG:3857", coord));
-
+            const bufferedBoundsForSearch = [[boundsForSearch[0][0]-0.00005, boundsForSearch[0][1]-0.00005],[boundsForSearch[1][0]+0.00005, boundsForSearch[1][1]+0.00005]];
+            const searchPolygonForApi = [[bufferedBoundsForSearch[0][1], bufferedBoundsForSearch[0][0]],[bufferedBoundsForSearch[1][1], bufferedBoundsForSearch[0][0]],[bufferedBoundsForSearch[1][1], bufferedBoundsForSearch[1][0]],[bufferedBoundsForSearch[0][1], bufferedBoundsForSearch[1][0]],[bufferedBoundsForSearch[0][1], bufferedBoundsForSearch[0][0]]].map(coord => proj4("EPSG:4326", "EPSG:3857", coord));
+            
+            showLoader('Формирование отчета...');
             const fetchedCandidateFeatures = await searchParcelsByArea(searchPolygonForApi);
-
             if (fetchedCandidateFeatures.length > 0) {
                 let searchTurfPoly = turf.polygon([coordsForArea.map(c => [c[1], c[0]])]);
-                
                 fetchedCandidateFeatures.forEach(feature => {
                     if (feature.properties.descr === mainObjectData.cadastralNumber) return;
-                    if (!feature.geometry || !feature.geometry.coordinates || feature.geometry.type !== 'Polygon') return;
-
+                    if (!feature.geometry || feature.geometry.type !== 'Polygon') return;
                     const featureWgsCoordsWithOffset = feature.geometry.coordinates[0].map(coord3857 => {
                         const wgsCoord = proj4('EPSG:3857', 'EPSG:4326', coord3857);
                         return [wgsCoord[0] - (mapOffsetX * 0.000008983), wgsCoord[1] - (mapOffsetY * 0.000008983)];
                     });
                     const targetTurfPoly = turf.polygon([featureWgsCoordsWithOffset]);
-
                     const intersectionGeometry = turf.intersect(turf.featureCollection([searchTurfPoly, targetTurfPoly]));
-
-                    if (intersectionGeometry) {
-                        const intersectionArea = turf.area(intersectionGeometry);
-                        if (intersectionArea > 0.01) {
-                            const percentage = (intersectionArea / mainObjectAreaInMeters) * 100;
-                            underlyingParcelsResults.push({ feature, intersectionArea, percentage });
-                        }
+                    if (intersectionGeometry && turf.area(intersectionGeometry) > 0.01) {
+                        const percentage = (turf.area(intersectionGeometry) / mainObjectAreaInMeters) * 100;
+                        underlyingParcelsResults.push({ feature, intersectionArea: turf.area(intersectionGeometry), percentage });
                     }
                 });
             }
             linkedOksResults = await fetchLinkedOks(mainObjectData.cadastralNumber);
-
-        } else {
+        } else if (isManualObject) {
              const coords = targetPolygon.geometry.getCoordinates()[0];
              const unbufferedTurfPoly = turf.polygon([coords.map(c => [c[1], c[0]])]);
              mainObjectAreaInMeters = turf.area(unbufferedTurfPoly);
-
-             let displayName = 'Произвольный контур';
-             const hint = targetPolygon.properties.get('hintContent');
-             if (typeof hint === 'string' && hint.trim() !== '') displayName = hint;
-             else if (targetPolygon.properties.get('isAreaMeasurement')) displayName = 'Объект измерения площади';
-
-             mainObjectData = {
-                cadastralNumber: displayName, 
-                address: 'Координаты указаны вручную',
-                areaText: `${Math.round(mainObjectAreaInMeters).toLocaleString('ru-RU')} м²` 
-             };
+             mainObjectData = { cadastralNumber: 'Созданный объект', address: 'Координаты указаны вручную', areaText: `${Math.round(mainObjectAreaInMeters).toLocaleString('ru-RU')} м²` };
              
              showLoader('Загрузка участков в области...');
              const bounds = targetPolygon.geometry.getBounds();
-             const bufferedBounds = [
-                [bounds[0][0] - 0.00005, bounds[0][1] - 0.00005],
-                [bounds[1][0] + 0.00005, bounds[1][1] + 0.00005]
-             ];
-             const searchPolygonForApi = [
-                [bufferedBounds[0][1], bufferedBounds[0][0]], 
-                [bufferedBounds[1][1], bufferedBounds[0][0]],
-                [bufferedBounds[1][1], bufferedBounds[1][0]], 
-                [bufferedBounds[0][1], bufferedBounds[1][0]],
-                [bufferedBounds[0][1], bufferedBounds[0][0]]
-             ].map(coord => proj4("EPSG:4326", "EPSG:3857", coord));
-
+             const bufferedBounds = [[bounds[0][0]-0.00005, bounds[0][1]-0.00005],[bounds[1][0]+0.00005, bounds[1][1]+0.00005]];
+             const searchPolygonForApi = [[bufferedBounds[0][1], bufferedBounds[0][0]],[bufferedBounds[1][1], bufferedBounds[0][0]],[bufferedBounds[1][1], bufferedBounds[1][0]],[bufferedBounds[0][1], bufferedBounds[1][0]],[bufferedBounds[0][1], bufferedBounds[0][0]]].map(coord => proj4("EPSG:4326", "EPSG:3857", coord));
              const fetchedCandidateFeatures = await searchParcelsByArea(searchPolygonForApi);
              
              if (fetchedCandidateFeatures.length > 0) {
@@ -15279,21 +15240,15 @@ async function generateConsolidatedReport(targetObject) {
 
                 fetchedCandidateFeatures.forEach(feature => {
                     if (!feature.geometry || !feature.geometry.coordinates || feature.geometry.type !== 'Polygon') return;
-
                     const featureWgsCoordsWithOffset = feature.geometry.coordinates[0].map(coord3857 => {
                         const wgsCoord = proj4('EPSG:3857', 'EPSG:4326', coord3857);
                         return [wgsCoord[0] - (mapOffsetX * 0.000008983), wgsCoord[1] - (mapOffsetY * 0.000008983)];
                     });
                     const targetTurfPoly = turf.polygon([featureWgsCoordsWithOffset]);
-
                     const intersectionGeometry = turf.intersect(turf.featureCollection([searchTurfPoly, targetTurfPoly]));
-
-                    if (intersectionGeometry) {
-                        const intersectionArea = turf.area(intersectionGeometry);
-                        if (intersectionArea > 0.01) {
-                            const percentage = (intersectionArea / mainObjectAreaInMeters) * 100;
-                            underlyingParcelsResults.push({ feature, intersectionArea, percentage });
-                        }
+                    if (intersectionGeometry && turf.area(intersectionGeometry) > 0.01) {
+                        const percentage = (turf.area(intersectionGeometry) / mainObjectAreaInMeters) * 100;
+                        underlyingParcelsResults.push({ feature, intersectionArea: turf.area(intersectionGeometry), percentage });
                     }
                 });
             }
@@ -15304,30 +15259,16 @@ async function generateConsolidatedReport(targetObject) {
         const centerLon = (bounds[0][1] + bounds[1][1]) / 2;
 
         const oksResults = await searchFeaturesByGeometry(targetPolygon, 36369);
-
         if (oksResults.length > 0) {
              showLoader('Анализ наложений с ОКС...');
              const searchCoords = targetPolygon.geometry.getCoordinates()[0];
              const searchTurfPoly = turf.polygon([searchCoords.map(c => [c[1], c[0]])]);
-
              oksResults.forEach(feature => {
                  if (!feature.geometry || !feature.geometry.coordinates || feature.geometry.type !== 'Polygon') return;
-
-                 const featureWgsCoordsWithOffset = feature.geometry.coordinates[0].map(coord3857 => {
-                    const wgsCoord = proj4('EPSG:3857', 'EPSG:4326', coord3857);
-                    return [wgsCoord[0] - (mapOffsetX * 0.000008983), wgsCoord[1] - (mapOffsetY * 0.000008983)];
-                 });
+                 const featureWgsCoordsWithOffset = feature.geometry.coordinates[0].map(c => { const w = proj4('EPSG:3857', 'EPSG:4326', c); return [w[0]-(mapOffsetX*0.000008983), w[1]-(mapOffsetY*0.000008983)]; });
                  const targetTurfPoly = turf.polygon([featureWgsCoordsWithOffset]);
-
                  const intersectionGeometry = turf.intersect(turf.featureCollection([searchTurfPoly, targetTurfPoly]));
-
-                 if (intersectionGeometry) {
-                    const intersectionArea = turf.area(intersectionGeometry);
-                    if (intersectionArea > 0.01) {
-                        const percentage = (intersectionArea / mainObjectAreaInMeters) * 100;
-                        oksIntersectionResults.push({ feature, intersectionArea, percentage });
-                    }
-                 }
+                 if (intersectionGeometry) { oksIntersectionResults.push({ feature, intersectionArea: turf.area(intersectionGeometry), percentage: (turf.area(intersectionGeometry)/mainObjectAreaInMeters)*100 }); }
              });
         }
 
@@ -15339,7 +15280,6 @@ async function generateConsolidatedReport(targetObject) {
 
         const drawnZouits = [];
         const coveringZouits = [];
-
         const mainCoords = targetPolygon.geometry.getCoordinates()[0];
         const mainTurfPoly = turf.polygon([mainCoords.map(c => [c[1], c[0]])]);
         
