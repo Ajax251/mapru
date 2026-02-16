@@ -1072,7 +1072,7 @@
 <div id="relatedParcelModal" class="modal-overlay">
     <div class="related-parcel-modal-content">
         <div class="related-parcel-modal-header">
-            <h2><i class="fas fa-draw-polygon"></i> Проверка границ смежного ЗУ</h2>
+            <h2><i class="fas fa-draw-polygon"></i> Проверка (описания части границ) смежного ЗУ </h2>
             <!-- Обновленная кнопка закрытия -->
             <button class="red-close-btn" id="relatedParcelModalClose" title="Закрыть окно">
                 <i class="fas fa-times"></i>
@@ -3005,13 +3005,12 @@ function findPointInContour(contour, targetPoint, tolerance = 0.5) {
 
 function applyBorderChangesToContour(egrnContour, junctionPoints, removedPoints, newPoints) {
     const errors = [];
-    
+
     if (junctionPoints.length < 2) {
         errors.push('Недостаточно точек стыковки (требуется минимум 2)');
         return { resultContour: null, errors, appliedChanges: null };
     }
-    
-    // Убираем замыкающую точку если есть
+
     let workContour = [...egrnContour];
     if (workContour.length > 2) {
         const first = workContour[0];
@@ -3020,8 +3019,7 @@ function applyBorderChangesToContour(egrnContour, junctionPoints, removedPoints,
             workContour.pop();
         }
     }
-    
-    // Находим индексы точек стыковки
+
     const junctionIndices = [];
     junctionPoints.forEach((jp, jpIdx) => {
         const idx = findPointInContour(workContour, jp);
@@ -3031,32 +3029,26 @@ function applyBorderChangesToContour(egrnContour, junctionPoints, removedPoints,
             junctionIndices.push({ idx, point: jp });
         }
     });
-    
+
     if (junctionIndices.length < 2) {
         return { resultContour: null, errors, appliedChanges: null };
     }
-    
-    // Берём первую и последнюю найденные точки стыковки
+
     junctionIndices.sort((a, b) => a.idx - b.idx);
     const startJunction = junctionIndices[0];
     const endJunction = junctionIndices[junctionIndices.length - 1];
-    
-    // Определяем какой путь содержит удаляемые точки
     const n = workContour.length;
-    
-    // Путь A: от start к end по возрастанию индексов
+
     const pathA = [];
     for (let i = startJunction.idx + 1; i < endJunction.idx; i++) {
         pathA.push({ idx: i, point: workContour[i] });
     }
-    
-    // Путь B: от end к start через "конец" массива
+
     const pathB = [];
     for (let i = (endJunction.idx + 1) % n; i !== startJunction.idx; i = (i + 1) % n) {
         pathB.push({ idx: i, point: workContour[i] });
     }
-    
-    // Проверяем какой путь содержит удаляемые точки
+
     const countRemovedInPath = (path) => {
         let count = 0;
         path.forEach(p => {
@@ -3067,96 +3059,91 @@ function applyBorderChangesToContour(egrnContour, junctionPoints, removedPoints,
         });
         return count;
     };
-    
+
     const removedInA = countRemovedInPath(pathA);
     const removedInB = countRemovedInPath(pathB);
-    
-    let pathToRemove, pathToKeep, needReverse;
-    
+
+    const getPathGeoLength = (path, startP, endP) => {
+        if (path.length === 0) {
+            return Math.sqrt(Math.pow(startP.x - endP.x, 2) + Math.pow(startP.y - endP.y, 2));
+        }
+        let len = Math.sqrt(Math.pow(startP.x - path[0].point.x, 2) + Math.pow(startP.y - path[0].point.y, 2));
+        for (let i = 0; i < path.length - 1; i++) {
+            len += Math.sqrt(Math.pow(path[i].point.x - path[i + 1].point.x, 2) + Math.pow(path[i].point.y - path[i + 1].point.y, 2));
+        }
+        len += Math.sqrt(Math.pow(path[path.length - 1].point.x - endP.x, 2) + Math.pow(path[path.length - 1].point.y - endP.y, 2));
+        return len;
+    };
+
+    const lenA = getPathGeoLength(pathA, startJunction.point, endJunction.point);
+    const lenB = getPathGeoLength(pathB, endJunction.point, startJunction.point);
+
+    let pathToRemove, pathToKeep;
+
     if (removedInA > removedInB) {
         pathToRemove = pathA;
         pathToKeep = pathB;
-        needReverse = false;
     } else if (removedInB > removedInA) {
         pathToRemove = pathB;
         pathToKeep = pathA;
-        needReverse = true;
     } else {
-        // Если одинаково (или 0) - берём более короткий путь для удаления
-        if (pathA.length <= pathB.length) {
+        if (lenA <= lenB) {
             pathToRemove = pathA;
             pathToKeep = pathB;
-            needReverse = false;
         } else {
             pathToRemove = pathB;
             pathToKeep = pathA;
-            needReverse = true;
         }
     }
-    
-    // Проверяем что все удаляемые точки в pathToRemove
+
     const removedIndicesInContour = [];
     removedPoints.forEach(rp => {
         const found = pathToRemove.find(p => {
             const dist = Math.sqrt(Math.pow(p.point.x - rp.x, 2) + Math.pow(p.point.y - rp.y, 2));
             return dist < 0.5;
         });
-        if (!found) {
-            errors.push(`Удаляемая точка ${rp.num} (${rp.x.toFixed(2)}, ${rp.y.toFixed(2)}) не найдена в удаляемом сегменте`);
-        } else {
-            removedIndicesInContour.push(found.idx);
-        }
+        if (found) removedIndicesInContour.push(found.idx);
     });
-    
-    // Проверяем нет ли "забытых" точек
-    pathToRemove.forEach(p => {
-        const isRemoved = removedPoints.some(rp => {
-            const dist = Math.sqrt(Math.pow(p.point.x - rp.x, 2) + Math.pow(p.point.y - rp.y, 2));
-            return dist < 0.5;
-        });
-        if (!isRemoved) {
-            errors.push(`Точка (${p.point.x.toFixed(2)}, ${p.point.y.toFixed(2)}) находится в удаляемом сегменте, но НЕ отмечена как удаляемая`);
-        }
-    });
-    
-    // Собираем результирующий контур
+
     let resultContour = [];
-    
-    // Начинаем с первой точки стыковки
-    resultContour.push({ ...startJunction.point, type: 'junction' });
-    
-    // Добавляем новые точки
-    newPoints.forEach(np => {
-        resultContour.push({ ...np, type: 'new' });
-    });
-    
-    // Добавляем вторую точку стыковки
-    resultContour.push({ ...endJunction.point, type: 'junction' });
-    
-    // Добавляем сохраняемый путь
-    let keptPoints = pathToKeep.map(p => ({ ...p.point, type: 'kept' }));
-    if (needReverse) {
-        keptPoints.reverse();
+    let orderedNewPoints = [...newPoints];
+
+    if (pathToRemove === pathA) {
+        if (orderedNewPoints.length > 0) {
+            const first = orderedNewPoints[0];
+            const last = orderedNewPoints[orderedNewPoints.length - 1];
+            const distDirect = Math.sqrt(Math.pow(startJunction.point.x - first.x, 2) + Math.pow(startJunction.point.y - first.y, 2));
+            const distReverse = Math.sqrt(Math.pow(startJunction.point.x - last.x, 2) + Math.pow(startJunction.point.y - last.y, 2));
+            if (distReverse < distDirect) orderedNewPoints.reverse();
+        }
+
+        resultContour.push({ ...startJunction.point, type: 'junction' });
+        orderedNewPoints.forEach(np => resultContour.push({ ...np, type: 'new' }));
+        resultContour.push({ ...endJunction.point, type: 'junction' });
+        pathToKeep.forEach(p => resultContour.push({ ...p.point, type: 'kept' }));
+    } else {
+        if (orderedNewPoints.length > 0) {
+            const first = orderedNewPoints[0];
+            const last = orderedNewPoints[orderedNewPoints.length - 1];
+            const distDirect = Math.sqrt(Math.pow(endJunction.point.x - first.x, 2) + Math.pow(endJunction.point.y - first.y, 2));
+            const distReverse = Math.sqrt(Math.pow(endJunction.point.x - last.x, 2) + Math.pow(endJunction.point.y - last.y, 2));
+            if (distReverse < distDirect) orderedNewPoints.reverse();
+        }
+
+        resultContour.push({ ...endJunction.point, type: 'junction' });
+        orderedNewPoints.forEach(np => resultContour.push({ ...np, type: 'new' }));
+        resultContour.push({ ...startJunction.point, type: 'junction' });
+        pathToKeep.forEach(p => resultContour.push({ ...p.point, type: 'kept' }));
     }
-    resultContour.push(...keptPoints);
-    
-    // Замыкаем контур
-    const first = resultContour[0];
-    const last = resultContour[resultContour.length - 1];
-    if (Math.abs(first.x - last.x) > 0.01 || Math.abs(first.y - last.y) > 0.01) {
-        resultContour.push({ ...first, type: 'closing' });
+
+    if (resultContour.length > 2) {
+        const first = resultContour[0];
+        const last = resultContour[resultContour.length - 1];
+        if (Math.abs(first.x - last.x) > 0.01 || Math.abs(first.y - last.y) > 0.01) {
+            resultContour.push({ ...first, type: 'closing' });
+        }
     }
-    
-    // Проверка замкнутости
-    const finalFirst = resultContour[0];
-    const finalLast = resultContour[resultContour.length - 1];
-    const isClosed = Math.abs(finalFirst.x - finalLast.x) < 0.01 && 
-                     Math.abs(finalFirst.y - finalLast.y) < 0.01;
-    
-    if (!isClosed) {
-        errors.push('Результирующий контур не замкнут!');
-    }
-    
+
     return {
         resultContour,
         errors,
@@ -3164,7 +3151,7 @@ function applyBorderChangesToContour(egrnContour, junctionPoints, removedPoints,
             startJunction,
             endJunction,
             pathToRemove: pathToRemove.map(p => p.point),
-            pathToKeep: keptPoints,
+            pathToKeep: pathToKeep.map(p => p.point),
             removedIndices: removedIndicesInContour
         }
     };

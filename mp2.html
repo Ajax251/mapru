@@ -3011,7 +3011,7 @@ function applyBorderChangesToContour(egrnContour, junctionPoints, removedPoints,
         return { resultContour: null, errors, appliedChanges: null };
     }
     
-    // Убираем замыкающую точку если есть, для корректной работы с индексами
+    // Убираем замыкающую точку если есть
     let workContour = [...egrnContour];
     if (workContour.length > 2) {
         const first = workContour[0];
@@ -3036,27 +3036,27 @@ function applyBorderChangesToContour(egrnContour, junctionPoints, removedPoints,
         return { resultContour: null, errors, appliedChanges: null };
     }
     
-    // Сортируем точки стыковки по их индексу в контуре
+    // Берём первую и последнюю найденные точки стыковки
     junctionIndices.sort((a, b) => a.idx - b.idx);
     const startJunction = junctionIndices[0];
     const endJunction = junctionIndices[junctionIndices.length - 1];
     
-    // Определяем два возможных пути между точками стыковки
+    // Определяем какой путь содержит удаляемые точки
     const n = workContour.length;
     
-    // Путь A: "короткий" по индексам (от start к end внутри массива)
+    // Путь A: от start к end по возрастанию индексов
     const pathA = [];
     for (let i = startJunction.idx + 1; i < endJunction.idx; i++) {
         pathA.push({ idx: i, point: workContour[i] });
     }
     
-    // Путь B: "длинный" по индексам (через замыкание массива, вокруг)
+    // Путь B: от end к start через "конец" массива
     const pathB = [];
     for (let i = (endJunction.idx + 1) % n; i !== startJunction.idx; i = (i + 1) % n) {
         pathB.push({ idx: i, point: workContour[i] });
     }
     
-    // Проверяем, в какой путь попадают явно удаляемые точки (из XML)
+    // Проверяем какой путь содержит удаляемые точки
     const countRemovedInPath = (path) => {
         let count = 0;
         path.forEach(p => {
@@ -3073,48 +3073,17 @@ function applyBorderChangesToContour(egrnContour, junctionPoints, removedPoints,
     
     let pathToRemove, pathToKeep, needReverse;
     
-    // ЛОГИКА ВЫБОРА УДАЛЯЕМОГО СЕГМЕНТА
     if (removedInA > removedInB) {
-        // Если в пути А больше удаляемых точек — удаляем А
         pathToRemove = pathA;
         pathToKeep = pathB;
         needReverse = false;
     } else if (removedInB > removedInA) {
-        // Если в пути Б больше удаляемых точек — удаляем Б
         pathToRemove = pathB;
         pathToKeep = pathA;
         needReverse = true;
     } else {
-        // === ИЗМЕНЕНИЕ: ГЕОМЕТРИЧЕСКИЙ РАСЧЕТ ===
-        // Если явных точек нет (или поровну), считаем ГЕОМЕТРИЧЕСКУЮ ДЛИНУ (в метрах),
-        // а не количество вершин. Удаляем тот путь, который короче физически.
-        
-        const getPathGeoLength = (path, startP, endP) => {
-            if (path.length === 0) {
-                // Если путь пуст, это прямая линия между точками стыковки
-                return Math.sqrt(Math.pow(startP.x - endP.x, 2) + Math.pow(startP.y - endP.y, 2));
-            }
-            
-            let len = 0;
-            // Расстояние от старта до первой точки пути
-            len += Math.sqrt(Math.pow(startP.x - path[0].point.x, 2) + Math.pow(startP.y - path[0].point.y, 2));
-            
-            // Расстояние между точками пути
-            for (let i = 0; i < path.length - 1; i++) {
-                len += Math.sqrt(Math.pow(path[i].point.x - path[i+1].point.x, 2) + Math.pow(path[i].point.y - path[i+1].point.y, 2));
-            }
-            
-            // Расстояние от последней точки пути до конца
-            len += Math.sqrt(Math.pow(path[path.length-1].point.x - endP.x, 2) + Math.pow(path[path.length-1].point.y - endP.y, 2));
-            
-            return len;
-        };
-
-        const lenA = getPathGeoLength(pathA, startJunction.point, endJunction.point);
-        const lenB = getPathGeoLength(pathB, endJunction.point, startJunction.point); // Для B порядок обратный, но расстояние то же
-
-        // Удаляем более короткий сегмент
-        if (lenA <= lenB) {
+        // Если одинаково (или 0) - берём более короткий путь для удаления
+        if (pathA.length <= pathB.length) {
             pathToRemove = pathA;
             pathToKeep = pathB;
             needReverse = false;
@@ -3125,7 +3094,7 @@ function applyBorderChangesToContour(egrnContour, junctionPoints, removedPoints,
         }
     }
     
-    // Проверяем валидность удаления
+    // Проверяем что все удаляемые точки в pathToRemove
     const removedIndicesInContour = [];
     removedPoints.forEach(rp => {
         const found = pathToRemove.find(p => {
@@ -3133,41 +3102,59 @@ function applyBorderChangesToContour(egrnContour, junctionPoints, removedPoints,
             return dist < 0.5;
         });
         if (!found) {
-            // Это предупреждение можно игнорировать, если XML составлен "криво", но геометрия верна
-            // errors.push(`Удаляемая точка ${rp.num} не найдена в удаляемом сегменте`);
+            errors.push(`Удаляемая точка ${rp.num} (${rp.x.toFixed(2)}, ${rp.y.toFixed(2)}) не найдена в удаляемом сегменте`);
         } else {
             removedIndicesInContour.push(found.idx);
+        }
+    });
+    
+    // Проверяем нет ли "забытых" точек
+    pathToRemove.forEach(p => {
+        const isRemoved = removedPoints.some(rp => {
+            const dist = Math.sqrt(Math.pow(p.point.x - rp.x, 2) + Math.pow(p.point.y - rp.y, 2));
+            return dist < 0.5;
+        });
+        if (!isRemoved) {
+            errors.push(`Точка (${p.point.x.toFixed(2)}, ${p.point.y.toFixed(2)}) находится в удаляемом сегменте, но НЕ отмечена как удаляемая`);
         }
     });
     
     // Собираем результирующий контур
     let resultContour = [];
     
-    // 1. Начинаем с первой точки стыковки
+    // Начинаем с первой точки стыковки
     resultContour.push({ ...startJunction.point, type: 'junction' });
     
-    // 2. Добавляем новые точки (уточненная граница)
+    // Добавляем новые точки
     newPoints.forEach(np => {
         resultContour.push({ ...np, type: 'new' });
     });
     
-    // 3. Добавляем вторую точку стыковки
+    // Добавляем вторую точку стыковки
     resultContour.push({ ...endJunction.point, type: 'junction' });
     
-    // 4. Добавляем сохраняемую часть старой границы
+    // Добавляем сохраняемый путь
     let keptPoints = pathToKeep.map(p => ({ ...p.point, type: 'kept' }));
     if (needReverse) {
         keptPoints.reverse();
     }
     resultContour.push(...keptPoints);
     
-    // Замыкаем контур визуально, если нужно (для полигона)
-    if (resultContour.length > 2) {
-        const first = resultContour[0];
-        const last = resultContour[resultContour.length - 1];
-        if (Math.abs(first.x - last.x) > 0.01 || Math.abs(first.y - last.y) > 0.01) {
-            resultContour.push({ ...first, type: 'closing' });
-        }
+    // Замыкаем контур
+    const first = resultContour[0];
+    const last = resultContour[resultContour.length - 1];
+    if (Math.abs(first.x - last.x) > 0.01 || Math.abs(first.y - last.y) > 0.01) {
+        resultContour.push({ ...first, type: 'closing' });
+    }
+    
+    // Проверка замкнутости
+    const finalFirst = resultContour[0];
+    const finalLast = resultContour[resultContour.length - 1];
+    const isClosed = Math.abs(finalFirst.x - finalLast.x) < 0.01 && 
+                     Math.abs(finalFirst.y - finalLast.y) < 0.01;
+    
+    if (!isClosed) {
+        errors.push('Результирующий контур не замкнут!');
     }
     
     return {
