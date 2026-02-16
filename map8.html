@@ -13520,62 +13520,65 @@ async function zouitMenuItemHandler(contextMenu, map, polygons, polygonStyle, ma
     const lon = parseFloat(contextMenu.dataset.lon);
 
     contextMenu.style.display = 'none';
-    showLoader('Поиск ЗОУИТ (область 3х3м)...');
 
     try {
-    
-        const trueLat = lat + (mapOffsetY * 0.000008983);
-        const trueLon = lon + (mapOffsetX * 0.000008983);
-
-   
-        const center3857 = proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
-        const centerX = center3857[0];
-        const centerY = center3857[1];
-        
-    
-        const halfSize = 1.5; 
-
-  
-        const box3857 = [
-            [centerX - halfSize, centerY - halfSize],
-            [centerX + halfSize, centerY - halfSize], 
-            [centerX + halfSize, centerY + halfSize],
-            [centerX - halfSize, centerY + halfSize], 
-            [centerX - halfSize, centerY - halfSize]  
+        const queryPointsWGS84 = [];
+        queryPointsWGS84.push([lat, lon]);
+        const squareHalfSizeMeters = 7.5;
+        const centerEPSG3857 = proj4("EPSG:4326", "EPSG:3857", [lon, lat]);
+        const centerX = centerEPSG3857[0];
+        const centerY = centerEPSG3857[1];
+        const cornersEPSG3857 = [
+            [centerX - squareHalfSizeMeters, centerY + squareHalfSizeMeters],
+            [centerX + squareHalfSizeMeters, centerY + squareHalfSizeMeters],
+            [centerX - squareHalfSizeMeters, centerY - squareHalfSizeMeters],
+            [centerX + squareHalfSizeMeters, centerY - squareHalfSizeMeters]
         ];
+        for (const corner of cornersEPSG3857) {
+            try {
+                const cornerWGS84 = proj4("EPSG:3857", "EPSG:4326", corner);
+                queryPointsWGS84.push([cornerWGS84[1], cornerWGS84[0]]);
+            } catch (projError) { console.error("Ошибка конвертации координат угла:", corner, projError); }
+        }
 
-        const visualCoords = box3857.map(coord => {
-            const wgs = proj4("EPSG:3857", "EPSG:4326", coord); 
-            return [
-                wgs[1] - (mapOffsetY * 0.000008983), 
-                wgs[0] - (mapOffsetX * 0.000008983)  
-            ];
+        const promises = queryPointsWGS84.map(point => queryZouitInfo(point[0], point[1]));
+        const results = await Promise.all(promises);
+
+        const allFoundFeatures = [];
+        const uniqueFeatureIds = new Set();
+
+        results.forEach((result) => {
+            if (result && result.features && result.features.length > 0) {
+                result.features.forEach(feature => {
+                    const featureId = feature.id;
+                    if (featureId && !uniqueFeatureIds.has(featureId)) {
+                        uniqueFeatureIds.add(featureId);
+                        allFoundFeatures.push(feature);
+                    } else if (!featureId) {
+                         const featureDescr = feature.properties?.descr;
+                          if (featureDescr && !uniqueFeatureIds.has(featureDescr)) {
+                              uniqueFeatureIds.add(featureDescr);
+                              allFoundFeatures.push(feature);
+                          }
+                    }
+                });
+            }
         });
 
-    
-        const tempPolygon = new ymaps.Polygon([visualCoords], {}, {});
-
-   
-        const foundFeatures = await searchFeaturesByGeometry(tempPolygon, 36940);
-
-        if (!foundFeatures || foundFeatures.length === 0) {
-            showNotification('ЗОУИТ в точке клика не найдены', 'warning');
+        if (allFoundFeatures.length === 0) {
+            showNotification('ЗОУИТ не найдены', 'warning', 'exclamation-triangle');
             return;
         }
 
-  
-        await processAndDrawZouits(foundFeatures);
-        
-    
-        await populateSidebarWithFoundObjects(foundFeatures, 'ЗОУИТ (по клику)');
-
-        showNotification(`Найдено ЗОУИТ: ${foundFeatures.length}`, 'success');
+        showZouitSelectionModal(allFoundFeatures, (selectedIndex) => {
+            if (selectedIndex !== null) {
+                drawSelectedZouits(allFoundFeatures, selectedIndex, map, polygons, polygonStyle, mapOffsetY, mapOffsetX, getAddressByCoords, proj4, ymaps, showNotification);
+            }
+        });
 
     } catch (error) {
-        console.error('Ошибка в zouitMenuItemHandler:', error);
-        showNotification(`Ошибка: ${error.message}`, 'error', 'exclamation-circle');
-    } finally {
-        hideLoader();
+        console.error('Критическая ошибка в zouitMenuItemHandler:', error);
+        showNotification('Ошибка при обработке запроса ЗОУИТ', 'error', 'exclamation-circle');
     }
 }
 
