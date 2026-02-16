@@ -3157,286 +3157,355 @@ function applyBorderChangesToContour(egrnContour, junctionPoints, removedPoints,
     };
 }
 
-// --- Вспомогательные функции для проверки пересечений ---
-
-// Проверка: находится ли точка внутри полигона (Ray Casting algorithm)
-function isPointInPolygon(point, vs) {
-    let x = point.x, y = point.y;
-    let inside = false;
-    for (let i = 0, j = vs.length - 1; i < vs.length; j = i++) {
-        let xi = vs[i].x, yi = vs[i].y;
-        let xj = vs[j].x, yj = vs[j].y;
-        let intersect = ((yi > y) !== (yj > y)) &&
-            (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
-        if (intersect) inside = !inside;
-    }
-    return inside;
-}
-
-function segmentsIntersectStrict(p1, p2, p3, p4) {
-    const ccw = (a, b, c) => (c.y - a.y) * (b.x - a.x) > (b.y - a.y) * (c.x - a.x);
-    const det = (p2.x - p1.x) * (p4.y - p3.y) - (p4.x - p3.x) * (p2.y - p1.y);
-    if (det === 0) return false;
-    
-    // Игнорируем совпадение вершин (касание)
-    const isSame = (a, b) => Math.abs(a.x - b.x) < 0.001 && Math.abs(a.y - b.y) < 0.001;
-    if (isSame(p1, p3) || isSame(p1, p4) || isSame(p2, p3) || isSame(p2, p4)) return false;
-
-    return (ccw(p1, p3, p4) !== ccw(p2, p3, p4)) && (ccw(p1, p2, p3) !== ccw(p1, p2, p4));
-}
-
-function checkPolygonsOverlap(poly1, poly2) {
-    if (!poly1 || !poly2 || poly1.length < 3 || poly2.length < 3) return false;
-    // 1. Пересечение ребер
-    for (let i = 0; i < poly1.length - 1; i++) {
-        for (let j = 0; j < poly2.length - 1; j++) {
-            if (segmentsIntersectStrict(poly1[i], poly1[i+1], poly2[j], poly2[j+1])) return true;
-        }
-    }
-    // 2. Один внутри другого (проверка первой уникальной точки)
-    const findUniquePoint = (pArr, otherArr) => pArr.find(p => !otherArr.some(op => Math.abs(p.x - op.x) < 0.001 && Math.abs(p.y - op.y) < 0.001));
-    const p1 = findUniquePoint(poly1, poly2);
-    if (p1 && isPointInPolygon(p1, poly2)) return true;
-    const p2 = findUniquePoint(poly2, poly1);
-    if (p2 && isPointInPolygon(p2, poly1)) return true;
-
-    return false;
-}
-
-
-
-function extractMainParcelContoursFromXml() {
-    if (!lastXmlDoc) return [];
-    const contours = [];
-    
-    // Ищем основной уточняемый или образуемый участок
-    // Приоритет: SpecifyParcel (Уточняемый) -> NewParcel (Образуемый)
-    const mainParcel = lastXmlDoc.querySelector('SpecifyParcel > ExistParcel, NewParcel');
-    
-    if (!mainParcel) return [];
-
-    // Ищем EntitySpatial
-    // В XML структура может быть: EntitySpatial -> SpatialElement (несколько контуров)
-    // Или Contours -> Contour -> EntitySpatial (многоконтурный)
-    
-    const extractFromEntity = (entity) => {
-        if (!entity) return;
-        const spatialElements = entity.querySelectorAll('SpatialElement');
-        spatialElements.forEach(el => {
-            const points = [];
-            const ordinates = el.querySelectorAll('Ordinate, NewOrdinate');
-            ordinates.forEach(ord => {
-                const x = parseFloat(ord.getAttribute('X'));
-                const y = parseFloat(ord.getAttribute('Y'));
-                if (!isNaN(x) && !isNaN(y)) points.push({ x, y });
-            });
-            if (points.length > 2) contours.push(points);
-        });
-    };
-
-    // 1. Проверяем прямую геометрию
-    const directEntity = mainParcel.querySelector(':scope > EntitySpatial');
-    if (directEntity) {
-        extractFromEntity(directEntity);
-    } else {
-        // 2. Проверяем через Contours
-        const contourEntities = mainParcel.querySelectorAll('Contours > Contour > EntitySpatial, Contours > NewContour > EntitySpatial, Contours > ExistContour > EntitySpatial');
-        contourEntities.forEach(ent => extractFromEntity(ent));
-    }
-    
-    return contours;
-}
-
-
-
 async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNumber) {
     const modal = document.getElementById('relatedParcelModal');
     const infoDiv = document.getElementById('relatedParcelInfo');
     
     modal.style.display = 'flex';
-    infoDiv.innerHTML = `<div style="display:flex; align-items:center; justify-content:center; gap:12px; padding:20px; color:var(--text-secondary);"><div class="loader"></div><span>Загрузка данных...</span></div>`;
+    infoDiv.innerHTML = `<div style="display:flex; align-items:center; justify-content:center; gap:12px; padding:20px; color:var(--text-secondary);">
+        <div class="loader"></div>
+        <span>Загрузка данных из ЕГРН...</span>
+    </div>`;
     
     try {
+        // Извлекаем данные из XML
         const xmlData = extractSpecifyRelatedParcelData(specifyRelatedParcel);
-        if (!xmlData.cadNumber) throw new Error('Нет кадастрового номера смежного ЗУ');
         
-        // 1. Загружаем СМЕЖНЫЙ участок из ЕГРН (чтобы взять его старые границы)
-        const mskSystem = detectMskSystem(xmlData.cadNumber);
-        if (!mskSystem) throw new Error('Не определена система координат');
-        
-        const relatedContours = await fetchEgrnCoordinates(xmlData.cadNumber);
-        if (!relatedContours?.length) throw new Error(`Смежный ЗУ ${xmlData.cadNumber} не найден в ЕГРН`);
-        
-        const egrnContour = relatedContours[0]; // Старая граница смежного
-        
-        // 2. Берем ОСНОВНОЙ участок из XML (Новые границы)
-        const mainContoursXml = extractMainParcelContoursFromXml();
-        
-        // 3. Строим новую границу смежного участка
-        const { resultContour, errors, appliedChanges } = applyBorderChangesToContour(
-            egrnContour, xmlData.junctionPoints, xmlData.removedPoints, xmlData.newPoints
-        );
-
-        // 4. Проверка наложения (Новый смежный vs Новый основной из XML)
-        let hasOverlap = false;
-        if (resultContour && mainContoursXml.length > 0) {
-            for (const mainContour of mainContoursXml) {
-                // Используем функцию проверки геометрии (должна быть объявлена в коде ранее)
-                if (checkPolygonsOverlap(resultContour, mainContour)) {
-                    hasOverlap = true;
-                    errors.push("НАЛОЖЕНИЕ: Граница смежного ЗУ пересекает новые границы основного участка!");
-                    break;
-                }
-            }
-        } else if (mainContoursXml.length === 0) {
-            // Не критичная ошибка, но предупредим
-            console.warn("Не удалось извлечь границы основного участка из XML для проверки наложений.");
+        if (!xmlData.cadNumber) {
+            throw new Error('Не удалось определить кадастровый номер смежного участка');
         }
         
+        // Определяем МСК
+        const mskSystem = detectMskSystem(xmlData.cadNumber);
+        if (!mskSystem) {
+            throw new Error('Не удалось определить систему координат для региона');
+        }
+        
+        // Загружаем контур смежного ЗУ из ЕГРН
+        infoDiv.innerHTML = `<div style="display:flex; align-items:center; justify-content:center; gap:12px; padding:20px; color:var(--text-secondary);">
+            <div class="loader"></div>
+            <span>Загрузка смежного ЗУ ${xmlData.cadNumber}...</span>
+        </div>`;
+        
+        const relatedContours = await fetchEgrnCoordinates(xmlData.cadNumber);
+        if (!relatedContours || relatedContours.length === 0) {
+            throw new Error(`Контур смежного ЗУ ${xmlData.cadNumber} не найден в ЕГРН`);
+        }
+        
+        // Загружаем контур основного ЗУ
+        await delay(500);
+        infoDiv.innerHTML = `<div style="display:flex; align-items:center; justify-content:center; gap:12px; padding:20px; color:var(--text-secondary);">
+            <div class="loader"></div>
+            <span>Загрузка основного ЗУ ${mainParcelCadNumber}...</span>
+        </div>`;
+        
+        let mainContours = null;
+        try {
+            mainContours = await fetchEgrnCoordinates(mainParcelCadNumber);
+        } catch (e) {
+            console.warn('Не удалось загрузить основной ЗУ:', e);
+        }
+        
+        // Применяем изменения
+        const egrnContour = relatedContours[0]; // Берём первый контур
+        const { resultContour, errors, appliedChanges } = applyBorderChangesToContour(
+            egrnContour,
+            xmlData.junctionPoints,
+            xmlData.removedPoints,
+            xmlData.newPoints
+        );
+        
+        // Сохраняем данные для отрисовки
         relatedParcelCheckData = {
-            xmlData, 
-            egrnContour, 
-            mainContours: mainContoursXml, // Передаем контуры из XML для отрисовки
-            resultContour, 
-            errors, 
-            appliedChanges, 
-            mskSystem, 
-            mainParcelCadNumber, 
-            hasOverlap 
+            xmlData,
+            egrnContour,
+            mainContours,
+            resultContour,
+            errors,
+            appliedChanges,
+            mskSystem,
+            mainParcelCadNumber
         };
         
+        // Рисуем схему
         drawRelatedParcelSchema();
         
     } catch (error) {
-        console.error(error);
-        infoDiv.innerHTML = `<div class="related-parcel-status error"><i class="fas fa-exclamation-circle"></i><span>Ошибка: ${error.message}</span></div>`;
+        console.error('Ошибка проверки смежного ЗУ:', error);
+        infoDiv.innerHTML = `<div class="related-parcel-status error">
+            <i class="fas fa-exclamation-circle"></i>
+            <span>Ошибка: ${error.message}</span>
+        </div>`;
     }
 }
-
-
-
-
 function drawRelatedParcelSchema() {
     const canvas = document.getElementById('relatedParcelCanvas');
     const ctx = canvas.getContext('2d');
     const infoDiv = document.getElementById('relatedParcelInfo');
 
-    if (!relatedParcelCheckData) return;
-
-    const { xmlData, egrnContour, mainContours, resultContour, errors, appliedChanges, hasOverlap } = relatedParcelCheckData;
-
-    // Сбор всех точек для масштабирования (включая основной участок из XML)
-    const allPoints = [...egrnContour];
-    if (mainContours) mainContours.forEach(c => c.forEach(p => allPoints.push(p)));
-    if (resultContour) resultContour.forEach(p => allPoints.push(p));
-
-    if (!allPoints.length) {
-        infoDiv.innerHTML = '<div style="padding:20px;text-align:center;">Нет координат</div>';
+    if (!relatedParcelCheckData) {
+        infoDiv.innerHTML = '<div style="color:var(--error-color); text-align:center; padding:20px;">Нет данных для отображения</div>';
         return;
     }
 
-    const container = canvas.parentElement;
-    const dpr = window.devicePixelRatio || 1;
-    const w = container.clientWidth || 800;
-    const h = container.clientHeight || 600;
-    canvas.width = w * dpr; canvas.height = h * dpr;
-    canvas.style.width = '100%'; canvas.style.height = '100%';
-    ctx.scale(dpr, dpr);
-    ctx.clearRect(0, 0, w, h);
+    const { xmlData, egrnContour, mainContours, resultContour, errors, appliedChanges, mainParcelCadNumber } = relatedParcelCheckData;
 
-    // Масштабирование
-    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    allPoints.forEach(p => { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); });
+    // Сбор всех точек
+    const allPoints = [];
+    egrnContour.forEach(p => allPoints.push(p));
+    if (mainContours) mainContours.forEach(c => c.forEach(p => allPoints.push(p)));
+    if (resultContour) resultContour.forEach(p => allPoints.push(p));
+    xmlData.newPoints.forEach(p => allPoints.push(p));
+    xmlData.junctionPoints.forEach(p => allPoints.push(p));
+
+    if (allPoints.length === 0) {
+        infoDiv.innerHTML = '<div style="color:var(--error-color); text-align:center; padding:20px;">Нет координат для отображения</div>';
+        return;
+    }
+
+    // --- РАЗМЕРЫ ---
+    const container = canvas.parentElement;
+    // Берем размеры, если они 0 (окно скрыто), ставим дефолт, чтобы не было ошибки деления на 0
+    const displayWidth = container.clientWidth || 800;
+    const displayHeight = container.clientHeight || 600;
+
+    // Устанавливаем физический размер canvas
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = displayWidth * dpr;
+    canvas.height = displayHeight * dpr;
     
-    const pad = 50;
-    const scale = Math.min((w - pad*2) / (maxY - minY || 1), (h - pad*2) / (maxX - minX || 1)) * 0.9;
-    const offX = pad + (w - pad*2 - (maxY - minY)*scale)/2;
-    const offY = pad + (h - pad*2 - (maxX - minX)*scale)/2;
+    // Устанавливаем CSS размер (визуальный)
+    canvas.style.width = '100%';
+    canvas.style.height = '100%';
     
-    const toCanvas = (p) => ({ x: offX + (p.y - minY) * scale, y: offY + (maxX - p.x) * scale });
+    // Масштабируем контекст
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, displayWidth, displayHeight);
+
+    // --- ГЕОМЕТРИЯ ---
+    let minGeoX = Infinity, maxGeoX = -Infinity, minGeoY = Infinity, maxGeoY = -Infinity;
+    allPoints.forEach(p => {
+        minGeoX = Math.min(minGeoX, p.x);
+        maxGeoX = Math.max(maxGeoX, p.x);
+        minGeoY = Math.min(minGeoY, p.y);
+        maxGeoY = Math.max(maxGeoY, p.y);
+    });
+
+    // В геодезии (МСК): X - вертикаль (Север), Y - горизонталь (Восток)
+    // Поэтому Width экрана соответствует разнице Y, Height экрана - разнице X
+    const dataWidth = (maxGeoY - minGeoY) || 1;
+    const dataHeight = (maxGeoX - minGeoX) || 1;
+
+    // Настройки отступов
+    const padding = 60; // Увеличили отступ для подписей
+    const scaleMultiplier = 0.9; // Оставляем 10% запаса, чтобы не прилипало к краям
+
+    const availableWidth = displayWidth - (padding * 2);
+    const availableHeight = displayHeight - (padding * 2);
+
+    // Считаем масштаб так, чтобы чертеж поместился целиком
+    const scale = Math.min(availableWidth / dataWidth, availableHeight / dataHeight) * scaleMultiplier;
+
+    // Центрируем чертеж
+    const drawnWidth = dataWidth * scale;
+    const drawnHeight = dataHeight * scale;
+    
+    const offsetX_canvas = padding + (availableWidth - drawnWidth) / 2;
+    const offsetY_canvas = padding + (availableHeight - drawnHeight) / 2;
+
+    // Функция конвертации координат (X->Y, Y->X + инверсия вертикали)
+    const toCanvas = (point) => ({
+        x: offsetX_canvas + (point.y - minGeoY) * scale,
+        y: offsetY_canvas + (maxGeoX - point.x) * scale
+    });
 
     // --- ОТРИСОВКА ---
 
-    // 1. ОСНОВНОЙ УЧАСТОК (Из XML)
-    // Зеленый если ОК, Красный если Наложение
+    // 1. Основной ЗУ (ЕГРН) - серый фон
     if (mainContours && mainContours.length > 0) {
-        ctx.lineWidth = 2;
         ctx.setLineDash([]);
-        
-        if (hasOverlap) {
-            ctx.strokeStyle = '#dc2626'; // Красный
-            ctx.fillStyle = 'rgba(220, 38, 38, 0.1)'; 
-        } else {
-            ctx.strokeStyle = '#059669'; // Зеленый
-            ctx.fillStyle = 'rgba(16, 185, 129, 0.1)'; 
-        }
-
+        ctx.strokeStyle = 'rgba(100, 116, 139, 0.4)';
+        ctx.fillStyle = 'rgba(100, 116, 139, 0.05)';
+        ctx.lineWidth = 1;
         mainContours.forEach(contour => {
             if (contour.length < 2) return;
             ctx.beginPath();
-            contour.forEach((p, i) => { const cp = toCanvas(p); i===0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y); });
+            contour.forEach((p, i) => {
+                const cp = toCanvas(p);
+                i === 0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y);
+            });
             ctx.closePath();
             ctx.fill();
             ctx.stroke();
         });
         
-        // Подпись
-        const cp = toCanvas(mainContours[0][0]);
-        ctx.font = 'bold 12px Arial';
-        ctx.fillStyle = hasOverlap ? '#dc2626' : '#059669';
-        ctx.fillText('Основной ЗУ (XML)', cp.x, cp.y - 15);
+        // Подпись основного ЗУ
+        if (mainParcelCadNumber && mainContours[0]) {
+             let sumX = 0, sumY = 0;
+             mainContours[0].forEach(p => { sumX += p.x; sumY += p.y; });
+             const center = { x: sumX / mainContours[0].length, y: sumY / mainContours[0].length };
+             const cp = toCanvas(center);
+             ctx.font = '11px Arial';
+             ctx.fillStyle = 'rgba(100, 116, 139, 0.6)';
+             ctx.textAlign = 'center';
+             ctx.fillText(mainParcelCadNumber, cp.x, cp.y);
+        }
     }
 
-    // 2. СМЕЖНЫЙ УЧАСТОК (Старый ЕГРН) - Оранжевый пунктир
+    // 2. Смежный ЗУ (ЕГРН) - оранжевый пунктир
     ctx.setLineDash([6, 4]);
     ctx.strokeStyle = '#f59e0b';
-    ctx.lineWidth = 1;
+    ctx.lineWidth = 2;
     ctx.beginPath();
-    egrnContour.forEach((p, i) => { const cp = toCanvas(p); i===0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y); });
+    egrnContour.forEach((p, i) => {
+        const cp = toCanvas(p);
+        i === 0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y);
+    });
+    const firstEgrn = toCanvas(egrnContour[0]);
+    ctx.lineTo(firstEgrn.x, firstEgrn.y);
     ctx.stroke();
     ctx.setLineDash([]);
 
-    // 3. СМЕЖНЫЙ УЧАСТОК (Результат) - Синяя линия
-    if (resultContour) {
-        ctx.strokeStyle = '#2563eb';
-        ctx.lineWidth = 2;
+    // Подпись смежного ЗУ
+    let rSumX = 0, rSumY = 0;
+    egrnContour.forEach(p => { rSumX += p.x; rSumY += p.y; });
+    const rCenter = { x: rSumX / egrnContour.length, y: rSumY / egrnContour.length };
+    const rCp = toCanvas(rCenter);
+    ctx.font = 'bold 12px Arial';
+    ctx.fillStyle = '#b45309';
+    ctx.textAlign = 'center';
+    ctx.fillText(xmlData.cadNumber, rCp.x, rCp.y - 12);
+    ctx.font = '10px Arial';
+    ctx.fillStyle = '#92400e';
+    ctx.fillText('(смежный)', rCp.x, rCp.y + 4);
+
+    // 3. Удаляемый сегмент - красный
+    if (appliedChanges && appliedChanges.pathToRemove && appliedChanges.pathToRemove.length > 0) {
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 3;
         ctx.beginPath();
-        resultContour.forEach((p, i) => { const cp = toCanvas(p); i===0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y); });
-        ctx.stroke();
-        
-        // Точки стыковки
-        ctx.fillStyle = '#3b82f6';
-        xmlData.junctionPoints.forEach(p => {
+        const startCp = toCanvas(appliedChanges.startJunction.point);
+        ctx.moveTo(startCp.x, startCp.y);
+        appliedChanges.pathToRemove.forEach(p => {
             const cp = toCanvas(p);
-            ctx.beginPath(); ctx.arc(cp.x, cp.y, 4, 0, Math.PI*2); ctx.fill();
+            ctx.lineTo(cp.x, cp.y);
+        });
+        const endCp = toCanvas(appliedChanges.endJunction.point);
+        ctx.lineTo(endCp.x, endCp.y);
+        ctx.stroke();
+
+        // Крестики
+        ctx.lineWidth = 2;
+        appliedChanges.pathToRemove.forEach(p => {
+            const cp = toCanvas(p);
+            ctx.beginPath();
+            const size = 4;
+            ctx.moveTo(cp.x - size, cp.y - size); ctx.lineTo(cp.x + size, cp.y + size);
+            ctx.moveTo(cp.x + size, cp.y - size); ctx.lineTo(cp.x - size, cp.y + size);
+            ctx.stroke();
         });
     }
 
-    // 4. Индикация пересечения
-    if (hasOverlap && resultContour && resultContour.length) {
-        const cp = toCanvas(resultContour[0]);
-        ctx.font = '30px Arial';
-        ctx.fillStyle = 'red';
-        ctx.fillText('⚠', cp.x, cp.y);
+    // 4. Новые точки - зеленый
+    if (xmlData.newPoints.length > 0) {
+        ctx.strokeStyle = '#10b981';
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        if (xmlData.junctionPoints.length > 0) {
+            const startCp = toCanvas(xmlData.junctionPoints[0]);
+            ctx.moveTo(startCp.x, startCp.y);
+        }
+        xmlData.newPoints.forEach(p => {
+            const cp = toCanvas(p);
+            ctx.lineTo(cp.x, cp.y);
+        });
+        if (xmlData.junctionPoints.length > 1) {
+            const endCp = toCanvas(xmlData.junctionPoints[xmlData.junctionPoints.length - 1]);
+            ctx.lineTo(endCp.x, endCp.y);
+        }
+        ctx.stroke();
+
+        ctx.fillStyle = '#10b981';
+        xmlData.newPoints.forEach(p => {
+            const cp = toCanvas(p);
+            ctx.beginPath();
+            ctx.arc(cp.x, cp.y, 4, 0, 2 * Math.PI);
+            ctx.fill();
+            // Подпись новой точки
+            ctx.font = '11px Arial';
+            ctx.fillStyle = '#065f46';
+            ctx.textAlign = 'left';
+            ctx.fillText(`н${p.num}`, cp.x + 8, cp.y + 4);
+            ctx.fillStyle = '#10b981';
+        });
     }
 
-    // --- СТАТУС ---
-    const statusClass = (hasOverlap || errors.length) ? 'error' : 'success';
-    const statusText = hasOverlap 
-        ? 'НАЛОЖЕНИЕ НА ОСНОВНОЙ УЧАСТОК!' 
-        : (errors.length ? 'Ошибка построения' : 'Границы корректны');
+    // 5. Точки стыковки - синий
+    ctx.fillStyle = '#3b82f6';
+    ctx.strokeStyle = '#1d4ed8';
+    ctx.lineWidth = 2;
+    xmlData.junctionPoints.forEach((p, i) => {
+        const cp = toCanvas(p);
+        ctx.beginPath();
+        ctx.arc(cp.x, cp.y, 6, 0, 2 * Math.PI);
+        ctx.fill();
+        ctx.stroke();
+        // Подпись точки стыковки
+        ctx.font = 'bold 11px Arial';
+        ctx.fillStyle = '#1e40af';
+        ctx.textAlign = 'left';
+        ctx.fillText(`С${i + 1}`, cp.x + 10, cp.y - 5);
+        ctx.fillStyle = '#3b82f6';
+    });
 
-    infoDiv.innerHTML = `
-    <div class="related-parcel-status ${statusClass}">
-        <i class="fas fa-${(hasOverlap || errors.length) ? 'times-circle' : 'check-circle'}"></i>
-        <strong>${statusText}</strong>
-    </div>
-    <div class="related-parcel-details">
+    // 6. Результат - синяя линия
+    if (resultContour && errors.length === 0) {
+        ctx.strokeStyle = '#2563eb';
+        ctx.lineWidth = 2;
+        ctx.setLineDash([]);
+        ctx.beginPath();
+        resultContour.forEach((p, i) => {
+            const cp = toCanvas(p);
+            i === 0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y);
+        });
+        ctx.stroke();
+    }
+
+    // 7. Ошибки - красные круги
+    if (errors.length > 0) {
+        ctx.strokeStyle = '#ef4444';
+        ctx.lineWidth = 3;
+        ctx.setLineDash([4, 4]);
+        if (resultContour && resultContour.length > 1) {
+            const lastP = toCanvas(resultContour[resultContour.length - 1]);
+            const firstP = toCanvas(resultContour[0]);
+            ctx.beginPath(); ctx.arc(lastP.x, lastP.y, 14, 0, 2 * Math.PI); ctx.stroke();
+            ctx.beginPath(); ctx.arc(firstP.x, firstP.y, 14, 0, 2 * Math.PI); ctx.stroke();
+        }
+        ctx.setLineDash([]);
+    }
+
+    // --- HTML СТАТУС ---
+    const hasErrors = errors.length > 0;
+    let statusHtml = hasErrors
+        ? `<div class="related-parcel-status error"><i class="fas fa-times-circle"></i><span>Обнаружены ошибки в границах смежного ЗУ</span></div>`
+        : `<div class="related-parcel-status success"><i class="fas fa-check-circle"></i><span>Контур смежного ЗУ корректен — замкнут успешно</span></div>`;
+
+    let detailsHtml = `<div class="related-parcel-details">
         <div class="related-parcel-detail-item"><div class="label">Смежный ЗУ</div><div class="value">${xmlData.cadNumber}</div></div>
-        <div class="related-parcel-detail-item"><div class="label">Статус проверки</div><div class="value" style="color:${hasOverlap ? 'red':'green'}">${hasOverlap ? 'НАЛОЖЕНИЕ' : 'УСПЕШНО: Контур смежного замкнулся без наложения на основной участок'}</div></div>
-    </div>
-    ${errors.length ? `<div class="related-parcel-errors"><ul>${errors.map(e=>`<li>${e}</li>`).join('')}</ul></div>` : ''}
-    `;
+        <div class="related-parcel-detail-item"><div class="label">Точек в ЕГРН</div><div class="value">${egrnContour.length}</div></div>
+        <div class="related-parcel-detail-item"><div class="label">Точек стыковки</div><div class="value">${xmlData.junctionPoints.length}</div></div>
+        <div class="related-parcel-detail-item"><div class="label">Удаляемых</div><div class="value" style="color:#ef4444;">${xmlData.removedPoints.length}</div></div>
+        <div class="related-parcel-detail-item"><div class="label">Новых</div><div class="value" style="color:#10b981;">${xmlData.newPoints.length}</div></div>
+        <div class="related-parcel-detail-item"><div class="label">Итого</div><div class="value">${resultContour ? resultContour.length : '—'}</div></div>
+    </div>`;
+
+    let errorsHtml = '';
+    if (hasErrors) {
+        errorsHtml = `<div class="related-parcel-errors"><div class="error-title"><i class="fas fa-exclamation-triangle"></i> Найденные ошибки:</div><ul>${errors.map(e => `<li>${e}</li>`).join('')}</ul></div>`;
+    }
+
+    infoDiv.innerHTML = statusHtml + detailsHtml + errorsHtml;
 }
 
 function closeRelatedParcelModal() {
