@@ -2963,52 +2963,126 @@ function drawOksSchemaCanvas() {
 
 function extractSpecifyRelatedParcelData(specifyRelatedParcel) {
     const cadNumber = specifyRelatedParcel.getAttribute('CadastralNumber');
-    const changeBorders = All(specifyRelatedParcel, 'ChangeBorder');
     
-    const junctionPoints = [];  // Точки стыковки (есть Old и New с одинаковыми координатами)
-    const removedPoints = [];   // Удаляемые точки (только Old)
-    const newPoints = [];       // Новые точки (только New с PointPref="н")
+    // 1. Проверка на полное описание границы (AllBorder)
+    const allBorder = specifyRelatedParcel.querySelector('AllBorder');
+    if (allBorder) {
+        const contours = [];
+        // AllBorder может содержать один EntitySpatial или несколько SpatialElement (многоконтурный)
+        // Структура: AllBorder -> EntitySpatial -> SpatialElement
+        
+        const entitySpatials = allBorder.querySelectorAll('EntitySpatial');
+        
+        if (entitySpatials.length > 0) {
+            entitySpatials.forEach(es => {
+                const spatialElements = es.querySelectorAll('SpatialElement');
+                spatialElements.forEach(spEl => {
+                    const contourPoints = [];
+                    const ordinates = spEl.querySelectorAll('Ordinate, NewOrdinate');
+                    ordinates.forEach(ord => {
+                        const x = parseFloat(ord.getAttribute('X'));
+                        const y = parseFloat(ord.getAttribute('Y'));
+                        const num = ord.getAttribute('NumGeopoint');
+                        if (!isNaN(x) && !isNaN(y)) {
+                            contourPoints.push({ x, y, num });
+                        }
+                    });
+                    if (contourPoints.length > 0) contours.push(contourPoints);
+                });
+            });
+        }
+        
+        return { cadNumber, isAllBorder: true, contours };
+    }
+
+    // 2. Проверка на частичное изменение (ChangeBorder)
+    const changeBorders = specifyRelatedParcel.querySelectorAll('ChangeBorder');
+    const junctionPoints = [];
+    const removedPoints = [];
+    const newPoints = [];
     
     changeBorders.forEach(cb => {
-        const oldOrd = E(cb, 'OldOrdinate');
-        const newOrd = E(cb, 'NewOrdinate');
+        const oldOrd = cb.querySelector('OldOrdinate');
+        const newOrd = cb.querySelector('NewOrdinate');
         
         if (oldOrd && newOrd) {
-            // Точка стыковки - координаты должны совпадать
-            const oldX = parseFloat(A(oldOrd, 'X'));
-            const oldY = parseFloat(A(oldOrd, 'Y'));
-            const newX = parseFloat(A(newOrd, 'X'));
-            const newY = parseFloat(A(newOrd, 'Y'));
+            const oldX = parseFloat(oldOrd.getAttribute('X'));
+            const oldY = parseFloat(oldOrd.getAttribute('Y'));
+            const newX = parseFloat(newOrd.getAttribute('X'));
+            const newY = parseFloat(newOrd.getAttribute('Y'));
             
             if (Math.abs(oldX - newX) < 0.01 && Math.abs(oldY - newY) < 0.01) {
                 junctionPoints.push({
                     x: oldX,
                     y: oldY,
-                    oldNum: A(oldOrd, 'NumGeopoint'),
-                    newNum: A(newOrd, 'NumGeopoint')
+                    oldNum: oldOrd.getAttribute('NumGeopoint'),
+                    newNum: newOrd.getAttribute('NumGeopoint')
                 });
             }
         } else if (oldOrd && !newOrd) {
-            // Удаляемая точка
             removedPoints.push({
-                x: parseFloat(A(oldOrd, 'X')),
-                y: parseFloat(A(oldOrd, 'Y')),
-                num: A(oldOrd, 'NumGeopoint')
+                x: parseFloat(oldOrd.getAttribute('X')),
+                y: parseFloat(oldOrd.getAttribute('Y')),
+                num: oldOrd.getAttribute('NumGeopoint')
             });
         } else if (!oldOrd && newOrd) {
-            // Новая точка
-            const pref = A(newOrd, 'PointPref');
+            const pref = newOrd.getAttribute('PointPref');
             if (pref === 'н') {
                 newPoints.push({
-                    x: parseFloat(A(newOrd, 'X')),
-                    y: parseFloat(A(newOrd, 'Y')),
-                    num: A(newOrd, 'NumGeopoint')
+                    x: parseFloat(newOrd.getAttribute('X')),
+                    y: parseFloat(newOrd.getAttribute('Y')),
+                    num: newOrd.getAttribute('NumGeopoint')
                 });
             }
         }
     });
     
-    return { cadNumber, junctionPoints, removedPoints, newPoints };
+    return { cadNumber, isAllBorder: false, junctionPoints, removedPoints, newPoints };
+}
+
+
+
+function compareFullBoundaries(xmlContours, egrnContours) {
+    const comparisonResults = [];
+    const tolerance = 0.01; // Допуск 1 см
+    let hasDiff = false;
+
+    // xmlContours - массив массивов (контуров)
+    // egrnContours - массив массивов (контуров)
+    
+    xmlContours.forEach((contour) => {
+        contour.forEach(xmlPoint => {
+            let match = null;
+            let minDelta = Infinity;
+
+            // Ищем ближайшую точку во всех контурах ЕГРН
+            for (const eContour of egrnContours) {
+                for (const ePoint of eContour) {
+                    const dist = Math.sqrt(Math.pow(xmlPoint.x - ePoint.x, 2) + Math.pow(xmlPoint.y - ePoint.y, 2));
+                    if (dist < minDelta) {
+                        minDelta = dist;
+                    }
+                    if (dist <= tolerance) {
+                        match = ePoint;
+                    }
+                }
+            }
+
+            if (minDelta > tolerance) hasDiff = true;
+
+            comparisonResults.push({
+                num: xmlPoint.num,
+                xmlX: xmlPoint.x,
+                xmlY: xmlPoint.y,
+                egrnX: match ? match.x : null,
+                egrnY: match ? match.y : null,
+                delta: minDelta,
+                isMatch: !!match
+            });
+        });
+    });
+
+    return { comparisonResults, hasDiff };
 }
 
 function findPointInContour(contour, targetPoint, tolerance = 0.5) {
@@ -3281,49 +3355,116 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
         const xmlData = extractSpecifyRelatedParcelData(specifyRelatedParcel);
         if (!xmlData.cadNumber) throw new Error('Нет кадастрового номера смежного ЗУ');
         
-        // 1. Загружаем СМЕЖНЫЙ участок из ЕГРН (чтобы взять его старые границы)
         const mskSystem = detectMskSystem(xmlData.cadNumber);
         if (!mskSystem) throw new Error('Не определена система координат');
         
         const relatedContours = await fetchEgrnCoordinates(xmlData.cadNumber);
-        if (!relatedContours?.length) throw new Error(`Смежный ЗУ ${xmlData.cadNumber} не найден в ЕГРН`);
         
-        const egrnContour = relatedContours[0]; // Старая граница смежного
-        
-        // 2. Берем ОСНОВНОЙ участок из XML (Новые границы)
         const mainContoursXml = extractMainParcelContoursFromXml();
         
-        // 3. Строим новую границу смежного участка
-        const { resultContour, errors, appliedChanges } = applyBorderChangesToContour(
-            egrnContour, xmlData.junctionPoints, xmlData.removedPoints, xmlData.newPoints
-        );
-
-        // 4. Проверка наложения (Новый смежный vs Новый основной из XML)
+        let resultContour = null;
+        let errors = [];
+        let appliedChanges = null;
         let hasOverlap = false;
-        if (resultContour && mainContoursXml.length > 0) {
-            for (const mainContour of mainContoursXml) {
-                // Используем функцию проверки геометрии (должна быть объявлена в коде ранее)
-                if (checkPolygonsOverlap(resultContour, mainContour)) {
-                    hasOverlap = true;
-                    errors.push("НАЛОЖЕНИЕ: Граница смежного ЗУ пересекает новые границы основного участка!");
-                    break;
+        let comparisonResults = null;
+
+        if (xmlData.isAllBorder) {
+            // ЛОГИКА ДЛЯ ALLBORDER
+            const comp = compareFullBoundaries(xmlData.contours, relatedContours);
+            comparisonResults = comp.comparisonResults;
+            resultContour = xmlData.contours; // Массив контуров
+
+            // Генерация таблицы
+            let tableRows = '';
+            comparisonResults.forEach(r => {
+                const deltaStr = r.isMatch ? r.delta.toFixed(3) : `<span style="color:red; font-weight:bold">${r.delta.toFixed(3)}</span>`;
+                const egrnCoord = r.isMatch ? `${r.egrnX.toFixed(2)}, ${r.egrnY.toFixed(2)}` : `<span style="color:#ef4444">Нет (сдвиг)</span>`;
+                const rowClass = r.isMatch ? '' : 'style="background-color:#fef2f2"';
+                
+                tableRows += `<tr ${rowClass}>
+                    <td>${r.num}</td>
+                    <td>${r.xmlX.toFixed(2)}, ${r.xmlY.toFixed(2)}</td>
+                    <td>${egrnCoord}</td>
+                    <td>${deltaStr}</td>
+                </tr>`;
+            });
+
+            infoDiv.innerHTML = `
+                <div class="related-parcel-status ${comp.hasDiff ? 'warning' : 'success'}">
+                    <i class="fas fa-${comp.hasDiff ? 'exclamation-triangle' : 'check-circle'}"></i>
+                    <strong>${comp.hasDiff ? 'Есть расхождения координат (>1 см)' : 'Координаты совпадают с ЕГРН'}</strong>
+                </div>
+                <div style="max-height:300px; overflow-y:auto; margin-top:10px; border:1px solid #e2e8f0; border-radius:6px;">
+                    <table class="data-table coord-table" style="margin:0;">
+                        <thead>
+                            <tr style="position:sticky; top:0; background:#f1f5f9; z-index:1;">
+                                <th>Точка</th>
+                                <th>XML (X, Y)</th>
+                                <th>ЕГРН (Совпадение)</th>
+                                <th>Δ, м</th>
+                            </tr>
+                        </thead>
+                        <tbody>${tableRows}</tbody>
+                    </table>
+                </div>
+            `;
+
+        } else {
+            // ЛОГИКА ДЛЯ CHANGEBORDER
+            if (!relatedContours?.length) throw new Error(`Смежный ЗУ ${xmlData.cadNumber} не найден в ЕГРН`);
+            const egrnContour = relatedContours[0]; // Берем внешний контур для врезки
+
+            const res = applyBorderChangesToContour(
+                egrnContour, xmlData.junctionPoints, xmlData.removedPoints, xmlData.newPoints
+            );
+            resultContour = res.resultContour; // Одиночный массив точек
+            errors = res.errors;
+            appliedChanges = res.appliedChanges;
+            
+            if (resultContour && mainContoursXml.length > 0) {
+                for (const mainContour of mainContoursXml) {
+                    if (checkPolygonsOverlap(resultContour, mainContour)) {
+                        hasOverlap = true;
+                        errors.push("НАЛОЖЕНИЕ: Граница смежного ЗУ пересекает новые границы основного участка!");
+                        break;
+                    }
                 }
             }
-        } else if (mainContoursXml.length === 0) {
-            // Не критичная ошибка, но предупредим
-            console.warn("Не удалось извлечь границы основного участка из XML для проверки наложений.");
+
+            const statusClass = (hasOverlap || errors.length) ? 'error' : 'success';
+            const statusText = hasOverlap 
+                ? 'НАЛОЖЕНИЕ НА ОСНОВНОЙ УЧАСТОК!' 
+                : (errors.length ? 'Ошибка построения' : 'Границы корректны');
+
+            infoDiv.innerHTML = `
+                <div class="related-parcel-status ${statusClass}">
+                    <i class="fas fa-${(hasOverlap || errors.length) ? 'times-circle' : 'check-circle'}"></i>
+                    <strong>${statusText}</strong>
+                </div>
+                <div class="related-parcel-details">
+                    <div class="related-parcel-detail-item"><div class="label">Смежный ЗУ</div><div class="value">${xmlData.cadNumber}</div></div>
+                    <div class="related-parcel-detail-item"><div class="label">Тип</div><div class="value">Частичное изменение границы</div></div>
+                </div>
+                ${errors.length ? `<div class="related-parcel-errors"><ul>${errors.map(e=>`<li>${e}</li>`).join('')}</ul></div>` : ''}
+            `;
+            
+            // Приводим результат к массиву массивов для единообразия отрисовки
+            if (resultContour) {
+                resultContour = [resultContour];
+            }
         }
         
         relatedParcelCheckData = {
             xmlData, 
-            egrnContour, 
-            mainContours: mainContoursXml, // Передаем контуры из XML для отрисовки
-            resultContour, 
+            egrnContour: relatedContours, // Всегда массив контуров
+            mainContours: mainContoursXml, 
+            resultContour, // Всегда массив контуров
             errors, 
             appliedChanges, 
             mskSystem, 
             mainParcelCadNumber, 
-            hasOverlap 
+            hasOverlap,
+            comparisonResults
         };
         
         drawRelatedParcelSchema();
@@ -3340,21 +3481,22 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
 function drawRelatedParcelSchema() {
     const canvas = document.getElementById('relatedParcelCanvas');
     const ctx = canvas.getContext('2d');
-    const infoDiv = document.getElementById('relatedParcelInfo');
-
+    
     if (!relatedParcelCheckData) return;
 
-    const { xmlData, egrnContour, mainContours, resultContour, errors, appliedChanges, hasOverlap } = relatedParcelCheckData;
+    const { xmlData, egrnContour, mainContours, resultContour, hasOverlap, comparisonResults } = relatedParcelCheckData;
 
-    // Сбор всех точек для масштабирования (включая основной участок из XML)
-    const allPoints = [...egrnContour];
+    // Сбор всех точек для масштабирования
+    const allPoints = [];
+    if (egrnContour) egrnContour.forEach(c => c.forEach(p => allPoints.push(p)));
     if (mainContours) mainContours.forEach(c => c.forEach(p => allPoints.push(p)));
-    if (resultContour) resultContour.forEach(p => allPoints.push(p));
-
-    if (!allPoints.length) {
-        infoDiv.innerHTML = '<div style="padding:20px;text-align:center;">Нет координат</div>';
-        return;
+    
+    // Собираем точки результата
+    if (resultContour) {
+        resultContour.forEach(c => c.forEach(p => allPoints.push(p)));
     }
+
+    if (!allPoints.length) return;
 
     const container = canvas.parentElement;
     const dpr = window.devicePixelRatio || 1;
@@ -3367,7 +3509,12 @@ function drawRelatedParcelSchema() {
 
     // Масштабирование
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
-    allPoints.forEach(p => { minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); });
+    allPoints.forEach(p => { 
+        if (p.x !== undefined && p.y !== undefined) {
+            minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); 
+            minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); 
+        }
+    });
     
     const pad = 50;
     const scale = Math.min((w - pad*2) / (maxY - minY || 1), (h - pad*2) / (maxX - minX || 1)) * 0.9;
@@ -3376,88 +3523,72 @@ function drawRelatedParcelSchema() {
     
     const toCanvas = (p) => ({ x: offX + (p.y - minY) * scale, y: offY + (maxX - p.x) * scale });
 
-    // --- ОТРИСОВКА ---
-
-    // 1. ОСНОВНОЙ УЧАСТОК (Из XML)
-    // Зеленый если ОК, Красный если Наложение
-    if (mainContours && mainContours.length > 0) {
+    // Функция отрисовки массива контуров (чтобы не соединять их линиями)
+    const drawMultiContour = (contoursArray, strokeStyle, lineDash = []) => {
+        ctx.strokeStyle = strokeStyle;
         ctx.lineWidth = 2;
-        ctx.setLineDash([]);
+        ctx.setLineDash(lineDash);
         
-        if (hasOverlap) {
-            ctx.strokeStyle = '#dc2626'; // Красный
-            ctx.fillStyle = 'rgba(220, 38, 38, 0.1)'; 
-        } else {
-            ctx.strokeStyle = '#059669'; // Зеленый
-            ctx.fillStyle = 'rgba(16, 185, 129, 0.1)'; 
-        }
-
-        mainContours.forEach(contour => {
-            if (contour.length < 2) return;
+        contoursArray.forEach(ring => {
+            if (ring.length < 2) return;
             ctx.beginPath();
-            contour.forEach((p, i) => { const cp = toCanvas(p); i===0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y); });
-            ctx.closePath();
-            ctx.fill();
+            ring.forEach((p, i) => { 
+                const cp = toCanvas(p); 
+                i === 0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y); 
+            });
+            if (ring.length > 2) ctx.closePath();
             ctx.stroke();
         });
+        ctx.setLineDash([]);
+    };
+
+    // 1. ОСНОВНОЙ УЧАСТОК (Из XML)
+    if (mainContours && mainContours.length > 0) {
+        const color = hasOverlap ? '#dc2626' : '#059669';
+        // mainContours уже массив массивов
+        drawMultiContour(mainContours, color);
         
-        // Подпись
         const cp = toCanvas(mainContours[0][0]);
         ctx.font = 'bold 12px Arial';
-        ctx.fillStyle = hasOverlap ? '#dc2626' : '#059669';
-        ctx.fillText('Основной ЗУ (XML)', cp.x, cp.y - 15);
+        ctx.fillStyle = color;
+        ctx.fillText('Основной ЗУ', cp.x, cp.y - 15);
     }
 
-    // 2. СМЕЖНЫЙ УЧАСТОК (Старый ЕГРН) - Оранжевый пунктир
-    ctx.setLineDash([6, 4]);
-    ctx.strokeStyle = '#f59e0b';
-    ctx.lineWidth = 1;
-    ctx.beginPath();
-    egrnContour.forEach((p, i) => { const cp = toCanvas(p); i===0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y); });
-    ctx.stroke();
-    ctx.setLineDash([]);
-
-    // 3. СМЕЖНЫЙ УЧАСТОК (Результат) - Синяя линия
-    if (resultContour) {
-        ctx.strokeStyle = '#2563eb';
-        ctx.lineWidth = 2;
-        ctx.beginPath();
-        resultContour.forEach((p, i) => { const cp = toCanvas(p); i===0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y); });
-        ctx.stroke();
-        
-        // Точки стыковки
-        ctx.fillStyle = '#3b82f6';
-        xmlData.junctionPoints.forEach(p => {
-            const cp = toCanvas(p);
-            ctx.beginPath(); ctx.arc(cp.x, cp.y, 4, 0, Math.PI*2); ctx.fill();
-        });
+    // 2. СМЕЖНЫЙ УЧАСТОК
+    // 2.1 ЕГРН (Старый) - Оранжевый пунктир
+    if (egrnContour && egrnContour.length) {
+         drawMultiContour(egrnContour, '#f59e0b', [6, 4]);
     }
 
-    // 4. Индикация пересечения
-    if (hasOverlap && resultContour && resultContour.length) {
-        const cp = toCanvas(resultContour[0]);
-        ctx.font = '30px Arial';
-        ctx.fillStyle = 'red';
-        ctx.fillText('⚠', cp.x, cp.y);
+    // 2.2 XML (Новый) - Синий сплошной
+    if (resultContour && resultContour.length) {
+        drawMultiContour(resultContour, '#2563eb');
     }
 
-    // --- СТАТУС ---
-    const statusClass = (hasOverlap || errors.length) ? 'error' : 'success';
-    const statusText = hasOverlap 
-        ? 'НАЛОЖЕНИЕ НА ОСНОВНОЙ УЧАСТОК!' 
-        : (errors.length ? 'Ошибка построения' : 'Границы корректны');
-
-    infoDiv.innerHTML = `
-    <div class="related-parcel-status ${statusClass}">
-        <i class="fas fa-${(hasOverlap || errors.length) ? 'times-circle' : 'check-circle'}"></i>
-        <strong>${statusText}</strong>
-    </div>
-    <div class="related-parcel-details">
-        <div class="related-parcel-detail-item"><div class="label">Смежный ЗУ</div><div class="value">${xmlData.cadNumber}</div></div>
-        <div class="related-parcel-detail-item"><div class="label">Статус проверки</div><div class="value" style="color:${hasOverlap ? 'red':'green'}">${hasOverlap ? 'НАЛОЖЕНИЕ' : 'УСПЕШНО: Контур смежного замкнулся без наложения на основной участок'}</div></div>
-    </div>
-    ${errors.length ? `<div class="related-parcel-errors"><ul>${errors.map(e=>`<li>${e}</li>`).join('')}</ul></div>` : ''}
-    `;
+    // 3. ТОЧКИ (Стыковки или Сравнения)
+    if (xmlData.isAllBorder) {
+        if (comparisonResults) {
+            comparisonResults.forEach(r => {
+                const cp = toCanvas({x: r.xmlX, y: r.xmlY});
+                ctx.beginPath();
+                ctx.arc(cp.x, cp.y, 4, 0, Math.PI*2);
+                ctx.fillStyle = r.isMatch ? '#22c55e' : '#ef4444'; // Зеленый или Красный
+                ctx.fill();
+                ctx.strokeStyle = '#fff';
+                ctx.lineWidth = 1;
+                ctx.stroke();
+            });
+        }
+    } else {
+        // ChangeBorder - точки стыковки
+        if (xmlData.junctionPoints) {
+            ctx.fillStyle = '#3b82f6';
+            xmlData.junctionPoints.forEach(p => {
+                const cp = toCanvas(p);
+                ctx.beginPath(); ctx.arc(cp.x, cp.y, 4, 0, Math.PI*2); ctx.fill();
+            });
+        }
+    }
 }
 
 function closeRelatedParcelModal() {
@@ -3554,29 +3685,24 @@ if (checkRelatedBtn) {
     event.preventDefault();
     const cadNumber = checkRelatedBtn.dataset.relatedCadNumber;
     const mainCadNumber = checkRelatedBtn.dataset.mainCadNumber;
+    // Получаем индекс из атрибута
+    const index = parseInt(checkRelatedBtn.dataset.index, 10);
     
-    // Проверяем есть ли уже загруженные данные для этого участка
-    if (relatedParcelCheckData && relatedParcelCheckData.xmlData?.cadNumber === cadNumber) {
-        // Данные уже есть - просто открываем модалку
-        const modal = document.getElementById('relatedParcelModal');
-        modal.style.display = 'flex';
-        setTimeout(() => drawRelatedParcelSchema(), 50);
-        return;
-    }
-    
-    // Данных нет - загружаем
-    const specifyRelatedParcels = All(lastXmlDoc, 'SpecifyRelatedParcel');
-    const targetParcel = Array.from(specifyRelatedParcels).find(
-        el => el.getAttribute('CadastralNumber') === cadNumber
-    );
+    // Ищем конкретный элемент по индексу, а не первый попавшийся по номеру
+    const allSpecifyParcels = All(lastXmlDoc, 'SpecifyRelatedParcel');
+    const targetParcel = allSpecifyParcels[index];
     
     if (targetParcel) {
+        // Сбрасываем старые данные перед новой проверкой, чтобы не открылся кэш другого контура
+        relatedParcelCheckData = null; 
         checkRelatedParcelBoundary(targetParcel, mainCadNumber);
     } else {
-        alert('Не удалось найти данные смежного участка в XML');
+        alert('Не удалось найти данные смежного участка в XML по индексу');
     }
     return;
 }
+    
+  
             const checkZuBtn = event.target.closest('.check-zu-btn');
             
            
@@ -4313,352 +4439,316 @@ function runTechPlanValidation(xmlDoc, xmlText) {
     }
 
        function displaySurveyPlanData(xmlDoc, xmlText) {
-        let mainHtml = '';
-        let sidebarHtml = '';
-        let sectionsFound = 0;
-        const formParcels = E(xmlDoc, 'FormParcels');
-        const reasonText = T(xmlDoc, 'GeneralCadastralWorks > Reason');
-        if (formParcels || reasonText !== '—') {
-            sectionsFound++;
-            let generalInfoContent = '';
-            if (formParcels) {
-                const method = A(formParcels, 'Method');
-                generalInfoContent += `<div class="info-card"><div class="info-label">Способ образования ЗУ</div><div class="info-value">${planTypes[method] || `Неизвестный (${method})`}</div></div>`;
-            }
-            if (reasonText !== '—') {
-                generalInfoContent += `<div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Основание для работ</div><div class="info-value">${reasonText}</div></div>`;
-            }
-            sidebarHtml += `<div class="section"><div class="section-header">${sectionIcons.generalInfo}<h3 class="section-title">Общая информация</h3></div><div class="section-content" style="padding:16px"><div class="info-grid">${generalInfoContent}</div></div></div>`;
+    let mainHtml = '';
+    let sidebarHtml = '';
+    let sectionsFound = 0;
+
+    // 1. Общая информация
+    const formParcels = E(xmlDoc, 'FormParcels');
+    const reasonText = T(xmlDoc, 'GeneralCadastralWorks > Reason');
+    if (formParcels || reasonText !== '—') {
+        sectionsFound++;
+        let generalInfoContent = '';
+        if (formParcels) {
+            const method = A(formParcels, 'Method');
+            generalInfoContent += `<div class="info-card"><div class="info-label">Способ образования ЗУ</div><div class="info-value">${planTypes[method] || `Неизвестный (${method})`}</div></div>`;
         }
-        const contractor = E(xmlDoc, 'Contractor');
-        const client = E(xmlDoc, 'Client');
-        if (contractor || client) {
-            sectionsFound++;
-            let participantsHtml = `<div class="section"><div class="section-header">${sectionIcons.participants}<h3 class="section-title">Участники работ</h3></div><div class="section-content" style="padding:16px">`;
-            if (contractor) {
-                const cadWork = E(contractor, 'AgreementCadWork');
-                participantsHtml += `<div class="subsection" style="margin-top:0;"><div class="subsection-title">Кадастровый инженер</div><div class="info-grid"><div class="info-card"><div class="info-label">ФИО</div><div class="info-value">${T(contractor, 'FamilyName')} ${T(contractor, 'FirstName')} ${T(contractor, 'Patronymic')}</div></div><div class="info-card"><div class="info-label">№ в реестре</div><div class="info-value">${T(contractor, 'CadastralEngineerRegistryNumber')} (от ${T(contractor, 'DateEntering')})</div></div><div class="info-card"><div class="info-label">СНИЛС</div><div class="info-value">${T(contractor, 'SNILS')}</div></div><div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Контакты</div><div class="info-value">Тел: ${T(contractor, 'Telephone')}, Email: ${T(contractor, 'Email')}</div></div><div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">СРО</div><div class="info-value">${T(contractor, 'SelfRegulatoryOrganization')}</div></div><div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Договор</div><div class="info-value">${T(cadWork, 'Name')} №${T(cadWork, 'NumberAgreement')} от ${T(cadWork, 'DateAgreement')}</div></div></div></div>`;
-            }
-            if (client) {
-                const org = E(client, 'Organization');
-                const gov = E(client, 'Governance');
-                const clientOrgEntity = org || gov;
-                participantsHtml += `<div class="subsection"><div class="subsection-title">Заказчик</div><div class="info-grid">`;
-                if (clientOrgEntity) {
-                    participantsHtml += `<div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Наименование</div><div class="info-value">${T(clientOrgEntity, 'Name')}</div></div><div class="info-card"><div class="info-label">ИНН</div><div class="info-value">${T(clientOrgEntity, 'INN')}</div></div><div class="info-card"><div class="info-label">ОГРН</div><div class="info-value">${T(clientOrgEntity, 'OGRN')}</div></div>`;
-                } else {
-                    participantsHtml += `<div class="info-card"><div class="info-label">ФИО</div><div class="info-value">${T(client, 'FamilyName')} ${T(client, 'FirstName')} ${T(client, 'Patronymic')}</div></div><div class="info-card"><div class="info-label">СНИЛС</div><div class="info-value">${T(client, 'SNILS')}</div></div>`;
-                }
-                participantsHtml += `</div></div>`;
+        if (reasonText !== '—') {
+            generalInfoContent += `<div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Основание для работ</div><div class="info-value">${reasonText}</div></div>`;
+        }
+        sidebarHtml += `<div class="section"><div class="section-header">${sectionIcons.generalInfo}<h3 class="section-title">Общая информация</h3></div><div class="section-content" style="padding:16px"><div class="info-grid">${generalInfoContent}</div></div></div>`;
+    }
+
+    // 2. Участники работ
+    const contractor = E(xmlDoc, 'Contractor');
+    const client = E(xmlDoc, 'Client');
+    if (contractor || client) {
+        sectionsFound++;
+        let participantsHtml = `<div class="section"><div class="section-header">${sectionIcons.participants}<h3 class="section-title">Участники работ</h3></div><div class="section-content" style="padding:16px">`;
+        if (contractor) {
+            const cadWork = E(contractor, 'AgreementCadWork');
+            participantsHtml += `<div class="subsection" style="margin-top:0;"><div class="subsection-title">Кадастровый инженер</div><div class="info-grid"><div class="info-card"><div class="info-label">ФИО</div><div class="info-value">${T(contractor, 'FamilyName')} ${T(contractor, 'FirstName')} ${T(contractor, 'Patronymic')}</div></div><div class="info-card"><div class="info-label">№ в реестре</div><div class="info-value">${T(contractor, 'CadastralEngineerRegistryNumber')} (от ${T(contractor, 'DateEntering')})</div></div><div class="info-card"><div class="info-label">СНИЛС</div><div class="info-value">${T(contractor, 'SNILS')}</div></div><div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Контакты</div><div class="info-value">Тел: ${T(contractor, 'Telephone')}, Email: ${T(contractor, 'Email')}</div></div><div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">СРО</div><div class="info-value">${T(contractor, 'SelfRegulatoryOrganization')}</div></div><div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Договор</div><div class="info-value">${T(cadWork, 'Name')} №${T(cadWork, 'NumberAgreement')} от ${T(cadWork, 'DateAgreement')}</div></div></div></div>`;
+        }
+        if (client) {
+            const org = E(client, 'Organization');
+            const gov = E(client, 'Governance');
+            const clientOrgEntity = org || gov;
+            participantsHtml += `<div class="subsection"><div class="subsection-title">Заказчик</div><div class="info-grid">`;
+            if (clientOrgEntity) {
+                participantsHtml += `<div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Наименование</div><div class="info-value">${T(clientOrgEntity, 'Name')}</div></div><div class="info-card"><div class="info-label">ИНН</div><div class="info-value">${T(clientOrgEntity, 'INN')}</div></div><div class="info-card"><div class="info-label">ОГРН</div><div class="info-value">${T(clientOrgEntity, 'OGRN')}</div></div>`;
+            } else {
+                participantsHtml += `<div class="info-card"><div class="info-label">ФИО</div><div class="info-value">${T(client, 'FamilyName')} ${T(client, 'FirstName')} ${T(client, 'Patronymic')}</div></div><div class="info-card"><div class="info-label">СНИЛС</div><div class="info-value">${T(client, 'SNILS')}</div></div>`;
             }
             participantsHtml += `</div></div>`;
-            sidebarHtml += participantsHtml;
         }
-        const inputData = E(xmlDoc, 'InputData');
-        if (inputData) {
-            sectionsFound++;
-            let inputDataHtml = `<div class="section"><div class="section-header">${sectionIcons.inputData}<h3 class="section-title">Исходные данные</h3></div><div class="section-content" style="padding:16px">`;
-            const documents = All(inputData, 'Documents > Document');
-            if (documents.length > 0) {
-                inputDataHtml += `<div class="subsection" style="margin-top:0;"><div class="subsection-title">Документы</div><table class="data-table"><thead><tr><th class="left-align">Наименование</th><th class="no-wrap">№</th><th class="no-wrap">Дата</th></tr></thead><tbody>${Array.from(documents).map(doc => `<tr><td class="left-align">${T(doc, 'Name')}</td><td class="no-wrap">${T(doc, 'Number')}</td><td class="no-wrap">${T(doc, 'Date')}</td></tr>`).join('')}</tbody></table></div>`;
-            }
-            const geoBases = All(inputData, 'GeodesicBases > GeodesicBase');
-            if (geoBases.length > 0) {
-                inputDataHtml += `<div class="subsection"><div class="subsection-title">Геодезическая основа</div><table class="data-table"><thead><tr><th class="left-align">Пункт</th><th>Класс</th><th>X</th><th>Y</th></tr></thead><tbody>${Array.from(geoBases).map(base => `<tr><td class="left-align">${T(base, 'PName')} (${T(base, 'PKind')})</td><td>${T(base, 'PKlass')}</td><td>${T(base, 'OrdX')}</td><td>${T(base, 'OrdY')}</td></tr>`).join('')}</tbody></table></div>`;
-            }
-            const meanSurvey = E(inputData, 'MeansSurvey > MeanSurvey');
-            if (meanSurvey) {
-                inputDataHtml += `<div class="subsection"><div class="subsection-title">Средства измерений</div><div class="info-grid"><div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Прибор</div><div class="info-value">${T(meanSurvey, 'Name')}</div></div><div class="info-card"><div class="info-label">Номер</div><div class="info-value">${T(meanSurvey, 'Number')}</div></div><div class="info-card"><div class="info-label">Поверка</div><div class="info-value">${T(meanSurvey, 'CertificateVerification')}</div></div></div></div>`;
-            }
-            inputDataHtml += `</div></div>`;
-            sidebarHtml += inputDataHtml;
-        }
-        const newParcels = All(xmlDoc, 'NewParcel');
-        for (const newParcel of newParcels) {
-            sectionsFound++;
-            const categoryCode = A(E(newParcel, 'Category'), 'Category');
-            const categoryName = landCategories[categoryCode] || 'Категория не определена';
-            let areaVal = '—';
-            let areaInacc = '—';
-            const directAreaNode = Array.from(newParcel.children).find(el => el.tagName === 'Area');
-            if (directAreaNode) {
-                areaVal = T(directAreaNode, 'Area');
-                areaInacc = T(directAreaNode, 'Inaccuracy');
-            } else {
-                areaVal = T(newParcel, 'Area > Area');
-                areaInacc = T(newParcel, 'Area > Inaccuracy');
-            }
-            let sectionContent = `<div class="info-grid">
-                <div class="info-card"><div class="info-label">Кадастровый квартал</div><div class="info-value">${T(newParcel, 'CadastralBlock')}</div></div>
-                <div class="info-card"><div class="info-label">Площадь, кв.м.</div><div class="info-value">${areaVal} (±${areaInacc})</div></div>
-                <div class="info-card"><div class="info-label">Категория земель</div><div class="info-value">${categoryName} <code>${categoryCode}</code></div></div>
-                <div class="info-card"><div class="info-label">Вид разрешенного использования</div><div class="info-value">${A(E(newParcel, 'PermittedUseEstablished, PermittedUsesLand > PermittedUseEstablished'), 'ByDocument')}</div></div>
-                <div class="info-card"><div class="info-label">Обеспечение доступа</div><div class="info-value">${T(newParcel, 'ProvidingPassCadastralNumbers > Other, ProvidingPassCadastralNumbers > CadastralNumber')}</div></div>
-            </div>`;
-            const prevRedist = E(newParcel, 'PrevWithRedistributed');
-            if (prevRedist) {
-                let redistRows = '';
-                All(prevRedist, 'PrevWithRedistribute').forEach(item => {
-                    const kn = T(item, 'CadastralNumber');
-                    const block = T(item, 'CadastralBlock');
-                    const sourceName = kn !== '—' ? kn : (block !== '—' ? `Квартал ${block}` : '—');
-                    let sourceArea = '—';
-                    for (let child of item.children) {
-                        if (child.tagName === 'Area') {
-                            sourceArea = T(child, 'Area');
-                            break;
-                        }
-                    }
-                    const partName = T(item, 'IncludedPart > Definition');
-                    const partArea = T(item, 'IncludedPart > Area > Area');
-                    redistRows += `<tr><td class="left-align">${sourceName}</td><td>${sourceArea}</td><td>${partName}</td><td>${partArea}</td></tr>`;
-                });
-                if (redistRows) {
-                    sectionContent += `<div class="subsection"><div class="subsection-title">Сведения о перераспределении</div><table class="data-table"><thead><tr><th class="left-align">Источник образования (ЗУ или Квартал)</th><th>Площадь источника, м²</th><th>Обозначение части</th><th>Площадь части, м²</th></tr></thead><tbody>${redistRows}</tbody></table></div>`;
-                }
-            }
-            if (T(newParcel, 'Area > Formula') !== '—') {
-                sectionContent += `<div class="subsection"><div class="subsection-title">Формула погрешности</div><div class="conclusion-text">${T(newParcel, 'Area > Formula')}</div></div>`;
-            }
-     
-     const oksNodesNewParcel = All(newParcel, 'ObjectsRealty CadastralNumber');
-const oksNumbersNewParcel = Array.from(oksNodesNewParcel).map(node => node.textContent.trim());
-sectionContent += `
-    <div class="subsection">
-        <div class="subsection-title" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
-            <span>ОКС на участке</span>
-            <button class="check-oks-egrn-btn" data-oks-numbers='${JSON.stringify(oksNumbersNewParcel)}'>
-                <i class="fas fa-clipboard-check"></i>
-                <span class="btn-text">Проверить ОКС</span>
-            </button>
-        </div>
-        ${oksNumbersNewParcel.length > 0 ? `<div class="info-grid oks-list-container">
-            ${oksNumbersNewParcel.map(kn => `<div class="info-card oks-item" data-cad-number="${kn}"><div class="info-value">${kn}</div><div class="oks-address" style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;"></div></div>`).join('')}
-        </div>` : `<div style="color:var(--text-secondary); font-style:italic; padding:8px 0;">ОКС не указаны в XML</div>`}
-        <div class="oks-check-status" style="margin-top:12px;"></div>
-    </div>`;
-     
-            const prevCadastralNumbers = All(newParcel, 'PrevCadastralNumbers > CadastralNumber');
-            if (prevCadastralNumbers.length > 0) {
-                sectionContent += `<div class="subsection"><div class="subsection-title">Исходные земельные участки</div><div class="info-grid">${Array.from(prevCadastralNumbers).map(node => `<div class="info-card"><div class="info-value">${node.textContent}</div></div>`).join('')}</div></div>`;
-            }
-            if (E(newParcel, 'Address')) {
-                sectionContent += `<div class="subsection"><div class="subsection-title">Адрес</div><div class="address-display">${getFullAddress(E(newParcel, 'Address'))}</div><div class="info-grid" style="margin-top: 16px;"><div class="info-card"><div class="info-label">FIAS</div><div class="info-value">${T(E(newParcel, 'Address'), 'FIAS')}</div></div></div></div>`;
-            }
-            const entitySpatial = E(newParcel, 'EntitySpatial');
-            if (entitySpatial) {
-                sectionContent += createSpatialDataHtml(entitySpatial);
-            }
-            const hasCoords = !!entitySpatial;
-            mainHtml += `<div class="section"><div class="section-header">${sectionIcons.newParcel}<h3 class="section-title">Сведения об образуемом участке (${A(newParcel, 'Definition')})</h3>${hasCoords ? `<button class="header-button copy-coords-btn" title="Скопировать координаты и открыть схему">${sectionIcons.copyXY}</button>` : ''}</div><div class="section-content" style="padding:16px">${sectionContent}</div></div>`;
-        }
-        const specifiedParcels = All(xmlDoc, 'SpecifyParcel > ExistParcel');
-        for (const parcel of specifiedParcels) {
-            sectionsFound++;
-            const cadNum = A(parcel, 'CadastralNumber');
-            const categoryCode = A(E(parcel, 'Category'), 'Category');
-            const categoryName = landCategories[categoryCode] || 'Категория не определена';
-            let sectionContent = `<div class="info-grid">
-                <div class="info-card"><div class="info-label">Кадастровый номер</div><div class="info-value"><code>${cadNum}</code></div></div>
-                <div class="info-card"><div class="info-label">Кадастровый квартал</div><div class="info-value">${T(parcel, 'CadastralBlock')}</div></div>
-                ${categoryCode && categoryCode !== '—' ? `<div class="info-card"><div class="info-label">Категория земель</div><div class="info-value">${categoryName} <code>${categoryCode}</code></div></div>` : ''}
-                <div class="info-card"><div class="info-label">Уточненная площадь, кв.м.</div><div class="info-value">${T(parcel, 'Area > Area')} (погрешность ±${T(parcel, 'Area > Inaccuracy')})</div></div>
-                <div class="info-card"><div class="info-label">Площадь по ЕГРН, кв.м.</div><div class="info-value">${T(parcel, 'AreaInGKN')}</div></div>
-                <div class="info-card"><div class="info-label">Разница площадей, кв.м.</div><div class="info-value">${T(parcel, 'DeltaArea')}</div></div>
-                <div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Обеспечение доступа</div><div class="info-value">${T(parcel, 'ProvidingPassCadastralNumbers > Other')}</div></div>
-            </div>`;
-            if (T(parcel, 'Area > Formula') !== '—') {
-                sectionContent += `<div class="subsection"><div class="subsection-title">Формула погрешности</div><div class="conclusion-text">${T(parcel, 'Area > Formula')}</div></div>`;
-            }
-    
-    
-    const oksNodesExist = All(parcel, 'ObjectsRealty CadastralNumber');
-const oksNumbersExist = Array.from(oksNodesExist).map(node => node.textContent.trim());
-sectionContent += `
-    <div class="subsection">
-        <div class="subsection-title" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
-            <span>ОКС на участке</span>
-            <button class="check-oks-egrn-btn" data-oks-numbers='${JSON.stringify(oksNumbersExist)}'>
-                <i class="fas fa-clipboard-check"></i>
-                <span class="btn-text">Проверить ОКС</span>
-            </button>
-        </div>
-        ${oksNumbersExist.length > 0 ? `<div class="info-grid oks-list-container">
-            ${oksNumbersExist.map(kn => `<div class="info-card oks-item" data-cad-number="${kn}"><div class="info-value">${kn}</div><div class="oks-address" style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;"></div></div>`).join('')}
-        </div>` : `<div style="color:var(--text-secondary); font-style:italic; padding:8px 0;">ОКС не указаны в XML</div>`}
-        <div class="oks-check-status" style="margin-top:12px;"></div>
-    </div>`;
-    
-    
-    
-            const entitySpatial = E(parcel, 'EntitySpatial');
-            if (entitySpatial) {
-                sectionContent += createSpatialDataHtml(entitySpatial);
-            }
-            mainHtml += `<div class="section">
-                <div class="section-header">
-                    ${sectionIcons.newParcel}
-                    <h3 class="section-title">Сведения об уточняемом участке</h3>
-                    <button class="header-button copy-coords-btn" title="Скопировать координаты и открыть схему">${sectionIcons.copyXY}</button>
-                </div>
-                <div class="section-content" style="padding:16px">${sectionContent}</div>
-            </div>`;
-        }
-        const approxParcels = All(xmlDoc, 'SpecifyParcelApproximal > ExistParcel');
-        for (const parcel of approxParcels) {
-            sectionsFound++;
-            const cadNum = A(parcel, 'CadastralNumber');
-            const categoryCode = A(E(parcel, 'Category'), 'Category');
-            const categoryName = landCategories[categoryCode] || 'Категория не определена';
-            let sectionContent = `<div class="info-grid">
-                <div class="info-card"><div class="info-label">Кадастровый номер</div><div class="info-value"><code>${cadNum}</code></div></div>
-                <div class="info-card"><div class="info-label">Кадастровый квартал</div><div class="info-value">${T(parcel, 'CadastralBlock')}</div></div>
-                ${categoryCode && categoryCode !== '—' ? `<div class="info-card"><div class="info-label">Категория земель</div><div class="info-value">${categoryName} <code>${categoryCode}</code></div></div>` : ''}
-                <div class="info-card"><div class="info-label">Уточненная площадь, кв.м.</div><div class="info-value">${T(parcel, 'Area > Area')} (погрешность ±${T(parcel, 'Area > Inaccuracy')})</div></div>
-                <div class="info-card"><div class="info-label">Площадь по ЕГРН, кв.м.</div><div class="info-value">${T(parcel, 'AreaInGKN')}</div></div>
-                <div class="info-card"><div class="info-label">Разница площадей, кв.м.</div><div class="info-value">${T(parcel, 'DeltaArea')}</div></div>
-                <div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Обеспечение доступа</div><div class="info-value">${T(parcel, 'ProvidingPassCadastralNumbers > Other')}</div></div>
-            </div>`;
-            if (T(parcel, 'Area > Formula') !== '—') {
-                sectionContent += `<div class="subsection"><div class="subsection-title">Формула погрешности</div><div class="conclusion-text">${T(parcel, 'Area > Formula')}</div></div>`;
-            }
-            if (All(parcel, 'ObjectsRealty CadastralNumber').length > 0) {
-                sectionContent += `<div class="subsection"><div class="subsection-title">ОКС на участке</div><div class="info-grid">${Array.from(All(parcel, 'ObjectsRealty CadastralNumber')).map(node => `<div class="info-card"><div class="info-value">${node.textContent}</div></div>`).join('')}</div></div>`;
-            }
-            const contours = All(parcel, 'Contours > ExistContour, Contours > NewContour, Contours > Contour');
-            if (contours.length > 0) {
-                contours.forEach(contour => {
-                    const contourNum = A(contour, 'NumberRecord') || A(contour, 'Definition') || '';
-                    const contourArea = T(contour, 'Area > Area');
-                    const entitySpatial = E(contour, 'EntitySpatial');
-                    sectionContent += `<div class="subsection"><div class="subsection-title">Контур ${contourNum}${contourArea !== '—' ? ` (площадь: ${contourArea} кв.м.)` : ''}</div>${entitySpatial ? createSpatialDataHtml(entitySpatial) : ''}</div>`;
-                });
-            } else {
-                const entitySpatial = E(parcel, 'EntitySpatial');
-                if (entitySpatial) {
-                    sectionContent += createSpatialDataHtml(entitySpatial);
-                }
-            }
-            mainHtml += `<div class="section">
-                <div class="section-header">
-                    ${sectionIcons.newParcel}
-                    <h3 class="section-title">Смежный земельный участок с площадью: ${cadNum}</h3>
-                    <button class="header-button copy-coords-btn" title="Скопировать координаты и открыть схему">${sectionIcons.copyXY}</button>
-                </div>
-                <div class="section-content" style="padding:16px">${sectionContent}</div>
-            </div>`;
-        }
-        const specifyRelatedParcels = All(xmlDoc, 'SpecifyRelatedParcel');
-        specifyRelatedParcels.forEach(specifyRelatedParcel => {
-            sectionsFound++;
-            const relatedCadNum = A(specifyRelatedParcel, 'CadastralNumber');
-            let relatedContentHtml = '';
-            const contours = All(specifyRelatedParcel, 'Contours > NewContour, Contours > Contour');
-            if (contours.length > 0) {
-                contours.forEach(cnt => {
-                    const definition = A(cnt, 'Definition');
-                    const entSpatial = E(cnt, 'EntitySpatial');
-                    if (entSpatial) {
-                        relatedContentHtml += `<div class="subsection"><div class="subsection-title">Контур ${definition}</div>${createSpatialDataHtml(entSpatial)}</div>`;
-                    }
-                });
-            } else {
-                const entSpatial = E(specifyRelatedParcel, 'EntitySpatial');
-                if (entSpatial) {
-                    relatedContentHtml += createSpatialDataHtml(entSpatial);
-                } else {
-                    const allBorderSpatial = E(specifyRelatedParcel, 'AllBorder > EntitySpatial');
-                    if (allBorderSpatial) {
-                        relatedContentHtml += createSpatialDataHtml(allBorderSpatial);
-                    }
-                }
-            }
-            if (!relatedContentHtml) {
-                let tableContent = '';
-                All(specifyRelatedParcel, 'ChangeBorder').forEach(ch => {
-                    const oldOrd = E(ch, 'OldOrdinate');
-                    const newOrd = E(ch, 'NewOrdinate');
-                    const oldPointName = oldOrd ? (A(oldOrd, 'NumGeopoint') || '—') : '—';
-                    const newPointName = newOrd ? ((A(newOrd, 'PointPref') || '') + A(newOrd, 'NumGeopoint')) : '—';
-                    const displayPointName = newPointName !== '—' ? newPointName : oldPointName;
-                    tableContent += `<tr>
-                        <td>${displayPointName}</td>
-                        <td>${oldOrd ? `${A(oldOrd, 'X')}, ${A(oldOrd, 'Y')}` : '—'}</td>
-                        <td>${newOrd ? `${A(newOrd, 'X')}, ${A(newOrd, 'Y')}` : '—'}</td>
-                        <td class="left-align">${newOrd ? `Δ=${A(newOrd, 'DeltaGeopoint')} м, ${A(newOrd, 'GeopointZacrep')}` : 'Точка удалена'}</td>
-                    </tr>`;
-                });
-                if (tableContent) {
-                    relatedContentHtml += `<div class="subsection"><div class="subsection-title">Изменение частей границы</div><table class="data-table coord-table"><thead><tr><th>Точка</th><th>Старые коорд. (X, Y)</th><th>Новые коорд. (X, Y)</th><th class="left-align">Примечание</th></tr></thead><tbody>${tableContent}</tbody></table></div>`;
-                }
-            }
-            if (relatedContentHtml) {
-                const randomId = 'rel_' + Math.floor(Math.random() * 1000000);
-               const mainParcelCadNum = E(xmlDoc, 'SpecifyParcel > ExistParcel')?.getAttribute('CadastralNumber') || 
-                          E(xmlDoc, 'NewParcel')?.querySelector('CadastralBlock')?.textContent?.trim() || '';
-
-mainHtml += `
-<div class="section">
-    <div class="section-header">
-        ${sectionIcons.relatedParcel}
-        <h3 class="section-title">Уточнение смежного участка: ${relatedCadNum}</h3>
-        <button class="check-related-btn" 
-                data-related-cad-number="${relatedCadNum}" 
-                data-main-cad-number="${mainParcelCadNum}">
-            <i class="fas fa-draw-polygon"></i>
-            <span>Проверить границы</span>
-        </button>
-        <button class="header-button copy-coords-btn" title="Скопировать координаты">${sectionIcons.copyXY}</button>
-    </div>
-    <div class="section-content" style="padding:16px">
-        <div class="info-card" style="margin-bottom: 12px; background: #fff8e1; border-color: #ffe0b2;">
-            <div class="info-value">Координаты смежного земельного участка</div>
-        </div>
-        <button class="print-btn" style="padding: 8px 16px; font-size: 0.9rem;" onclick="document.getElementById('${randomId}').classList.toggle('hidden'); this.textContent = this.textContent.includes('Раскрыть') ? 'Скрыть координаты' : 'Раскрыть список координат';">
-            Раскрыть список координат
-        </button>
-        <div id="${randomId}" class="hidden" style="margin-top: 16px;">
-            ${relatedContentHtml}
-        </div>
-    </div>
-</div>`;
-            }
-        });
-        const conclusion = E(xmlDoc, 'Conclusion');
-        if (conclusion && conclusion.textContent.trim()) {
-            sectionsFound++;
-            mainHtml += `<div class="section"><div class="section-header">${sectionIcons.conclusion}<h3 class="section-title">Заключение кадастрового инженера</h3><button class="header-button ai-check-btn" data-conclusion-text="${escapeHtml(conclusion.textContent.trim())}" title="Проверить заключение с помощью ИИ"><i class="fas fa-atom"></i></button></div><div class="section-content" style="padding:16px"><div class="conclusion-text">${conclusion.textContent.trim()}</div></div></div>`;
-        }
-        const graphicFiles = [
-            { title: 'Схема геодезических построений', file: A(E(xmlDoc, 'SchemeGeodesicPlotting'), 'Name') },
-            { title: 'Схема расположения ЗУ', file: A(E(xmlDoc, 'SchemeDisposition'), 'Name') },
-            { title: 'Чертеж земельного участка', file: A(E(xmlDoc, 'DiagramParcelsSubParcels > AppliedFile'), 'Name') },
-            { title: 'Акт согласования границ', file: A(E(xmlDoc, 'AgreementDocument > AppliedFile'), 'Name') }
-        ].filter(f => f.file !== '—');
-        if (graphicFiles.length > 0) {
-            sectionsFound++;
-            mainHtml += `<div class="section"><div class="section-header">${sectionIcons.graphics}<h3 class="section-title">Графические разделы</h3></div><div class="section-content" style="padding:16px"><table class="data-table"><thead><tr><th class="left-align">Наименование раздела</th><th class="left-align">Имя файла</th></tr></thead><tbody>${graphicFiles.map(f => `<tr><td class="left-align">${f.title}</td><td class="left-align"><span class="file-name">${f.file}</span></td></tr>`).join('')}</tbody></table></div></div>`;
-        }
-        const appendixFiles = All(xmlDoc, 'Appendix > AppliedFiles');
-        if (appendixFiles.length > 0) {
-            sectionsFound++;
-            mainHtml += `<div class="section"><div class="section-header">${sectionIcons.appendix}<h3 class="section-title">Приложения</h3></div><div class="section-content" style="padding:16px"><table class="data-table"><thead><tr><th>№</th><th class="left-align">Наименование</th><th class="left-align">Имя файла</th></tr></thead><tbody>${Array.from(appendixFiles).map(f => `<tr><td>${T(f, 'NumberAppendix')}</td><td class="left-align">${T(f, 'NameAppendix')}</td><td class="left-align"><span class="file-name">${A(E(f, 'AppliedFile'), 'Name')}</span></td></tr>`).join('')}</tbody></table></div></div>`;
-        }
-        const validationHtml = runValidation(xmlDoc, xmlText);
-        if (validationHtml) {
-            mainHtml += `<div class="section validation-section"><div class="section-header">${sectionIcons.validation}<h3 class="section-title">Проверка межевого плана</h3></div><div class="section-content" style="padding:16px">${validationHtml}</div></div>`;
-        }
-        if (sectionsFound > 0) {
-            mainColumn.innerHTML = mainHtml;
-            sidebarColumn.innerHTML = sidebarHtml;
-            resultsContainer.classList.remove('hidden');
-            statusContainer.classList.add('hidden');
-            printButtonContainer.classList.remove('hidden');
-            messageArea.innerHTML = '';
-        } else {
-            showError('Файл успешно прочитан, но в нем не найдено известных разделов межевого плана. Возможно, это XML другого типа.');
-        }
+        participantsHtml += `</div></div>`;
+        sidebarHtml += participantsHtml;
     }
+
+    // 3. Исходные данные
+    const inputData = E(xmlDoc, 'InputData');
+    if (inputData) {
+        sectionsFound++;
+        let inputDataHtml = `<div class="section"><div class="section-header">${sectionIcons.inputData}<h3 class="section-title">Исходные данные</h3></div><div class="section-content" style="padding:16px">`;
+        const documents = All(inputData, 'Documents > Document');
+        if (documents.length > 0) {
+            inputDataHtml += `<div class="subsection" style="margin-top:0;"><div class="subsection-title">Документы</div><table class="data-table"><thead><tr><th class="left-align">Наименование</th><th class="no-wrap">№</th><th class="no-wrap">Дата</th></tr></thead><tbody>${Array.from(documents).map(doc => `<tr><td class="left-align">${T(doc, 'Name')}</td><td class="no-wrap">${T(doc, 'Number')}</td><td class="no-wrap">${T(doc, 'Date')}</td></tr>`).join('')}</tbody></table></div>`;
+        }
+        const geoBases = All(inputData, 'GeodesicBases > GeodesicBase');
+        if (geoBases.length > 0) {
+            inputDataHtml += `<div class="subsection"><div class="subsection-title">Геодезическая основа</div><table class="data-table"><thead><tr><th class="left-align">Пункт</th><th>Класс</th><th>X</th><th>Y</th></tr></thead><tbody>${Array.from(geoBases).map(base => `<tr><td class="left-align">${T(base, 'PName')} (${T(base, 'PKind')})</td><td>${T(base, 'PKlass')}</td><td>${T(base, 'OrdX')}</td><td>${T(base, 'OrdY')}</td></tr>`).join('')}</tbody></table></div>`;
+        }
+        const meanSurvey = E(inputData, 'MeansSurvey > MeanSurvey');
+        if (meanSurvey) {
+            inputDataHtml += `<div class="subsection"><div class="subsection-title">Средства измерений</div><div class="info-grid"><div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Прибор</div><div class="info-value">${T(meanSurvey, 'Name')}</div></div><div class="info-card"><div class="info-label">Номер</div><div class="info-value">${T(meanSurvey, 'Number')}</div></div><div class="info-card"><div class="info-label">Поверка</div><div class="info-value">${T(meanSurvey, 'CertificateVerification')}</div></div></div></div>`;
+        }
+        inputDataHtml += `</div></div>`;
+        sidebarHtml += inputDataHtml;
+    }
+
+    // 4. Образуемые участки (NewParcel)
+    const newParcels = All(xmlDoc, 'NewParcel');
+    for (const newParcel of newParcels) {
+        sectionsFound++;
+        const categoryCode = A(E(newParcel, 'Category'), 'Category');
+        const categoryName = landCategories[categoryCode] || 'Категория не определена';
+        
+        let areaVal = '—', areaInacc = '—';
+        const directAreaNode = Array.from(newParcel.children).find(el => el.tagName === 'Area');
+        if (directAreaNode) {
+            areaVal = T(directAreaNode, 'Area');
+            areaInacc = T(directAreaNode, 'Inaccuracy');
+        } else {
+            areaVal = T(newParcel, 'Area > Area');
+            areaInacc = T(newParcel, 'Area > Inaccuracy');
+        }
+
+        let sectionContent = `<div class="info-grid">
+            <div class="info-card"><div class="info-label">Кадастровый квартал</div><div class="info-value">${T(newParcel, 'CadastralBlock')}</div></div>
+            <div class="info-card"><div class="info-label">Площадь, кв.м.</div><div class="info-value">${areaVal} (±${areaInacc})</div></div>
+            <div class="info-card"><div class="info-label">Категория земель</div><div class="info-value">${categoryName} <code>${categoryCode}</code></div></div>
+            <div class="info-card"><div class="info-label">Вид разрешенного использования</div><div class="info-value">${A(E(newParcel, 'PermittedUseEstablished, PermittedUsesLand > PermittedUseEstablished'), 'ByDocument')}</div></div>
+            <div class="info-card"><div class="info-label">Обеспечение доступа</div><div class="info-value">${T(newParcel, 'ProvidingPassCadastralNumbers > Other, ProvidingPassCadastralNumbers > CadastralNumber')}</div></div>
+        </div>`;
+
+        // Перераспределение
+        const prevRedist = E(newParcel, 'PrevWithRedistributed');
+        if (prevRedist) {
+            let redistRows = '';
+            All(prevRedist, 'PrevWithRedistribute').forEach(item => {
+                const kn = T(item, 'CadastralNumber');
+                const block = T(item, 'CadastralBlock');
+                const sourceName = kn !== '—' ? kn : (block !== '—' ? `Квартал ${block}` : '—');
+                let sourceArea = '—';
+                for (let child of item.children) {
+                    if (child.tagName === 'Area') {
+                        sourceArea = T(child, 'Area');
+                        break;
+                    }
+                }
+                const partName = T(item, 'IncludedPart > Definition');
+                const partArea = T(item, 'IncludedPart > Area > Area');
+                redistRows += `<tr><td class="left-align">${sourceName}</td><td>${sourceArea}</td><td>${partName}</td><td>${partArea}</td></tr>`;
+            });
+            if (redistRows) {
+                sectionContent += `<div class="subsection"><div class="subsection-title">Сведения о перераспределении</div><table class="data-table"><thead><tr><th class="left-align">Источник образования (ЗУ или Квартал)</th><th>Площадь источника, м²</th><th>Обозначение части</th><th>Площадь части, м²</th></tr></thead><tbody>${redistRows}</tbody></table></div>`;
+            }
+        }
+
+        // ОКС на участке
+        const oksNodesNewParcel = All(newParcel, 'ObjectsRealty CadastralNumber');
+        const oksNumbersNewParcel = Array.from(oksNodesNewParcel).map(node => node.textContent.trim());
+        sectionContent += `
+        <div class="subsection">
+            <div class="subsection-title" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+                <span>ОКС на участке</span>
+                <button class="check-oks-egrn-btn" data-oks-numbers='${JSON.stringify(oksNumbersNewParcel)}'>
+                    <i class="fas fa-clipboard-check"></i>
+                    <span class="btn-text">Проверить ОКС</span>
+                </button>
+            </div>
+            ${oksNumbersNewParcel.length > 0 ? `<div class="info-grid oks-list-container">
+                ${oksNumbersNewParcel.map(kn => `<div class="info-card oks-item" data-cad-number="${kn}"><div class="info-value">${kn}</div><div class="oks-address" style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;"></div></div>`).join('')}
+            </div>` : `<div style="color:var(--text-secondary); font-style:italic; padding:8px 0;">ОКС не указаны в XML</div>`}
+            <div class="oks-check-status" style="margin-top:12px;"></div>
+        </div>`;
+
+        // Адрес и координаты
+        if (E(newParcel, 'Address')) {
+            sectionContent += `<div class="subsection"><div class="subsection-title">Адрес</div><div class="address-display">${getFullAddress(E(newParcel, 'Address'))}</div></div>`;
+        }
+        const entitySpatial = E(newParcel, 'EntitySpatial');
+        if (entitySpatial) {
+            sectionContent += createSpatialDataHtml(entitySpatial);
+        }
+
+        mainHtml += `<div class="section"><div class="section-header">${sectionIcons.newParcel}<h3 class="section-title">Сведения об образуемом участке (${A(newParcel, 'Definition')})</h3>${entitySpatial ? `<button class="header-button copy-coords-btn" title="Скопировать координаты">${sectionIcons.copyXY}</button>` : ''}</div><div class="section-content" style="padding:16px">${sectionContent}</div></div>`;
+    }
+
+    // 5. Уточняемые участки (ExistParcel)
+    const specifiedParcels = All(xmlDoc, 'SpecifyParcel > ExistParcel');
+    for (const parcel of specifiedParcels) {
+        sectionsFound++;
+        const cadNum = A(parcel, 'CadastralNumber');
+        const categoryCode = A(E(parcel, 'Category'), 'Category');
+        const categoryName = landCategories[categoryCode] || 'Категория не определена';
+        let sectionContent = `<div class="info-grid">
+            <div class="info-card"><div class="info-label">Кадастровый номер</div><div class="info-value"><code>${cadNum}</code></div></div>
+            <div class="info-card"><div class="info-label">Кадастровый квартал</div><div class="info-value">${T(parcel, 'CadastralBlock')}</div></div>
+            ${categoryCode && categoryCode !== '—' ? `<div class="info-card"><div class="info-label">Категория земель</div><div class="info-value">${categoryName} <code>${categoryCode}</code></div></div>` : ''}
+            <div class="info-card"><div class="info-label">Уточненная площадь, кв.м.</div><div class="info-value">${T(parcel, 'Area > Area')} (погрешность ±${T(parcel, 'Area > Inaccuracy')})</div></div>
+            <div class="info-card"><div class="info-label">Площадь по ЕГРН, кв.м.</div><div class="info-value">${T(parcel, 'AreaInGKN')}</div></div>
+            <div class="info-card"><div class="info-label">Разница площадей, кв.м.</div><div class="info-value">${T(parcel, 'DeltaArea')}</div></div>
+        </div>`;
+
+        // ОКС на участке (ExistParcel)
+        const oksNodesExist = All(parcel, 'ObjectsRealty CadastralNumber');
+        const oksNumbersExist = Array.from(oksNodesExist).map(node => node.textContent.trim());
+        sectionContent += `
+        <div class="subsection">
+            <div class="subsection-title" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
+                <span>ОКС на участке</span>
+                <button class="check-oks-egrn-btn" data-oks-numbers='${JSON.stringify(oksNumbersExist)}'>
+                    <i class="fas fa-clipboard-check"></i>
+                    <span class="btn-text">Проверить ОКС</span>
+                </button>
+            </div>
+            ${oksNumbersExist.length > 0 ? `<div class="info-grid oks-list-container">
+                ${oksNumbersExist.map(kn => `<div class="info-card oks-item" data-cad-number="${kn}"><div class="info-value">${kn}</div><div class="oks-address" style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;"></div></div>`).join('')}
+            </div>` : `<div style="color:var(--text-secondary); font-style:italic; padding:8px 0;">ОКС не указаны в XML</div>`}
+            <div class="oks-check-status" style="margin-top:12px;"></div>
+        </div>`;
+
+        const entitySpatial = E(parcel, 'EntitySpatial');
+        if (entitySpatial) {
+            sectionContent += createSpatialDataHtml(entitySpatial);
+        }
+        mainHtml += `<div class="section"><div class="section-header">${sectionIcons.newParcel}<h3 class="section-title">Сведения об уточняемом участке</h3><button class="header-button copy-coords-btn" title="Скопировать координаты">${sectionIcons.copyXY}</button></div><div class="section-content" style="padding:16px">${sectionContent}</div></div>`;
+    }
+
+    // 6. Уточнение смежных участков (SpecifyRelatedParcel)
+    const specifyRelatedParcels = All(xmlDoc, 'SpecifyRelatedParcel');
+    // ИСПОЛЬЗУЕМ ИНДЕКС ДЛЯ ИДЕНТИФИКАЦИИ КОНКРЕТНОГО БЛОКА
+    specifyRelatedParcels.forEach((specifyRelatedParcel, index) => {
+        sectionsFound++;
+        const relatedCadNum = A(specifyRelatedParcel, 'CadastralNumber');
+        let relatedContentHtml = '';
+
+        // Попытка найти полное описание (AllBorder) или контуры
+        const contours = All(specifyRelatedParcel, 'Contours > NewContour, Contours > Contour, AllBorder > EntitySpatial > SpatialElement');
+        const entitySpatialSimple = E(specifyRelatedParcel, 'EntitySpatial'); // Для простых участков
+        const allBorderSpatial = E(specifyRelatedParcel, 'AllBorder > EntitySpatial');
+
+        if (contours.length > 0) {
+            contours.forEach((cnt, idx) => {
+                const definition = A(cnt, 'Definition') || A(cnt, 'NumberRecord') || (idx + 1);
+                // Если это AllBorder, то SpatialElement сам по себе содержит координаты
+                const entSpatial = cnt.tagName === 'SpatialElement' ? cnt : E(cnt, 'EntitySpatial');
+                if (entSpatial) {
+                    relatedContentHtml += `<div class="subsection"><div class="subsection-title">Контур ${definition}</div>${createSpatialDataHtml(entSpatial)}</div>`;
+                }
+            });
+        } else if (allBorderSpatial) {
+             relatedContentHtml += createSpatialDataHtml(allBorderSpatial);
+        } else if (entitySpatialSimple) {
+             relatedContentHtml += createSpatialDataHtml(entitySpatialSimple);
+        }
+
+        // Если не нашли геометрию через SpatialElement, ищем ChangeBorder
+        if (!relatedContentHtml) {
+            let tableContent = '';
+            All(specifyRelatedParcel, 'ChangeBorder').forEach(ch => {
+                const oldOrd = E(ch, 'OldOrdinate');
+                const newOrd = E(ch, 'NewOrdinate');
+                const oldPointName = oldOrd ? (A(oldOrd, 'NumGeopoint') || '—') : '—';
+                const newPointName = newOrd ? ((A(newOrd, 'PointPref') || '') + A(newOrd, 'NumGeopoint')) : '—';
+                const displayPointName = newPointName !== '—' ? newPointName : oldPointName;
+                tableContent += `<tr>
+                    <td>${displayPointName}</td>
+                    <td>${oldOrd ? `${A(oldOrd, 'X')}, ${A(oldOrd, 'Y')}` : '—'}</td>
+                    <td>${newOrd ? `${A(newOrd, 'X')}, ${A(newOrd, 'Y')}` : '—'}</td>
+                    <td class="left-align">${newOrd ? `Δ=${A(newOrd, 'DeltaGeopoint')} м, ${A(newOrd, 'GeopointZacrep')}` : 'Точка удалена'}</td>
+                </tr>`;
+            });
+            if (tableContent) {
+                relatedContentHtml += `<div class="subsection"><div class="subsection-title">Изменение частей границы</div><table class="data-table coord-table"><thead><tr><th>Точка</th><th>Старые коорд. (X, Y)</th><th>Новые коорд. (X, Y)</th><th class="left-align">Примечание</th></tr></thead><tbody>${tableContent}</tbody></table></div>`;
+            }
+        }
+
+        if (relatedContentHtml) {
+            const randomId = 'rel_' + Math.floor(Math.random() * 1000000);
+            const mainParcelCadNum = E(xmlDoc, 'SpecifyParcel > ExistParcel')?.getAttribute('CadastralNumber') || 
+                                     E(xmlDoc, 'NewParcel')?.querySelector('CadastralBlock')?.textContent?.trim() || '';
+
+            mainHtml += `
+            <div class="section">
+                <div class="section-header">
+                    ${sectionIcons.relatedParcel}
+                    <h3 class="section-title">Уточнение смежного участка: ${relatedCadNum} (Запись ${index + 1})</h3>
+                    <button class="check-related-btn" 
+                            data-related-cad-number="${relatedCadNum}" 
+                            data-main-cad-number="${mainParcelCadNum}"
+                            data-index="${index}"> <!-- ВАЖНО: Добавлен data-index -->
+                        <i class="fas fa-draw-polygon"></i>
+                        <span>Проверить границы</span>
+                    </button>
+                    <button class="header-button copy-coords-btn" title="Скопировать координаты">${sectionIcons.copyXY}</button>
+                </div>
+                <div class="section-content" style="padding:16px">
+                    <div class="info-card" style="margin-bottom: 12px; background: #fff8e1; border-color: #ffe0b2;">
+                        <div class="info-value">Координаты смежного земельного участка</div>
+                    </div>
+                    <button class="print-btn" style="padding: 8px 16px; font-size: 0.9rem;" onclick="document.getElementById('${randomId}').classList.toggle('hidden'); this.textContent = this.textContent.includes('Раскрыть') ? 'Скрыть координаты' : 'Раскрыть список координат';">
+                        Раскрыть список координат
+                    </button>
+                    <div id="${randomId}" class="hidden" style="margin-top: 16px;">
+                        ${relatedContentHtml}
+                    </div>
+                </div>
+            </div>`;
+        }
+    });
+
+    // 7. Заключение, Графика, Приложения
+    const conclusion = E(xmlDoc, 'Conclusion');
+    if (conclusion && conclusion.textContent.trim()) {
+        sectionsFound++;
+        mainHtml += `<div class="section"><div class="section-header">${sectionIcons.conclusion}<h3 class="section-title">Заключение кадастрового инженера</h3><button class="header-button ai-check-btn" data-conclusion-text="${escapeHtml(conclusion.textContent.trim())}" title="Проверить заключение с помощью ИИ"><i class="fas fa-atom"></i></button></div><div class="section-content" style="padding:16px"><div class="conclusion-text">${conclusion.textContent.trim()}</div></div></div>`;
+    }
+    const graphicFiles = [
+        { title: 'Схема геодезических построений', file: A(E(xmlDoc, 'SchemeGeodesicPlotting'), 'Name') },
+        { title: 'Схема расположения ЗУ', file: A(E(xmlDoc, 'SchemeDisposition'), 'Name') },
+        { title: 'Чертеж земельного участка', file: A(E(xmlDoc, 'DiagramParcelsSubParcels > AppliedFile'), 'Name') },
+        { title: 'Акт согласования границ', file: A(E(xmlDoc, 'AgreementDocument > AppliedFile'), 'Name') }
+    ].filter(f => f.file !== '—');
+    if (graphicFiles.length > 0) {
+        sectionsFound++;
+        mainHtml += `<div class="section"><div class="section-header">${sectionIcons.graphics}<h3 class="section-title">Графические разделы</h3></div><div class="section-content" style="padding:16px"><table class="data-table"><thead><tr><th class="left-align">Наименование раздела</th><th class="left-align">Имя файла</th></tr></thead><tbody>${graphicFiles.map(f => `<tr><td class="left-align">${f.title}</td><td class="left-align"><span class="file-name">${f.file}</span></td></tr>`).join('')}</tbody></table></div></div>`;
+    }
+    const appendixFiles = All(xmlDoc, 'Appendix > AppliedFiles');
+    if (appendixFiles.length > 0) {
+        sectionsFound++;
+        mainHtml += `<div class="section"><div class="section-header">${sectionIcons.appendix}<h3 class="section-title">Приложения</h3></div><div class="section-content" style="padding:16px"><table class="data-table"><thead><tr><th>№</th><th class="left-align">Наименование</th><th class="left-align">Имя файла</th></tr></thead><tbody>${Array.from(appendixFiles).map(f => `<tr><td>${T(f, 'NumberAppendix')}</td><td class="left-align">${T(f, 'NameAppendix')}</td><td class="left-align"><span class="file-name">${A(E(f, 'AppliedFile'), 'Name')}</span></td></tr>`).join('')}</tbody></table></div></div>`;
+    }
+
+    // 8. Валидация
+    const validationHtml = runValidation(xmlDoc, xmlText);
+    if (validationHtml) {
+        mainHtml += `<div class="section validation-section"><div class="section-header">${sectionIcons.validation}<h3 class="section-title">Проверка межевого плана</h3></div><div class="section-content" style="padding:16px">${validationHtml}</div></div>`;
+    }
+
+    if (sectionsFound > 0) {
+        mainColumn.innerHTML = mainHtml;
+        sidebarColumn.innerHTML = sidebarHtml;
+        resultsContainer.classList.remove('hidden');
+        statusContainer.classList.add('hidden');
+        printButtonContainer.classList.remove('hidden');
+        messageArea.innerHTML = '';
+    } else {
+        showError('Файл успешно прочитан, но в нем не найдено известных разделов межевого плана. Возможно, это XML другого типа.');
+    }
+}
+
 
     function runValidation(xmlDoc, xmlText) {
         let messages = [];
