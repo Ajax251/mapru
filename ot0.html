@@ -1237,11 +1237,9 @@
         <polyline points="17 8 12 3 7 8"/>
         <line x1="12" y1="3" x2="12" y2="15"/>
     </svg>
-    Открыть XML или JSON
+    Открыть XML
 </label>
-
-
-<input type="file" id="xmlFileInput" accept=".xml,.zip,.json" onchange="handleFileSelect(event)">
+                    <input type="file" id="xmlFileInput" accept=".xml,.zip" onchange="handleFileSelect(event)">
                 </div>
             </div>
         </div>
@@ -1403,18 +1401,15 @@ function restoreMergeState() {
     });
 }
 
-
 function showStartView() {
     document.getElementById('start-view').style.display = 'flex';
     document.getElementById('results-view').style.display = 'none';
     document.getElementById('report-output').innerHTML = '';
-    // Сброс структуры
-    loadedKptData = { xmlString: null, jsonData: null, fileName: null, objectList: [], title: null, skipCoordinates: false, dataType: null };
+  loadedKptData = { xmlString: null, fileName: null, objectList: [], title: null, skipCoordinates: false };
     document.getElementById('selectObjectBtn').style.display = 'none';
     document.getElementById('extendedReportBtn').style.display = 'none';
     currentObjectGeometry = null;
 }
-
 
 function showResultsView() {
     document.getElementById('start-view').style.display = 'none';
@@ -1433,118 +1428,45 @@ async function handleFileSelect(event) {
     const file = event.target.files[0]; if (!file) return;
     resetAndShowLoader();
     try {
-        let fileName = file.name;
-        let fileSize = file.size;
-        let xmlString = null;
-        let jsonData = null;
-        let isJson = false;
-
+        let xmlString, fileName = file.name;
+        let fileSize = file.size; // Размер в байтах
+        
         if (file.name.toLowerCase().endsWith('.zip')) {
             const zip = await JSZip.loadAsync(await file.arrayBuffer());
-            let targetFile = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.xml'));
-            
-            if (!targetFile) {
-                targetFile = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.json'));
-                if (targetFile) isJson = true;
-            }
-
-            if (!targetFile) throw new Error("Файл данных (.xml или .json) не найден в архиве.");
-            
-            fileName = targetFile.name;
-            const content = await targetFile.async("string");
-            
-            if (isJson) jsonData = JSON.parse(content);
-            else xmlString = content;
-            
-            fileSize = content.length; 
-
-        } else if (file.name.toLowerCase().endsWith('.json')) {
-            isJson = true;
-            const content = await file.text();
-            jsonData = JSON.parse(content);
-            fileSize = content.length;
-        } else {
-            xmlString = await file.text();
+            const xmlFile = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.xml'));
+            if (!xmlFile) throw new Error("XML-файл не найден в архиве.");
+            xmlString = await xmlFile.async("string");
+            fileName = xmlFile.name;
+            fileSize = xmlString.length; // Размер распакованного XML
+        } else { 
+            xmlString = await file.text(); 
             fileSize = xmlString.length;
         }
+        
+        const parser = new DOMParser();
+        const xmlDoc = parser.parseFromString(xmlString, "text/xml");
+        const reportTitle = createTitleFromXml(xmlDoc, fileName);
 
+        // Проверка размера файла (5 MB = 5 * 1024 * 1024 байт)
         const SIZE_THRESHOLD = 5 * 1024 * 1024;
         let skipCoordinates = false;
+        
         if (fileSize > SIZE_THRESHOLD) {
             showLoader(false);
             skipCoordinates = !(await showCoordinatesConfirmDialog(fileSize));
             showLoader(true);
         }
 
-        if (isJson) {
-            const features = jsonData.features || (jsonData.data && jsonData.data.features) || (Array.isArray(jsonData) ? jsonData : [jsonData]);
-            
-            if (!features || features.length === 0) throw new Error("JSON не содержит объектов (features).");
-
-            const formattedDate = new Date().toLocaleDateString('ru-RU');
-            const reportTitle = `Данные из файла: ${fileName}`;
-
-            if (features.length > 1) {
-                showLoader(false);
-                const objectList = features.map(f => {
-                    const props = f.properties || {};
-                    const opts = props.options || {};
-                    const cadNum = opts.cad_num || opts.cad_number || props.descr || 'Без номера';
-                    let type = 'Объект';
-                    const catName = props.categoryName || '';
-                    if (catName.includes('Земельные')) type = 'ЗУ';
-                    else if (catName.includes('Здания')) type = 'Здание';
-                    else if (catName.includes('Сооружения')) type = 'Сооружение';
-                    else if (catName.includes('Помещения')) type = 'Помещение';
-                    
-                    return { cadNum, type, originalFeature: f };
-                });
-
-                loadedKptData = { 
-                    xmlString: null, 
-                    jsonData: features,
-                    fileName, 
-                    objectList, 
-                    title: reportTitle, 
-                    skipCoordinates,
-                    dataType: 'json'
-                };
-                
-                document.getElementById('selectObjectBtn').style.display = 'inline-flex';
-                reShowObjectSelectionDialog();
-
-            } else {
-                const feature = features[0];
-                
-                if (feature.geometry) {
-                    currentObjectGeometry = feature.geometry;
-                }
-
-                const data = await parseNspdJson(feature, true);
-                
-                if (skipCoordinates) data.coordinates = []; 
-                
-                displayResults(data, `Дата: ${formattedDate} (из файла)`, false);
-                showResultsView();
-            }
-
+        const records = xmlDoc.querySelectorAll('land_record, build_record, construction_record');
+        if (records.length > 1) {
+            showLoader(false);
+            extractAndShowObjectList(xmlString, records, fileName, reportTitle, skipCoordinates);
+            document.getElementById('selectObjectBtn').style.display = 'inline-flex';
         } else {
-            const parser = new DOMParser();
-            const xmlDoc = parser.parseFromString(xmlString, "text/xml");
-            const reportTitle = createTitleFromXml(xmlDoc, fileName);
-
-            const records = xmlDoc.querySelectorAll('land_record, build_record, construction_record');
-            if (records.length > 1) {
-                showLoader(false);
-                extractAndShowObjectList(xmlString, records, fileName, reportTitle, skipCoordinates);
-                document.getElementById('selectObjectBtn').style.display = 'inline-flex';
-            } else {
-                const { data, isKptFile } = parseXml(xmlString, null, skipCoordinates);
-                displayResults(data, reportTitle, isKptFile);
-                showResultsView();
-            }
+            const { data, isKptFile } = parseXml(xmlString, null, skipCoordinates);
+            displayResults(data, reportTitle, isKptFile);
+            showResultsView();
         }
-
     } catch (error) { displayError(error, true); }
     finally { if (document.querySelectorAll('.modal-overlay').length === 0) showLoader(false); event.target.value = null; }
 }
@@ -1694,11 +1616,11 @@ function resetAndShowLoader() {
 
 function reShowObjectSelectionDialog() {
     if (loadedKptData && loadedKptData.objectList.length > 0) {
-        const { xmlString, jsonData, fileName, objectList, title, skipCoordinates, dataType } = loadedKptData;
+        const { xmlString, fileName, objectList, title, skipCoordinates } = loadedKptData;
         const overlay = document.createElement('div');
         overlay.className = 'modal-overlay';
         const dialog = document.createElement('div');
-        dialog.className = 'modal-dialog glass-panel';
+        dialog.className = 'modal-dialog';
 
         dialog.innerHTML = `
             <h3>Выберите объект из файла "${fileName}" (${objectList.length} шт.)</h3>
@@ -1707,31 +1629,15 @@ function reShowObjectSelectionDialog() {
 
         const list = document.createElement('ul');
         list.className = 'modal-list';
-        objectList.forEach((obj, index) => {
+        objectList.forEach(obj => {
             const listItem = document.createElement('li');
             listItem.innerHTML = `<span>${obj.cadNum}</span><span class="obj-type">${obj.type}</span>`;
             listItem.onclick = () => {
                 document.body.removeChild(overlay); 
                 resetAndShowLoader();
-                setTimeout(async () => {
+                setTimeout(() => {
                     try {
-                        let data, isKptFile = false;
-                        
-                        if (dataType === 'json') {
-                            const feature = jsonData[index]; 
-                            
-                            if (feature.geometry) {
-                                currentObjectGeometry = feature.geometry;
-                            }
-
-                            data = await parseNspdJson(feature, true);
-                            if (skipCoordinates) data.coordinates = [];
-                        } else {
-                            const result = parseXml(xmlString, obj.cadNum, skipCoordinates);
-                            data = result.data;
-                            isKptFile = result.isKptFile;
-                        }
-
+                        const { data, isKptFile } = parseXml(xmlString, obj.cadNum, skipCoordinates);
                         displayResults(data, title, isKptFile);
                         showResultsView();
                     } catch (e) { displayError(e); }
@@ -1791,8 +1697,7 @@ function extractAndShowObjectList(xmlString, records, fileName, title, skipCoord
         const type = typeMap[record.tagName] || 'Объект';
         if (cadNum) objectList.push({ cadNum, type });
     });
-    // Добавлено поле dataType
-    loadedKptData = { xmlString, jsonData: null, fileName, objectList, title, skipCoordinates, dataType: 'xml' }; 
+    loadedKptData = { xmlString, fileName, objectList, title, skipCoordinates }; // <-- Сохраняем флаг
     reShowObjectSelectionDialog();
 }
 
@@ -1982,29 +1887,39 @@ function formatNumberWithSpaces(number) {
     return String(num).replace(/\B(?=(\d{3})+(?!\d))/g, ' ');
 }
 
-async function parseNspdJson(feature, isLocal = false) {
+async function parseNspdJson(feature) {
     const options = feature.properties.options || {};
     const properties = feature.properties || {};
     const data = createDataObject();
 
+    // --- Общие данные ---
     data.common.cadNum = options.cad_num || options.cad_number;
     data.common.objType = properties.categoryName || (feature.properties.categoryName || '').replace(' ЕГРН', '');
     data.common.location = options.readable_address || options.address_readable_address || options.address_by_document;
-    data.common.cost = options.cost_value;
+    data.common.cost = options.cost_value; // Основная цена используется в шапке
     data.common.status = options.status || options.common_data_status;
     
+    // Дата присвоения
     data.common.assignDate = formatDate(options.date_created || options.land_record_reg_date || options.registration_date || options.build_record_registration_date);
 
+    // Вспомогательная функция для добавления параметров только если есть значение
     const addParam = (key, value) => {
         if (value !== null && value !== undefined && value !== '' && value !== '-' && value !== 'null') {
             data.params[key] = value;
         }
     };
 
+    // --- Детальные характеристики ---
+    
+    // Адрес (если отличается от местоположения или для надежности)
+    // addParam('Адрес', options.readable_address); 
+
+    // Данные о стоимости (детали)
     addParam('Дата определения стоимости', formatDate(options.cost_determination_date));
     addParam('Дата внесения стоимости', formatDate(options.cost_registration_date || options.cost_approval_date));
     addParam('Основание определения стоимости', options.determination_couse);
 
+    // Характеристики ЗЕМЕЛЬНОГО УЧАСТКА
     if (data.common.objType.includes("Земельные участки")) {
         addParam('Вид участка', options.subtype || options.land_record_subtype);
         
@@ -2021,25 +1936,26 @@ async function parseNspdJson(feature, isLocal = false) {
         addParam('Разрешенное использование', options.permitted_use_established_by_document || options.permitted_use);
         addParam('Использование по документу', options.utilization_by_document);
         
-        if (!isLocal) {
-            const oknList = await fetchLinkedObjects(feature);
-            if (oknList && oknList.length > 0) {
-                 data.links['ОКС на земельном участке'] = oknList;
-            }
+        // Связанные ОКС
+        const oknList = await fetchLinkedObjects(feature);
+        if (oknList && oknList.length > 0) {
+             data.links['ОКС на земельном участке'] = oknList;
         }
 
     } 
-    else if (data.common.objType.includes("Машино")) {
-        addParam('Площадь', options.area ? `${formatNumberWithSpaces(options.area)} м²` : null);
-        addParam('Этаж', options.floor);
-        addParam('Номер на плане', options.floor_plan_number);
-        addParam('КН здания/сооружения', options.parent_cad_number);
-        
-        if (!isLocal) {
-            const landList = await fetchLinkedObjects(feature);
-            if (landList && landList.length > 0) data.links['Расположен на ЗУ'] = landList;
-        }
-    }
+    
+    // Машино-места
+else if (data.common.objType.includes("Машино")) {
+    addParam('Площадь', options.area ? `${formatNumberWithSpaces(options.area)} м²` : null);
+    addParam('Этаж', options.floor);
+    addParam('Номер на плане', options.floor_plan_number);
+    addParam('КН здания/сооружения', options.parent_cad_number);
+    
+    // ДОБАВИТЬ: получение связанных ЗУ
+    const landList = await fetchLinkedObjects(feature);
+    if (landList && landList.length > 0) data.links['Расположен на ЗУ'] = landList;
+}
+    // Характеристики ЗДАНИЯ
     else if (data.common.objType.includes("Здания")) {
         const areaVal = options.area || options.build_record_area;
         addParam('Площадь', areaVal ? `${formatNumberWithSpaces(areaVal)} м²` : null);
@@ -2057,13 +1973,12 @@ async function parseNspdJson(feature, isLocal = false) {
         addParam('Физический износ', options.physical_wear ? `${options.physical_wear}%` : null);
         addParam('УПКС', options.cost_index);
         
-        if (!isLocal) {
-            const landList = await fetchLinkedObjects(feature);
-            if (landList && landList.length > 0) data.links['Расположен на ЗУ'] = landList;
-        }
+        const landList = await fetchLinkedObjects(feature);
+        if (landList && landList.length > 0) data.links['Расположен на ЗУ'] = landList;
         addParam('Объединенные КН', options.united_cad_numbers);
 
     } 
+    // Характеристики ПОМЕЩЕНИЯ
     else if (data.common.objType.includes("Помещения")) {
         addParam('Площадь', options.area ? `${formatNumberWithSpaces(options.area)} м²` : null);
         addParam('Назначение', options.purpose);
@@ -2079,12 +1994,11 @@ async function parseNspdJson(feature, isLocal = false) {
         const isCommon = options.common_property === "true" || options.common_property === true ? "Да" : null;
         addParam('Общее имущество', isCommon);
         
-        if (!isLocal) {
-            const landList = await fetchLinkedObjects(feature);
-            if (landList && landList.length > 0) data.links['Расположен на ЗУ'] = landList;
-        }
+        const landList = await fetchLinkedObjects(feature);
+        if (landList && landList.length > 0) data.links['Расположен на ЗУ'] = landList;
 
     } 
+    // Характеристики СООРУЖЕНИЯ
     else if (data.common.objType.includes("Сооружения")) {
         addParam('Площадь', options.params_area ? `${formatNumberWithSpaces(options.params_area)} м²` : null);
         addParam('Наименование', options.params_name || options.name);
@@ -2101,11 +2015,10 @@ async function parseNspdJson(feature, isLocal = false) {
         addParam('Год постройки', options.params_year_built || options.year_built);
         addParam('Год ввода в экспл.', options.params_year_commisioning || options.year_commisioning);
         
-        if (!isLocal) {
-            const landList = await fetchLinkedObjects(feature);
-            if (landList && landList.length > 0) data.links['Расположен на ЗУ'] = landList;
-        }
+        const landList = await fetchLinkedObjects(feature);
+        if (landList && landList.length > 0) data.links['Расположен на ЗУ'] = landList;
     } 
+    // Машино-места
     else if (data.common.objType.includes("Машино")) {
          addParam('Площадь', options.area ? `${formatNumberWithSpaces(options.area)} м²` : null);
          addParam('Этаж', options.floor);
@@ -2113,6 +2026,9 @@ async function parseNspdJson(feature, isLocal = false) {
          addParam('КН здания/сооружения', options.parent_cad_number);
     }
 
+    // Общие поля для всех (права, ограничения, примечания)
+    
+    // Формирование права
     let rightDisplay = null;
     if (options.right_type) {
         rightDisplay = options.right_type;
@@ -2129,9 +2045,12 @@ async function parseNspdJson(feature, isLocal = false) {
     addParam('Дата обновления данных', formatDate(properties.systemInfo?.updated));
     addParam('Дата внесения записи', formatDate(properties.systemInfo?.inserted));
 
+    // Координаты системы
     data.coordinatesSystem = 'EPSG:3857';
 
+    // Обработка геометрии для отрисовки
     if (feature.geometry) {
+        // Если точка, добавляем в параметры
         if (feature.geometry.type === 'Point' && Array.isArray(feature.geometry.coordinates)) {
              const x = feature.geometry.coordinates[0];
              const y = feature.geometry.coordinates[1];
@@ -2161,7 +2080,6 @@ async function parseNspdJson(feature, isLocal = false) {
     data.source = 'nspd';
     return data;
 }
-
 
 function displayResults(data, title, isKptFile = false) {
     const output = document.getElementById('report-output');
