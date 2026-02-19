@@ -13364,7 +13364,6 @@ async function exportMapToJson() {
     }
 }
 
-
 // --- ФУНКЦИЯ ИМПОРТА (Обработчик input) ---
 function handleMapJsonImport(event) {
     const file = event.target.files[0];
@@ -13380,7 +13379,7 @@ function handleMapJsonImport(event) {
             const arrayBuffer = e.target.result;
             let jsonContent;
 
-            // --- Распаковка (поддержка ZIP и обычного JSON) ---
+            // --- НАЧАЛО ИЗМЕНЕНИЙ (Распаковка) ---
             try {
                 // Пытаемся открыть как ZIP
                 const zip = await JSZip.loadAsync(arrayBuffer);
@@ -13399,7 +13398,8 @@ function handleMapJsonImport(event) {
                     throw new Error("В файле .map не найден JSON с данными");
                 }
             } catch (zipError) {
-                // Если не удалось открыть как ZIP, пробуем как обычный текст
+                // Если не удалось открыть как ZIP, пробуем как обычный текст (Legacy support)
+                // Используем TextDecoder для преобразования ArrayBuffer в строку
                 const decoder = new TextDecoder("utf-8");
                 jsonContent = decoder.decode(arrayBuffer);
                 
@@ -13408,220 +13408,225 @@ function handleMapJsonImport(event) {
                     throw new Error("Файл поврежден или имеет неверный формат");
                 }
             }
+            // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-            const parsedData = JSON.parse(jsonContent);
+            const mapData = JSON.parse(jsonContent);
 
-          
-            if (parsedData.type === 'FeatureCollection' || parsedData.type === 'Feature' || (parsedData.data && parsedData.data.features)) {
-                
-                clearMapAndResetTheme();
-                
-                let featuresToImport = [];
-                
-           
-                if (parsedData.type === 'Feature') {
-                    featuresToImport = [parsedData];
-                } else if (parsedData.type === 'FeatureCollection') {
-                    featuresToImport = parsedData.features;
-                } else if (parsedData.data && Array.isArray(parsedData.data.features)) {
-                    featuresToImport = parsedData.data.features;
-                }
-
-                if (!featuresToImport || featuresToImport.length === 0) {
-                    throw new Error("JSON файл не содержит объектов (features).");
-                }
-
-           
-                const importDate = new Date().toLocaleDateString('ru-RU');
-                
-            
-                parcelFeaturesData = featuresToImport;
-                
-               
-                await loadAndProcessSupabaseData(featuresToImport, `Импорт JSON (${importDate})`);
-                
-                showNotification(`Успешно импортировано ${featuresToImport.length} объектов из JSON`, 'success', 'file-import');
-                
-            } 
-          
-            else if (parsedData.type === 'MapData') {
-                const mapData = parsedData; 
-                
-            
-                clearMapAndResetTheme();
-
-                let importedCount = 0;
-                const restoredParcelsData = [];
-                const restoredBuildingsData = [];
-                const restoredStructuresData = [];
-                const restoredZouitsData = [];
-                
-                const pendingVertexPoints = []; 
-
-                const applyOffset = (coord) => [
-                    coord[0] - (mapOffsetY * 0.000008983),
-                    coord[1] - (mapOffsetX * 0.000008983)
-                ];
-
-                if (mapData.features) {
-                    mapData.features.forEach(f => {
-                        let ymapsObj;
-                        let coords = f.geometry.coordinates;
-                        let type = f.geometry.type;
-                        let props = f.properties || {};
-                        let opts = f.options || {};
-                        let flags = f.appFlags || {};
-
-                        // Применяем смещение к координатам
-                        let visualCoords;
-                        if (type === 'Point') {
-                            visualCoords = applyOffset(coords);
-                        } else if (type === 'LineString') {
-                            visualCoords = coords.map(applyOffset);
-                        } else if (type === 'Polygon') {
-                            visualCoords = coords.map(ring => ring.map(applyOffset));
-                        }
-
-                        // --- Создание объектов ---
-                        if (type === 'Point') {
-                            ymapsObj = new ymaps.Placemark(visualCoords, props, opts);
-                            if (flags.isCustomLabel || (props.cadastralNumber && !flags.isVertexPoint)) {
-                                ymapsObj.options.set('iconLayout', customPlacemarkLayout);
-                            }
-                            if (flags.isVertexPoint) {
-                                if (props.isCoordLabel) {
-                                    ymapsObj.options.set('iconLayout', coordinateLabelLayout);
-                                } else if (props.dotSize) {
-                                    ymapsObj.options.set('iconLayout', redDotLayout);
-                                } else if (props.fontSize) {
-                                    ymapsObj.options.set('iconLayout', numberedPointLayout);
-                                }
-                                pendingVertexPoints.push({
-                                    placemark: ymapsObj,
-                                    parentCn: flags.relatedPolygonCadastralNumber
-                                });
-                            }
-                        } else if (type === 'LineString') {
-                            ymapsObj = new ymaps.Polyline(visualCoords, props, opts);
-                        } else if (type === 'Polygon') {
-                            ymapsObj = new ymaps.Polygon(visualCoords, props, opts);
-                            if (props.hintContent && typeof props.hintContent === 'object') {
-                                ymapsObj.options.set('hintLayout', customHintLayout);
-                            }
-                        }
-
-                        if (ymapsObj) {
-                            Object.keys(flags).forEach(key => {
-                                if (key !== 'relatedPolygonCadastralNumber') {
-                                    ymapsObj.properties.set(key, flags[key]);
-                                }
-                            });
-
-                            map.geoObjects.add(ymapsObj);
-                            
-                            if (flags.isAreaMeasurement) {
-                                areaObjects.push(ymapsObj);
-                            } else {
-                                polygons.push(ymapsObj);
-                            }
-
-                            if (type === 'Point' && flags.isCustomLabel) {
-                                const parentPoly = polygons.find(p => 
-                                    p instanceof ymaps.Polygon && 
-                                    p.properties.get('cadastralNumber') === props.cadastralNumber
-                                );
-                                if (parentPoly) ymapsObj.polygon = parentPoly;
-                                parcelPlacemarks.push(ymapsObj);
-                            }
-                            
-                            // Восстановление данных для сайдбара
-                            let featureData = props.featureData;
-                            const isDataBroken = !featureData || !featureData.properties || Object.keys(featureData.properties).length === 0;
-                            
-                            if (isDataBroken && (props.cadastralNumber || props.address)) {
-                                if (!featureData) featureData = { type: "Feature", geometry: f.geometry };
-                                featureData.properties = featureData.properties || {};
-                                featureData.properties.options = featureData.properties.options || {};
-                                featureData.properties.descr = props.cadastralNumber;
-                                featureData.properties.options.cad_num = props.cadastralNumber;
-                                featureData.properties.options.readable_address = props.address;
-                                // ... (восстановление площади и стоимости опустим для краткости, оно есть в оригинале) ...
-                                ymapsObj.properties.set('featureData', featureData);
-                            }
-
-                            if (featureData) {
-                                if (flags.isParcelInQuarter || flags.isFoundInArea) restoredParcelsData.push(featureData);
-                                if (flags.isBuilding) restoredBuildingsData.push(featureData);
-                                if (flags.isStructure) restoredStructuresData.push(featureData);
-                                if (flags.isZouit) restoredZouitsData.push(featureData);
-                            }
-                            importedCount++;
-                        }
-                    });
-                    
-                    // Восстановление связей точек
-                    pendingVertexPoints.forEach(item => {
-                        if (item.parentCn) {
-                            const parentPolygon = polygons.find(p => 
-                                p instanceof ymaps.Polygon && 
-                                p.properties.get('cadastralNumber') === item.parentCn
-                            );
-                            if (parentPolygon) {
-                                item.placemark.properties.set('relatedPolygon', parentPolygon);
-                                if (item.placemark.properties.get('isCoordLabel')) {
-                                    parentPolygon.properties.set('coordsPointsVisible', true);
-                                } else {
-                                    parentPolygon.properties.set('numberedPointsVisible', true);
-                                }
-                            }
-                        }
-                    });
-                }
-
-                // Восстановление текста
-                if (mapData.texts) {
-                    mapData.texts.forEach(t => {
-                        const visualPos = applyOffset(t.position);
-                        const projection = map.options.get('projection');
-                        const zoom = map.getZoom();
-                        const px = projection.toGlobalPixels(visualPos, zoom);
-                        const pagePx = map.converter.globalToPage(px);
-                        createDraggableText(t.content, {x: pagePx[0], y: pagePx[1]});
-                        const newTextEl = draggableTexts[draggableTexts.length - 1];
-                        if (newTextEl) {
-                            newTextEl.dataset.rotation = t.rotation;
-                            newTextEl.style.transform = `rotate(${t.rotation}deg)`;
-                            const span = newTextEl.querySelector('span');
-                            if (span && t.style) {
-                                span.style.color = t.style.color;
-                                span.style.fontSize = t.style.fontSize;
-                                if (t.style.backgroundVisible === 'false') {
-                                    const eyeBtn = newTextEl.querySelector('button i.fa-eye-slash')?.parentNode;
-                                    if (eyeBtn) eyeBtn.click();
-                                }
-                            }
-                        }
-                        importedCount++;
-                    });
-                }
-
-                if (restoredParcelsData.length > 0) {
-                    parcelFeaturesData = restoredParcelsData;
-                    populateSidebarWithParcels(parcelFeaturesData, "Импорт Карты");
-                }
-                if (restoredBuildingsData.length > 0) buildingFeaturesData = restoredBuildingsData;
-                if (restoredStructuresData.length > 0) structureFeaturesData = restoredStructuresData;
-                if (restoredZouitsData.length > 0) zouitFeaturesData = restoredZouitsData;
-
-                applyCurrentTheme();
-                showNotification(`Карта восстановлена. Объектов: ${importedCount}`, 'success', 'check-circle');
-            
-            } else {
-                throw new Error("Неизвестный или неподдерживаемый формат данных JSON.");
+            if (!mapData.type || mapData.type !== 'MapData') {
+                throw new Error("Неверный формат файла (.map)");
             }
 
+            // Очищаем текущую карту и данные
+            clearMapAndResetTheme();
+
+            let importedCount = 0;
+            const restoredParcelsData = [];
+            const restoredBuildingsData = [];
+            const restoredStructuresData = [];
+            const restoredZouitsData = [];
+            
+            // Временный массив для восстановления связей "Точка -> Полигон"
+            const pendingVertexPoints = []; 
+
+            const applyOffset = (coord) => [
+                coord[0] - (mapOffsetY * 0.000008983),
+                coord[1] - (mapOffsetX * 0.000008983)
+            ];
+
+            if (mapData.features) {
+                mapData.features.forEach(f => {
+                    let ymapsObj;
+                    let coords = f.geometry.coordinates;
+                    let type = f.geometry.type;
+                    let props = f.properties || {};
+                    let opts = f.options || {};
+                    let flags = f.appFlags || {};
+
+                    // Применяем смещение к координатам
+                    let visualCoords;
+                    if (type === 'Point') {
+                        visualCoords = applyOffset(coords);
+                    } else if (type === 'LineString') {
+                        visualCoords = coords.map(applyOffset);
+                    } else if (type === 'Polygon') {
+                        visualCoords = coords.map(ring => ring.map(applyOffset));
+                    }
+
+                    // --- Создание объектов ---
+                    if (type === 'Point') {
+                        ymapsObj = new ymaps.Placemark(visualCoords, props, opts);
+                        
+                        // Восстанавливаем внешний вид текстовых меток
+                        if (flags.isCustomLabel || (props.cadastralNumber && !flags.isVertexPoint)) {
+                            ymapsObj.options.set('iconLayout', customPlacemarkLayout);
+                        }
+                        
+                        // Восстанавливаем макеты для технических точек (н1, н2...)
+                        if (flags.isVertexPoint) {
+                             if (props.isCoordLabel) {
+                                 ymapsObj.options.set('iconLayout', coordinateLabelLayout);
+                             } else if (props.dotSize) {
+                                 ymapsObj.options.set('iconLayout', redDotLayout);
+                             } else if (props.fontSize) {
+                                 ymapsObj.options.set('iconLayout', numberedPointLayout);
+                             }
+                             // Сохраняем во временный массив для связывания после создания всех полигонов
+                             pendingVertexPoints.push({
+                                 placemark: ymapsObj,
+                                 parentCn: flags.relatedPolygonCadastralNumber
+                             });
+                        }
+
+                    } else if (type === 'LineString') {
+                        ymapsObj = new ymaps.Polyline(visualCoords, props, opts);
+                    } else if (type === 'Polygon') {
+                        ymapsObj = new ymaps.Polygon(visualCoords, props, opts);
+                        // Для полигонов восстанавливаем сложный хинт
+                        if (props.hintContent && typeof props.hintContent === 'object') {
+                            ymapsObj.options.set('hintLayout', customHintLayout);
+                        }
+                    }
+
+                    if (ymapsObj) {
+                        // Восстанавливаем флаги приложения
+                        Object.keys(flags).forEach(key => {
+                            if (key !== 'relatedPolygonCadastralNumber') {
+                                ymapsObj.properties.set(key, flags[key]);
+                            }
+                        });
+
+                        map.geoObjects.add(ymapsObj);
+                        
+                        if (flags.isAreaMeasurement) {
+                            areaObjects.push(ymapsObj);
+                        } else {
+                            polygons.push(ymapsObj);
+                        }
+
+                        // Если это текстовая метка КН
+                        if (type === 'Point' && flags.isCustomLabel) {
+                            const parentPoly = polygons.find(p => 
+                                p instanceof ymaps.Polygon && 
+                                p.properties.get('cadastralNumber') === props.cadastralNumber
+                            );
+                            if (parentPoly) ymapsObj.polygon = parentPoly;
+                            parcelPlacemarks.push(ymapsObj);
+                        }
+                        
+                        // --- ЛОГИКА ВОССТАНОВЛЕНИЯ ДАННЫХ ДЛЯ САЙДБАРА ---
+                        let featureData = props.featureData;
+                        
+                        // Если featureData поврежден или отсутствует
+                        const isDataBroken = !featureData || !featureData.properties || Object.keys(featureData.properties).length === 0;
+                        
+                        if (isDataBroken && (props.cadastralNumber || props.address)) {
+                            if (!featureData) featureData = { type: "Feature", geometry: f.geometry };
+                            featureData.properties = featureData.properties || {};
+                            featureData.properties.options = featureData.properties.options || {};
+
+                            featureData.properties.descr = props.cadastralNumber;
+                            featureData.properties.options.cad_num = props.cadastralNumber;
+                            featureData.properties.options.readable_address = props.address;
+
+                            if (props.areaText) {
+                                const areaRegex = /^([\d\s ]+)[^0-9]*\((.*?)\)$/;
+                                const match = props.areaText.match(areaRegex);
+                                if (match) {
+                                    const rawVal = match[1].replace(/[\s ]/g, '');
+                                    const type = match[2];
+                                    if (type.includes('декларированная')) {
+                                        featureData.properties.options.land_record_area_declaration = rawVal;
+                                        featureData.properties.options.declared_area = rawVal;
+                                    } else {
+                                        featureData.properties.options.land_record_area_verified = rawVal;
+                                        featureData.properties.options.specified_area = rawVal;
+                                    }
+                                } else {
+                                    featureData.properties.options.land_record_area = props.areaText.replace(/\D/g, '');
+                                }
+                            }
+
+                            if (props.costIndex) featureData.properties.options.cost_index = props.costIndex;
+                            if (props.vri) featureData.properties.options.permitted_use_established_by_document = props.vri;
+                            
+                            ymapsObj.properties.set('featureData', featureData);
+                        }
+
+                        if (featureData) {
+                            if (flags.isParcelInQuarter || flags.isFoundInArea) restoredParcelsData.push(featureData);
+                            if (flags.isBuilding) restoredBuildingsData.push(featureData);
+                            if (flags.isStructure) restoredStructuresData.push(featureData);
+                            if (flags.isZouit) restoredZouitsData.push(featureData);
+                        }
+                        
+                        importedCount++;
+                    }
+                });
+                
+                // --- ВТОРОЙ ПРОХОД: ВОССТАНОВЛЕНИЕ СВЯЗЕЙ ТОЧЕК ---
+                pendingVertexPoints.forEach(item => {
+                    if (item.parentCn) {
+                        const parentPolygon = polygons.find(p => 
+                            p instanceof ymaps.Polygon && 
+                            p.properties.get('cadastralNumber') === item.parentCn
+                        );
+                        
+                        if (parentPolygon) {
+                            item.placemark.properties.set('relatedPolygon', parentPolygon);
+                            if (item.placemark.properties.get('isCoordLabel')) {
+                                parentPolygon.properties.set('coordsPointsVisible', true);
+                            } else {
+                                parentPolygon.properties.set('numberedPointsVisible', true);
+                            }
+                        }
+                    }
+                });
+            }
+
+            // Восстановление текста
+            if (mapData.texts) {
+                mapData.texts.forEach(t => {
+                    const visualPos = applyOffset(t.position);
+                    const projection = map.options.get('projection');
+                    const zoom = map.getZoom();
+                    const px = projection.toGlobalPixels(visualPos, zoom);
+                    const pagePx = map.converter.globalToPage(px);
+                    
+                    createDraggableText(t.content, {x: pagePx[0], y: pagePx[1]});
+                    
+                    const newTextEl = draggableTexts[draggableTexts.length - 1];
+                    if (newTextEl) {
+                        newTextEl.dataset.rotation = t.rotation;
+                        newTextEl.style.transform = `rotate(${t.rotation}deg)`;
+                        const span = newTextEl.querySelector('span');
+                        if (span && t.style) {
+                            span.style.color = t.style.color;
+                            span.style.fontSize = t.style.fontSize;
+                            if (t.style.backgroundVisible === 'false') {
+                                const eyeBtn = newTextEl.querySelector('button i.fa-eye-slash')?.parentNode;
+                                if (eyeBtn) eyeBtn.click();
+                            }
+                        }
+                    }
+                    importedCount++;
+                });
+            }
+
+            if (restoredParcelsData.length > 0) {
+                parcelFeaturesData = restoredParcelsData;
+                populateSidebarWithParcels(parcelFeaturesData, "Импорт JSON");
+            }
+            if (restoredBuildingsData.length > 0) {
+                buildingFeaturesData = restoredBuildingsData;
+            }
+            if (restoredStructuresData.length > 0) structureFeaturesData = restoredStructuresData;
+            if (restoredZouitsData.length > 0) zouitFeaturesData = restoredZouitsData;
+
+            applyCurrentTheme();
+            showNotification(`Импорт завершен. Объектов: ${importedCount}`, 'success', 'check-circle');
+
         } catch (error) {
-            console.error("Ошибка импорта:", error);
+            console.error("Ошибка импорта JSON:", error);
             showNotification("Не удалось прочитать файл: " + error.message, 'error');
         } finally {
             hideLoader();
@@ -13629,7 +13634,6 @@ function handleMapJsonImport(event) {
         }
     };
 }
-
 
 async function copyAllOks(oksArray) {
     if (!oksArray || oksArray.length === 0) {
