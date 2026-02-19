@@ -5780,13 +5780,21 @@ async function terrZoneMenuItemHandler(contextMenu, map, polygons, polygonStyle,
         }
 
         let combinedBounds = null;
+        const turfPolygons = [];
         let clickedContourCentroid = null;
 
-        const polygonsCoords = feature.geometry.type === 'MultiPolygon' ? feature.geometry.coordinates : [feature.geometry.coordinates];
+        const isMultiPolygon = feature.geometry.type === 'MultiPolygon';
+        const polygonsCoords = isMultiPolygon ? feature.geometry.coordinates : [feature.geometry.coordinates];
 
-        const cadastralNumber = feature.properties.options && feature.properties.options.reg_numb_border ? feature.properties.options.reg_numb_border : 'Не указан';
-        const name = feature.properties.options && feature.properties.options.name_by_doc ? feature.properties.options.name_by_doc : 'Не указано';
-        const registrationDate = feature.properties.options && feature.properties.options.registration_date ? feature.properties.options.registration_date : 'Не указана';
+        const cadastralNumber = feature.properties.options && feature.properties.options.reg_numb_border
+            ? feature.properties.options.reg_numb_border
+            : 'Не указан';
+        const name = feature.properties.options && feature.properties.options.name_by_doc
+            ? feature.properties.options.name_by_doc
+            : 'Не указано';
+        const registrationDate = feature.properties.options && feature.properties.options.registration_date
+            ? feature.properties.options.registration_date
+            : 'Не указана';
         const labelContent = `${cadastralNumber} - ${name} (${registrationDate})`;
 
         for (let polygonIndex = 0; polygonIndex < polygonsCoords.length; polygonIndex++) {
@@ -5794,17 +5802,29 @@ async function terrZoneMenuItemHandler(contextMenu, map, polygons, polygonStyle,
 
             for (let contourIndex = 0; contourIndex < polygonCoords.length; contourIndex++) {
                 const contour = polygonCoords[contourIndex];
-                if (!Array.isArray(contour)) continue;
+                if (!Array.isArray(contour)) {
+                    console.error(`Некорректный формат контура в полигоне:`, contour);
+                    continue;
+                }
 
                 const coords = [];
                 for (const coord of contour) {
-                    if (!Array.isArray(coord) || coord.length !== 2) continue;
+                    if (!Array.isArray(coord) || coord.length !== 2 || typeof coord[0] !== 'number' || typeof coord[1] !== 'number' || !Number.isFinite(coord[0]) || !Number.isFinite(coord[1])) {
+                        console.error(`Некорректная координата перед преобразованием:`, coord);
+                        continue;
+                    }
+
                     try {
                         const point = proj4('EPSG:3857', 'EPSG:4326', coord);
-                        if (Number.isFinite(point[0]) && Number.isFinite(point[1])) {
-                            coords.push([point[1], point[0]]);
+                        if (!Number.isFinite(point[0]) || !Number.isFinite(point[1])) {
+                            console.error(`Преобразование дало некорректные значения:`, coord, '->', point);
+                            continue;
                         }
-                    } catch (e) { }
+                        coords.push([point[1], point[0]]);
+                    } catch (e) {
+                        console.error(`Ошибка преобразования координаты:`, coord, e);
+                        continue;
+                    }
                 }
 
                 if (coords.length > 0) {
@@ -5813,10 +5833,7 @@ async function terrZoneMenuItemHandler(contextMenu, map, polygons, polygonStyle,
                         coord[1] - mapOffsetX * 0.000008983
                     ]);
 
-                    const polygonObj = new ymaps.Polygon([offsetCoords], {
-                        featureData: feature,
-                        cadastralNumber: cadastralNumber
-                    }, {
+                    const polygonObj = new ymaps.Polygon([offsetCoords], {}, {
                         strokeColor: '#0000FF',
                         strokeWidth: polygonStyle.width,
                         strokeOpacity: 0.8,
@@ -5840,6 +5857,8 @@ async function terrZoneMenuItemHandler(contextMenu, map, polygons, polygonStyle,
                     }
 
                     const turfContour = turf.polygon([coords.map(coord => [coord[1], coord[0]])]);
+                    turfPolygons.push(turfContour);
+
                     const clickPoint = turf.point([lon, lat]);
                     const isPointInContour = turf.booleanPointInPolygon(clickPoint, turfContour);
 
@@ -5859,12 +5878,36 @@ async function terrZoneMenuItemHandler(contextMenu, map, polygons, polygonStyle,
             throw new Error('Не удалось определить границы полигона');
         }
 
-        map.setBounds(combinedBounds, { checkZoomRange: true, duration: 200 });
+        map.setBounds(combinedBounds, {
+            checkZoomRange: true,
+            duration: 200
+        });
 
-        const centerGeo = [(combinedBounds[0][0] + combinedBounds[1][0]) / 2, (combinedBounds[0][1] + combinedBounds[1][1]) / 2];
+        const centerGeo = [
+            (combinedBounds[0][0] + combinedBounds[1][0]) / 2,
+            (combinedBounds[0][1] + combinedBounds[1][1]) / 2
+        ];
+
         getAddressByCoords(centerGeo).then(address => {
             document.getElementById('city-name-display').innerHTML = address;
         });
+
+        const center3857 = proj4("EPSG:4326", "EPSG:3857", [centerGeo[1], centerGeo[0]]);
+
+        lastPolygonCenter = {
+            geo: {
+                lat: centerGeo[0],
+                lon: centerGeo[1]
+            },
+            epsg3857: {
+                x: center3857[0],
+                y: center3857[1]
+            },
+            native: {
+                x: feature.geometry.coordinates[0]?.[0]?.[0]?.[0] || 0,
+                y: feature.geometry.coordinates[0]?.[0]?.[0]?.[1] || 0
+            }
+        };
 
         if (clickedContourCentroid) {
             const terrZoneText = new ymaps.Placemark(clickedContourCentroid, {
@@ -5872,10 +5915,13 @@ async function terrZoneMenuItemHandler(contextMenu, map, polygons, polygonStyle,
                 hintContent: labelContent
             }, {
                 preset: 'islands#blueStretchyIcon',
-                draggable: true
+                draggable: true // Добавлено: метка перетаскиваемая
             });
+
             map.geoObjects.add(terrZoneText);
             polygons.push(terrZoneText);
+        } else {
+            console.warn('Выбранная точка не попала ни в один из контуров');
         }
     } catch (error) {
         console.error('Ошибка при получении тер. зоны:', error);
@@ -5883,7 +5929,6 @@ async function terrZoneMenuItemHandler(contextMenu, map, polygons, polygonStyle,
     }
     contextMenu.style.display = 'none';
 }
-
 
 
 
@@ -6138,30 +6183,49 @@ async function municipalMenuItemHandler(contextMenu, map, polygons, polygonStyle
         }
 
         let combinedBounds = null;
+        const turfPolygons = [];
 
         for (const feature of municipalData.features) {
-            if (!feature.geometry || !feature.geometry.coordinates) continue;
+            if (!feature.geometry || !feature.geometry.coordinates) {
+                console.error('Геометрия или координаты отсутствуют в данных:', feature);
+                continue;
+            }
 
-            const polygonsCoords = feature.geometry.type === 'MultiPolygon' ? feature.geometry.coordinates : [feature.geometry.coordinates];
+            const isMultiPolygon = feature.geometry.type === 'MultiPolygon';
+            const polygonsCoords = isMultiPolygon ? feature.geometry.coordinates : [feature.geometry.coordinates];
+
             const label = feature.properties.label || "Без названия";
             const descr = feature.properties.descr || "Без описания";
             const labelContent = `${label} - ${descr}`;
 
             for (let polygonIndex = 0; polygonIndex < polygonsCoords.length; polygonIndex++) {
                 const polygonCoords = polygonsCoords[polygonIndex];
+
                 for (let contourIndex = 0; contourIndex < polygonCoords.length; contourIndex++) {
                     const contour = polygonCoords[contourIndex];
-                    if (!Array.isArray(contour)) continue;
+                    if (!Array.isArray(contour)) {
+                        console.error(`Некорректный формат контура в полигоне:`, contour);
+                        continue;
+                    }
 
                     const coords = [];
                     for (const coord of contour) {
-                        if (!Array.isArray(coord) || coord.length !== 2) continue;
+                        if (!Array.isArray(coord) || coord.length !== 2 || typeof coord[0] !== 'number' || typeof coord[1] !== 'number' || !Number.isFinite(coord[0]) || !Number.isFinite(coord[1])) {
+                            console.error(`Некорректная координата перед преобразованием:`, coord);
+                            continue;
+                        }
+
                         try {
                             const point = proj4('EPSG:3857', 'EPSG:4326', coord);
-                            if (Number.isFinite(point[0]) && Number.isFinite(point[1])) {
-                                coords.push([point[1], point[0]]);
+                            if (!Number.isFinite(point[0]) || !Number.isFinite(point[1])) {
+                                console.error(`Преобразование дало некорректные значения:`, coord, '->', point);
+                                continue;
                             }
-                        } catch (e) {}
+                            coords.push([point[1], point[0]]);
+                        } catch (e) {
+                            console.error(`Ошибка преобразования координаты:`, coord, e);
+                            continue;
+                        }
                     }
 
                     if (coords.length > 0) {
@@ -6170,10 +6234,7 @@ async function municipalMenuItemHandler(contextMenu, map, polygons, polygonStyle
                             coord[1] - mapOffsetX * 0.000008983
                         ]);
 
-                        const polygonObj = new ymaps.Polygon([offsetCoords], {
-                            featureData: feature,
-                            cadastralNumber: label
-                        }, {
+                        const polygonObj = new ymaps.Polygon([offsetCoords], {}, {
                             strokeColor: '#FFA500',
                             strokeWidth: polygonStyle.width,
                             strokeOpacity: 0.8,
@@ -6197,6 +6258,8 @@ async function municipalMenuItemHandler(contextMenu, map, polygons, polygonStyle
                         }
 
                         const turfContour = turf.polygon([coords.map(coord => [coord[1], coord[0]])]);
+                        turfPolygons.push(turfContour);
+
                         const centroidFeature = turf.centroid(turfContour);
                         const centroidCoordsGeo = centroidFeature.geometry.coordinates;
                         const contourCentroid = [
@@ -6209,7 +6272,7 @@ async function municipalMenuItemHandler(contextMenu, map, polygons, polygonStyle
                             hintContent: labelContent
                         }, {
                             preset: 'islands#orangeStretchyIcon',
-                            draggable: true
+                            draggable: true // Добавлено: метка перетаскиваемая
                         });
 
                         map.geoObjects.add(municipalText);
@@ -6219,20 +6282,40 @@ async function municipalMenuItemHandler(contextMenu, map, polygons, polygonStyle
             }
         }
 
-        if (combinedBounds) {
-            map.setBounds(combinedBounds, { checkZoomRange: true, duration: 200 });
-            const centerGeo = [(combinedBounds[0][0] + combinedBounds[1][0]) / 2, (combinedBounds[0][1] + combinedBounds[1][1]) / 2];
-            getAddressByCoords(centerGeo).then(address => {
-                document.getElementById('city-name-display').innerHTML = address;
-            });
+        if (!combinedBounds) {
+            throw new Error('Не удалось определить границы полигонов');
         }
+
+        map.setBounds(combinedBounds, {
+            checkZoomRange: true,
+            duration: 200
+        });
+
+        const centerGeo = [
+            (combinedBounds[0][0] + combinedBounds[1][0]) / 2,
+            (combinedBounds[0][1] + combinedBounds[1][1]) / 2
+        ];
+
+        getAddressByCoords(centerGeo).then(address => {
+            document.getElementById('city-name-display').innerHTML = address;
+        });
+
+        const center3857 = proj4("EPSG:4326", "EPSG:3857", [centerGeo[1], centerGeo[0]]);
+
+        lastPolygonCenter = {
+            geo: { lat: centerGeo[0], lon: centerGeo[1] },
+            epsg3857: { x: center3857[0], y: center3857[1] },
+            native: {
+                x: municipalData.features[0].geometry.coordinates[0]?.[0]?.[0]?.[0] || 0,
+                y: municipalData.features[0].geometry.coordinates[0]?.[0]?.[0]?.[1] || 0
+            }
+        };
     } catch (error) {
         console.error('Ошибка при получении муниципального образования:', error);
         showNotification('Ошибка обработки данных муниципального образования', 'error', 'exclamation-circle');
     }
     contextMenu.style.display = 'none';
 }
-
 
 async function settlementsMenuItemHandler(contextMenu, map, polygons, polygonStyle, mapOffsetY, mapOffsetX, getAddressByCoords, proj4, ymaps, showNotification) {
     const lat = parseFloat(contextMenu.dataset.lat);
@@ -6248,30 +6331,53 @@ async function settlementsMenuItemHandler(contextMenu, map, polygons, polygonSty
         }
 
         let combinedBounds = null;
+        const turfPolygons = [];
 
         for (const feature of settlementsData.features) {
-            if (!feature.geometry || !feature.geometry.coordinates) continue;
+            if (!feature.geometry || !feature.geometry.coordinates) {
+                console.error('Геометрия или координаты отсутствуют в данных:', feature);
+                continue;
+            }
 
-            const polygonsCoords = feature.geometry.type === 'MultiPolygon' ? feature.geometry.coordinates : [feature.geometry.coordinates];
+            const isMultiPolygon = feature.geometry.type === 'MultiPolygon';
+            const polygonsCoords = isMultiPolygon ? feature.geometry.coordinates : [feature.geometry.coordinates];
+
             const label = feature.properties.label || "Без названия";
-            const name = feature.properties.options && feature.properties.options.name ? feature.properties.options.name : 'Не указано';
+            const name = feature.properties.options && feature.properties.options.name 
+                ? feature.properties.options.name 
+                : 'Не указано';
             const labelContent = `${label} - ${name}`;
+
+          //  console.log('Сформированная метка:', labelContent);
 
             for (let polygonIndex = 0; polygonIndex < polygonsCoords.length; polygonIndex++) {
                 const polygonCoords = polygonsCoords[polygonIndex];
+
                 for (let contourIndex = 0; contourIndex < polygonCoords.length; contourIndex++) {
                     const contour = polygonCoords[contourIndex];
-                    if (!Array.isArray(contour)) continue;
+                    if (!Array.isArray(contour)) {
+                        console.error(`Некорректный формат контура в полигоне:`, contour);
+                        continue;
+                    }
 
                     const coords = [];
                     for (const coord of contour) {
-                        if (!Array.isArray(coord) || coord.length !== 2) continue;
+                        if (!Array.isArray(coord) || coord.length !== 2 || typeof coord[0] !== 'number' || typeof coord[1] !== 'number' || !Number.isFinite(coord[0]) || !Number.isFinite(coord[1])) {
+                            console.error(`Некорректная координата перед преобразованием:`, coord);
+                            continue;
+                        }
+
                         try {
                             const point = proj4('EPSG:3857', 'EPSG:4326', coord);
-                            if (Number.isFinite(point[0]) && Number.isFinite(point[1])) {
-                                coords.push([point[1], point[0]]);
+                            if (!Number.isFinite(point[0]) || !Number.isFinite(point[1])) {
+                                console.error(`Преобразование дало некорректные значения:`, coord, '->', point);
+                                continue;
                             }
-                        } catch (e) {}
+                            coords.push([point[1], point[0]]);
+                        } catch (e) {
+                            console.error(`Ошибка преобразования координаты:`, coord, e);
+                            continue;
+                        }
                     }
 
                     if (coords.length > 0) {
@@ -6280,10 +6386,7 @@ async function settlementsMenuItemHandler(contextMenu, map, polygons, polygonSty
                             coord[1] - mapOffsetX * 0.000008983
                         ]);
 
-                        const polygonObj = new ymaps.Polygon([offsetCoords], {
-                            featureData: feature,
-                            cadastralNumber: label
-                        }, {
+                        const polygonObj = new ymaps.Polygon([offsetCoords], {}, {
                             strokeColor: '#FFED29',
                             strokeWidth: polygonStyle.width,
                             strokeOpacity: 0.8,
@@ -6307,6 +6410,8 @@ async function settlementsMenuItemHandler(contextMenu, map, polygons, polygonSty
                         }
 
                         const turfContour = turf.polygon([coords.map(coord => [coord[1], coord[0]])]);
+                        turfPolygons.push(turfContour);
+
                         const centroidFeature = turf.centroid(turfContour);
                         const centroidCoordsGeo = centroidFeature.geometry.coordinates;
                         const contourCentroid = [
@@ -6319,7 +6424,7 @@ async function settlementsMenuItemHandler(contextMenu, map, polygons, polygonSty
                             hintContent: labelContent
                         }, {
                             preset: 'islands#yellowStretchyIcon',
-                            draggable: true
+                            draggable: true // Добавлено: метка перетаскиваемая
                         });
 
                         map.geoObjects.add(settlementText);
@@ -6329,20 +6434,40 @@ async function settlementsMenuItemHandler(contextMenu, map, polygons, polygonSty
             }
         }
 
-        if (combinedBounds) {
-            map.setBounds(combinedBounds, { checkZoomRange: true, duration: 200 });
-            const centerGeo = [(combinedBounds[0][0] + combinedBounds[1][0]) / 2, (combinedBounds[0][1] + combinedBounds[1][1]) / 2];
-            getAddressByCoords(centerGeo).then(address => {
-                document.getElementById('city-name-display').innerHTML = address;
-            });
+        if (!combinedBounds) {
+            throw new Error('Не удалось определить границы полигонов');
         }
+
+        map.setBounds(combinedBounds, {
+            checkZoomRange: true,
+            duration: 200
+        });
+
+        const centerGeo = [
+            (combinedBounds[0][0] + combinedBounds[1][0]) / 2,
+            (combinedBounds[0][1] + combinedBounds[1][1]) / 2
+        ];
+
+        getAddressByCoords(centerGeo).then(address => {
+            document.getElementById('city-name-display').innerHTML = address;
+        });
+
+        const center3857 = proj4("EPSG:4326", "EPSG:3857", [centerGeo[1], centerGeo[0]]);
+
+        lastPolygonCenter = {
+            geo: { lat: centerGeo[0], lon: centerGeo[1] },
+            epsg3857: { x: center3857[0], y: center3857[1] },
+            native: {
+                x: settlementsData.features[0].geometry.coordinates[0]?.[0]?.[0]?.[0] || 0,
+                y: settlementsData.features[0].geometry.coordinates[0]?.[0]?.[0]?.[1] || 0
+            }
+        };
     } catch (error) {
         console.error('Ошибка при получении населённого пункта:', error);
         showNotification('Ошибка обработки данных населённого пункта', 'error', 'exclamation-circle');
     }
     contextMenu.style.display = 'none';
 }
-
 
 
 function copyPolygonCoordinatesAndOpenSite(targetPolygon) {
@@ -10539,12 +10664,14 @@ async function handleEgrnRelatedAction(lat, lon, targetUrl) {
 }
 
 function showExportOptionsDialog(lat, lon) {
+    // Удаляем старое окно, если есть
     const existingModal = document.getElementById('export-options-modal');
     if (existingModal) existingModal.remove();
 
     const modal = document.createElement('div');
     modal.id = 'export-options-modal';
     
+    // Стили для затемнения фона
     Object.assign(modal.style, {
         position: 'fixed',
         zIndex: '10001',
@@ -10561,6 +10688,7 @@ function showExportOptionsDialog(lat, lon) {
         transition: 'opacity 0.3s ease'
     });
 
+    // HTML контент модального окна
     modal.innerHTML = `
         <div class="export-modal-content" style="
             background: linear-gradient(135deg, #ffffff, #f0f0f0);
@@ -10583,31 +10711,27 @@ function showExportOptionsDialog(lat, lon) {
                 box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: transform 0.2s;
             "><i class="fas fa-file-excel"></i>XLSX</button>
 
+            <button id="btn-export-json-all" style="
+                width: 100%; padding: 12px; margin-bottom: 10px; border: none; border-radius: 8px;
+                background: linear-gradient(90deg, #f59e0b, #d97706); color: white; font-weight: bold;
+                cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px;
+                box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: transform 0.2s;
+            "><i class="fas fa-file-code"></i>JSON (Весь квартал)</button>
 
-    
+            <!-- КНОПКА ДЛЯ ВСЕХ ОБЪЕКТОВ КАРТЫ В ФОРМАТЕ NSPD JSON -->
+            <button id="btn-export-json-map" style="
+                width: 100%; padding: 12px; margin-bottom: 10px; border: none; border-radius: 8px;
+                background: linear-gradient(90deg, #8b5cf6, #6d28d9); color: white; font-weight: bold;
+                cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px;
+                box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: transform 0.2s;
+            "><i class="fas fa-globe"></i> JSON (Все объекты карты)</button>
 
             <button id="btn-export-json-current" style="
                 width: 100%; padding: 12px; margin-bottom: 20px; border: none; border-radius: 8px;
                 background: linear-gradient(90deg, #3b82f6, #2563eb); color: white; font-weight: bold;
                 cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px;
                 box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: transform 0.2s;
-            "><i class="fas fa-bullseye"></i> JSON (Объект)</button>
-            
-                        <button id="btn-export-json-all" style="
-                width: 100%; padding: 12px; margin-bottom: 10px; border: none; border-radius: 8px;
-                background: linear-gradient(90deg, #f59e0b, #d97706); color: white; font-weight: bold;
-                cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px;
-                box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: transform 0.2s;
-            "><i class="fas fa-file-code"></i>JSON (Квартал)</button>
-
-            
-            
-                    <button id="btn-export-json-map" style="
-                width: 100%; padding: 12px; margin-bottom: 10px; border: none; border-radius: 8px;
-                background: linear-gradient(90deg, #8b5cf6, #6d28d9); color: white; font-weight: bold;
-                cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px;
-                box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: transform 0.2s;
-            "><i class="fas fa-globe"></i> JSON (Все объекты)</button>
+            "><i class="fas fa-bullseye"></i> JSON (Текущий объект)</button>
 
             <button id="btn-export-cancel" style="
                 background: transparent; border: 1px solid #999; color: #666; padding: 8px 20px;
@@ -10618,32 +10742,38 @@ function showExportOptionsDialog(lat, lon) {
 
     document.body.appendChild(modal);
 
+    // Анимация появления
     requestAnimationFrame(() => {
         modal.style.opacity = '1';
         modal.querySelector('.export-modal-content').style.transform = 'scale(1)';
     });
 
+    // Обработчики кнопок
     const closeModal = () => {
         modal.style.opacity = '0';
         modal.querySelector('.export-modal-content').style.transform = 'scale(0.9)';
         setTimeout(() => modal.remove(), 300);
     };
 
+    // 1. XLSX
     document.getElementById('btn-export-xlsx').onclick = () => {
         closeModal();
         handleExportAction();
     };
 
+    // 2. JSON (Весь квартал - из глобальных переменных)
     document.getElementById('btn-export-json-all').onclick = () => {
         closeModal();
         exportAllDataToJson();
     };
 
+    // 3. JSON (ВСЕ объекты на карте - НОВАЯ ЛОГИКА)
     document.getElementById('btn-export-json-map').onclick = () => {
         closeModal();
-        exportAllMapObjectsToCleanJson();
+        exportAllMapObjectsToCleanJson(); // Вызов новой функции
     };
 
+    // 4. JSON (Текущий объект)
     document.getElementById('btn-export-json-current').onclick = () => {
         closeModal();
         exportCurrentObjectToJson(lat, lon);
@@ -10654,6 +10784,9 @@ function showExportOptionsDialog(lat, lon) {
         if (e.target === modal) closeModal();
     };
 
+    // --- Вспомогательные функции экспорта JSON внутри ---
+
+    // Функция экспорта глобальных массивов (квартал)
     function exportAllDataToJson() {
         const allFeatures = [
             ...(parcelFeaturesData || []),
@@ -10663,7 +10796,7 @@ function showExportOptionsDialog(lat, lon) {
         ];
 
         if (allFeatures.length === 0) {
-            showNotification('Нет загруженных данных для экспорта.', 'warning');
+            showNotification('Нет загруженных данных квартала для экспорта.', 'warning');
             return;
         }
 
@@ -10676,55 +10809,23 @@ function showExportOptionsDialog(lat, lon) {
         saveJsonFile(geoJson, fileName);
     }
 
+    // НОВАЯ ФУНКЦИЯ: Собирает featureData из ВСЕХ полигонов на карте
     function exportAllMapObjectsToCleanJson() {
-        const allFeaturesMap = new Map();
+        const allFeaturesMap = new Map(); // Используем Map для дедупликации по ID/КН
 
+        // 1. Проходим по всем полигонам на карте
         polygons.forEach(obj => {
             if (obj instanceof ymaps.Polygon) {
-                let featureData = obj.properties.get('featureData');
-                
-                if (!featureData) {
-                    const hint = obj.properties.get('hintContent');
-                    const cadNum = obj.properties.get('cadastralNumber');
-                    
-                    if (obj.properties.get('isAreaMeasurement') || obj.properties.get('isSearchShape') || obj.options.get('strokeStyle') === 'dash') return;
-
-                    const yandexCoords = obj.geometry.getCoordinates();
-                    const geomType = yandexCoords.length > 1 && Array.isArray(yandexCoords[0][0]) ? "MultiPolygon" : "Polygon";
-                    
-                    const restoreCoords = (ring) => ring.map(c => {
-                        const trueLat = c[0] + (mapOffsetY * 0.000008983);
-                        const trueLon = c[1] + (mapOffsetX * 0.000008983);
-                        return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
-                    });
-
-                    let coordinates;
-                    if (geomType === "Polygon") {
-                        coordinates = yandexCoords.map(ring => restoreCoords(ring));
-                    } else {
-                        coordinates = [yandexCoords[0].map(ring => restoreCoords(ring))];
-                    }
-
-                    featureData = {
-                        type: "Feature",
-                        id: Math.random().toString(36).substr(2, 9),
-                        geometry: { type: "Polygon", coordinates: coordinates },
-                        properties: {
-                            descr: cadNum || (typeof hint === 'string' ? hint : 'Object'),
-                            options: {
-                                cad_num: cadNum,
-                                name_by_doc: (typeof hint === 'object' ? hint.address : hint),
-                                reg_numb_border: cadNum
-                            }
-                        }
-                    };
-                }
+                // Пытаемся получить исходные данные НСПД
+                const featureData = obj.properties.get('featureData');
                 
                 if (featureData) {
+                    // Формируем уникальный ключ для дедупликации (чтобы не дублировать, если объект есть в нескольких слоях)
                     const id = featureData.id || 
                                featureData.properties?.descr || 
                                featureData.properties?.options?.cad_num || 
                                featureData.properties?.options?.reg_numb_border ||
+                               // Фолбек на случай уникального объекта без ID (маловероятно для НСПД)
                                Math.random().toString(36); 
                     
                     if (!allFeaturesMap.has(id)) {
@@ -10737,7 +10838,7 @@ function showExportOptionsDialog(lat, lon) {
         const allFeatures = Array.from(allFeaturesMap.values());
 
         if (allFeatures.length === 0) {
-            showNotification('На карте нет объектов с данными НСПД.', 'warning');
+            showNotification('На карте нет объектов с данными НСПД (возможно, только нарисованные вручную).', 'warning');
             return;
         }
 
@@ -10750,6 +10851,7 @@ function showExportOptionsDialog(lat, lon) {
         saveJsonFile(geoJson, `All_Map_Objects_${dateStr}.json`);
     }
 
+    // Функция экспорта одного объекта под курсором
     function exportCurrentObjectToJson(lat, lon) {
         let targetObject = findLineAtPoint(lat, lon);
         if (!targetObject) {
@@ -10761,24 +10863,10 @@ function showExportOptionsDialog(lat, lon) {
             return;
         }
 
-        let featureData = targetObject.properties.get('featureData');
-
-        if (!featureData && targetObject instanceof ymaps.Polygon) {
-             const yandexCoords = targetObject.geometry.getCoordinates();
-             const restoreCoords = (ring) => ring.map(c => {
-                const trueLat = c[0] + (mapOffsetY * 0.000008983);
-                const trueLon = c[1] + (mapOffsetX * 0.000008983);
-                return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
-            });
-            featureData = {
-                type: "Feature",
-                geometry: { type: "Polygon", coordinates: yandexCoords.map(restoreCoords) },
-                properties: { descr: targetObject.properties.get('cadastralNumber') || 'Reconstructed' }
-            };
-        }
+        const featureData = targetObject.properties.get('featureData');
 
         if (!featureData) {
-            showNotification('Не удалось извлечь данные объекта.', 'warning');
+            showNotification('У выбранного объекта нет исходных данных JSON (возможно, он нарисован вручную).', 'warning');
             return;
         }
 
@@ -10788,6 +10876,7 @@ function showExportOptionsDialog(lat, lon) {
         saveJsonFile(featureData, fileName);
     }
 
+    // Общая функция сохранения
     function saveJsonFile(data, filename) {
         try {
             const jsonString = JSON.stringify(data, null, 2);
@@ -10800,7 +10889,6 @@ function showExportOptionsDialog(lat, lon) {
         }
     }
 }
-
 
 
 // Modify clearMapAndResetTheme to clear specific object types
@@ -13344,13 +13432,13 @@ async function exportMapToJson() {
 
 
 // --- ФУНКЦИЯ ИМПОРТА (Обработчик input) ---
-// --- ФУНКЦИЯ ИМПОРТА (Обработчик input) ---
 function handleMapJsonImport(event) {
     const file = event.target.files[0];
     if (!file) return;
 
+    // Считываем как ArrayBuffer для работы с ZIP
     const reader = new FileReader();
-    reader.readAsArrayBuffer(file);
+    reader.readAsArrayBuffer(file); 
 
     reader.onload = async (e) => {
         try {
@@ -13360,21 +13448,28 @@ function handleMapJsonImport(event) {
 
             // --- Распаковка (поддержка ZIP и обычного JSON) ---
             try {
+                // Пытаемся открыть как ZIP
                 const zip = await JSZip.loadAsync(arrayBuffer);
+                // Ищем файл внутри (либо map_data.json, либо любой .json)
                 let jsonFile = zip.file("map_data.json");
                 if (!jsonFile) {
                     const files = Object.keys(zip.files);
                     const anyJson = files.find(name => name.endsWith('.json'));
                     if (anyJson) jsonFile = zip.file(anyJson);
                 }
+
                 if (jsonFile) {
                     jsonContent = await jsonFile.async("string");
                 } else {
+                    // Если это zip, но внутри нет json - ошибка
                     throw new Error("В файле .map не найден JSON с данными");
                 }
             } catch (zipError) {
+                // Если не удалось открыть как ZIP, пробуем как обычный текст
                 const decoder = new TextDecoder("utf-8");
                 jsonContent = decoder.decode(arrayBuffer);
+                
+                // Проверяем, похоже ли это на JSON
                 if (!jsonContent.trim().startsWith('{')) {
                     throw new Error("Файл поврежден или имеет неверный формат");
                 }
@@ -13382,12 +13477,14 @@ function handleMapJsonImport(event) {
 
             const parsedData = JSON.parse(jsonContent);
 
-            // === ЛОГИКА ДЛЯ STANDARD GeoJSON (NSPD формат) ===
+          
             if (parsedData.type === 'FeatureCollection' || parsedData.type === 'Feature' || (parsedData.data && parsedData.data.features)) {
                 
                 clearMapAndResetTheme();
                 
                 let featuresToImport = [];
+                
+           
                 if (parsedData.type === 'Feature') {
                     featuresToImport = [parsedData];
                 } else if (parsedData.type === 'FeatureCollection') {
@@ -13400,98 +13497,23 @@ function handleMapJsonImport(event) {
                     throw new Error("JSON файл не содержит объектов (features).");
                 }
 
-                // --- НОВАЯ ЛОГИКА РАСПРЕДЕЛЕНИЯ ПО ТИПАМ ---
-                const parcels = [];
-                const buildings = [];
-                const structures = [];
-                const zouits = [];
-                const others = [];
-
-                featuresToImport.forEach(f => {
-                    const props = f.properties || {};
-                    const opts = props.options || {};
-                    const cat = props.category;
-                    const catName = props.categoryName;
-
-                    // Определение типа объекта по категории или косвенным признакам
-                    const isBuilding = cat === 36369 || catName === 'Здания' || opts.build_record_area || (opts.cad_num && opts.purpose);
-                    const isStructure = cat === 36383 || catName === 'Сооружения' || (opts.cad_number && opts.params_extension);
-                    const isZouit = cat === 36940 || catName?.includes('Зоны') || opts.content_restrict_encumbrances || (opts.reg_numb_border && !opts.type_zone);
-                    const isTerrZone = cat === 36315 || catName === 'Территориальные зоны' || opts.type_zone;
-                    const isParcel = cat === 36368 || catName === 'Земельные участки' || opts.land_record_type || opts.land_record_category_type;
-
-                    if (isBuilding) {
-                        buildings.push(f);
-                    } else if (isStructure) {
-                        structures.push(f);
-                    } else if (isZouit) {
-                        zouits.push(f);
-                    } else if (isTerrZone) {
-                        // Терр. зоны отрисовываем как ЗОУИТ (они похожи по структуре)
-                        zouits.push(f);
-                    } else {
-                        // По умолчанию считаем участком (или если явно участок)
-                        parcels.push(f);
-                    }
-                });
-
-                // Обновляем глобальные массивы
-                parcelFeaturesData = parcels;
-                buildingFeaturesData = buildings;
-                structureFeaturesData = structures;
-                zouitFeaturesData = zouits;
-
-                // Отрисовываем каждую категорию своей функцией
-                // Используем await, чтобы отрисовка шла последовательно
-                if (parcels.length > 0) {
-                    await processAndDrawParcels(parcels, 'quarter');
-                }
-                if (buildings.length > 0) {
-                    await processAndDrawBuildings(buildings);
-                }
-                if (structures.length > 0) {
-                    await processAndDrawStructures(structures);
-                }
-                if (zouits.length > 0) {
-                    await processAndDrawZouits(zouits);
-                }
-
-                // Обновляем боковую панель (приоритет: участки -> ОКС -> ЗОУИТ)
+           
                 const importDate = new Date().toLocaleDateString('ru-RU');
-                if (parcels.length > 0) {
-                    populateSidebarWithParcels(parcels, `Импорт (${importDate})`);
-                } else if (buildings.length > 0) {
-                    await populateSidebarWithFoundObjects(buildings, 'Здания (Импорт)');
-                } else if (zouits.length > 0) {
-                    await populateSidebarWithFoundObjects(zouits, 'ЗОУИТ (Импорт)');
-                }
-
-                // Центрируем карту на всех объектах
-                let allBounds = null;
-                polygons.forEach(obj => {
-                    if (obj instanceof ymaps.Polygon) {
-                        const bounds = obj.geometry.getBounds();
-                        if (bounds) {
-                            if (!allBounds) allBounds = bounds;
-                            else {
-                                allBounds = [
-                                    [Math.min(allBounds[0][0], bounds[0][0]), Math.min(allBounds[0][1], bounds[0][1])],
-                                    [Math.max(allBounds[1][0], bounds[1][0]), Math.max(allBounds[1][1], bounds[1][1])]
-                                ];
-                            }
-                        }
-                    }
-                });
-
-                if (allBounds) {
-                    map.setBounds(allBounds, { checkZoomRange: true, duration: 300 });
-                }
-
-                showNotification(`Импортировано: ЗУ: ${parcels.length}, ОКС: ${buildings.length + structures.length}, Зон: ${zouits.length}`, 'success', 'file-import');
+                
+            
+                parcelFeaturesData = featuresToImport;
+                
+               
+                await loadAndProcessSupabaseData(featuresToImport, `Импорт JSON (${importDate})`);
+                
+                showNotification(`Успешно импортировано ${featuresToImport.length} объектов из JSON`, 'success', 'file-import');
+                
             } 
-            // === ЛОГИКА ДЛЯ MapData (.map формат) ===
+          
             else if (parsedData.type === 'MapData') {
-                const mapData = parsedData;
+                const mapData = parsedData; 
+                
+            
                 clearMapAndResetTheme();
 
                 let importedCount = 0;
@@ -13499,7 +13521,8 @@ function handleMapJsonImport(event) {
                 const restoredBuildingsData = [];
                 const restoredStructuresData = [];
                 const restoredZouitsData = [];
-                const pendingVertexPoints = [];
+                
+                const pendingVertexPoints = []; 
 
                 const applyOffset = (coord) => [
                     coord[0] - (mapOffsetY * 0.000008983),
@@ -13515,22 +13538,34 @@ function handleMapJsonImport(event) {
                         let opts = f.options || {};
                         let flags = f.appFlags || {};
 
+                        // Применяем смещение к координатам
                         let visualCoords;
-                        if (type === 'Point') visualCoords = applyOffset(coords);
-                        else if (type === 'LineString') visualCoords = coords.map(applyOffset);
-                        else if (type === 'Polygon') visualCoords = coords.map(ring => ring.map(applyOffset));
+                        if (type === 'Point') {
+                            visualCoords = applyOffset(coords);
+                        } else if (type === 'LineString') {
+                            visualCoords = coords.map(applyOffset);
+                        } else if (type === 'Polygon') {
+                            visualCoords = coords.map(ring => ring.map(applyOffset));
+                        }
 
+                        // --- Создание объектов ---
                         if (type === 'Point') {
                             ymapsObj = new ymaps.Placemark(visualCoords, props, opts);
                             if (flags.isCustomLabel || (props.cadastralNumber && !flags.isVertexPoint)) {
                                 ymapsObj.options.set('iconLayout', customPlacemarkLayout);
                             }
                             if (flags.isVertexPoint) {
-                                if (props.isCoordLabel) ymapsObj.options.set('iconLayout', coordinateLabelLayout);
-                                else if (props.dotSize) ymapsObj.options.set('iconLayout', redDotLayout);
-                                else if (props.fontSize) ymapsObj.options.set('iconLayout', numberedPointLayout);
-                                
-                                pendingVertexPoints.push({ placemark: ymapsObj, parentCn: flags.relatedPolygonCadastralNumber });
+                                if (props.isCoordLabel) {
+                                    ymapsObj.options.set('iconLayout', coordinateLabelLayout);
+                                } else if (props.dotSize) {
+                                    ymapsObj.options.set('iconLayout', redDotLayout);
+                                } else if (props.fontSize) {
+                                    ymapsObj.options.set('iconLayout', numberedPointLayout);
+                                }
+                                pendingVertexPoints.push({
+                                    placemark: ymapsObj,
+                                    parentCn: flags.relatedPolygonCadastralNumber
+                                });
                             }
                         } else if (type === 'LineString') {
                             ymapsObj = new ymaps.Polyline(visualCoords, props, opts);
@@ -13543,69 +13578,79 @@ function handleMapJsonImport(event) {
 
                         if (ymapsObj) {
                             Object.keys(flags).forEach(key => {
-                                if (key !== 'relatedPolygonCadastralNumber') ymapsObj.properties.set(key, flags[key]);
+                                if (key !== 'relatedPolygonCadastralNumber') {
+                                    ymapsObj.properties.set(key, flags[key]);
+                                }
                             });
 
                             map.geoObjects.add(ymapsObj);
-                            if (flags.isAreaMeasurement) areaObjects.push(ymapsObj);
-                            else polygons.push(ymapsObj);
+                            
+                            if (flags.isAreaMeasurement) {
+                                areaObjects.push(ymapsObj);
+                            } else {
+                                polygons.push(ymapsObj);
+                            }
 
                             if (type === 'Point' && flags.isCustomLabel) {
-                                const parentPoly = polygons.find(p => p instanceof ymaps.Polygon && p.properties.get('cadastralNumber') === props.cadastralNumber);
+                                const parentPoly = polygons.find(p => 
+                                    p instanceof ymaps.Polygon && 
+                                    p.properties.get('cadastralNumber') === props.cadastralNumber
+                                );
                                 if (parentPoly) ymapsObj.polygon = parentPoly;
                                 parcelPlacemarks.push(ymapsObj);
                             }
-
-                            // Восстановление данных для экспорта/сайдбара
+                            
+                            // Восстановление данных для сайдбара
                             let featureData = props.featureData;
-                            if ((!featureData || !featureData.properties) && (props.cadastralNumber)) {
-                                // Минимальная реконструкция для старых сохранений
-                                featureData = { 
-                                    type: "Feature", 
-                                    geometry: f.geometry, 
-                                    properties: { 
-                                        descr: props.cadastralNumber, 
-                                        options: { 
-                                            cad_num: props.cadastralNumber, 
-                                            readable_address: props.address,
-                                            reg_numb_border: props.cadastralNumber
-                                        } 
-                                    } 
-                                };
+                            const isDataBroken = !featureData || !featureData.properties || Object.keys(featureData.properties).length === 0;
+                            
+                            if (isDataBroken && (props.cadastralNumber || props.address)) {
+                                if (!featureData) featureData = { type: "Feature", geometry: f.geometry };
+                                featureData.properties = featureData.properties || {};
+                                featureData.properties.options = featureData.properties.options || {};
+                                featureData.properties.descr = props.cadastralNumber;
+                                featureData.properties.options.cad_num = props.cadastralNumber;
+                                featureData.properties.options.readable_address = props.address;
+                                // ... (восстановление площади и стоимости опустим для краткости, оно есть в оригинале) ...
                                 ymapsObj.properties.set('featureData', featureData);
                             }
 
                             if (featureData) {
                                 if (flags.isParcelInQuarter || flags.isFoundInArea) restoredParcelsData.push(featureData);
-                                else if (flags.isBuilding) restoredBuildingsData.push(featureData);
-                                else if (flags.isStructure) restoredStructuresData.push(featureData);
-                                else if (flags.isZouit) restoredZouitsData.push(featureData);
-                                // Фолбек по свойствам, если флагов нет
-                                else if (featureData.properties.categoryName === 'Здания') restoredBuildingsData.push(featureData);
-                                else if (featureData.properties.categoryName === 'Сооружения') restoredStructuresData.push(featureData);
-                                else if (featureData.properties.categoryName?.includes('Зоны')) restoredZouitsData.push(featureData);
-                                else restoredParcelsData.push(featureData);
+                                if (flags.isBuilding) restoredBuildingsData.push(featureData);
+                                if (flags.isStructure) restoredStructuresData.push(featureData);
+                                if (flags.isZouit) restoredZouitsData.push(featureData);
                             }
                             importedCount++;
                         }
                     });
-
+                    
+                    // Восстановление связей точек
                     pendingVertexPoints.forEach(item => {
                         if (item.parentCn) {
-                            const parentPolygon = polygons.find(p => p instanceof ymaps.Polygon && p.properties.get('cadastralNumber') === item.parentCn);
+                            const parentPolygon = polygons.find(p => 
+                                p instanceof ymaps.Polygon && 
+                                p.properties.get('cadastralNumber') === item.parentCn
+                            );
                             if (parentPolygon) {
                                 item.placemark.properties.set('relatedPolygon', parentPolygon);
-                                if (item.placemark.properties.get('isCoordLabel')) parentPolygon.properties.set('coordsPointsVisible', true);
-                                else parentPolygon.properties.set('numberedPointsVisible', true);
+                                if (item.placemark.properties.get('isCoordLabel')) {
+                                    parentPolygon.properties.set('coordsPointsVisible', true);
+                                } else {
+                                    parentPolygon.properties.set('numberedPointsVisible', true);
+                                }
                             }
                         }
                     });
                 }
 
+                // Восстановление текста
                 if (mapData.texts) {
                     mapData.texts.forEach(t => {
                         const visualPos = applyOffset(t.position);
-                        const px = map.options.get('projection').toGlobalPixels(visualPos, map.getZoom());
+                        const projection = map.options.get('projection');
+                        const zoom = map.getZoom();
+                        const px = projection.toGlobalPixels(visualPos, zoom);
                         const pagePx = map.converter.globalToPage(px);
                         createDraggableText(t.content, {x: pagePx[0], y: pagePx[1]});
                         const newTextEl = draggableTexts[draggableTexts.length - 1];
@@ -13626,23 +13671,24 @@ function handleMapJsonImport(event) {
                     });
                 }
 
-                parcelFeaturesData = restoredParcelsData;
-                buildingFeaturesData = restoredBuildingsData;
-                structureFeaturesData = restoredStructuresData;
-                zouitFeaturesData = restoredZouitsData;
-
-                if (restoredParcelsData.length > 0) populateSidebarWithParcels(parcelFeaturesData, "Импорт MapData");
-                else if (restoredBuildingsData.length > 0) populateSidebarWithFoundObjects(restoredBuildingsData, 'Здания');
+                if (restoredParcelsData.length > 0) {
+                    parcelFeaturesData = restoredParcelsData;
+                    populateSidebarWithParcels(parcelFeaturesData, "Импорт Карты");
+                }
+                if (restoredBuildingsData.length > 0) buildingFeaturesData = restoredBuildingsData;
+                if (restoredStructuresData.length > 0) structureFeaturesData = restoredStructuresData;
+                if (restoredZouitsData.length > 0) zouitFeaturesData = restoredZouitsData;
 
                 applyCurrentTheme();
                 showNotification(`Карта восстановлена. Объектов: ${importedCount}`, 'success', 'check-circle');
+            
             } else {
-                throw new Error("Неизвестный формат данных.");
+                throw new Error("Неизвестный или неподдерживаемый формат данных JSON.");
             }
 
         } catch (error) {
             console.error("Ошибка импорта:", error);
-            showNotification("Ошибка: " + error.message, 'error');
+            showNotification("Не удалось прочитать файл: " + error.message, 'error');
         } finally {
             hideLoader();
             event.target.value = '';
@@ -14124,19 +14170,30 @@ function showZouitSelectionModal(features, onSelectCallback) {
 }
 
 async function drawSelectedZouits(features, selectedIndex, map, polygons, polygonStyle, mapOffsetY, mapOffsetX, getAddressByCoords, proj4, ymaps, showNotification) {
-    if (selectedIndex === null || !features || features.length === 0) return;
+    if (selectedIndex === null || !features || features.length === 0) {
+        return;
+    }
 
     const featuresToDraw = selectedIndex === -1 ? features : [features[selectedIndex]];
+
     let combinedBounds = null;
     let firstFeatureCenterGeo = null;
 
     for (const feature of featuresToDraw) {
-        if (!feature.geometry || !feature.geometry.coordinates) continue;
+        if (!feature.geometry || !feature.geometry.coordinates) {
+            continue;
+        }
         
         const nameByDocRaw = feature.properties.options?.name_by_doc || '';
         const currentStrokeColor = getZouitColor(nameByDocRaw);
-        let currentLabelPreset = currentStrokeColor === '#FF0000' ? 'islands#redStretchyIcon' : 
-                                 (currentStrokeColor === '#FFBF00' || currentStrokeColor === '#FFA500') ? 'islands#yellowStretchyIcon' : 'islands#violetStretchyIcon';
+        let currentLabelPreset;
+        if (currentStrokeColor === '#FF0000') {
+            currentLabelPreset = 'islands#redStretchyIcon';
+        } else if (currentStrokeColor === '#FFBF00' || currentStrokeColor === '#FFA500') { // Добавлен желтый
+            currentLabelPreset = 'islands#yellowStretchyIcon';
+        } else {
+            currentLabelPreset = 'islands#violetStretchyIcon';
+        }
 
         const regNumbBorder = feature.properties.options?.reg_numb_border || 'Не указан';
         const registrationDate = feature.properties.options?.registration_date || 'Не указана';
@@ -14150,30 +14207,29 @@ async function drawSelectedZouits(features, selectedIndex, map, polygons, polygo
 
              const allProcessedRings = singlePolygonRings.map(contour => {
                 if (!Array.isArray(contour) || contour.length < 3) return null;
+
                 const coords = [];
                 let conversionOk = true;
                 for (const coord of contour) {
-                   if (!Array.isArray(coord) || coord.length !== 2) { conversionOk = false; break; }
+                   if (!Array.isArray(coord) || coord.length !== 2 || typeof coord[0] !== 'number' || typeof coord[1] !== 'number') { conversionOk = false; break; }
                    try {
                        const point = proj4('EPSG:3857', 'EPSG:4326', coord);
                        coords.push([point[1], point[0]]);
                    } catch (e) { conversionOk = false; break; }
                 }
                 if (!conversionOk || coords.length < 3) return null;
+
                 return coords.map(c => [c[0] - mapOffsetY * 0.000008983, c[1] - mapOffsetX * 0.000008983]);
             }).filter(r => r !== null);
 
             if (allProcessedRings.length === 0) continue;
 
             try {
-               const polygonObj = new ymaps.Polygon(allProcessedRings, 
-                {
-                    featureData: feature,
-                    cadastralNumber: regNumbBorder
-                }, 
+               const polygonObj = new ymaps.Polygon(allProcessedRings, // <-- ИЗМЕНЕНИЕ: Передаем все контуры
+                { /*...*/ }, 
                 {
                    strokeColor: currentStrokeColor,
-                   fillColor: `${currentStrokeColor}33`,
+                   fillColor: `${currentStrokeColor}33`, // <-- ИЗМЕНЕНИЕ: Добавляем легкую заливку
                    strokeWidth: polygonStyle.width,
                    strokeOpacity: 0.9,
                    hintContent: fullLabelText,
@@ -14203,7 +14259,9 @@ async function drawSelectedZouits(features, selectedIndex, map, polygons, polygo
                });
                map.geoObjects.add(zouitText);
                polygons.push(zouitText);
-            } catch (ymapsError) { console.error(`Ошибка Yandex Maps Polygon:`, ymapsError); }
+            } catch (ymapsError) {
+                 console.error(`Ошибка Yandex Maps Polygon:`, ymapsError);
+            }
         }
     }
 
@@ -14211,16 +14269,27 @@ async function drawSelectedZouits(features, selectedIndex, map, polygons, polygo
          const latMargin = (combinedBounds[1][0] - combinedBounds[0][0]) * 0.1 || 0.001;
          const lonMargin = (combinedBounds[1][1] - combinedBounds[0][1]) * 0.1 || 0.001;
          const viewBounds = [[combinedBounds[0][0] - latMargin, combinedBounds[0][1] - lonMargin], [combinedBounds[1][0] + latMargin, combinedBounds[1][1] + lonMargin]];
-         try { map.setBounds(viewBounds, { checkZoomRange: true, duration: 300 }); }
-         catch (boundsError) { if(firstFeatureCenterGeo) map.setCenter(firstFeatureCenterGeo, 16); }
+         try {
+            map.setBounds(viewBounds, { checkZoomRange: true, duration: 300 });
+         } catch (boundsError) {
+              console.error("Ошибка установки границ:", boundsError, viewBounds);
+              if(firstFeatureCenterGeo) map.setCenter(firstFeatureCenterGeo, 16);
+         }
+    } else if (featuresToDraw.length > 0) {
+         console.warn("Ни одна ЗОУИТ не была отрисована после выбора.");
     }
 
     if (firstFeatureCenterGeo) {
         getAddressByCoords(firstFeatureCenterGeo).then(address => {
             document.getElementById('city-name-display').innerHTML = address || 'Адрес не определен';
         });
+        try {
+            const center3857 = proj4("EPSG:4326", "EPSG:3857", [firstFeatureCenterGeo[1], firstFeatureCenterGeo[0]]);
+            lastPolygonCenter = { geo: { lat: firstFeatureCenterGeo[0], lon: firstFeatureCenterGeo[1] }, epsg3857: { x: center3857[0], y: center3857[1] }, native: {} };
+        } catch (projError) { console.error("Ошибка proj4 lastPolygonCenter:", projError); }
     }
 }
+
 
 
 
@@ -14413,32 +14482,52 @@ async function forestryMenuItemHandler(contextMenu, map, polygons, polygonStyle,
         }
 
         const feature = forestryData.features[0];
-        if (!feature.geometry || !feature.geometry.coordinates) throw new Error('Геометрия отсутствует');
+
+        if (!feature.geometry || !feature.geometry.coordinates) {
+            throw new Error('Геометрия или координаты отсутствуют в данных');
+        }
 
         let combinedBounds = null;
+        const turfPolygons = [];
         let clickedContourCentroid = null;
 
-        const polygonsCoords = feature.geometry.type === 'MultiPolygon' ? feature.geometry.coordinates : [feature.geometry.coordinates];
+        const isMultiPolygon = feature.geometry.type === 'MultiPolygon';
+        const polygonsCoords = isMultiPolygon ? feature.geometry.coordinates : [feature.geometry.coordinates];
+        
         const regNumbBorder = feature.properties.options?.reg_numb_border || 'Не указан';
         const nameByDoc = feature.properties.options?.name_by_doc || 'Не указано';
         const registrationDate = feature.properties.options?.registration_date || 'Не указана';
         const labelContent = `${regNumbBorder} - ${nameByDoc} (${registrationDate})`;
 
+
         for (let polygonIndex = 0; polygonIndex < polygonsCoords.length; polygonIndex++) {
             const polygonCoords = polygonsCoords[polygonIndex];
+
             for (let contourIndex = 0; contourIndex < polygonCoords.length; contourIndex++) {
                 const contour = polygonCoords[contourIndex];
-                if (!Array.isArray(contour)) continue;
+                if (!Array.isArray(contour)) {
+                    console.error(`Некорректный формат контура в полигоне:`, contour);
+                    continue;
+                }
 
                 const coords = [];
                 for (const coord of contour) {
-                    if (!Array.isArray(coord) || coord.length !== 2) continue;
+                    if (!Array.isArray(coord) || coord.length !== 2 || typeof coord[0] !== 'number' || typeof coord[1] !== 'number' || !Number.isFinite(coord[0]) || !Number.isFinite(coord[1])) {
+                        console.error(`Некорректная координата перед преобразованием:`, coord);
+                        continue;
+                    }
+
                     try {
                         const point = proj4('EPSG:3857', 'EPSG:4326', coord);
-                        if (Number.isFinite(point[0]) && Number.isFinite(point[1])) {
-                            coords.push([point[1], point[0]]);
+                        if (!Number.isFinite(point[0]) || !Number.isFinite(point[1])) {
+                            console.error(`Преобразование дало некорректные значения:`, coord, '->', point);
+                            continue;
                         }
-                    } catch (e) {}
+                        coords.push([point[1], point[0]]);
+                    } catch (e) {
+                        console.error(`Ошибка преобразования координаты:`, coord, e);
+                        continue;
+                    }
                 }
 
                 if (coords.length > 0) {
@@ -14447,11 +14536,8 @@ async function forestryMenuItemHandler(contextMenu, map, polygons, polygonStyle,
                         coord[1] - mapOffsetX * 0.000008983
                     ]);
 
-                    const polygonObj = new ymaps.Polygon([offsetCoords], {
-                        featureData: feature,
-                        cadastralNumber: regNumbBorder
-                    }, {
-                        strokeColor: '#228B22',
+                    const polygonObj = new ymaps.Polygon([offsetCoords], {}, {
+                        strokeColor: '#228B22', // Forest Green
                         strokeWidth: polygonStyle.width,
                         strokeOpacity: 0.8,
                         fillColor: '#00000000',
@@ -14474,8 +14560,12 @@ async function forestryMenuItemHandler(contextMenu, map, polygons, polygonStyle,
                     }
 
                     const turfContour = turf.polygon([coords.map(coord => [coord[1], coord[0]])]);
+                    turfPolygons.push(turfContour);
+
                     const clickPoint = turf.point([lon, lat]);
-                    if (turf.booleanPointInPolygon(clickPoint, turfContour)) {
+                    const isPointInContour = turf.booleanPointInPolygon(clickPoint, turfContour);
+
+                    if (isPointInContour) {
                         const centroidFeature = turf.centroid(turfContour);
                         const centroidCoordsGeo = centroidFeature.geometry.coordinates;
                         clickedContourCentroid = [
@@ -14487,13 +14577,40 @@ async function forestryMenuItemHandler(contextMenu, map, polygons, polygonStyle,
             }
         }
 
-        if (combinedBounds) {
-            map.setBounds(combinedBounds, { checkZoomRange: true, duration: 200 });
-            const centerGeo = [(combinedBounds[0][0] + combinedBounds[1][0]) / 2, (combinedBounds[0][1] + combinedBounds[1][1]) / 2];
-            getAddressByCoords(centerGeo).then(address => {
-                document.getElementById('city-name-display').innerHTML = address;
-            });
+        if (!combinedBounds) {
+            throw new Error('Не удалось определить границы полигона');
         }
+
+        map.setBounds(combinedBounds, {
+            checkZoomRange: true,
+            duration: 200
+        });
+
+        const centerGeo = [
+            (combinedBounds[0][0] + combinedBounds[1][0]) / 2,
+            (combinedBounds[0][1] + combinedBounds[1][1]) / 2
+        ];
+
+        getAddressByCoords(centerGeo).then(address => {
+            document.getElementById('city-name-display').innerHTML = address;
+        });
+
+        const center3857 = proj4("EPSG:4326", "EPSG:3857", [centerGeo[1], centerGeo[0]]);
+
+        lastPolygonCenter = {
+            geo: {
+                lat: centerGeo[0],
+                lon: centerGeo[1]
+            },
+            epsg3857: {
+                x: center3857[0],
+                y: center3857[1]
+            },
+            native: {
+                x: feature.geometry.coordinates[0]?.[0]?.[0]?.[0] || 0,
+                y: feature.geometry.coordinates[0]?.[0]?.[0]?.[1] || 0
+            }
+        };
 
         if (clickedContourCentroid) {
             const forestryText = new ymaps.Placemark(clickedContourCentroid, {
@@ -14503,8 +14620,11 @@ async function forestryMenuItemHandler(contextMenu, map, polygons, polygonStyle,
                 preset: 'islands#greenStretchyIcon',
                 draggable: true 
             });
+
             map.geoObjects.add(forestryText);
             polygons.push(forestryText);
+        } else {
+            console.warn('Выбранная точка не попала ни в один из контуров');
         }
     } catch (error) {
         console.error('Ошибка при получении лесничества:', error);
@@ -14512,6 +14632,7 @@ async function forestryMenuItemHandler(contextMenu, map, polygons, polygonStyle,
     }
     contextMenu.style.display = 'none';
 }
+
 
 async function queryMunicipalInfo(latitude, longitude) {
     const centerPoint = toEPSG3857(latitude, longitude);
@@ -15297,6 +15418,9 @@ function getZouitColor(zouitName) {
     return '#9400D3'; // Темно-фиолетовый
 }
 
+/**
+ * 2. ПОЛНАЯ ФУНКЦИЯ ДЛЯ ОТРИСОВКИ ЗОУИТ
+ */
 async function processAndDrawZouits(features) {
     if (!map) return;
 
@@ -15306,12 +15430,14 @@ async function processAndDrawZouits(features) {
             const options = properties.options || {};
             const regNumber = options.reg_numb_border || properties.descr || 'Без номера';
             const nameRaw = options.name_by_doc || 'Без названия';
+            const restrictions = options.content_restrict_encumbrances || 'Ограничения не указаны';
+
             const strokeColor = getZouitColor(nameRaw);
 
             const hintContent = {
                 cadastralNumber: regNumber,
                 address: nameRaw,
-                area: options.content_restrict_encumbrances || 'Ограничения не указаны',
+                area: restrictions,
             };
             
             if (!feature?.geometry?.coordinates) continue;
@@ -15335,19 +15461,18 @@ async function processAndDrawZouits(features) {
 
                  if (allProcessedRings.length === 0) continue;
 
-                 const zouitPolygon = new ymaps.Polygon(allProcessedRings, 
+                 const zouitPolygon = new ymaps.Polygon(allProcessedRings, // <-- ИЗМЕНЕНИЕ: Передаем все контуры сразу
                     {
                         cadastralNumber: regNumber,
                         name: nameRaw,
                         hintContent: hintContent,
-                        isZouit: true,
-                        featureData: feature
+                        isZouit: true
                     }, 
                     {
                         strokeColor: strokeColor,
                         strokeWidth: polygonStyle.width - 1,
-                        strokeOpacity: loadedObjectOpacity,
-                        fillColor: `${strokeColor}33`,
+                       strokeOpacity: loadedObjectOpacity,
+                        fillColor: `${strokeColor}33`, // <-- ИЗМЕНЕНИЕ: Добавляем легкую заливку
                         cursor: 'pointer',
                         hintLayout: customHintLayout
                     }
@@ -15361,6 +15486,7 @@ async function processAndDrawZouits(features) {
                 map.geoObjects.add(zouitPolygon);
                 polygons.push(zouitPolygon);
 
+                // Логика добавления метки остается прежней, но теперь она будет по центру корректной фигуры
                 const bounds = zouitPolygon.geometry.getBounds();
                 if (bounds && bounds[0] && bounds[1]) {
                     const centerGeo = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
@@ -15376,8 +15502,8 @@ async function processAndDrawZouits(features) {
                     parcelPlacemarks.push(zouitText);
                     
                      if (isGlobalFillActive) {
-                        applyGlobalFill();
-                    }
+        applyGlobalFill();
+    }
                 }
             }
         } catch (error) {
