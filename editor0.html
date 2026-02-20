@@ -822,7 +822,6 @@ function updateObjectMetrics(obj) {
         return;
     }
 
-    // Округляем координаты и замыкаем полигоны при необходимости
     obj.contours.forEach((contour) => {
         if (contour) {
             for (let i = 0; i < contour.length; i++) {
@@ -832,8 +831,7 @@ function updateObjectMetrics(obj) {
                 }
             }
 
-            // Если полигон, проверяем замыкание
-            if (obj.type === 'polygon' && contour.length >= 3) {
+            if (obj.type === 'polygon' && obj.subType !== 'construction_record' && contour.length >= 3) {
                 const firstPt = contour[0];
                 const lastPt = contour[contour.length - 1];
                 const PRECISION_THRESHOLD = 0.001;
@@ -844,17 +842,11 @@ function updateObjectMetrics(obj) {
         }
     });
 
-    // --- РАСЧЕТ ПЛОЩАДИ ---
-    // Убрана блокировка для 'construction_record'
-    if (obj.type === 'polygon') {
+    if (obj.type === 'polygon' && obj.subType !== 'construction_record') {
         const polygonStats = obj.contours.map(c => ({
             contour: c,
-            // ВАЖНО: Используем Math.abs, так как функция может возвращать отрицательную площадь (CW/CCW)
-            area: Math.abs(calculatePolygonArea(c)) 
+            area: calculatePolygonArea(c)
         }));
-
-        // Сортируем от больших к меньшим (важно для поиска вложенности)
-        polygonStats.sort((a, b) => b.area - a.area);
 
         let totalArea = 0;
 
@@ -862,23 +854,24 @@ function updateObjectMetrics(obj) {
             let nestingLevel = 0;
             const currentPoly = polygonStats[i];
             
-            // Если площадь ничтожно мала, пропускаем
+            // Если площадь 0, пропускаем
             if (currentPoly.area < 1e-9) continue;
 
             for (let j = 0; j < polygonStats.length; j++) {
                 if (i === j) continue;
                 const otherPoly = polygonStats[j];
                 
-                // Проверяем вложенность только если другой полигон больше
+                // Оптимизация: контур может быть внутри только если он меньше по площади
                 if (otherPoly.area > currentPoly.area) {
+                    // Проверяем, находится ли первая точка текущего контура внутри другого контура
                     if (isPointInPolygon(currentPoly.contour[0], otherPoly.contour)) {
                         nestingLevel++;
                     }
                 }
             }
 
-            // Четный уровень (0, 2...) -> Добавляем (Остров)
-            // Нечетный уровень (1, 3...) -> Вычитаем (Дырка)
+            // Четный уровень вложенности (0, 2...) -> Добавляем площадь (Внешний контур или Остров)
+            // Нечетный уровень вложенности (1, 3...) -> Вычитаем площадь (Дырка или Озеро в острове)
             if (nestingLevel % 2 === 0) {
                 totalArea += currentPoly.area;
             } else {
@@ -890,11 +883,8 @@ function updateObjectMetrics(obj) {
         obj.area = 0;
     }
 
-    // --- РАСЧЕТ ПЕРИМЕТРА / ДЛИНЫ ---
     let totalPerimeter = 0;
-    // Считаем как замкнутый полигон только если тип 'polygon'. Для 'line' периметр считается как длина линии.
-    const isConsideredPolygonForCalc = obj.type === 'polygon';
-    
+    const isConsideredPolygonForCalc = obj.type === 'polygon' && obj.subType !== 'construction_record';
     obj.contours.forEach(c => {
         totalPerimeter += calculatePolygonPerimeter(c, isConsideredPolygonForCalc);
     });
@@ -4654,102 +4644,87 @@ function selectObjectByPoint(dataClickPoint) {
     
     
     function displayObjectInfo(index) {
-    selectedObjectIndex = index;
-    if (isGeometryEditMode && editingObjectIndex !== selectedObjectIndex) {
-        deactivateGeometryEditMode(false);
-    }
+        selectedObjectIndex = index;
+        if (isGeometryEditMode && editingObjectIndex !== selectedObjectIndex) {
+            deactivateGeometryEditMode(false);
+        }
 
-    selectedObjectInfoDiv.innerHTML = ''; coordinatesTableContainer.innerHTML = '';
-    intersectionList.innerHTML = ''; intersectionsTitle.style.display = 'none';
+        selectedObjectInfoDiv.innerHTML = ''; coordinatesTableContainer.innerHTML = '';
+        intersectionList.innerHTML = ''; intersectionsTitle.style.display = 'none';
 
-    if (index < 0 || index >= userObjects.length || !userObjects[index]) {
-        selectedObjectInfoDiv.innerHTML = '<p style="color: #777; font-style: italic; text-align: center;">Объект не выбран.</p>';
-        updateObjectListSelection(); return;
-    }
-    const obj = userObjects[index];
-    
-    // Обновляем метрики перед отображением, чтобы гарантировать актуальность данных
-    updateObjectMetrics(obj);
+        if (index < 0 || index >= userObjects.length || !userObjects[index]) {
+            selectedObjectInfoDiv.innerHTML = '<p style="color: #777; font-style: italic; text-align: center;">Объект не выбран.</p>';
+            updateObjectListSelection(); return;
+        }
+        const obj = userObjects[index];
+        const nameContainer = document.createElement('div'); nameContainer.style.marginBottom = '10px';
+        const nameLabel = document.createElement('h3'); nameLabel.textContent = obj.name || `Объект ${obj.id}`;
+        nameLabel.title = "Кликните для переименования"; nameLabel.onclick = () => handleRenameRequest(index);
+        nameContainer.appendChild(nameLabel); selectedObjectInfoDiv.appendChild(nameContainer);
 
-    const nameContainer = document.createElement('div'); nameContainer.style.marginBottom = '10px';
-    const nameLabel = document.createElement('h3'); nameLabel.textContent = obj.name || `Объект ${obj.id}`;
-    nameLabel.title = "Кликните для переименования"; nameLabel.onclick = () => handleRenameRequest(index);
-    nameContainer.appendChild(nameLabel); selectedObjectInfoDiv.appendChild(nameContainer);
+        const pointCount = (obj.contours || []).reduce((sum, c) => sum + (c ? c.length : 0), 0);
+        let typeDisplay = 'Н/Д';
+        if (obj.type === 'polygon') typeDisplay = 'Полигон';
+        else if (obj.type === 'line') typeDisplay = 'Линия';
+        else if (obj.type === 'point') typeDisplay = 'Точка';
 
-    const pointCount = (obj.contours || []).reduce((sum, c) => sum + (c ? c.length : 0), 0);
-    let typeDisplay = 'Н/Д';
-    if (obj.type === 'polygon') typeDisplay = 'Полигон';
-    else if (obj.type === 'line') typeDisplay = 'Линия';
-    else if (obj.type === 'point') typeDisplay = 'Точка';
+        addInfoItem('ID', obj.id); addInfoItem('Тип', typeDisplay);
+        addInfoItem('Цвет', obj.color || 'Н/Д', false, index);
+        addInfoItem(obj.type === 'line' ? 'Длина (м)' : 'Периметр (м)', obj.perimeter);
+        addInfoItem('Площадь (кв. м)', obj.type === 'polygon' && obj.area > 1e-9 ? obj.area : 0);
+        addInfoItem('Контуры', (obj.contours || []).length); addInfoItem('Точки', pointCount);
 
-    addInfoItem('ID', obj.id); 
-    addInfoItem('Тип', typeDisplay);
-    addInfoItem('Цвет', obj.color || 'Н/Д', false, index);
-    
-    // ЛОГИКА ОТОБРАЖЕНИЯ ДЛИНЫ / ПЕРИМЕТРА
-    const lengthLabel = obj.type === 'line' ? 'Протяженность (м)' : 'Периметр (м)';
-    addInfoItem(lengthLabel, obj.perimeter);
-    
-    // ЛОГИКА ОТОБРАЖЕНИЯ ПЛОЩАДИ (только для полигонов)
-    addInfoItem('Площадь (кв. м)', obj.type === 'polygon' && obj.area > 1e-9 ? obj.area : 0);
-    
-    addInfoItem('Контуры', (obj.contours || []).length); 
-    addInfoItem('Точки', pointCount);
-
-    // ... (остальной код создания кнопок без изменений) ...
-    const colorValueSpan = selectedObjectInfoDiv.querySelector('.color-picker-trigger');
-    if (colorValueSpan) {
-            colorValueSpan.onclick = (e) => {
-                e.stopPropagation();
-                if (index < 0 || index >= userObjects.length || !userObjects[index]) return;
-                const currentColor = userObjects[index].color || '#000000';
-                const colorInput = document.createElement('input');
-                colorInput.type = 'color'; colorInput.value = currentColor;
-                colorInput.style.position = 'absolute'; colorInput.style.left = '-9999px'; colorInput.style.top = '-9999px';
-                colorInput.onchange = (event) => {
-                    const newColor = event.target.value; userObjects[index].color = newColor;
-                    colorValueSpan.textContent = newColor;
-                    const colorSwatch = colorValueSpan.querySelector('span');
-                    if (colorSwatch) colorSwatch.style.backgroundColor = newColor;
-                    else {
-                        const newSwatch = document.createElement('span');
-                        newSwatch.style.display = 'inline-block'; newSwatch.style.width = '12px'; newSwatch.style.height = '12px';
-                        newSwatch.style.backgroundColor = newColor; newSwatch.style.border = '1px solid #ccc';
-                        newSwatch.style.marginRight = '5px'; newSwatch.style.verticalAlign = 'middle';
-                        colorValueSpan.prepend(newSwatch);
-                    }
-                    updateObjectListColorIndicator(index, newColor); redraw(true); saveState();
-                    showNotification(`Цвет объекта "${obj.name || obj.id}" изменен на ${newColor}`, 'success', 'palette');
-                    document.body.removeChild(colorInput);
-                };
-                document.body.appendChild(colorInput); colorInput.click();
-                colorInput.onblur = () => { setTimeout(() => { if (colorInput.parentNode === document.body) document.body.removeChild(colorInput); }, 100); };
+        const colorValueSpan = selectedObjectInfoDiv.querySelector('.color-picker-trigger');
+        if (colorValueSpan) {
+             colorValueSpan.onclick = (e) => {
+                 e.stopPropagation();
+                 if (index < 0 || index >= userObjects.length || !userObjects[index]) return;
+                 const currentColor = userObjects[index].color || '#000000';
+                 const colorInput = document.createElement('input');
+                 colorInput.type = 'color'; colorInput.value = currentColor;
+                 colorInput.style.position = 'absolute'; colorInput.style.left = '-9999px'; colorInput.style.top = '-9999px';
+                 colorInput.onchange = (event) => {
+                     const newColor = event.target.value; userObjects[index].color = newColor;
+                     colorValueSpan.textContent = newColor;
+                     const colorSwatch = colorValueSpan.querySelector('span');
+                     if (colorSwatch) colorSwatch.style.backgroundColor = newColor;
+                     else {
+                           const newSwatch = document.createElement('span');
+                           newSwatch.style.display = 'inline-block'; newSwatch.style.width = '12px'; newSwatch.style.height = '12px';
+                           newSwatch.style.backgroundColor = newColor; newSwatch.style.border = '1px solid #ccc';
+                           newSwatch.style.marginRight = '5px'; newSwatch.style.verticalAlign = 'middle';
+                           colorValueSpan.prepend(newSwatch);
+                     }
+                     updateObjectListColorIndicator(index, newColor); redraw(true); saveState();
+                     showNotification(`Цвет объекта "${obj.name || obj.id}" изменен на ${newColor}`, 'success', 'palette');
+                     document.body.removeChild(colorInput);
+                 };
+                 document.body.appendChild(colorInput); colorInput.click();
+                 colorInput.onblur = () => { setTimeout(() => { if (colorInput.parentNode === document.body) document.body.removeChild(colorInput); }, 100); };
+            };
+        }
+        const btnContainer = document.createElement('div'); btnContainer.style.marginTop = '15px';
+        const showCoordsBtn = document.createElement('button'); showCoordsBtn.id = 'showCoordinatesBtn'; showCoordsBtn.className = 'panel-button'; showCoordsBtn.innerHTML = '<i class="fas fa-list-ol"></i> Координаты'; showCoordsBtn.onclick = () => toggleCoordinatesTable(index); btnContainer.appendChild(showCoordsBtn);
+        
+              const schemaBtn = document.createElement('button'); 
+        schemaBtn.id = 'openSchemaBtn'; 
+        schemaBtn.className = 'panel-button'; 
+        schemaBtn.innerHTML = '<i class="fas fa-map"></i> Схема'; 
+        schemaBtn.title = 'Скопировать координаты и открыть схему';
+        schemaBtn.onclick = () => {
+            handleCopyAllCoordinates(index); 
+            window.open('схема.html', '_blank'); 
         };
+        btnContainer.appendChild(schemaBtn);
+        
+        const copyAllCoordsBtn = document.createElement('button'); copyAllCoordsBtn.id = 'copyAllCoordinatesBtn'; copyAllCoordsBtn.className = 'panel-button'; copyAllCoordsBtn.innerHTML = '<i class="fas fa-copy"></i> Копировать'; copyAllCoordsBtn.title = 'Скопировать все координаты объекта (X\tY)'; copyAllCoordsBtn.onclick = () => handleCopyAllCoordinates(index); btnContainer.appendChild(copyAllCoordsBtn);
+        const centerBtn = document.createElement('button'); centerBtn.id = 'centerObjectBtn'; centerBtn.className = 'panel-button'; centerBtn.innerHTML = '<i class="fas fa-crosshairs"></i> Центрировать'; centerBtn.onclick = () => centerOnObject(index, false); btnContainer.appendChild(centerBtn);
+        const renameBtn = document.createElement('button'); renameBtn.id = 'renameObjectBtn'; renameBtn.className = 'panel-button'; renameBtn.innerHTML = '<i class="fas fa-pencil-alt"></i> Переименовать'; renameBtn.onclick = () => handleRenameRequest(index); btnContainer.appendChild(renameBtn);
+        const deleteBtn = document.createElement('button'); deleteBtn.id = 'deleteObjectBtn'; deleteBtn.className = 'panel-button'; deleteBtn.innerHTML = '<i class="fas fa-trash-alt"></i> Удалить'; deleteBtn.onclick = () => deleteObject(index); btnContainer.appendChild(deleteBtn);
+        selectedObjectInfoDiv.appendChild(btnContainer);
+
+        calculateAndDisplayIntersections(index); updateObjectListSelection();
     }
-    const btnContainer = document.createElement('div'); btnContainer.style.marginTop = '15px';
-    const showCoordsBtn = document.createElement('button'); showCoordsBtn.id = 'showCoordinatesBtn'; showCoordsBtn.className = 'panel-button'; showCoordsBtn.innerHTML = '<i class="fas fa-list-ol"></i> Координаты'; showCoordsBtn.onclick = () => toggleCoordinatesTable(index); btnContainer.appendChild(showCoordsBtn);
-    
-            const schemaBtn = document.createElement('button'); 
-    schemaBtn.id = 'openSchemaBtn'; 
-    schemaBtn.className = 'panel-button'; 
-    schemaBtn.innerHTML = '<i class="fas fa-map"></i> Схема'; 
-    schemaBtn.title = 'Скопировать координаты и открыть схему';
-    schemaBtn.onclick = () => {
-        handleCopyAllCoordinates(index); 
-        window.open('схема.html', '_blank'); 
-    };
-    btnContainer.appendChild(schemaBtn);
-    
-    const copyAllCoordsBtn = document.createElement('button'); copyAllCoordsBtn.id = 'copyAllCoordinatesBtn'; copyAllCoordsBtn.className = 'panel-button'; copyAllCoordsBtn.innerHTML = '<i class="fas fa-copy"></i> Копировать'; copyAllCoordsBtn.title = 'Скопировать все координаты объекта (X\tY)'; copyAllCoordsBtn.onclick = () => handleCopyAllCoordinates(index); btnContainer.appendChild(copyAllCoordsBtn);
-    const centerBtn = document.createElement('button'); centerBtn.id = 'centerObjectBtn'; centerBtn.className = 'panel-button'; centerBtn.innerHTML = '<i class="fas fa-crosshairs"></i> Центрировать'; centerBtn.onclick = () => centerOnObject(index, false); btnContainer.appendChild(centerBtn);
-    const renameBtn = document.createElement('button'); renameBtn.id = 'renameObjectBtn'; renameBtn.className = 'panel-button'; renameBtn.innerHTML = '<i class="fas fa-pencil-alt"></i> Переименовать'; renameBtn.onclick = () => handleRenameRequest(index); btnContainer.appendChild(renameBtn);
-    const deleteBtn = document.createElement('button'); deleteBtn.id = 'deleteObjectBtn'; deleteBtn.className = 'panel-button'; deleteBtn.innerHTML = '<i class="fas fa-trash-alt"></i> Удалить'; deleteBtn.onclick = () => deleteObject(index); btnContainer.appendChild(deleteBtn);
-    selectedObjectInfoDiv.appendChild(btnContainer);
-
-    calculateAndDisplayIntersections(index); updateObjectListSelection();
-}
-
-
     function handleCopyAllCoordinates(objectIndex) {
         if (objectIndex < 0 || objectIndex >= userObjects.length || !userObjects[objectIndex]) {
             showNotification("Объект не выбран или невалиден.", "error", "exclamation-circle"); return;
