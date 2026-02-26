@@ -2927,6 +2927,40 @@ input:checked + .slider:after { content: 'Proj4'; left: 15px; right: auto; }
     font-style: italic;
 }
 
+.bd-reload-btn {
+    background: #ffffff;
+    border: 1px solid #cbd5e1;
+    border-radius: 6px;
+    cursor: pointer;
+    color: #10b981; /* Зеленый оттенок */
+    width: 28px;
+    height: 28px;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    transition: all 0.2s;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.05);
+    margin-right: 5px; /* Отступ от кнопки глаза */
+}
+
+.bd-reload-btn:hover {
+    background: #ecfdf5;
+    border-color: #6ee7b7;
+    transform: rotate(15deg);
+}
+
+.bd-reload-btn:disabled {
+    color: #94a3b8;
+    cursor: not-allowed;
+    background: #f1f5f9;
+    transform: none;
+}
+
+/* Анимация вращения при загрузке */
+.fa-spin-fast {
+    animation: fa-spin 1s infinite linear;
+}
+
 @media (max-width: 768px) {
     .bottom-dashboard { height: 75vh; flex-direction: column; width: 100%; border-radius: 16px 16px 0 0; }
     .bd-summary { width: 100%; border-right: none; border-bottom: 1px solid #e2e8f0; padding: 15px; flex-direction: row; flex-wrap: wrap; gap: 10px; justify-content: space-between; align-items: center;}
@@ -11145,6 +11179,12 @@ function showExportOptionsDialog(lat, lon) {
 
 
 async function executeQuickReport(targetObject) {
+  
+    showLoader("Поиск ...");
+    
+  
+    await new Promise(resolve => setTimeout(resolve, 50));
+
     const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
     
@@ -11178,6 +11218,21 @@ async function executeQuickReport(targetObject) {
                 targetTurfGeoms.push({ geom: turf.lineString(coords.map(c => [c[1], c[0]])), isLine: true });
             }
         });
+
+    // Получаем связанные ОКС по КН исходных объектов
+        let linkedOksCns = [];
+        for (const obj of objects) {
+            const cn = obj.properties.get('cadastralNumber');
+            if (cn && cn.includes(':')) {
+                try {
+                    const linked = await fetchLinkedOks(cn);
+                    if (linked && linked.length > 0) {
+                        linkedOksCns.push(...linked);
+                    }
+                } catch(e) { console.error("Ошибка получения связанных ОКС", e); }
+            }
+        }
+        linkedOksCns = [...new Set(linkedOksCns)]; // Оставляем только уникальные
 
         const results = { zu: [], oks: [], structure: [], zouit: [] };
 
@@ -11221,11 +11276,60 @@ async function executeQuickReport(targetObject) {
         
         await delay(500);
 
-        // 2. ОКС
-        showLoader('Поиск ОКС...');
-        results.oks = await searchFeaturesByGeometry(objects, 36369);
-        await delay(500);
+   
 
+           // 2. ОКС (Обновленная логика)
+        showLoader('Поиск ОКС...');
+        const spatialOksFeatures = await searchFeaturesByGeometry(objects, 36369);
+        
+        // Используем Map для объединения данных по Кадастровому номеру
+        // Это гарантирует, что один объект будет иметь все правильные флаги
+        const oksMap = new Map();
+
+        // Хелпер для извлечения КН
+        const getCn = (f) => (f.properties?.options?.cad_num || f.properties?.descr || '').trim();
+
+        // А. Заносим пространственные объекты (те, что реально найдены на карте по координатам)
+        spatialOksFeatures.forEach(f => {
+            if (!f.properties) f.properties = {};
+            f.properties._isSpatial = true; // Флаг: найден геометрически (должен быть crosshair)
+            
+            const cn = getCn(f);
+            if (cn) {
+                oksMap.set(cn, f);
+            } else {
+                // Если КН нет, добавляем с уникальным ключом
+                oksMap.set(`unknown_${Math.random()}`, f);
+            }
+        });
+        
+        // Б. Обрабатываем список связанных КН (из ЕГРН)
+        linkedOksCns.forEach(lCn => {
+            const cn = lCn.trim();
+            if (oksMap.has(cn)) {
+                // Объект УЖЕ есть (найден геометрически) -> Добавляем ему флаг связи
+                const existing = oksMap.get(cn);
+                existing.properties._isLinked = true;
+            } else {
+                // Объекта НЕТ на карте -> Создаем карточку "только связь" (без геометрии)
+                oksMap.set(cn, {
+                    properties: { 
+                        descr: cn, 
+                        // Убрали лишний текст, так как будет иконка скрепки
+                        options: { cad_num: cn, purpose: '' }, 
+                        _isLinked: true,
+                        _isSpatial: false 
+                    },
+                    geometry: null
+                });
+            }
+        });
+        
+        // Преобразуем Map обратно в массив для результатов
+        results.oks = Array.from(oksMap.values());
+        
+        await delay(500);
+        
         // 3. Сооружения
         showLoader('Поиск Сооружений...');
         results.structure = await searchFeaturesByGeometry(objects, 36383);
@@ -11315,6 +11419,23 @@ function renderBottomDashboard(objName, results, targetBounds) {
             } else if (type === 'oks') {
                 cn = o.cad_num || p.descr || 'Без номера';
                 desc = o.purpose || o.building_name || 'Назначение не указано';
+                
+                // Формируем блок иконок (НЕЗАВИСИМЫЕ проверки)
+                let icons = '';
+                
+                // 1. Иконка связи (скрепка) - если есть в списке связанных
+                if (p._isLinked) {
+                    icons += `<i class="fas fa-link" style="color: #3b82f6; margin-right: 5px;" title="Связанный ОКС"></i>`;
+                }
+                
+                // 2. Иконка прицела - если найден геометрически (на карте)
+                // Важно: проверяем независимо от скрепки, чтобы выводились обе или по одной
+                if (p._isSpatial) {
+                    icons += `<i class="fas fa-crosshairs" style="color: #9333ea; margin-right: 5px;" title="Найден по координатам"></i>`;
+                }
+                
+                desc = icons + desc;
+
             } else if (type === 'structure') {
                 cn = o.cad_number || p.descr || 'Без номера';
                 desc = `${o.params_name || 'Без названия'} (${o.params_extension ? o.params_extension+'м' : 'длина не указ.'})`;
@@ -11359,11 +11480,17 @@ function renderBottomDashboard(objName, results, targetBounds) {
                 <div class="bd-col-list">${genListHtml(results.zu, 'zu')}</div>
             </div>
             <div class="bd-column">
-                <div class="bd-col-header">Здания (ОКС) <button class="bd-eye-btn" data-layer="oks" title="Скрыть/Показать слой"><i class="fas fa-eye"></i></button></div>
+                <div class="bd-col-header">
+                    ОКС
+                    <div style="display: flex; align-items: center;">
+                        <button class="bd-reload-btn" data-layer="oks" title="Запросить данные (Наименование, Площадь) из ЕГРН"><i class="fas fa-sync-alt"></i></button>
+                        <button class="bd-eye-btn" data-layer="oks" title="Скрыть/Показать слой"><i class="fas fa-eye"></i></button>
+                    </div>
+                </div>
                 <div class="bd-col-list">${genListHtml(results.oks, 'oks')}</div>
             </div>
             <div class="bd-column">
-                <div class="bd-col-header">Сооружения <button class="bd-eye-btn" data-layer="structure" title="Скрыть/Показать слой"><i class="fas fa-eye"></i></button></div>
+                <div class="bd-col-header">Сооружения с коорд.<button class="bd-eye-btn" data-layer="structure" title="Скрыть/Показать слой"><i class="fas fa-eye"></i></button></div>
                 <div class="bd-col-list">${genListHtml(results.structure, 'structure')}</div>
             </div>
             <div class="bd-column">
@@ -11430,9 +11557,19 @@ function renderBottomDashboard(objName, results, targetBounds) {
             }
         });
 
-        item.addEventListener('dblclick', (e) => {
+        item.addEventListener('dblclick', async (e) => {
             e.preventDefault();
             const cn = item.dataset.cn;
+
+            // Копирование в буфер обмена по двойному клику
+            if (cn && cn !== 'Объект' && cn !== 'Без номера') {
+                try {
+                    await navigator.clipboard.writeText(cn);
+                    showNotification(`Скопировано: ${cn}`, 'success', 'check-circle');
+                } catch (err) {
+                    console.error('Ошибка копирования:', err);
+                }
+            }
 
             if (currentlyIsolatedCn === cn) {
                 currentlyIsolatedCn = null;
@@ -11469,9 +11606,26 @@ function renderBottomDashboard(objName, results, targetBounds) {
                         }
                     }
                 });
-                
- 
             }
+        });
+    });
+    
+    
+     // Обработчик для кнопки обновления данных
+    panel.querySelectorAll('.bd-reload-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            const layerKey = btn.dataset.layer;
+            const icon = btn.querySelector('i');
+            
+            // Блокируем кнопку и включаем анимацию
+            btn.disabled = true;
+            icon.classList.add('fa-spin-fast');
+            
+            await enrichDashboardLayer(layerKey, panel);
+            
+            // Возвращаем кнопку в исходное состояние
+            icon.classList.remove('fa-spin-fast');
+            btn.disabled = false;
         });
     });
 
@@ -11489,6 +11643,93 @@ function renderBottomDashboard(objName, results, targetBounds) {
     });
 }
 
+
+
+async function enrichDashboardLayer(layerType, panelElement) {
+    // Находим все элементы списка выбранного типа
+    const items = panelElement.querySelectorAll(`.bd-item[data-type="${layerType}"]`);
+    if (items.length === 0) return;
+
+    let successCount = 0;
+
+    for (const item of items) {
+        const cn = item.dataset.cn;
+        
+        // Пропускаем, если КН некорректный
+        if (!cn || !cn.includes(':')) continue;
+
+        const descSpan = item.querySelector('.bd-item-desc');
+        const originalText = descSpan.innerHTML;
+        
+        // Сохраняем иконки (скрепка/прицел), они обычно в начале HTML
+        // Регулярка ищет все теги <i>...</i> в начале строки
+        const iconsMatch = originalText.match(/^(<i[^>]*><\/i>\s*)+/i); 
+        const iconsHtml = iconsMatch ? iconsMatch[0] : '';
+
+        // Ставим индикатор загрузки
+        descSpan.innerHTML = `${iconsHtml} <span style="color:#f59e0b; font-size: 0.9em;">Загрузка данных...</span>`;
+
+        try {
+            // Пауза перед запросом (1.2 сек)
+            await new Promise(r => setTimeout(r, 1200));
+
+            // Запрос данных
+            const feature = await fetchCadastralData(cn);
+
+            if (feature && feature.properties) {
+                const opts = feature.properties.options || {};
+                
+                // Формируем новую строку описания
+                let newDescParts = [];
+                
+                // Наименование / Назначение
+                const name = opts.name || opts.params_name || opts.building_name || opts.purpose;
+                if (name) newDescParts.push(`<b>${name}</b>`);
+                
+                // Площадь
+                if (opts.build_record_area) {
+                    newDescParts.push(`Площадь: ${opts.build_record_area} м²`);
+                } 
+                // Или Протяженность (для сооружений)
+                else if (opts.params_extension) {
+                    newDescParts.push(`Протяженность: ${opts.params_extension} м`);
+                }
+
+                // Адрес (опционально, если нужно)
+                // if (opts.readable_address) newDescParts.push(opts.readable_address);
+
+                if (newDescParts.length > 0) {
+                    descSpan.innerHTML = iconsHtml + newDescParts.join('<br>');
+                    
+                    // Обновляем глобальные данные (чтобы экспорт в Excel подхватил новые данные)
+                    const globalArr = (layerType === 'oks') ? buildingFeaturesData : structureFeaturesData;
+                    const existingFeatureIndex = globalArr.findIndex(f => 
+                        (f.properties?.options?.cad_num === cn) || (f.properties?.descr === cn)
+                    );
+                    
+                    if (existingFeatureIndex !== -1) {
+                        // Мержим новые опции в существующий объект
+                        globalArr[existingFeatureIndex].properties.options = {
+                            ...globalArr[existingFeatureIndex].properties.options,
+                            ...opts
+                        };
+                    }
+                    
+                    successCount++;
+                } else {
+                    descSpan.innerHTML = iconsHtml + "Нет детальных данных";
+                }
+            } else {
+                descSpan.innerHTML = iconsHtml + "Данные не найдены";
+            }
+        } catch (e) {
+            console.error(`Ошибка обновления ${cn}:`, e);
+            descSpan.innerHTML = iconsHtml + "Ошибка запроса"; // Возвращаем иконки и пишем ошибку
+        }
+    }
+    
+    showNotification(`Обновлено объектов: ${successCount}`, 'success');
+}
 
 
 // Modify clearMapAndResetTheme to clear specific object types
@@ -12932,7 +13173,7 @@ document.getElementById('city-input').addEventListener('keydown', async function
             }
             
             if (isValidCadastralNumber(inputText)) {
-                showLoader(`Запрос данных для ${inputText}...`);
+                showLoader(`Поиск ${inputText}...`);
                 const feature = await fetchCadastralData(inputText);
 
                 if (!feature || !feature.geometry) {
@@ -22868,13 +23109,14 @@ function handleExportAction() {
  
  
  // --- Функция Экспорта Быстрого отчета в один файл с вкладками ---
+// --- Функция Экспорта Быстрого отчета в один файл с вкладками ---
 function exportQuickReportToExcel() {
     showLoader('Формирование сводного Excel отчета...');
 
     try {
         const wb = XLSX.utils.book_new();
 
-        // 1. Вкладка ЗУ
+        // 1. Вкладка ЗУ (без изменений)
         if (parcelFeaturesData && parcelFeaturesData.length > 0) {
             const dataZU = [["Кадастровый номер", "Адрес", "Площадь (м²)", "Тип площади", "ВРИ", "Форма собственности", "Тип права"]];
             parcelFeaturesData.forEach(f => {
@@ -22895,14 +23137,20 @@ function exportQuickReportToExcel() {
             XLSX.utils.book_append_sheet(wb, wsZU, "Земельные участки");
         }
 
-        // 2. Вкладка ОКС
+        // 2. Вкладка ОКС (ИЗМЕНЕНО чтение полей)
         if (buildingFeaturesData && buildingFeaturesData.length > 0) {
-            const dataOKS = [["Кадастровый номер", "Назначение", "Адрес", "Площадь (м²)", "Год постройки", "Материал стен", "Этажность"]];
+            // Изменили заголовок столбца на более универсальный
+            const dataOKS = [["Кадастровый номер", "Наименование / Назначение", "Адрес", "Площадь (м²)", "Год постройки", "Материал стен", "Этажность"]];
+            
             buildingFeaturesData.forEach(f => {
                 const o = f.properties.options || {};
+                
+                // Проверяем все возможные поля с именем, приоритет у 'name' и 'params_name' (приходят при обновлении)
+                const nameOrPurpose = o.name || o.params_name || o.building_name || o.purpose || '-';
+
                 dataOKS.push([
                     o.cad_num || f.properties.descr || 'Не указан',
-                    o.purpose || o.building_name || '-',
+                    nameOrPurpose, 
                     o.readable_address || '-',
                     o.build_record_area || '-',
                     o.year_built || '-',
@@ -22911,18 +23159,22 @@ function exportQuickReportToExcel() {
                 ]);
             });
             const wsOKS = XLSX.utils.aoa_to_sheet(dataOKS);
-            wsOKS['!cols'] = [{wch:20}, {wch:25}, {wch:50}, {wch:15}, {wch:15}, {wch:20}, {wch:12}];
+            wsOKS['!cols'] = [{wch:20}, {wch:40}, {wch:50}, {wch:15}, {wch:15}, {wch:20}, {wch:12}];
             XLSX.utils.book_append_sheet(wb, wsOKS, "Здания (ОКС)");
         }
 
-        // 3. Вкладка Сооружения
+        // 3. Вкладка Сооружения (ИЗМЕНЕНО чтение полей)
         if (structureFeaturesData && structureFeaturesData.length > 0) {
             const dataStr = [["Кадастровый номер", "Наименование", "Адрес", "Протяженность (м)", "Назначение"]];
             structureFeaturesData.forEach(f => {
                 const o = f.properties.options || {};
+                
+                // Проверяем расширенные поля имени
+                const structName = o.name || o.params_name || '-';
+
                 dataStr.push([
                     o.cad_number || f.properties.descr || 'Не указан',
-                    o.params_name || '-',
+                    structName,
                     o.address_readable_address || '-',
                     o.params_extension || '-',
                     o.params_purpose || '-'
@@ -22933,7 +23185,7 @@ function exportQuickReportToExcel() {
             XLSX.utils.book_append_sheet(wb, wsStr, "Сооружения");
         }
 
-        // 4. Вкладка ЗОУИТ
+        // 4. Вкладка ЗОУИТ (без изменений)
         if (zouitFeaturesData && zouitFeaturesData.length > 0) {
             const dataZouit = [["Регистрационный номер", "Наименование", "Ограничения", "Дата регистрации"]];
             zouitFeaturesData.forEach(f => {
