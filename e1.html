@@ -11532,7 +11532,7 @@ function renderBottomDashboard(objName, results, targetBounds) {
                     <span>Сооруж.</span><strong>${results.structure.length}</strong>
                 </div>
                 <div class="bd-stat-box" style="border-top: 3px solid #9400D3">
-                    <span>ЗОУИТ</span><strong>${results.zouit.length}</strong>
+                    <span>Зоны/терр.</span><strong>${results.zouit.length}</strong>
                 </div>
             </div>
            
@@ -17216,50 +17216,40 @@ async function exportQuickReportToHtml() {
 
         if (!tablesHtml) tablesHtml = '<div class="empty-msg">В выбранной области нет пересекаемых объектов</div>';
 
-        // --- РАСЧЕТ ГЕОМЕТРИИ (ДЛЯ НИЖНЕГО БЛОКА) ---
+      // --- РАСЧЕТ ГЕОМЕТРИИ (ЧЕРЕЗ МСК) ---
         let totalArea = 0;
         let totalPerimeter = 0;
-        const targetTurfFeatures = [];
+        const targetTurfFeatures = []; // Оставляем только для пересечения с зонами
 
         quickReportTargetObjects.forEach(obj => {
+            // 1. Формируем WGS84 объекты для Turf (ТОЛЬКО для пересечений)
             const coords = obj.geometry.getCoordinates();
             if (obj instanceof ymaps.Polygon) {
-                const turfPoly = turf.polygon([coords[0].map(c => [c[1], c[0]])]);
-                totalArea += turf.area(turfPoly);
-                totalPerimeter += turf.length(turfPoly, { units: 'meters' });
-                targetTurfFeatures.push(turfPoly);
+                targetTurfFeatures.push(turf.polygon([coords[0].map(c => [c[1], c[0]])]));
             } else if (obj instanceof ymaps.Polyline) {
-                const turfLine = turf.lineString(coords.map(c => [c[1], c[0]]));
-                totalPerimeter += turf.length(turfLine, { units: 'meters' });
-                targetTurfFeatures.push(turfLine);
+                targetTurfFeatures.push(turf.lineString(coords.map(c => [c[1], c[0]])));
             }
+
+            // 2. Считаем точную площадь и периметр через новую функцию
+            const geomStats = calculatePreciseGeometry(obj);
+            totalArea += geomStats.area;
+            totalPerimeter += geomStats.perimeter;
         });
 
-        // --- РАСЧЕТ ПЕРЕСЕЧЕНИЙ ЗОН (БЕЗ YMAPS, НАПРЯМУЮ ПО ДАННЫМ) ---
-       // --- РАСЧЕТ ПЕРЕСЕЧЕНИЙ ЗОН (ИСПРАВЛЕННАЯ И БЕЗОПАСНАЯ ЛОГИКА) ---
+      // --- РАСЧЕТ ПЕРЕСЕЧЕНИЙ ЗОН (С ЗАПАСНЫМ ВАРИАНТОМ) ---
         const zoneResults = [];
 
-        // Безопасная функция трансформации координат
+        // Функция трансформации
         const transformCoordToMapWgs = (c) => {
             if (!Array.isArray(c) || c.length < 2) return null;
             try {
-                // Если координаты большие (Mercator), конвертируем. Если маленькие (уже WGS84), оставляем.
                 let wgs;
-                if (Math.abs(c[0]) > 200 || Math.abs(c[1]) > 200) {
-                    wgs = proj4('EPSG:3857', 'EPSG:4326', c);
-                } else {
-                    wgs = [c[0], c[1]]; // Считаем, что уже градусы (lon, lat)
-                }
-
+                if (Math.abs(c[0]) > 200 || Math.abs(c[1]) > 200) wgs = proj4('EPSG:3857', 'EPSG:4326', c);
+                else wgs = [c[0], c[1]];
+                
                 if (!isFinite(wgs[0]) || !isFinite(wgs[1])) return null;
-
-                return [
-                    wgs[0] - (mapOffsetX * 0.000008983), // Lon
-                    wgs[1] - (mapOffsetY * 0.000008983)  // Lat
-                ];
-            } catch (e) {
-                return null;
-            }
+                return [wgs[0] - (mapOffsetX * 0.000008983), wgs[1] - (mapOffsetY * 0.000008983)];
+            } catch (e) { return null; }
         };
 
         geoAnalysisZones.forEach(f => {
@@ -17286,100 +17276,97 @@ async function exportQuickReportToHtml() {
                 zoneName = `${regNum} ${name ? '- ' + name : ''}`.trim();
             }
 
+            // Функция Fallback: добавляем зону, но ставим прочерк в статусе
+            const addAsIntersectingFallback = () => {
+                console.log(`[Отчет HTML] Геометрия ID=${f.id} сложна/отсутствует. Добавляем по факту наличия.`);
+                zoneResults.push({
+                    type: zoneType,
+                    name: zoneName,
+                    status: '-' // Ставим прочерк, т.к. не проверили математически
+                });
+            };
+
+            // 1. Проверка наличия геометрии
             if (!f.geometry || !f.geometry.coordinates || f.geometry.coordinates.length === 0) {
-                console.warn(`[Отчет HTML] Пустая геометрия у зоны ID=${f.id}`);
+                addAsIntersectingFallback();
                 return;
             }
 
-            // Формируем полноценный объект Turf с валидацией
             let zoneTurfFeature = null;
+
             try {
-                if (f.geometry.type === 'Polygon') {
-                    const rings = f.geometry.coordinates.map(ring => {
-                        const validPoints = ring.map(transformCoordToMapWgs).filter(p => p !== null);
-                        // Замыкаем кольцо, если нужно
-                        if (validPoints.length > 0) {
-                            const first = validPoints[0];
-                            const last = validPoints[validPoints.length - 1];
-                            if (first[0] !== last[0] || first[1] !== last[1]) {
-                                validPoints.push(first);
-                            }
+                // 2. Рекурсивный парсер
+                const extractRings = (coords) => {
+                    if (!Array.isArray(coords)) return [];
+                    if (coords.length === 2 && typeof coords[0] === 'number' && typeof coords[1] === 'number') return [transformCoordToMapWgs(coords)];
+                    if (Array.isArray(coords[0]) && coords[0].length === 2 && typeof coords[0][0] === 'number') {
+                        const ring = coords.map(transformCoordToMapWgs).filter(p => p !== null);
+                        if (ring.length >= 3) {
+                            const first = ring[0]; const last = ring[ring.length - 1];
+                            if (Math.abs(first[0]-last[0])>1e-9 || Math.abs(first[1]-last[1])>1e-9) ring.push(first);
+                            return [ring];
                         }
-                        return validPoints;
-                    }).filter(r => r.length >= 4); // Turf требует минимум 4 точки (3 + замыкающая)
-
-                    if (rings.length > 0) {
-                        zoneTurfFeature = turf.polygon(rings);
+                        return [];
                     }
-                } else if (f.geometry.type === 'MultiPolygon') {
-                    const polys = f.geometry.coordinates.map(poly => {
-                        return poly.map(ring => {
-                            const validPoints = ring.map(transformCoordToMapWgs).filter(p => p !== null);
-                            if (validPoints.length > 0) {
-                                const first = validPoints[0];
-                                const last = validPoints[validPoints.length - 1];
-                                if (first[0] !== last[0] || first[1] !== last[1]) {
-                                    validPoints.push(first);
-                                }
-                            }
-                            return validPoints;
-                        }).filter(r => r.length >= 4);
-                    }).filter(p => p.length > 0);
+                    return coords.flatMap(extractRings);
+                };
 
-                    if (polys.length > 0) {
-                        zoneTurfFeature = turf.multiPolygon(polys);
-                    }
+                const allRings = extractRings(f.geometry.coordinates);
+                const validRings = allRings.filter(r => r && r.length >= 4);
+
+                if (validRings.length > 0) {
+                    const multiPolyCoords = validRings.map(ring => [ring]);
+                    zoneTurfFeature = turf.multiPolygon(multiPolyCoords);
+                } else {
+                    addAsIntersectingFallback();
+                    return;
                 }
+
             } catch (err) {
-                console.error(`[Отчет HTML] Ошибка создания геометрии для зоны ID=${f.id}:`, err);
+                console.error(`[Отчет HTML] Ошибка парсинга ID=${f.id}:`, err);
+                addAsIntersectingFallback();
                 return;
             }
 
-            if (!zoneTurfFeature) {
-                console.log(`[Отчет HTML] Не удалось создать валидный полигон для ID=${f.id} (возможно, мало точек)`);
-                return;
-            }
-
+            // 3. Проверка через Turf
             let isFullyWithin = true;
             let isIntersecting = false;
 
-            // Отладочный вывод для первой зоны, чтобы проверить координаты
-            if (targetTurfFeatures.length > 0 && zoneResults.length === 0) {
-                try {
-                    const zBbox = turf.bbox(zoneTurfFeature);
-                    console.log(`[DEBUG] Первая валидная зона (${zoneType}). BBOX: [${zBbox.join(', ')}]`);
-                } catch(e) {}
-            }
-
-            targetTurfFeatures.forEach(targetGeom => {
-                try {
-                    // 1. Проверяем полное вхождение
+            try {
+                targetTurfFeatures.forEach(targetGeom => {
                     if (turf.booleanWithin(targetGeom, zoneTurfFeature)) {
                         isIntersecting = true;
                     } else {
                         isFullyWithin = false;
-                        // 2. Если не полностью внутри, проверяем пересечение
-                        // Используем booleanIntersects как более надежный метод чем intersect
                         if (turf.booleanIntersects(targetGeom, zoneTurfFeature)) {
                             isIntersecting = true;
                         }
                     }
-                } catch (turfErr) {
-                    console.warn(`[Отчет HTML] Ошибка Turf при проверке пересечения:`, turfErr);
-                }
-            });
+                });
+            } catch (turfErr) {
+                console.warn(`[Отчет HTML] Ошибка Turf для ID=${f.id}`);
+                addAsIntersectingFallback();
+                return;
+            }
 
             if (isIntersecting) {
-                console.log(`[Отчет HTML] Найдено пересечение: ID=${f.id}. Зона: ${zoneType}`);
+                console.log(`[Отчет HTML] Найдено пересечение (Turf): ID=${f.id}`);
                 zoneResults.push({
                     type: zoneType,
                     name: zoneName,
                     status: isFullyWithin ? 'Полностью входит' : 'Частично входит'
                 });
+            } else {
+                // Если Turf не нашел (возможно ошибка в сложной геометрии), но это МО/НП — верим API
+                if (zoneType === 'Муниципальное образование' || zoneType === 'Населенный пункт') {
+                     addAsIntersectingFallback();
+                } else {
+                     console.log(`[Отчет HTML] Пересечений НЕТ: ID=${f.id}`);
+                }
             }
         });
 
-        let geoHtml = `
+       let geoHtml = `
             <div style="margin-top: 25px;">
                 <div class="table-title">Геометрические характеристики объекта</div>
                 <table>
@@ -17394,13 +17381,13 @@ async function exportQuickReportToHtml() {
         if (zoneResults.length > 0) {
             geoHtml += `
             <div style="margin-top: 20px;">
-                <div class="table-title">Расположение в зонах (по карте)</div>
+                <div class="table-title">Зоны и территории</div>
                 <table>
                     <thead>
                         <tr><th>Тип зоны</th><th>Наименование / Номер</th><th>Статус</th></tr>
                     </thead>
                     <tbody>
-                        ${zoneResults.map(z => `<tr><td>${z.type}</td><td>${z.name}</td><td><b>${z.status}</b></td></tr>`).join('')}
+                        ${zoneResults.map(z => `<tr><td>${z.type}</td><td>${z.name}</td><td>${z.status}</td></tr>`).join('')}
                     </tbody>
                 </table>
             </div>`;
@@ -17441,7 +17428,10 @@ async function exportQuickReportToHtml() {
         
         .map-col { flex: 0 0 50%; max-width: 50%; position: sticky; top: 20px; }
         .map-box { border: 1px solid var(--border); padding: 4px; background: #fff; border-radius: 3px; }
-        .map-img { width: 100%; height: auto; display: block; border: 1px solid #e2e8f0; }
+        
+        /* Добавлен курсор лупы и плавность для картинки */
+        .map-img { width: 100%; height: auto; display: block; border: 1px solid #e2e8f0; cursor: zoom-in; transition: opacity 0.2s; }
+        .map-img:hover { opacity: 0.9; }
         
         .data-col { flex: 1; min-width: 45%; }
         
@@ -17459,6 +17449,23 @@ async function exportQuickReportToHtml() {
         
         .empty-msg { text-align: center; color: #888; font-style: italic; padding: 30px; border: 1px dashed #ccc; background: #fafafa; }
 
+        /* СТИЛИ ДЛЯ МОДАЛЬНОГО ОКНА ПРЕВЬЮ */
+        .img-modal {
+            position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+            background: rgba(0, 0, 0, 0.65); backdrop-filter: blur(4px);
+            display: flex; justify-content: center; align-items: center;
+            z-index: 9999; opacity: 0; pointer-events: none;
+            transition: opacity 0.3s ease;
+        }
+        .img-modal.active { opacity: 1; pointer-events: auto; }
+        .img-modal img {
+            max-width: 85vw; max-height: 85vh; border-radius: 6px;
+            box-shadow: 0 15px 40px rgba(0,0,0,0.4); border: 6px solid #fff;
+            transform: scale(0.9); transition: transform 0.3s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            cursor: zoom-out;
+        }
+        .img-modal.active img { transform: scale(1); }
+
         @media print {
             body { background: #fff; padding: 0; font-size: 11px; }
             .container { box-shadow: none; border: none; padding: 0; max-width: 100%; }
@@ -17468,8 +17475,9 @@ async function exportQuickReportToHtml() {
             .content-wrapper { display: block; }
             .map-col { max-width: 100%; position: static; margin-bottom: 25px; page-break-inside: avoid; }
             .map-box { padding: 0; border: none; }
-            .map-img { max-height: 450px; object-fit: contain; }
+            .map-img { max-height: 450px; object-fit: contain; cursor: default; }
             .data-col { width: 100%; }
+            .img-modal { display: none !important; }
             
             table { page-break-inside: auto; margin-bottom: 15px; }
             tr { page-break-inside: avoid; page-break-after: auto; }
@@ -17486,7 +17494,9 @@ async function exportQuickReportToHtml() {
         function saveHtml() {
             const docClone = document.documentElement.cloneNode(true);
             const actions = docClone.querySelector('.header-actions');
+            const modal = docClone.querySelector('.img-modal');
             if (actions) actions.remove();
+            if (modal) modal.remove(); // Убираем модальное окно из сохраненного файла
 
             const htmlContent = "<!DOCTYPE html>\\n" + docClone.outerHTML;
             const blob = new Blob([htmlContent], { type: "text/html;charset=utf-8" });
@@ -17503,6 +17513,32 @@ async function exportQuickReportToHtml() {
             document.body.removeChild(a);
             URL.revokeObjectURL(url);
         }
+
+        // Скрипт для работы модального окна
+        document.addEventListener('DOMContentLoaded', () => {
+            const mapImg = document.querySelector('.map-img');
+            const modal = document.getElementById('imageModal');
+            const modalImg = document.getElementById('modalImg');
+
+            if (mapImg && modal && modalImg) {
+                mapImg.addEventListener('click', () => {
+                    modalImg.src = mapImg.src;
+                    modal.classList.add('active');
+                });
+
+                // Закрытие при клике по фону или по самой картинке
+                modal.addEventListener('click', () => {
+                    modal.classList.remove('active');
+                });
+                
+                // Закрытие по клавише Esc
+                document.addEventListener('keydown', (e) => {
+                    if (e.key === 'Escape' && modal.classList.contains('active')) {
+                        modal.classList.remove('active');
+                    }
+                });
+            }
+        });
     ${'<'}/script>
 </head>
 <body>
@@ -17522,7 +17558,7 @@ async function exportQuickReportToHtml() {
             <!-- Схема слева -->
             <div class="map-col">
                 <div class="map-box">
-                    <img src="${mapImage}" class="map-img" alt="Схема расположения">
+                    <img src="${mapImage}" class="map-img" alt="Схема расположения" title="Нажмите для увеличения">
                 </div>
                 ${geoHtml}
             </div>
@@ -17532,6 +17568,11 @@ async function exportQuickReportToHtml() {
                 ${tablesHtml}
             </div>
         </div>
+    </div>
+    
+    <!-- Модальное окно для увеличенного просмотра -->
+    <div class="img-modal" id="imageModal">
+        <img id="modalImg" src="" alt="Увеличенная схема">
     </div>
 </body>
 </html>`;
@@ -18065,12 +18106,17 @@ async function generateConsolidatedReport(targetObject) {
         const allSearchCoords = [];
 
         // Вычисляем общую площадь и собираем все координаты
-        targetPolygons.forEach(polygon => {
+         targetPolygons.forEach(polygon => {
             const coords = polygon.geometry.getCoordinates()[0];
+            
+            // Получаем точную площадь через новую функцию
+            const geomStats = calculatePreciseGeometry(polygon);
+            mainObjectAreaInMeters += geomStats.area;
+
+            // WGS84 полигон оставляем для поиска пересечений (Turf.js)
             const turfPoly = turf.polygon([coords.map(c => [c[1], c[0]])]);
-            mainObjectAreaInMeters += turf.area(turfPoly);
-            allSearchCoords.push(...coords);
             targetTurfPolygons.push(turfPoly);
+            allSearchCoords.push(...coords);
         });
 
        let mainObjectData;
@@ -18915,39 +18961,30 @@ function openColorEditorModal(targetObject) {
     opacityValue.textContent = opacity.toFixed(1);
     opacitySlider.addEventListener('input', () => { opacityValue.textContent = parseFloat(opacitySlider.value).toFixed(1); });
 
-    try {
-        let coordsForTurf;
+ try {
+        const geomStats = calculatePreciseGeometry(targetObject);
         
         if (isPolygon) {
-            const rings = targetObject.geometry.getCoordinates();
-            if (rings && rings.length > 0 && rings[0].length >= 3) {
-                coordsForTurf = rings[0].map(c => [c[1], c[0]]);
-                const turfPoly = turf.polygon([coordsForTurf]);
-                
-                const area = Math.round(turf.area(turfPoly));
-                const perimeter = Math.round(turf.length(turfPoly, { units: 'meters' }));
-                
-                areaDetails.innerHTML = `
-                    <b>Полигон</b><br>
-                    Площадь: ~${area.toLocaleString('ru-RU')} м²<br>
-                    Периметр: ~${perimeter.toLocaleString('ru-RU')} м
-                `;
-            }
+            const area = Math.round(geomStats.area);
+            const perimeter = Math.round(geomStats.perimeter);
+            
+            areaDetails.innerHTML = `
+                <b>Полигон</b><br>
+                Площадь: ~${area.toLocaleString('ru-RU')} м²<br>
+                Периметр: ~${perimeter.toLocaleString('ru-RU')} м
+            `;
         } else if (isLine) {
-            const lineCoords = targetObject.geometry.getCoordinates();
-            if (lineCoords && lineCoords.length >= 2) {
-                coordsForTurf = lineCoords.map(c => [c[1], c[0]]);
-                const turfLine = turf.lineString(coordsForTurf);
-                const length = turf.length(turfLine, { units: 'meters' });
-                
-                areaDetails.innerHTML = `
-                    <b>Линия</b><br>
-                    Длина: ~${length.toFixed(2)} м<br>
-                    Точек: ${lineCoords.length}
-                `;
-            }
+            const pointsCount = targetObject.geometry.getCoordinates().length;
+            const length = geomStats.perimeter;
+            
+            areaDetails.innerHTML = `
+                <b>Линия</b><br>
+                Длина: ~${length.toFixed(2)} м<br>
+                Точек: ${pointsCount}
+            `;
         }
     } catch (e) {
+        console.error("Ошибка расчета геометрии в редакторе:", e);
         areaDetails.innerHTML = "Ошибка расчета геометрии";
     }
 
@@ -20914,6 +20951,109 @@ function setActiveTheme(theme) {
     }
 }
 
+
+
+function calculatePreciseGeometry(ymapsObject) {
+    let area = 0;
+    let perimeter = 0;
+    const isPolygon = ymapsObject instanceof ymaps.Polygon;
+    const isLine = ymapsObject instanceof ymaps.Polyline;
+
+    if (!isPolygon && !isLine) return { area, perimeter };
+
+    // 1. Настраиваем МСК
+    const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
+    const destSystemObject = (typeof COORDINATE_SYSTEMS !== 'undefined') ? COORDINATE_SYSTEMS.find(s => s.value === destSc) : null;
+    let calcMskOffsetX = 0, calcMskOffsetY = 0;
+    let canCalculateMsk = false;
+
+    if (destSystemObject && destSystemObject.def) {
+        proj4.defs(destSc, destSystemObject.def);
+        canCalculateMsk = true;
+        if (localStorage.getItem('autoLoadMskOffset') !== 'false') {
+            calcMskOffsetX = destSystemObject.offsetX || 0;
+            calcMskOffsetY = destSystemObject.offsetY || 0;
+        } else {
+            calcMskOffsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
+            calcMskOffsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
+        }
+    }
+
+    const coords = ymapsObject.geometry.getCoordinates();
+
+    const calcPlanarArea = (pts) => {
+        let a = 0;
+        for (let i = 0; i < pts.length - 1; i++) a += pts[i][0] * pts[i+1][1] - pts[i+1][0] * pts[i][1];
+        return Math.abs(a) / 2;
+    };
+
+    const calcPlanarLength = (pts) => {
+        let l = 0;
+        for (let i = 0; i < pts.length - 1; i++) {
+            const dx = pts[i+1][0] - pts[i][0];
+            const dy = pts[i+1][1] - pts[i][1];
+            l += Math.sqrt(dx * dx + dy * dy);
+        }
+        return l;
+    };
+
+    if (canCalculateMsk) {
+        const getMskPoints = (pts, isClosed) => {
+            const mskPoints = pts.map(c => {
+                const trueLat = c[0] + (mapOffsetY * 0.000008983);
+                const trueLon = c[1] + (mapOffsetX * 0.000008983);
+                const p = proj4('EPSG:4326', destSc, [trueLon, trueLat]); 
+                return [p[1] + calcMskOffsetX, p[0] + calcMskOffsetY]; 
+            });
+            if (isClosed) {
+                const first = mskPoints[0];
+                const last = mskPoints[mskPoints.length - 1];
+                if (Math.abs(first[0] - last[0]) > 0.001 || Math.abs(first[1] - last[1]) > 0.001) mskPoints.push(first);
+            }
+            return mskPoints;
+        };
+
+        if (isPolygon) {
+            const rings = coords; // coords для полигона - это массив колец
+            for (let i = 0; i < rings.length; i++) {
+                const mskRing = getMskPoints(rings[i], true);
+                const ringArea = calcPlanarArea(mskRing);
+                const ringPerimeter = calcPlanarLength(mskRing);
+
+                if (i === 0) {
+                    area += ringArea; // Внешний контур (плюсуем)
+                } else {
+                    area -= ringArea; // Внутренний контур (минусуем)
+                }
+                perimeter += ringPerimeter; // Периметр дырок плюсуется к общей длине границ
+            }
+            area = Math.max(0, area); // Защита от отрицательной площади при аномалиях
+        } else {
+            perimeter = calcPlanarLength(getMskPoints(coords, false));
+        }
+    } else {
+        // Fallback: расчет через Turf.js (сферический)
+        const getWgsPoints = (pts, isClosed) => {
+            const wgs = pts.map(c => [c[1] + (mapOffsetX * 0.000008983), c[0] + (mapOffsetY * 0.000008983)]);
+            if (isClosed) {
+                const first = wgs[0], last = wgs[wgs.length - 1];
+                if (Math.abs(first[0] - last[0]) > 1e-9 || Math.abs(first[1] - last[1]) > 1e-9) wgs.push(first);
+            }
+            return wgs;
+        };
+
+        if (isPolygon) {
+            const wgsRings = coords.map(r => getWgsPoints(r, true));
+            const turfPoly = turf.polygon(wgsRings); // Turf сам правильно вычтет дырки
+            area = turf.area(turfPoly);
+            perimeter = turf.length(turfPoly, { units: 'meters' });
+        } else {
+            perimeter = turf.length(turf.lineString(getWgsPoints(coords, false)), { units: 'meters' });
+        }
+    }
+
+    return { area, perimeter };
+}
 
 
 function applyCurrentTheme() {
