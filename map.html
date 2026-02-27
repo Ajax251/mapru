@@ -17216,23 +17216,24 @@ async function exportQuickReportToHtml() {
 
         if (!tablesHtml) tablesHtml = '<div class="empty-msg">В выбранной области нет пересекаемых объектов</div>';
 
-        // --- РАСЧЕТ ГЕОМЕТРИИ (ДЛЯ НИЖНЕГО БЛОКА) ---
+      // --- РАСЧЕТ ГЕОМЕТРИИ (ЧЕРЕЗ МСК) ---
         let totalArea = 0;
         let totalPerimeter = 0;
-        const targetTurfFeatures = [];
+        const targetTurfFeatures = []; // Оставляем только для пересечения с зонами
 
         quickReportTargetObjects.forEach(obj => {
+            // 1. Формируем WGS84 объекты для Turf (ТОЛЬКО для пересечений)
             const coords = obj.geometry.getCoordinates();
             if (obj instanceof ymaps.Polygon) {
-                const turfPoly = turf.polygon([coords[0].map(c => [c[1], c[0]])]);
-                totalArea += turf.area(turfPoly);
-                totalPerimeter += turf.length(turfPoly, { units: 'meters' });
-                targetTurfFeatures.push(turfPoly);
+                targetTurfFeatures.push(turf.polygon([coords[0].map(c => [c[1], c[0]])]));
             } else if (obj instanceof ymaps.Polyline) {
-                const turfLine = turf.lineString(coords.map(c => [c[1], c[0]]));
-                totalPerimeter += turf.length(turfLine, { units: 'meters' });
-                targetTurfFeatures.push(turfLine);
+                targetTurfFeatures.push(turf.lineString(coords.map(c => [c[1], c[0]])));
             }
+
+            // 2. Считаем точную площадь и периметр через новую функцию
+            const geomStats = calculatePreciseGeometry(obj);
+            totalArea += geomStats.area;
+            totalPerimeter += geomStats.perimeter;
         });
 
       // --- РАСЧЕТ ПЕРЕСЕЧЕНИЙ ЗОН (С ЗАПАСНЫМ ВАРИАНТОМ) ---
@@ -18051,12 +18052,17 @@ async function generateConsolidatedReport(targetObject) {
         const allSearchCoords = [];
 
         // Вычисляем общую площадь и собираем все координаты
-        targetPolygons.forEach(polygon => {
+         targetPolygons.forEach(polygon => {
             const coords = polygon.geometry.getCoordinates()[0];
+            
+            // Получаем точную площадь через новую функцию
+            const geomStats = calculatePreciseGeometry(polygon);
+            mainObjectAreaInMeters += geomStats.area;
+
+            // WGS84 полигон оставляем для поиска пересечений (Turf.js)
             const turfPoly = turf.polygon([coords.map(c => [c[1], c[0]])]);
-            mainObjectAreaInMeters += turf.area(turfPoly);
-            allSearchCoords.push(...coords);
             targetTurfPolygons.push(turfPoly);
+            allSearchCoords.push(...coords);
         });
 
        let mainObjectData;
@@ -18901,39 +18907,30 @@ function openColorEditorModal(targetObject) {
     opacityValue.textContent = opacity.toFixed(1);
     opacitySlider.addEventListener('input', () => { opacityValue.textContent = parseFloat(opacitySlider.value).toFixed(1); });
 
-    try {
-        let coordsForTurf;
+ try {
+        const geomStats = calculatePreciseGeometry(targetObject);
         
         if (isPolygon) {
-            const rings = targetObject.geometry.getCoordinates();
-            if (rings && rings.length > 0 && rings[0].length >= 3) {
-                coordsForTurf = rings[0].map(c => [c[1], c[0]]);
-                const turfPoly = turf.polygon([coordsForTurf]);
-                
-                const area = Math.round(turf.area(turfPoly));
-                const perimeter = Math.round(turf.length(turfPoly, { units: 'meters' }));
-                
-                areaDetails.innerHTML = `
-                    <b>Полигон</b><br>
-                    Площадь: ~${area.toLocaleString('ru-RU')} м²<br>
-                    Периметр: ~${perimeter.toLocaleString('ru-RU')} м
-                `;
-            }
+            const area = Math.round(geomStats.area);
+            const perimeter = Math.round(geomStats.perimeter);
+            
+            areaDetails.innerHTML = `
+                <b>Полигон</b><br>
+                Площадь: ~${area.toLocaleString('ru-RU')} м²<br>
+                Периметр: ~${perimeter.toLocaleString('ru-RU')} м
+            `;
         } else if (isLine) {
-            const lineCoords = targetObject.geometry.getCoordinates();
-            if (lineCoords && lineCoords.length >= 2) {
-                coordsForTurf = lineCoords.map(c => [c[1], c[0]]);
-                const turfLine = turf.lineString(coordsForTurf);
-                const length = turf.length(turfLine, { units: 'meters' });
-                
-                areaDetails.innerHTML = `
-                    <b>Линия</b><br>
-                    Длина: ~${length.toFixed(2)} м<br>
-                    Точек: ${lineCoords.length}
-                `;
-            }
+            const pointsCount = targetObject.geometry.getCoordinates().length;
+            const length = geomStats.perimeter;
+            
+            areaDetails.innerHTML = `
+                <b>Линия</b><br>
+                Длина: ~${length.toFixed(2)} м<br>
+                Точек: ${pointsCount}
+            `;
         }
     } catch (e) {
+        console.error("Ошибка расчета геометрии в редакторе:", e);
         areaDetails.innerHTML = "Ошибка расчета геометрии";
     }
 
@@ -20900,6 +20897,109 @@ function setActiveTheme(theme) {
     }
 }
 
+
+
+function calculatePreciseGeometry(ymapsObject) {
+    let area = 0;
+    let perimeter = 0;
+    const isPolygon = ymapsObject instanceof ymaps.Polygon;
+    const isLine = ymapsObject instanceof ymaps.Polyline;
+
+    if (!isPolygon && !isLine) return { area, perimeter };
+
+    // 1. Настраиваем МСК
+    const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
+    const destSystemObject = (typeof COORDINATE_SYSTEMS !== 'undefined') ? COORDINATE_SYSTEMS.find(s => s.value === destSc) : null;
+    let calcMskOffsetX = 0, calcMskOffsetY = 0;
+    let canCalculateMsk = false;
+
+    if (destSystemObject && destSystemObject.def) {
+        proj4.defs(destSc, destSystemObject.def);
+        canCalculateMsk = true;
+        if (localStorage.getItem('autoLoadMskOffset') !== 'false') {
+            calcMskOffsetX = destSystemObject.offsetX || 0;
+            calcMskOffsetY = destSystemObject.offsetY || 0;
+        } else {
+            calcMskOffsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
+            calcMskOffsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
+        }
+    }
+
+    const coords = ymapsObject.geometry.getCoordinates();
+
+    const calcPlanarArea = (pts) => {
+        let a = 0;
+        for (let i = 0; i < pts.length - 1; i++) a += pts[i][0] * pts[i+1][1] - pts[i+1][0] * pts[i][1];
+        return Math.abs(a) / 2;
+    };
+
+    const calcPlanarLength = (pts) => {
+        let l = 0;
+        for (let i = 0; i < pts.length - 1; i++) {
+            const dx = pts[i+1][0] - pts[i][0];
+            const dy = pts[i+1][1] - pts[i][1];
+            l += Math.sqrt(dx * dx + dy * dy);
+        }
+        return l;
+    };
+
+    if (canCalculateMsk) {
+        const getMskPoints = (pts, isClosed) => {
+            const mskPoints = pts.map(c => {
+                const trueLat = c[0] + (mapOffsetY * 0.000008983);
+                const trueLon = c[1] + (mapOffsetX * 0.000008983);
+                const p = proj4('EPSG:4326', destSc, [trueLon, trueLat]); 
+                return [p[1] + calcMskOffsetX, p[0] + calcMskOffsetY]; 
+            });
+            if (isClosed) {
+                const first = mskPoints[0];
+                const last = mskPoints[mskPoints.length - 1];
+                if (Math.abs(first[0] - last[0]) > 0.001 || Math.abs(first[1] - last[1]) > 0.001) mskPoints.push(first);
+            }
+            return mskPoints;
+        };
+
+        if (isPolygon) {
+            const rings = coords; // coords для полигона - это массив колец
+            for (let i = 0; i < rings.length; i++) {
+                const mskRing = getMskPoints(rings[i], true);
+                const ringArea = calcPlanarArea(mskRing);
+                const ringPerimeter = calcPlanarLength(mskRing);
+
+                if (i === 0) {
+                    area += ringArea; // Внешний контур (плюсуем)
+                } else {
+                    area -= ringArea; // Внутренний контур (минусуем)
+                }
+                perimeter += ringPerimeter; // Периметр дырок плюсуется к общей длине границ
+            }
+            area = Math.max(0, area); // Защита от отрицательной площади при аномалиях
+        } else {
+            perimeter = calcPlanarLength(getMskPoints(coords, false));
+        }
+    } else {
+        // Fallback: расчет через Turf.js (сферический)
+        const getWgsPoints = (pts, isClosed) => {
+            const wgs = pts.map(c => [c[1] + (mapOffsetX * 0.000008983), c[0] + (mapOffsetY * 0.000008983)]);
+            if (isClosed) {
+                const first = wgs[0], last = wgs[wgs.length - 1];
+                if (Math.abs(first[0] - last[0]) > 1e-9 || Math.abs(first[1] - last[1]) > 1e-9) wgs.push(first);
+            }
+            return wgs;
+        };
+
+        if (isPolygon) {
+            const wgsRings = coords.map(r => getWgsPoints(r, true));
+            const turfPoly = turf.polygon(wgsRings); // Turf сам правильно вычтет дырки
+            area = turf.area(turfPoly);
+            perimeter = turf.length(turfPoly, { units: 'meters' });
+        } else {
+            perimeter = turf.length(turf.lineString(getWgsPoints(coords, false)), { units: 'meters' });
+        }
+    }
+
+    return { area, perimeter };
+}
 
 
 function applyCurrentTheme() {
