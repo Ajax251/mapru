@@ -5730,7 +5730,8 @@ async function drawFeatures(geoCoordinates) {
             return;
         }
 
-        let allBounds = [];
+        // 1. Подготовка кандидатов (применяем смещение сразу)
+        const candidates = [];
         
         for (const coordGroup of geoCoordinates) {
             if (!Array.isArray(coordGroup) || coordGroup.length === 0) continue;
@@ -5738,7 +5739,10 @@ async function drawFeatures(geoCoordinates) {
             const validCoords = coordGroup
                 .map(coord => {
                     if (Array.isArray(coord) && coord.length === 2 && isFinite(coord[0]) && isFinite(coord[1])) {
-                        return [coord[0] - mapOffsetY * 0.000008983, coord[1] - mapOffsetX * 0.000008983];
+                        return [
+                            coord[0] - mapOffsetY * 0.000008983, 
+                            coord[1] - mapOffsetX * 0.000008983
+                        ];
                     }
                     return null;
                 })
@@ -5746,50 +5750,103 @@ async function drawFeatures(geoCoordinates) {
 
             if (validCoords.length === 0) continue;
 
-            const isPolygon = validCoords.length > 2 &&
-                Math.abs(validCoords[0][0] - validCoords[validCoords.length - 1][0]) < 1e-9 &&
-                Math.abs(validCoords[0][1] - validCoords[validCoords.length - 1][1]) < 1e-9;
+            // Определяем тип: Точка, Линия или Полигон
+            let type = 'line';
+            if (validCoords.length === 1) {
+                type = 'point';
+            } else if (validCoords.length > 2) {
+                const first = validCoords[0];
+                const last = validCoords[validCoords.length - 1];
+                // Если замкнут - полигон
+                if (Math.abs(first[0] - last[0]) < 1e-6 && Math.abs(first[1] - last[1]) < 1e-6) {
+                    type = 'polygon';
+                }
+            }
+            
+            candidates.push({ coords: validCoords, type: type });
+        }
 
-            if (isPolygon) {
-                const polygonObj = new ymaps.Polygon([validCoords], {
-                    isManuallyDrawn: true // Новый флаг для идентификации
+        let allBounds = [];
+        const processedIndices = new Set();
+        
+        // 2. Логика объединения вложенных полигонов (Дырки)
+        // Проходим только по полигонам
+        candidates.forEach((parent, i) => {
+            if (processedIndices.has(i) || parent.type !== 'polygon') return;
+
+            // Создаем Turf-полигон для проверки (Turf хочет [lon, lat])
+            const parentTurf = turf.polygon([parent.coords.map(c => [c[1], c[0]])]);
+            const holes = [];
+
+            candidates.forEach((child, j) => {
+                if (i === j || processedIndices.has(j) || child.type !== 'polygon') return;
+
+                // Проверяем, лежит ли ребенок внутри родителя
+                // Берем первую точку ребенка
+                const childPt = child.coords[0];
+                const turfPt = turf.point([childPt[1], childPt[0]]);
+
+                if (turf.booleanPointInPolygon(turfPt, parentTurf)) {
+                    // Это дырка!
+                    holes.push(child.coords);
+                    processedIndices.add(j); // Помечаем ребенка как обработанного
+                }
+            });
+
+            // Формируем структуру для Яндекс.Карт: [ВнешнийКонтур, Дырка1, Дырка2...]
+            const complexRings = [parent.coords, ...holes];
+            
+            // Отрисовка Полигона с дырками
+            const polygonObj = new ymaps.Polygon(complexRings, {
+                isManuallyDrawn: true,
+                hintContent: 'Полигон с дырками'
+            }, {
+                strokeColor: polygonStyle.color,
+                strokeWidth: polygonStyle.width,
+                strokeOpacity: manualObjectOpacity,
+                fillColor: '#00000000', // Изначально прозрачный
+                zIndex: 900
+            });
+
+            map.geoObjects.add(polygonObj);
+            polygons.push(polygonObj);
+            
+            const bounds = polygonObj.geometry.getBounds();
+            if (bounds) allBounds.push(bounds);
+            
+            processedIndices.add(i); // Помечаем родителя как обработанного
+        });
+
+        // 3. Отрисовка оставшихся объектов (Линии и Точки, которые не вошли в полигоны)
+        candidates.forEach((cand, i) => {
+            if (processedIndices.has(i)) return;
+
+            if (cand.type === 'line') {
+                const polyline = new ymaps.Polyline(cand.coords, {
+                    isDrawableLine: true
                 }, {
                     strokeColor: polygonStyle.color,
                     strokeWidth: polygonStyle.width,
-                    strokeOpacity: manualObjectOpacity, 
-                    fillColor: '#00000000',
-                      zIndex: 900 
+                    strokeOpacity: 0.8,
+                    interactivityModel: 'default#geoObject',
+                    zIndex: 900
                 });
-
-                map.geoObjects.add(polygonObj);
-                polygons.push(polygonObj);
-                const bounds = polygonObj.geometry.getBounds();
+                map.geoObjects.add(polyline);
+                polygons.push(polyline);
+                const bounds = polyline.geometry.getBounds();
                 if (bounds) allBounds.push(bounds);
 
-          } else if (validCoords.length > 1) {
-    const polyline = new ymaps.Polyline(validCoords, {
-        isDrawableLine: true // <<< ДОБАВЬТЕ ЭТО СВОЙСТВО
-    }, {
-        strokeColor: polygonStyle.color,
-        strokeWidth: polygonStyle.width,
-        strokeOpacity: 0.8,
-        interactivityModel: 'default#geoObject',
-         zIndex: 900 
-    });
-    map.geoObjects.add(polyline);
-    polygons.push(polyline);
-    const bounds = polyline.geometry.getBounds();
-    if (bounds) allBounds.push(bounds);
-} else if (validCoords.length === 1) {
-                const placemark = new ymaps.Placemark(validCoords[0], {}, {
+            } else if (cand.type === 'point') {
+                const placemark = new ymaps.Placemark(cand.coords[0], {}, {
                     preset: 'islands#blueDotIcon'
                 });
                 map.geoObjects.add(placemark);
                 polygons.push(placemark);
-                allBounds.push([validCoords[0], validCoords[0]]);
+                allBounds.push([cand.coords[0], cand.coords[0]]);
             }
-        }
+        });
 
+        // 4. Установка границ карты
         if (allBounds.length > 0) {
             let minLat = Infinity, minLng = Infinity, maxLat = -Infinity, maxLng = -Infinity;
             allBounds.forEach(bounds => {
@@ -11201,30 +11258,240 @@ function showExportOptionsDialog(lat, lon) {
 
 
 
+// Глобальная функция для точного вычисления пересечений в МСК (с вычетом дырок и защитой от миллиметровых погрешностей)
+function checkPreciseIntersection(turfGeom1, turfGeom2, isLine1 = false, logPrefix = "IntersectionCheck") {
+    const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
+    const destSystemObject = (typeof COORDINATE_SYSTEMS !== 'undefined') ? COORDINATE_SYSTEMS.find(s => s.value === destSc) : null;
+    let calcMskOffsetX = 0, calcMskOffsetY = 0;
+    let canCalculateMsk = !!(destSystemObject && destSystemObject.def);
+
+    if (canCalculateMsk) {
+        proj4.defs(destSc, destSystemObject.def);
+        if (localStorage.getItem('autoLoadMskOffset') !== 'false') {
+            calcMskOffsetX = destSystemObject.offsetX || 0;
+            calcMskOffsetY = destSystemObject.offsetY || 0;
+        } else {
+            calcMskOffsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
+            calcMskOffsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
+        }
+    }
+
+    // 1. ПЕРЕВОД В МСК С ОКРУГЛЕНИЕМ ДО САНТИМЕТРОВ (как в Георедакторе)
+    const toExactMsk = (coord) => { 
+        if (!canCalculateMsk) return coord;
+        try {
+            const trueLon = coord[0] + (mapOffsetX * 0.000008983);
+            const trueLat = coord[1] + (mapOffsetY * 0.000008983);
+            const p = proj4('EPSG:4326', destSc,[trueLon, trueLat]);
+            
+            // Ключевой момент: Округляем до 2 знаков (см)
+            // Это позволяет сравнивать точки "на равенство"
+            const x = Math.round((p[0] + calcMskOffsetX) * 100) / 100;
+            const y = Math.round((p[1] + calcMskOffsetY) * 100) / 100;
+            return [x, y];
+        } catch(e) { return coord; }
+    };
+
+    const getMskGeometry = (feature) => {
+        const type = feature.geometry.type;
+        const coords = feature.geometry.coordinates;
+        if (type === 'Polygon') return { type, coordinates: coords.map(ring => ring.map(toExactMsk)) };
+        if (type === 'MultiPolygon') return { type, coordinates: coords.map(poly => poly.map(ring => ring.map(toExactMsk))) };
+        if (type === 'LineString') return { type, coordinates: coords.map(toExactMsk) };
+        if (type === 'Point') return { type, coordinates: toExactMsk(coords) };
+        return feature.geometry;
+    };
+
+    const mskGeom1 = getMskGeometry(turfGeom1);
+    const mskGeom2 = getMskGeometry(turfGeom2);
+
+    // 2. ГЕНЕРАЦИЯ "ОТПЕЧАТКА" (СИГНАТУРЫ) КОНТУРА
+    // Создает строку из отсортированных координат. Если сигнатуры совпадают, контуры геометрически идентичны (или один является подмножеством точек другого)
+    const getContourSignature = (ring) => {
+        // Убираем замыкающую точку если есть
+        const unique = [...ring];
+        const first = unique[0]; 
+        const last = unique[unique.length - 1];
+        if (Math.abs(first[0]-last[0]) < 0.001 && Math.abs(first[1]-last[1]) < 0.001) unique.pop();
+        
+        // Превращаем в массив строк "X_Y", сортируем их
+        // Сортировка нужна, чтобы не зависеть от того, с какой точки начат обход и в какую сторону (CW/CCW)
+        const pointStrings = unique.map(p => `${p[0].toFixed(2)}_${p[1].toFixed(2)}`);
+        pointStrings.sort(); 
+        return pointStrings.join('|');
+    };
+
+    // 3. ПРОВЕРКА НА ИДЕАЛЬНОЕ СОВПАДЕНИЕ С ДЫРКОЙ
+    if (mskGeom1.type === 'Polygon' && mskGeom2.type === 'Polygon') {
+        // Сигнатура внешнего контура Искомого объекта
+        const searchSig = getContourSignature(mskGeom1.coordinates[0]);
+
+        // Проверяем дырки Целевого объекта
+        if (mskGeom2.coordinates.length > 1) {
+            for (let i = 1; i < mskGeom2.coordinates.length; i++) {
+                const holeSig = getContourSignature(mskGeom2.coordinates[i]);
+                
+                // Если набор точек совпал - это не наложение, это заполнение дырки
+                if (searchSig === holeSig) {
+                    console.log(`${logPrefix} ОТМЕНА: Идеальное совпадение с внутренним контуром (дыркой).`);
+                    return { isIntersecting: false, area: 0 };
+                }
+            }
+        }
+    }
+
+    // 4. Смещение к нулю для расчетов площади (если сигнатуры не совпали)
+    let originX = null, originY = null;
+    const shiftToZero = (coord) => {
+        if (originX === null) { originX = coord[0]; originY = coord[1]; }
+        return [coord[0] - originX, coord[1] - originY];
+    };
+
+    const applyShift = (geom) => {
+        if (geom.type === 'Polygon') return { type: 'Polygon', coordinates: geom.coordinates.map(r => r.map(shiftToZero)) };
+        if (geom.type === 'MultiPolygon') return { type: 'MultiPolygon', coordinates: geom.coordinates.map(p => p.map(r => r.map(shiftToZero))) };
+        if (geom.type === 'LineString') return turf.lineString(geom.coordinates.map(shiftToZero));
+        if (geom.type === 'Point') return turf.point(shiftToZero(geom.coordinates));
+        return geom;
+    };
+
+    const localGeom1 = applyShift(mskGeom1);
+    const localGeom2 = applyShift(mskGeom2);
+
+    // 5. Хелпер для математического вычитания площадей
+    const getSolidIntersectArea = (polyCoords1, polyCoords2) => {
+        try {
+            const c1 = [...polyCoords1];
+            if (c1.length > 2 && (c1[0][0] !== c1[c1.length-1][0] || c1[0][1] !== c1[c1.length-1][1])) c1.push(c1[0]);
+            const c2 = [...polyCoords2];
+            if (c2.length > 2 && (c2[0][0] !== c2[c2.length-1][0] || c2[0][1] !== c2[c2.length-1][1])) c2.push(c2[0]);
+
+            if (c1.length < 4 || c2.length < 4) return 0;
+
+            let p1 = turf.polygon([c1]);
+            let p2 = turf.polygon([c2]);
+            p1 = turf.rewind(p1, {reverse: false}); 
+            p2 = turf.rewind(p2, {reverse: false});
+
+            const intersection = turf.intersect(turf.featureCollection([p1, p2]));
+            if (!intersection) return 0;
+            
+            const calcPlanarArea = (pts) => {
+                let a = 0;
+                for (let i = 0; i < pts.length - 1; i++) a += pts[i][0] * pts[i+1][1] - pts[i+1][0] * pts[i][1];
+                return Math.abs(a) / 2;
+            };
+
+            let area = 0;
+            const geoms = intersection.geometry.type === 'Polygon' ? [intersection.geometry.coordinates]
+                        : (intersection.geometry.type === 'MultiPolygon' ? intersection.geometry.coordinates : []);
+            
+            for (const poly of geoms) {
+                area += calcPlanarArea(poly[0]);
+                for (let i = 1; i < poly.length; i++) {
+                    area -= calcPlanarArea(poly[i]);
+                }
+            }
+            return area;
+        } catch (e) { return 0; }
+    };
+
+    try {
+        if (isLine1) {
+            if (localGeom1.geometry.type === 'Point') {
+                // Для точки: Внутри внешнего И НЕ внутри дырок
+                const poly2 = localGeom2.type === 'Polygon' ? [localGeom2.coordinates] : localGeom2.coordinates;
+                let isInside = false;
+                for (const poly of poly2) {
+                    const outer = turf.polygon([poly[0]]);
+                    if (turf.booleanPointInPolygon(localGeom1, outer)) {
+                        let inHole = false;
+                        for (let i=1; i<poly.length; i++) {
+                            if (turf.booleanPointInPolygon(localGeom1, turf.polygon([poly[i]]))) { inHole = true; break; }
+                        }
+                        if (!inHole) { isInside = true; break; }
+                    }
+                }
+                return { isIntersecting: isInside, area: 0 };
+            }
+            
+            // Для линий
+            let fixedG2 = localGeom2.type === 'Polygon' ? turf.polygon(localGeom2.coordinates) : turf.multiPolygon(localGeom2.coordinates);
+            fixedG2 = turf.rewind(fixedG2, {reverse: false});
+            const isCross = turf.booleanCrosses(localGeom1, fixedG2) || turf.booleanWithin(localGeom1, fixedG2);
+            return { isIntersecting: isCross, area: 0 };
+
+        } else {
+            // Полигоны: Математический расчет
+            let totalArea = 0;
+            const polys1 = localGeom1.type === 'Polygon' ? [localGeom1.coordinates] : localGeom1.coordinates;
+            const polys2 = localGeom2.type === 'Polygon' ? [localGeom2.coordinates] : localGeom2.coordinates;
+
+            polys1.forEach(poly1 => {
+                const outer1 = poly1[0];
+                const holes1 = poly1.slice(1);
+
+                polys2.forEach(poly2 => {
+                    const outer2 = poly2[0];
+                    const holes2 = poly2.slice(1);
+
+                    // 1. Площадь наложения внешних контуров
+                    let baseArea = getSolidIntersectArea(outer1, outer2);
+
+                    if (baseArea > 0.0001) {
+                        // 2. Вычитаем наложение с дырками Цели
+                        holes2.forEach(hole2 => {
+                            baseArea -= getSolidIntersectArea(outer1, hole2);
+                        });
+
+                        // 3. Вычитаем наложение дырок Искомого с внешним Цели
+                        holes1.forEach(hole1 => {
+                            baseArea -= getSolidIntersectArea(hole1, outer2);
+                        });
+
+                        // 4. Возвращаем (прибавляем) наложение дырки на дырку (т.к. вычли дважды)
+                        holes1.forEach(hole1 => {
+                            holes2.forEach(hole2 => {
+                                baseArea += getSolidIntersectArea(hole1, hole2);
+                            });
+                        });
+                    }
+                    totalArea += baseArea;
+                });
+            });
+
+            // Порог чувствительности: 1 кв. см. (0.0001 кв.м.)
+            // Поскольку мы работаем в сантиметрах, "шума" быть не должно, поэтому порог минимальный
+            totalArea = Math.max(0, totalArea);
+            const isActualIntersection = totalArea >= 0.0001; 
+            
+            if (isActualIntersection) {
+                console.log(`${logPrefix} НАЙДЕНО ПЕРЕСЕЧЕНИЕ! Площадь: ${totalArea.toFixed(4)} кв.м.`);
+            }
+            return { isIntersecting: isActualIntersection, area: totalArea };
+        }
+    } catch (e) {
+        console.warn(`${logPrefix} Ошибка:`, e);
+        return { isIntersecting: false, area: 0 };
+    }
+}
+
 
 
 async function executeQuickReport(targetObject) {
-  
     showLoader("Поиск объекта в ЕГРН...");
-    
-  
     await new Promise(resolve => setTimeout(resolve, 50));
-
-   const isMulti = Array.isArray(targetObject);
+    const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
     quickReportTargetObjects = objects;
-    
-    // Скрываем боковую панель, если открыта
     const sidebar = document.getElementById('parcel-results-sidebar');
     if (sidebar) sidebar.classList.add('hidden');
-    
-    // Очищаем старые результаты быстрого отчета с карты
     Object.values(quickReportLayers).flat().forEach(obj => {
         if (map.geoObjects.indexOf(obj) !== -1) map.geoObjects.remove(obj);
         polygons = polygons.filter(p => p !== obj);
         parcelPlacemarks = parcelPlacemarks.filter(p => p !== obj);
     });
-    quickReportLayers = { zu: [], oks: [], structure: [], zouit: [] };
+    quickReportLayers = { zu: [], oks: [], structure:[], zouit:[] };
 
     let objName = 'Выбранный объект';
     if (!isMulti) {
@@ -11234,19 +11501,18 @@ async function executeQuickReport(targetObject) {
     }
 
     try {
-        // Подготовка геометрии для строгой фильтрации ЗУ
-        const targetTurfGeoms = [];
+        const targetTurfGeoms =[];
         objects.forEach(obj => {
             const coords = obj.geometry.getCoordinates();
             if (obj instanceof ymaps.Polygon) {
-                targetTurfGeoms.push({ geom: turf.polygon([coords[0].map(c => [c[1], c[0]])]), isLine: false });
+                // ИСПРАВЛЕНИЕ: берем ВСЕ кольца (с дырками), а не только[0]
+                targetTurfGeoms.push({ geom: turf.polygon(coords.map(ring => ring.map(c => [c[1], c[0]]))), isLine: false });
             } else if (obj instanceof ymaps.Polyline) {
                 targetTurfGeoms.push({ geom: turf.lineString(coords.map(c => [c[1], c[0]])), isLine: true });
             }
         });
 
-    // Получаем связанные ОКС по КН исходных объектов
-        let linkedOksCns = [];
+        let linkedOksCns =[];
         for (const obj of objects) {
             const cn = obj.properties.get('cadastralNumber');
             if (cn && cn.includes(':')) {
@@ -11255,20 +11521,19 @@ async function executeQuickReport(targetObject) {
                     if (linked && linked.length > 0) {
                         linkedOksCns.push(...linked);
                     }
-                } catch(e) { console.error("Ошибка получения связанных ОКС", e); }
+                } catch(e) {}
             }
         }
-        linkedOksCns = [...new Set(linkedOksCns)]; // Оставляем только уникальные
+        linkedOksCns = [...new Set(linkedOksCns)];
 
-        const results = { zu: [], oks: [], structure: [], zouit: [] };
+        const results = { zu: [], oks:[], structure: [], zouit:[] };
 
-        // 1. ЗУ (со строгой фильтрацией пересечений)
         showLoader('Поиск Земельных участков...');
         const rawZu = await searchFeaturesByGeometry(objects, 36368);
         if (rawZu.length > 0) {
             for (const feature of rawZu) {
                 if (!feature.geometry || !feature.geometry.coordinates) continue;
-                let featureTurfPolygons = [];
+                let featureTurfPolygons =[];
                 const processRing = (ring3857) => ring3857.map(c => {
                     const wgs = proj4('EPSG:3857', 'EPSG:4326', c);
                     return [wgs[0] - mapOffsetX * 0.000008983, wgs[1] - mapOffsetY * 0.000008983];
@@ -11283,18 +11548,13 @@ async function executeQuickReport(targetObject) {
                 let isIntersecting = false;
                 for (const featureTurfPoly of featureTurfPolygons) {
                     for (const target of targetTurfGeoms) {
-                        if (!target.isLine) {
-                            const intersection = turf.intersect(turf.featureCollection([target.geom, featureTurfPoly]));
-                            if (intersection && turf.area(intersection) > 0.005) isIntersecting = true;
-                        } else {
-                            if (turf.booleanCrosses(target.geom, featureTurfPoly) || turf.booleanWithin(target.geom, featureTurfPoly)) isIntersecting = true;
-                            else {
-                                for (const pt of target.geom.geometry.coordinates) {
-                                    if (turf.booleanPointInPolygon(turf.point(pt), featureTurfPoly)) { isIntersecting = true; break; }
-                                }
-                            }
+                        const result = checkPreciseIntersection(target.geom, featureTurfPoly, target.isLine, `[QuickReport ZU ${feature.properties.descr}]`);
+                        if (result.isIntersecting) {
+                            isIntersecting = true;
+                            break;
                         }
                     }
+                    if (isIntersecting) break;
                 }
                 if (isIntersecting) results.zu.push(feature);
             }
@@ -11302,46 +11562,31 @@ async function executeQuickReport(targetObject) {
         
         await delay(500);
 
-   
-
-           // 2. ОКС (Обновленная логика)
         showLoader('Поиск ОКС...');
         const spatialOksFeatures = await searchFeaturesByGeometry(objects, 36369);
-        
-        // Используем Map для объединения данных по Кадастровому номеру
-        // Это гарантирует, что один объект будет иметь все правильные флаги
         const oksMap = new Map();
-
-        // Хелпер для извлечения КН
         const getCn = (f) => (f.properties?.options?.cad_num || f.properties?.descr || '').trim();
 
-        // А. Заносим пространственные объекты (те, что реально найдены на карте по координатам)
         spatialOksFeatures.forEach(f => {
             if (!f.properties) f.properties = {};
-            f.properties._isSpatial = true; // Флаг: найден геометрически (должен быть crosshair)
-            
+            f.properties._isSpatial = true;
             const cn = getCn(f);
             if (cn) {
                 oksMap.set(cn, f);
             } else {
-                // Если КН нет, добавляем с уникальным ключом
                 oksMap.set(`unknown_${Math.random()}`, f);
             }
         });
         
-        // Б. Обрабатываем список связанных КН (из ЕГРН)
         linkedOksCns.forEach(lCn => {
             const cn = lCn.trim();
             if (oksMap.has(cn)) {
-                // Объект УЖЕ есть (найден геометрически) -> Добавляем ему флаг связи
                 const existing = oksMap.get(cn);
                 existing.properties._isLinked = true;
             } else {
-                // Объекта НЕТ на карте -> Создаем карточку "только связь" (без геометрии)
                 oksMap.set(cn, {
                     properties: { 
                         descr: cn, 
-                        // Убрали лишний текст, так как будет иконка скрепки
                         options: { cad_num: cn, purpose: '' }, 
                         _isLinked: true,
                         _isSpatial: false 
@@ -11351,35 +11596,25 @@ async function executeQuickReport(targetObject) {
             }
         });
         
-        // Преобразуем Map обратно в массив для результатов
         results.oks = Array.from(oksMap.values());
-        
         await delay(500);
-        
-        // 3. Сооружения
         showLoader('Поиск Сооружений...');
         results.structure = await searchFeaturesByGeometry(objects, 36383);
         await delay(500);
-
-        // 4. ЗОУИТ
         showLoader('Поиск ЗОУИТ...');
         results.zouit = await searchFeaturesByGeometry(objects, 36940);
-
         showLoader('Отрисовка результатов на карте...');
         
-        // Отрисовка с сохранением ссылок на объекты
         if (results.zu.length > 0) quickReportLayers.zu = await drawFoundParcels(results.zu, false);
         if (results.oks.length > 0) quickReportLayers.oks = await processAndDrawBuildingsProxy(results.oks);
         if (results.structure.length > 0) quickReportLayers.structure = await processAndDrawStructuresProxy(results.structure);
         if (results.zouit.length > 0) quickReportLayers.zouit = await processAndDrawZouitsProxy(results.zouit);
 
-    // Обновляем глобальные массивы для экспорта
         parcelFeaturesData = results.zu;
         buildingFeaturesData = results.oks;
         structureFeaturesData = results.structure;
         zouitFeaturesData = results.zouit;
 
-        // Вычисляем общие границы ИСХОДНОГО объекта(ов)
         let targetBounds = null;
         objects.forEach(obj => {
             const b = obj.geometry.getBounds();
@@ -11394,12 +11629,9 @@ async function executeQuickReport(targetObject) {
             }
         });
 
-        // Передаем targetBounds в функцию панели
         renderBottomDashboard(objName, results, targetBounds);
-        showNotification('Анализ завершен', 'success');
 
     } catch (e) {
-        console.error("Ошибка Быстрого отчета:", e);
         showNotification("Ошибка анализа: " + e.message, "error");
     } finally {
         hideLoader();
@@ -14090,14 +14322,14 @@ async function executeParcelsOnObjectSearch(targetObject) {
         }
 
         const foundFeatures = [];
-        const targetTurfGeoms = [];
+        const targetTurfGeoms =[];
         
-        // Подготовка всех геометрий целей
         objects.forEach(obj => {
             const targetCoords = obj.geometry.getCoordinates();
             if (obj instanceof ymaps.Polygon) {
-                const ring = targetCoords[0].map(c => [c[1], c[0]]);
-                targetTurfGeoms.push({ geom: turf.polygon([ring]), isLine: false });
+                // ИСПРАВЛЕНИЕ: берем все кольца (включая дырки)
+                const rings = targetCoords.map(ring => ring.map(c => [c[1], c[0]]));
+                targetTurfGeoms.push({ geom: turf.polygon(rings), isLine: false });
             } else if (obj instanceof ymaps.Polyline) {
                 const line = targetCoords.map(c => [c[1], c[0]]);
                 targetTurfGeoms.push({ geom: turf.lineString(line), isLine: true });
@@ -14109,8 +14341,8 @@ async function executeParcelsOnObjectSearch(targetObject) {
                 try {
                     if (!feature.geometry || !feature.geometry.coordinates) continue;
 
-                   const featureGeometryType = feature.geometry.type;
-                    let featureTurfPolygons = []; // Собираем сразу полигоны Turf с дырками
+                    const featureGeometryType = feature.geometry.type;
+                    let featureTurfPolygons =[];
 
                     const processRingToMapCoords = (ring3857) => {
                         return ring3857.map(coord => {
@@ -14122,7 +14354,6 @@ async function executeParcelsOnObjectSearch(targetObject) {
                     };
 
                     if (featureGeometryType === 'Polygon') {
-                        // Мапим ВСЕ кольца (первое - внешний контур, остальные - дырки)
                         const allRings = feature.geometry.coordinates.map(processRingToMapCoords);
                         featureTurfPolygons.push(turf.polygon(allRings));
                     } else if (featureGeometryType === 'MultiPolygon') {
@@ -14132,40 +14363,24 @@ async function executeParcelsOnObjectSearch(targetObject) {
                         });
                     }
 
-                    let totalIntersectionArea = 0;
-                    let isIntersectingLines = false;
+                    let isIntersecting = false;
 
                     for (const featureTurfPoly of featureTurfPolygons) {
                         for (const target of targetTurfGeoms) {
-                            if (!target.isLine) {
-                                const intersection = turf.intersect(turf.featureCollection([target.geom, featureTurfPoly]));
-                                if (intersection) {
-                                    totalIntersectionArea += turf.area(intersection);
-                                }
-                            } else {
-                                if (turf.booleanCrosses(target.geom, featureTurfPoly) || turf.booleanWithin(target.geom, featureTurfPoly)) {
-                                    isIntersectingLines = true;
-                                } else {
-                                    const linePoints = target.geom.geometry.coordinates;
-                                    for (const pt of linePoints) {
-                                        if (turf.booleanPointInPolygon(turf.point(pt), featureTurfPoly)) {
-                                            isIntersectingLines = true;
-                                            break;
-                                        }
-                                    }
-                                }
+                            const result = checkPreciseIntersection(target.geom, featureTurfPoly, target.isLine, `[Search ZU ${feature.properties.descr}]`);
+                            if (result.isIntersecting) {
+                                isIntersecting = true;
+                                break;
                             }
                         }
+                        if (isIntersecting) break;
                     }
 
-                    // Если пересекается хоть с одним из объектов списка
-                    if (totalIntersectionArea > 0.005 || isIntersectingLines) {
+                    if (isIntersecting) {
                         foundFeatures.push(feature);
                     }
 
-                } catch (e) {
-                    console.error("Ошибка при фильтрации пересечений:", e);
-                }
+                } catch (e) {}
             }
         } else {
             foundFeatures.push(...rawFeatures);
@@ -14182,7 +14397,6 @@ async function executeParcelsOnObjectSearch(targetObject) {
         showNotification(`Найдено участков: ${foundFeatures.length}`, 'success');
 
     } catch (error) {
-        console.error('Ошибка при поиске участков на объекте:', error);
         showNotification(`Ошибка поиска: ${error.message}`, 'error');
     } finally {
         hideLoader();
@@ -18103,7 +18317,7 @@ async function generateConsolidatedReport(targetObject) {
 
     try {
         const isMulti = Array.isArray(targetObject);
-        const targetPolygons = isMulti ? targetObject : [targetObject];
+        const targetPolygons = isMulti ? targetObject :[targetObject];
 
         if (targetPolygons.length === 0 || !targetPolygons.every(obj => obj instanceof ymaps.Polygon)) {
             throw new Error('Для площадного отчета требуются площадные объекты (полигоны).');
@@ -18111,26 +18325,23 @@ async function generateConsolidatedReport(targetObject) {
 
         let mainObjectAreaInMeters = 0;
         const targetTurfPolygons = [];
-        const allSearchCoords = [];
+        const allSearchCoords =[];
 
-        // Вычисляем общую площадь и собираем все координаты
-         targetPolygons.forEach(polygon => {
-            const coords = polygon.geometry.getCoordinates()[0];
-            
-            // Получаем точную площадь через новую функцию
+        targetPolygons.forEach(polygon => {
+            const coordsAll = polygon.geometry.getCoordinates(); 
             const geomStats = calculatePreciseGeometry(polygon);
             mainObjectAreaInMeters += geomStats.area;
-
-            // WGS84 полигон оставляем для поиска пересечений (Turf.js)
-            const turfPoly = turf.polygon([coords.map(c => [c[1], c[0]])]);
+            
+            // ИСПРАВЛЕНИЕ: Передаем все кольца (включая дырки)
+            const turfPoly = turf.polygon(coordsAll.map(ring => ring.map(c => [c[1], c[0]])));
             targetTurfPolygons.push(turfPoly);
-            allSearchCoords.push(...coords);
+            allSearchCoords.push(...coordsAll[0]); 
         });
 
-       let mainObjectData;
-        let underlyingParcelsResults = [];
+        let mainObjectData;
+        let underlyingParcelsResults =[];
         let oksIntersectionResults = [];
-        let linkedOksResults = [];
+        let linkedOksResults =[];
 
         const getPluralContour = (n) => {
             let n10 = n % 10; let n100 = n % 100;
@@ -18139,7 +18350,7 @@ async function generateConsolidatedReport(targetObject) {
             return 'контуров';
         };
 
-       if (isMulti) {
+        if (isMulti) {
             const uniqueCadNums = new Set();
             let firstRealFeatureData = null;
 
@@ -18150,7 +18361,6 @@ async function generateConsolidatedReport(targetObject) {
                     if (fd && fd.properties) cn = fd.properties.descr;
                 }
                 if (cn) uniqueCadNums.add(cn);
-
                 if (!firstRealFeatureData && polygon.properties.get('featureData')) {
                     firstRealFeatureData = polygon.properties.get('featureData');
                 }
@@ -18158,7 +18368,6 @@ async function generateConsolidatedReport(targetObject) {
 
             const countText = `(${targetPolygons.length} ${getPluralContour(targetPolygons.length)})`;
 
-            // 1. Формируем текстовое описание для таблицы
             if (uniqueCadNums.size === 1) {
                 const commonCn = Array.from(uniqueCadNums)[0];
                 const opts = firstRealFeatureData ? (firstRealFeatureData.properties.options || {}) : {};
@@ -18186,16 +18395,12 @@ async function generateConsolidatedReport(targetObject) {
                 };
             }
 
-            // 2. ИЩЕМ СВЯЗАННЫЕ ОКС ДЛЯ ВСЕХ УНИКАЛЬНЫХ КН
-            // Теперь храним объекты { cn: oksNum, parent: zuNum }
-            const allLinkedOksList = []; 
-            
+            const allLinkedOksList =[]; 
             for (const cn of uniqueCadNums) {
                 if (cn && cn.includes(':')) {
                     const oksForCn = await fetchLinkedOks(cn);
                     if (oksForCn && Array.isArray(oksForCn)) {
                         oksForCn.forEach(oks => {
-                            // Проверка на дубликаты именно этой связки
                             const exists = allLinkedOksList.some(item => item.cn === oks && item.parent === cn);
                             if (!exists) {
                                 allLinkedOksList.push({ cn: oks, parent: cn });
@@ -18207,7 +18412,6 @@ async function generateConsolidatedReport(targetObject) {
             linkedOksResults = allLinkedOksList;
 
         } else {
-         
             const targetPolygon = targetPolygons[0];
             const isRealObject = targetPolygon.properties.get('isParcelInQuarter') || targetPolygon.properties.get('isFoundInArea') || targetPolygon.properties.get('isParcelFromSingleSearch');
             
@@ -18225,7 +18429,6 @@ async function generateConsolidatedReport(targetObject) {
                     ownershipType: opts.ownership_type, 
                     rightType: opts.right_type
                 };
-                // Для одиночного объекта API возвращает массив строк, оставляем как есть
                 linkedOksResults = await fetchLinkedOks(mainObjectData.cadastralNumber);
             } else {
                 let displayName = 'Произвольный контур';
@@ -18246,7 +18449,6 @@ async function generateConsolidatedReport(targetObject) {
             }
         }
 
-        // Вычисляем общий Bounding Box
         let minLat = Infinity, minLon = Infinity, maxLat = -Infinity, maxLon = -Infinity;
         allSearchCoords.forEach(c => {
             minLat = Math.min(minLat, c[0]); maxLat = Math.max(maxLat, c[0]);
@@ -18256,9 +18458,7 @@ async function generateConsolidatedReport(targetObject) {
         const centerLon = (minLon + maxLon) / 2;
 
         showLoader('Анализ данных...');
-        const bufferedBoundsForSearch = [
-            [minLat - 0.00005, minLon - 0.00005],
-            [maxLat + 0.00005, maxLon + 0.00005]
+        const bufferedBoundsForSearch = [[minLat - 0.00005, minLon - 0.00005],[maxLat + 0.00005, maxLon + 0.00005]
         ];
         const searchPolygonForApi = [
             [bufferedBoundsForSearch[0][1], bufferedBoundsForSearch[0][0]], 
@@ -18270,24 +18470,44 @@ async function generateConsolidatedReport(targetObject) {
 
         const fetchedCandidateFeatures = await searchParcelsByArea(searchPolygonForApi);
 
+        // Хелпер для извлечения Turf-полигонов из геометрии API
+        const processRingsToTurf = (featureGeom) => {
+            if (!featureGeom || !featureGeom.coordinates) return[];
+            
+            const processRing = (ring3857) => ring3857.map(c => {
+                const wgs = proj4('EPSG:3857', 'EPSG:4326', c);
+                return [wgs[0] - mapOffsetX * 0.000008983, wgs[1] - mapOffsetY * 0.000008983];
+            });
+
+            let turfPolys =[];
+            if (featureGeom.type === 'Polygon') {
+                turfPolys.push(turf.polygon(featureGeom.coordinates.map(processRing)));
+            } else if (featureGeom.type === 'MultiPolygon') {
+                featureGeom.coordinates.forEach(poly => turfPolys.push(turf.polygon(poly.map(processRing))));
+            }
+            return turfPolys;
+        };
+
         if (fetchedCandidateFeatures.length > 0) {
             fetchedCandidateFeatures.forEach(feature => {
                 if (!isMulti && feature.properties.descr === mainObjectData.cadastralNumber) return;
-                if (!feature.geometry || !feature.geometry.coordinates || feature.geometry.type !== 'Polygon') return;
-
-                const featureWgsCoordsWithOffset = feature.geometry.coordinates[0].map(coord3857 => {
-                    const wgsCoord = proj4('EPSG:3857', 'EPSG:4326', coord3857);
-                    return [wgsCoord[0] - (mapOffsetX * 0.000008983), wgsCoord[1] - (mapOffsetY * 0.000008983)];
-                });
-                const candidateTurfPoly = turf.polygon([featureWgsCoordsWithOffset]);
+                
+                const candidateTurfPolys = processRingsToTurf(feature.geometry);
+                if (candidateTurfPolys.length === 0) return;
 
                 let totalIntersectionArea = 0;
-                targetTurfPolygons.forEach(searchTurfPoly => {
-                    const intersectionGeometry = turf.intersect(turf.featureCollection([searchTurfPoly, candidateTurfPoly]));
-                    if (intersectionGeometry) totalIntersectionArea += turf.area(intersectionGeometry);
+                
+                candidateTurfPolys.forEach(candidateTurfPoly => {
+                    targetTurfPolygons.forEach(searchTurfPoly => {
+                        const result = checkPreciseIntersection(searchTurfPoly, candidateTurfPoly, false, `[Report ZU ${feature.properties.descr}]`);
+                        if (result.isIntersecting) {
+                            totalIntersectionArea += result.area;
+                        }
+                    });
                 });
 
-                if (totalIntersectionArea > 0.01) {
+                // ИСПРАВЛЕНИЕ ПОРОГА ЧУВСТВИТЕЛЬНОСТИ: 0.0001 (1 кв. см.)
+                if (totalIntersectionArea >= 0.0001) {
                     const percentage = (totalIntersectionArea / mainObjectAreaInMeters) * 100;
                     underlyingParcelsResults.push({ feature, intersectionArea: totalIntersectionArea, percentage });
                 }
@@ -18299,21 +18519,22 @@ async function generateConsolidatedReport(targetObject) {
         if (oksResults.length > 0) {
              showLoader('Анализ наложений с ОКС...');
              oksResults.forEach(feature => {
-                 if (!feature.geometry || !feature.geometry.coordinates || feature.geometry.type !== 'Polygon') return;
-
-                 const featureWgsCoordsWithOffset = feature.geometry.coordinates[0].map(coord3857 => {
-                    const wgsCoord = proj4('EPSG:3857', 'EPSG:4326', coord3857);
-                    return [wgsCoord[0] - (mapOffsetX * 0.000008983), wgsCoord[1] - (mapOffsetY * 0.000008983)];
-                 });
-                 const candidateTurfPoly = turf.polygon([featureWgsCoordsWithOffset]);
+                 const candidateTurfPolys = processRingsToTurf(feature.geometry);
+                 if (candidateTurfPolys.length === 0) return;
 
                  let totalIntersectionArea = 0;
-                 targetTurfPolygons.forEach(searchTurfPoly => {
-                     const intersectionGeometry = turf.intersect(turf.featureCollection([searchTurfPoly, candidateTurfPoly]));
-                     if (intersectionGeometry) totalIntersectionArea += turf.area(intersectionGeometry);
+                 
+                 candidateTurfPolys.forEach(candidateTurfPoly => {
+                     targetTurfPolygons.forEach(searchTurfPoly => {
+                         const result = checkPreciseIntersection(searchTurfPoly, candidateTurfPoly, false, `[Report OKS]`);
+                         if (result.isIntersecting) {
+                             totalIntersectionArea += result.area;
+                         }
+                     });
                  });
 
-                 if (totalIntersectionArea > 0.01) {
+                 // ИСПРАВЛЕНИЕ ПОРОГА ЧУВСТВИТЕЛЬНОСТИ: 0.0001 (1 кв. см.)
+                 if (totalIntersectionArea >= 0.0001) {
                     const percentage = (totalIntersectionArea / mainObjectAreaInMeters) * 100;
                     oksIntersectionResults.push({ feature, intersectionArea: totalIntersectionArea, percentage });
                  }
@@ -18327,7 +18548,7 @@ async function generateConsolidatedReport(targetObject) {
         await delay(100);
 
         const drawnZouits = [];
-        const coveringZouits = [];
+        const coveringZouits =[];
 
         for (const feature of zouitResults) {
             let isCovering = true;
@@ -18340,7 +18561,6 @@ async function generateConsolidatedReport(targetObject) {
                         return [wgs[0] - (mapOffsetX * 0.000008983), wgs[1] - (mapOffsetY * 0.000008983)];
                     });
                     const featureTurf = turf.polygon([wgsRing]);
-                    
                     for (const mainTurfPoly of targetTurfPolygons) {
                         if (!turf.booleanContains(featureTurf, mainTurfPoly)) {
                             isCovering = false;
@@ -18351,7 +18571,6 @@ async function generateConsolidatedReport(targetObject) {
             } catch (e) {
                 isCovering = false;
             }
-
             if (isCovering) coveringZouits.push(feature);
             else drawnZouits.push(feature);
         }
@@ -18366,15 +18585,13 @@ async function generateConsolidatedReport(targetObject) {
 
         oksResults.forEach(f => f.properties._report_type = 'building');
         structuresResults.forEach(f => f.properties._report_type = 'structure');
-        const mainSchemeOtherObjects = [...oksResults, ...structuresResults];
+        const mainSchemeOtherObjects =[...oksResults, ...structuresResults];
 
         const underlyingParcelsForDrawing = underlyingParcelsResults.map(item => item.feature);
-        
-  // Подготавливаем список ОКС для отрисовки на Canvas (превращаем объекты обратно в строки)
         const simpleLinkedOksList = linkedOksResults.map(item => (typeof item === 'object' && item.cn) ? item.cn : item);
 
-        const { image: mainSchemeWithPoints, coordsTable } = await drawAllObjectsToCanvas(targetPolygons, mainSchemeOtherObjects, true, [], { linkedOksList: simpleLinkedOksList });
-        const { image: mainSchemeWithoutPoints } = await drawAllObjectsToCanvas(targetPolygons, mainSchemeOtherObjects, false, [], { linkedOksList: simpleLinkedOksList });
+        const { image: mainSchemeWithPoints, coordsTable } = await drawAllObjectsToCanvas(targetPolygons, mainSchemeOtherObjects, true,[], { linkedOksList: simpleLinkedOksList });
+        const { image: mainSchemeWithoutPoints } = await drawAllObjectsToCanvas(targetPolygons, mainSchemeOtherObjects, false,[], { linkedOksList: simpleLinkedOksList });
 
         let parcelsSchemeWithPoints = null;
         let parcelsSchemeWithoutPoints = null;
@@ -18404,7 +18621,7 @@ async function generateConsolidatedReport(targetObject) {
                 clone.properties._report_type = 'zouit';
                 return clone;
             });
-            const { image } = await drawAllObjectsToCanvas(targetPolygons, zouitsForDrawing, false, [], { transparent: true, drawMain: false });
+            const { image } = await drawAllObjectsToCanvas(targetPolygons, zouitsForDrawing, false,[], { transparent: true, drawMain: false });
             zouitScheme = image;
         }
 
@@ -18427,11 +18644,10 @@ async function generateConsolidatedReport(targetObject) {
             reportWindow.document.body.appendChild(scriptEl);
             reportWindow.document.close();
         } else {
-            throw new Error('Не удалось открыть новое окно. Возможно, оно заблокировано браузером.');
+            throw new Error('Не удалось открыть новое окно.');
         }
 
     } catch (error) {
-        console.error("Ошибка при формировании сводного отчета:", error);
         showNotification(error.message, 'error', 'exclamation-circle', 5000);
     } finally {
         hideLoader();
@@ -20405,58 +20621,45 @@ function findIntersectingParcelsFrontend(searchShapes) {
     const processedCadastralNumbers = new Set();
 
     for (const searchShape of searchShapes) {
-        for (const obj of polygons) { // Проверяем по всем полигонам на карте
-            // Убедимся, что это полигон земельного участка
+        for (const obj of polygons) { 
              if (!(obj instanceof ymaps.Polygon) || (!obj.properties.get('isParcelInQuarter') && !obj.properties.get('isFoundInArea'))) {
                 continue;
              }
 
             const cadastralNumber = obj.properties.get('cadastralNumber');
-            // Пропускаем, если у объекта нет КН или он уже был обработан
             if (!cadastralNumber || processedCadastralNumbers.has(cadastralNumber)) {
                 continue;
             }
 
             let isIntersecting = false;
-            const targetPolygonCoords = obj.geometry.getCoordinates()[0]; // Предполагаем один внешний контур
+            // Учитываем все контуры целевого объекта (с дырками)
+            const targetAllRings = obj.geometry.getCoordinates();
 
             try { 
+                const targetTurfPoly = turf.polygon(targetAllRings.map(ring => ring.map(c => [c[1], c[0]])));
+                const logPrefix = `[Поиск наложения на ${cadastralNumber}]`;
+
                 if (searchShape instanceof ymaps.Placemark) {
                     const pointCoords = searchShape.geometry.getCoordinates();
-                    isIntersecting = obj.geometry.contains(pointCoords);
+                    const turfPt = turf.point([pointCoords[1], pointCoords[0]]);
+                    const result = checkPreciseIntersection(turfPt, targetTurfPoly, true, logPrefix);
+                    isIntersecting = result.isIntersecting;
                 } else if (searchShape instanceof ymaps.Polyline) {
                     const lineCoords = searchShape.geometry.getCoordinates();
-                    for (let i = 0; i < lineCoords.length - 1; i++) {
-                        const segment = [lineCoords[i], lineCoords[i + 1]];
-                        if (obj.geometry.contains(segment[0]) || obj.geometry.contains(segment[1])) {
-                            isIntersecting = true; break;
-                        }
-                        for (let j = 0; j < targetPolygonCoords.length - 1; j++) {
-                            if (doLinesIntersect(segment[0], segment[1], targetPolygonCoords[j], targetPolygonCoords[j + 1])) {
-                                isIntersecting = true; break;
-                            }
-                        }
-                        if (isIntersecting) break;
-                    }
+                    const turfLine = turf.lineString(lineCoords.map(c => [c[1], c[0]]));
+                    const result = checkPreciseIntersection(turfLine, targetTurfPoly, true, logPrefix);
+                    isIntersecting = result.isIntersecting;
                 } else if (searchShape instanceof ymaps.Polygon) {
-                    const searchPolygonCoords = searchShape.geometry.getCoordinates()[0];
+                    // ВАЖНО: Берем все кольца поискового полигона (включая дырки, которые мы теперь создаем правильно)
+                    const searchAllRings = searchShape.geometry.getCoordinates();
+                    const searchTurfPoly = turf.polygon(searchAllRings.map(ring => ring.map(c => [c[1], c[0]])));
                     
-                    const searchTurfPoly = turf.polygon([searchPolygonCoords.map(c => [c[1], c[0]])]);
-                    const targetTurfPoly = turf.polygon([targetPolygonCoords.map(c => [c[1], c[0]])]);
-
-                    // Рассчитываем геометрию пересечения
-                    const intersectionGeometry = turf.intersect(turf.featureCollection([searchTurfPoly, targetTurfPoly]));
-
-                    // --- ИЗМЕНЕНИЕ ЗДЕСЬ ---
-                    // Считаем пересечением, только если площадь наложения больше 0.005 м²
-                    if (intersectionGeometry && turf.area(intersectionGeometry) > 0.005) {
-                        isIntersecting = true;
-                    }
-                    // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+                    const result = checkPreciseIntersection(searchTurfPoly, targetTurfPoly, false, logPrefix);
+                    isIntersecting = result.isIntersecting;
                 }
             } catch(intersectionError) {
-                console.error("Ошибка при проверке пересечения:", intersectionError, "Фигура поиска:", searchShape, "Целевой объект:", obj);
-                isIntersecting = false; // Считаем, что пересечения нет в случае ошибки
+                console.error("Ошибка при проверке пересечения:", intersectionError);
+                isIntersecting = false; 
             }
 
             if (isIntersecting) {
@@ -20465,16 +20668,16 @@ function findIntersectingParcelsFrontend(searchShapes) {
                     cadastralNumber: cadastralNumber,
                     address: obj.properties.get('address') || 'Адрес не указан',
                     areaText: obj.properties.get('areaText') || 'Площадь не указана',
-                    polygon: obj // Ссылка на объект полигона ymaps
+                    polygon: obj 
                 });
             }
         }
     }
-    // --- ИЗМЕНЕНИЕ В ЛОГЕ ---
-    console.log("Найдено пересекающихся участков (с площадью наложения > 0.005 м²):", intersectingParcels.length);
-    // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+    console.log("Итог: найдено пересекающихся участков:", intersectingParcels.length);
     return intersectingParcels;
 }
+
+
 function doLinesIntersect(p1, p2, p3, p4) {
     function ccw(a, b, c) {
         return (c[1] - a[1]) * (b[0] - a[0]) > (b[1] - a[1]) * (c[0] - a[0]);
@@ -23245,105 +23448,125 @@ function createTemporaryYmapsPolygon(feature) {
 // Draw the searched object on the map
 function drawSearchObject(geoCoordGroups) {
     const shapes = [];
-    
-    for (const coordGroup of geoCoordGroups) {
-        const offsetCoordinates = coordGroup.map(coord => [
+
+    // 1. Сортируем группы координат: сначала полигоны, потом линии/точки
+    // Это нужно, чтобы правильно определить вложенность (дырки)
+    const candidates = geoCoordGroups.map(group => {
+        const offsetCoordinates = group.map(coord => [
             coord[0] - mapOffsetY * 0.000008983,
             coord[1] - mapOffsetX * 0.000008983
         ]);
         
-        if (offsetCoordinates.length === 1) {
-            // Точка
-            const placemark = new ymaps.Placemark(offsetCoordinates[0], {
+        let type = 'line';
+        if (offsetCoordinates.length === 1) type = 'point';
+        else if (offsetCoordinates.length > 2 && 
+            Math.abs(offsetCoordinates[0][0] - offsetCoordinates[offsetCoordinates.length-1][0]) < 1e-6 &&
+            Math.abs(offsetCoordinates[0][1] - offsetCoordinates[offsetCoordinates.length-1][1]) < 1e-6) {
+            type = 'polygon';
+        }
+        
+        return { coords: offsetCoordinates, type: type };
+    });
+
+    // 2. Объединяем вложенные полигоны в один (полигон с дырками)
+    const complexPolygons = [];
+    const processedIndices = new Set();
+
+    candidates.forEach((cand, i) => {
+        if (processedIndices.has(i) || cand.type !== 'polygon') return;
+
+        // Создаем Turf-полигон для проверки вложенности
+        // Turf ожидает [lon, lat], а у нас [lat, lon], поэтому меняем местами для проверки
+        const turfOuter = turf.polygon([cand.coords.map(c => [c[1], c[0]])]);
+        const holes = [];
+
+        // Ищем другие полигоны, которые находятся внутри этого
+        candidates.forEach((inner, j) => {
+            if (i === j || processedIndices.has(j) || inner.type !== 'polygon') return;
+            
+            // Проверяем, лежит ли первая точка внутреннего полигона внутри внешнего
+            const innerPt = inner.coords[0];
+            if (turf.booleanPointInPolygon(turf.point([innerPt[1], innerPt[0]]), turfOuter)) {
+                holes.push(inner.coords);
+                processedIndices.add(j);
+            }
+        });
+
+        // Собираем итоговый массив колец: [внешнее, дырка1, дырка2...]
+        const rings = [cand.coords, ...holes];
+        complexPolygons.push(rings);
+        processedIndices.add(i);
+    });
+
+    // 3. Отрисовываем сложные полигоны (с дырками)
+    complexPolygons.forEach(rings => {
+        const polygon = new ymaps.Polygon(rings, {
+            hintContent: 'Поисковый полигон',
+            isSearchShape: true
+        }, {
+            strokeColor: '#FF0000',
+            strokeWidth: 4,
+            strokeOpacity: manualObjectOpacity,
+            fillColor: '#FF0000',
+            fillOpacity: manualObjectOpacity * 0.4,
+            zIndex: 900
+        });
+        map.geoObjects.add(polygon);
+        polygons.push(polygon);
+        shapes.push(polygon);
+    });
+
+    // 4. Отрисовываем оставшиеся линии и точки
+    candidates.forEach((cand, i) => {
+        if (processedIndices.has(i)) return; // Уже отрисован как часть полигона
+
+        if (cand.type === 'point') {
+            const placemark = new ymaps.Placemark(cand.coords[0], {
                 hintContent: 'Поисковая точка'
             }, {
                 preset: 'islands#redDotIcon',
                 iconColor: '#FF0000',
                 zIndex: 1000
             });
-            
             map.geoObjects.add(placemark);
             polygons.push(placemark);
             shapes.push(placemark);
-            
-        } else if (offsetCoordinates.length > 1) {
-            // Проверяем, замкнутый ли это полигон
-            const isClosedPolygon = offsetCoordinates.length > 2 && 
-                                   Math.abs(offsetCoordinates[0][0] - offsetCoordinates[offsetCoordinates.length-1][0]) < 0.000001 &&
-                                   Math.abs(offsetCoordinates[0][1] - offsetCoordinates[offsetCoordinates.length-1][1]) < 0.000001;
-            
-            if (isClosedPolygon) {
-                // Полигон (первая и последняя точки совпадают)
-                const polygon = new ymaps.Polygon([offsetCoordinates], {
-                    hintContent: 'Поисковый полигон',
-                    isSearchShape: true
-                }, {
-                    strokeColor: '#FF0000',
-                    strokeWidth: 4,
-                    strokeOpacity: manualObjectOpacity,
-                  fillColor: '#FF0000', // Цвет остается красным
-fillOpacity: manualObjectOpacity * 0.4, // Управляем прозрачностью
-                    zIndex: 900
-                });
-                
-                map.geoObjects.add(polygon);
-                polygons.push(polygon);
-                shapes.push(polygon);
-                
-            } else {
-                // Линия
-                const polyline = new ymaps.Polyline(offsetCoordinates, {
-                    hintContent: 'Поисковая линия',
-                    isSearchShape: true 
-                }, {
-                    strokeColor: '#FF0000',
-                    strokeWidth: 4,
-                    strokeOpacity: 0.8,
-                    zIndex: 900
-                });
-                
-                map.geoObjects.add(polyline);
-                polygons.push(polyline);
-                shapes.push(polyline);
-            }
+        } else {
+            const polyline = new ymaps.Polyline(cand.coords, {
+                hintContent: 'Поисковая линия',
+                isSearchShape: true 
+            }, {
+                strokeColor: '#FF0000',
+                strokeWidth: 4,
+                strokeOpacity: 0.8,
+                zIndex: 900
+            });
+            map.geoObjects.add(polyline);
+            polygons.push(polyline);
+            shapes.push(polyline);
         }
-    }
+    });
     
-    // Устанавливаем границы карты, чтобы вместить все фигуры
+    // Устанавливаем границы карты
     if (shapes.length > 0) {
         let allBounds = null;
-        
         shapes.forEach(shape => {
             const bounds = shape.geometry.getBounds();
-            if (!allBounds) {
-                allBounds = bounds;
-            } else {
+            if (!allBounds) allBounds = bounds;
+            else {
                 allBounds = [
-                    [
-                        Math.min(allBounds[0][0], bounds[0][0]),
-                        Math.min(allBounds[0][1], bounds[0][1])
-                    ],
-                    [
-                        Math.max(allBounds[1][0], bounds[1][0]),
-                        Math.max(allBounds[1][1], bounds[1][1])
-                    ]
+                    [Math.min(allBounds[0][0], bounds[0][0]), Math.min(allBounds[0][1], bounds[0][1])],
+                    [Math.max(allBounds[1][0], bounds[1][0]), Math.max(allBounds[1][1], bounds[1][1])]
                 ];
             }
         });
-        
         if (allBounds) {
-            // Немного расширяем границы для лучшего просмотра
             const latDiff = (allBounds[1][0] - allBounds[0][0]) * 0.1;
             const lonDiff = (allBounds[1][1] - allBounds[0][1]) * 0.1;
-            allBounds = [
+            map.setBounds([
                 [allBounds[0][0] - latDiff, allBounds[0][1] - lonDiff],
                 [allBounds[1][0] + latDiff, allBounds[1][1] + lonDiff]
-            ];
-            
-            map.setBounds(allBounds, {
-                checkZoomRange: true,
-                duration: 300
-            });
+            ], { checkZoomRange: true, duration: 300 });
         }
     }
     
