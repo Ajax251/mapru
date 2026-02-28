@@ -2722,17 +2722,13 @@ input:checked + .slider:after { content: 'Proj4'; left: 15px; right: auto; }
 .bd-summary {
     width: 200px;
     background: linear-gradient(135deg, #f8fafc, #eef2f7);
-    padding: 10px 15px;
+    padding: 15px;
     border-right: 1px solid #e2e8f0;
     display: flex;
     flex-direction: column;
     flex-shrink: 0;
     position: relative;
-    overflow-y: auto; 
 }
-
-.bd-summary::-webkit-scrollbar { width: 4px; }
-.bd-summary::-webkit-scrollbar-thumb { background-color: #cbd5e1; border-radius: 4px; }
 
 .bd-summary h3 {
     margin: 0 0 15px 0;
@@ -17305,33 +17301,27 @@ async function exportQuickReportToHtml() {
   
     const widgets = document.querySelectorAll('.widget, .map-mode-switcher, .input-container, .mobile-menu-btn, .camera-height-label, .map-legend, .raster-controls-panel');
     
+
     if (sidebar) sidebar.classList.add('hidden');
     if (panel) panel.style.display = 'none';
     widgets.forEach(w => { if (w) w.style.display = 'none'; });
 
     try {
-        // 1. Принудительно заставляем карту обновить размеры контейнера
-        // Это спасает от съезжания SVG-полигонов на мобилках и планшетах
-        if (map) {
-            map.container.fitToViewport();
-        }
+  
+        await new Promise(r => setTimeout(r, 300)); 
         
-        // 2. Увеличиваем паузу, чтобы Яндекс.Карты точно успели перерисовать слои
-        await new Promise(r => setTimeout(r, 800)); 
+       const mapElement = document.getElementById('map');
         
-        const mapElement = document.getElementById('map');
-        
-        // 3. Жестко фиксируем viewport для html2canvas, отключая любые скроллы
+   
         const canvas = await html2canvas(mapElement, {
             useCORS: true,
             allowTaint: true,
             logging: false,
             width: mapElement.clientWidth,
             height: mapElement.clientHeight,
-            scrollX: 0, // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ (обнуляем скролл)
-            scrollY: 0, // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ (обнуляем скролл)
-            windowWidth: document.documentElement.clientWidth, // Фиксируем ширину
-            windowHeight: document.documentElement.clientHeight, // Фиксируем высоту
+            scrollX: window.scrollX,
+            scrollY: window.scrollY,
+          
             ignoreElements: (element) => {
                 if (typeof element.className === 'string') {
                     return element.className.includes('-copyright') || 
@@ -17345,7 +17335,7 @@ async function exportQuickReportToHtml() {
         const mapImage = canvas.toDataURL('image/jpeg', 0.85);
 
         // Вспомогательная функция генерации аккуратных HTML таблиц
-        const generateTable = (features, type) => {
+     const generateTable = (features, type) => {
             if (!features || features.length === 0) return '';
             
             let title = '';
@@ -17385,6 +17375,7 @@ async function exportQuickReportToHtml() {
                     if (o.params_extension) details += `<b>Протяженность:</b> ${o.params_extension} м<br>`;
                     if (o.params_purpose) details += `<b>Назначение:</b> ${o.params_purpose}`;
                 } else if (type === 'zouit') {
+                    // Строго ЗОУИТ
                     cn = o.reg_numb_border || p.descr || '-';
                     details = `<b>Наименование:</b> ${o.name_by_doc || '-'}`;
                 }
@@ -17402,13 +17393,14 @@ async function exportQuickReportToHtml() {
         const today = new Date().toLocaleDateString('ru-RU');
         const objName = document.querySelector('.bd-summary h3 span')?.textContent || 'Объект';
 
-        let tablesHtml = '';
+       let tablesHtml = '';
         if (parcelFeaturesData?.length) tablesHtml += generateTable(parcelFeaturesData, 'zu');
         if (buildingFeaturesData?.length) tablesHtml += generateTable(buildingFeaturesData, 'oks');
         if (structureFeaturesData?.length) tablesHtml += generateTable(structureFeaturesData, 'structure');
         
-        const pureZouits =[];
-        const geoAnalysisZones =[]; 
+        // Массивы для разделения зон
+        const pureZouits = [];
+        const geoAnalysisZones = []; // Зоны, которые пойдут в таблицу под картой
 
         if (zouitFeaturesData?.length) {
             zouitFeaturesData.forEach(f => {
@@ -17428,10 +17420,12 @@ async function exportQuickReportToHtml() {
                     else if (isMunicipal) determinedType = 'Муниципальное образование';
                     else if (isForestry) determinedType = 'Лесничество';
                     
-                    f._report_geo_type = determinedType; 
+                    f._report_geo_type = determinedType; // Сохраняем тип для таблицы
                     geoAnalysisZones.push(f);
+                    console.log(`[Отчет HTML] ID=${f.id || 'н/д'}. Отправлен в нижнюю таблицу как: ${determinedType}. Имя: ${f.properties?.descr || f.properties?.label}`);
                 } else {
                     pureZouits.push(f);
+                    console.log(`[Отчет HTML] ID=${f.id || 'н/д'}. Отправлен в правую таблицу как чистый ЗОУИТ.`);
                 }
             });
 
@@ -17442,11 +17436,13 @@ async function exportQuickReportToHtml() {
 
         if (!tablesHtml) tablesHtml = '<div class="empty-msg">В выбранной области нет пересекаемых объектов</div>';
 
+      // --- РАСЧЕТ ГЕОМЕТРИИ (ЧЕРЕЗ МСК) ---
         let totalArea = 0;
         let totalPerimeter = 0;
-        const targetTurfFeatures =[]; 
+        const targetTurfFeatures = []; // Оставляем только для пересечения с зонами
 
         quickReportTargetObjects.forEach(obj => {
+            // 1. Формируем WGS84 объекты для Turf (ТОЛЬКО для пересечений)
             const coords = obj.geometry.getCoordinates();
             if (obj instanceof ymaps.Polygon) {
                 targetTurfFeatures.push(turf.polygon([coords[0].map(c => [c[1], c[0]])]));
@@ -17454,13 +17450,16 @@ async function exportQuickReportToHtml() {
                 targetTurfFeatures.push(turf.lineString(coords.map(c => [c[1], c[0]])));
             }
 
+            // 2. Считаем точную площадь и периметр через новую функцию
             const geomStats = calculatePreciseGeometry(obj);
             totalArea += geomStats.area;
             totalPerimeter += geomStats.perimeter;
         });
 
-        const zoneResults =[];
+      // --- РАСЧЕТ ПЕРЕСЕЧЕНИЙ ЗОН (С ЗАПАСНЫМ ВАРИАНТОМ) ---
+        const zoneResults = [];
 
+        // Функция трансформации
         const transformCoordToMapWgs = (c) => {
             if (!Array.isArray(c) || c.length < 2) return null;
             try {
@@ -17469,7 +17468,7 @@ async function exportQuickReportToHtml() {
                 else wgs = [c[0], c[1]];
                 
                 if (!isFinite(wgs[0]) || !isFinite(wgs[1])) return null;
-                return[wgs[0] - (mapOffsetX * 0.000008983), wgs[1] - (mapOffsetY * 0.000008983)];
+                return [wgs[0] - (mapOffsetX * 0.000008983), wgs[1] - (mapOffsetY * 0.000008983)];
             } catch (e) { return null; }
         };
 
@@ -17497,10 +17496,17 @@ async function exportQuickReportToHtml() {
                 zoneName = `${regNum} ${name ? '- ' + name : ''}`.trim();
             }
 
+            // Функция Fallback: добавляем зону, но ставим прочерк в статусе
             const addAsIntersectingFallback = () => {
-                zoneResults.push({ type: zoneType, name: zoneName, status: '-' });
+                console.log(`[Отчет HTML] Геометрия ID=${f.id} сложна/отсутствует. Добавляем по факту наличия.`);
+                zoneResults.push({
+                    type: zoneType,
+                    name: zoneName,
+                    status: '-' // Ставим прочерк, т.к. не проверили математически
+                });
             };
 
+            // 1. Проверка наличия геометрии
             if (!f.geometry || !f.geometry.coordinates || f.geometry.coordinates.length === 0) {
                 addAsIntersectingFallback();
                 return;
@@ -17509,9 +17515,10 @@ async function exportQuickReportToHtml() {
             let zoneTurfFeature = null;
 
             try {
+                // 2. Рекурсивный парсер
                 const extractRings = (coords) => {
                     if (!Array.isArray(coords)) return [];
-                    if (coords.length === 2 && typeof coords[0] === 'number' && typeof coords[1] === 'number') return[transformCoordToMapWgs(coords)];
+                    if (coords.length === 2 && typeof coords[0] === 'number' && typeof coords[1] === 'number') return [transformCoordToMapWgs(coords)];
                     if (Array.isArray(coords[0]) && coords[0].length === 2 && typeof coords[0][0] === 'number') {
                         const ring = coords.map(transformCoordToMapWgs).filter(p => p !== null);
                         if (ring.length >= 3) {
@@ -17519,7 +17526,7 @@ async function exportQuickReportToHtml() {
                             if (Math.abs(first[0]-last[0])>1e-9 || Math.abs(first[1]-last[1])>1e-9) ring.push(first);
                             return [ring];
                         }
-                        return[];
+                        return [];
                     }
                     return coords.flatMap(extractRings);
                 };
@@ -17534,11 +17541,14 @@ async function exportQuickReportToHtml() {
                     addAsIntersectingFallback();
                     return;
                 }
+
             } catch (err) {
+                console.error(`[Отчет HTML] Ошибка парсинга ID=${f.id}:`, err);
                 addAsIntersectingFallback();
                 return;
             }
 
+            // 3. Проверка через Turf
             let isFullyWithin = true;
             let isIntersecting = false;
 
@@ -17554,15 +17564,24 @@ async function exportQuickReportToHtml() {
                     }
                 });
             } catch (turfErr) {
+                console.warn(`[Отчет HTML] Ошибка Turf для ID=${f.id}`);
                 addAsIntersectingFallback();
                 return;
             }
 
             if (isIntersecting) {
-                zoneResults.push({ type: zoneType, name: zoneName, status: isFullyWithin ? 'Полностью входит' : 'Частично входит' });
+                console.log(`[Отчет HTML] Найдено пересечение (Turf): ID=${f.id}`);
+                zoneResults.push({
+                    type: zoneType,
+                    name: zoneName,
+                    status: isFullyWithin ? 'Полностью входит' : 'Частично входит'
+                });
             } else {
+                // Если Turf не нашел (возможно ошибка в сложной геометрии), но это МО/НП — верим API
                 if (zoneType === 'Муниципальное образование' || zoneType === 'Населенный пункт') {
                      addAsIntersectingFallback();
+                } else {
+                     console.log(`[Отчет HTML] Пересечений НЕТ: ID=${f.id}`);
                 }
             }
         });
@@ -17630,6 +17649,7 @@ async function exportQuickReportToHtml() {
         .map-col { flex: 0 0 50%; max-width: 50%; position: sticky; top: 20px; }
         .map-box { border: 1px solid var(--border); padding: 4px; background: #fff; border-radius: 3px; }
         
+        /* Добавлен курсор лупы и плавность для картинки */
         .map-img { width: 100%; height: auto; display: block; border: 1px solid #e2e8f0; cursor: zoom-in; transition: opacity 0.2s; }
         .map-img:hover { opacity: 0.9; }
         
@@ -17649,6 +17669,7 @@ async function exportQuickReportToHtml() {
         
         .empty-msg { text-align: center; color: #888; font-style: italic; padding: 30px; border: 1px dashed #ccc; background: #fafafa; }
 
+        /* СТИЛИ ДЛЯ МОДАЛЬНОГО ОКНА ПРЕВЬЮ */
         .img-modal {
             position: fixed; top: 0; left: 0; width: 100%; height: 100%;
             background: rgba(0, 0, 0, 0.65); backdrop-filter: blur(4px);
@@ -17693,6 +17714,8 @@ async function exportQuickReportToHtml() {
         function saveHtml() {
             const docClone = document.documentElement.cloneNode(true);
             const actions = docClone.querySelector('.header-actions');
+            
+            // Удаляем только кнопки "Сохранить" и "Печать", модальное окно оставляем!
             if (actions) actions.remove();
 
             const htmlContent = "<!DOCTYPE html>\\n" + docClone.outerHTML;
@@ -17711,6 +17734,7 @@ async function exportQuickReportToHtml() {
             URL.revokeObjectURL(url);
         }
         
+        // Скрипт для работы модального окна
         document.addEventListener('DOMContentLoaded', () => {
             const mapImg = document.querySelector('.map-img');
             const modal = document.getElementById('imageModal');
@@ -17721,7 +17745,13 @@ async function exportQuickReportToHtml() {
                     modalImg.src = mapImg.src;
                     modal.classList.add('active');
                 });
-                modal.addEventListener('click', () => { modal.classList.remove('active'); });
+
+                // Закрытие при клике по фону или по самой картинке
+                modal.addEventListener('click', () => {
+                    modal.classList.remove('active');
+                });
+                
+                // Закрытие по клавише Esc
                 document.addEventListener('keydown', (e) => {
                     if (e.key === 'Escape' && modal.classList.contains('active')) {
                         modal.classList.remove('active');
@@ -17745,6 +17775,7 @@ async function exportQuickReportToHtml() {
         </div>
         
         <div class="content-wrapper">
+            <!-- Схема слева -->
             <div class="map-col">
                 <div class="map-box">
                     <img src="${mapImage}" class="map-img" alt="Схема расположения" title="Нажмите для увеличения">
@@ -17752,12 +17783,14 @@ async function exportQuickReportToHtml() {
                 ${geoHtml}
             </div>
             
+            <!-- Таблицы справа -->
             <div class="data-col">
                 ${tablesHtml}
             </div>
         </div>
     </div>
     
+    <!-- Модальное окно для увеличенного просмотра -->
     <div class="img-modal" id="imageModal">
         <img id="modalImg" src="" alt="Увеличенная схема">
     </div>
@@ -17773,12 +17806,15 @@ async function exportQuickReportToHtml() {
         console.error('Ошибка экспорта HTML:', error);
         showNotification('Ошибка создания HTML', 'error');
     } finally {
+        // Обязательно возвращаем интерфейс обратно
         if (panel) panel.style.display = '';
         widgets.forEach(w => {
             if (w && !w.classList.contains('custom-context-menu')) {
                 w.style.display = '';
             }
         });
+     
+        
         hideLoader();
     }
 }
