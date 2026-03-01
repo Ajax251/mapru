@@ -19430,27 +19430,13 @@ function openColorEditorModal(targetObject) {
 
 modal.querySelector('#show-points-btn').addEventListener('click', async () => {
          clearRelatedPoints();
-         
-         // --- ИЗМЕНЕНИЕ: Собираем ВСЕ точки (внешний контур + все внутренние дырки) ---
-         let allCoordinates = [];
-         if (isPolygon) {
-             const rings = targetObject.geometry.getCoordinates();
-             rings.forEach(ring => {
-                 allCoordinates.push(...ring);
-             });
-         } else if (isLine) {
-             allCoordinates = targetObject.geometry.getCoordinates();
-         }
-         
-         if (!allCoordinates.length) return;
+         const coordinates = getCoords();
+         if (!coordinates.length) return;
 
          document.body.removeChild(modal);
-         showLoader('Анализ наложений для точек (МСК)...');
+         showLoader('Анализ наложений ...');
 
          try {
-             const logPrefix = "[Точки-Наложения]";
-             console.log(`${logPrefix} === СТАРТ АНАЛИЗА ===`);
-
              // 1. Настройка МСК
              const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
              const destSystemObject = (typeof COORDINATE_SYSTEMS !== 'undefined') ? COORDINATE_SYSTEMS.find(s => s.value === destSc) : null;
@@ -19466,32 +19452,23 @@ modal.querySelector('#show-points-btn').addEventListener('click', async () => {
                      calcMskOffsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
                  }
              } else {
-                 throw new Error("Не удалось инициализировать МСК для точного расчета.");
+                 throw new Error("Не удалось инициализировать МСК.");
              }
 
-             // Функция точного перевода в МСК БЕЗ округления (для точной математики)
-             const toPreciseMsk = (coord) => { 
+             // Конвертация целевых точек карты в МСК с округлением до сантиметров (как в ГеоРедакторе)
+             const targetMskPoints = coordinates.map(coord => {
                  const trueLat = coord[0] + (mapOffsetY * 0.000008983);
                  const trueLon = coord[1] + (mapOffsetX * 0.000008983);
                  const p = proj4('EPSG:4326', destSc, [trueLon, trueLat]);
-                 // Не округляем, возвращаем как есть. В РФ: X - север (p[1]), Y - восток (p[0])
-                 return [p[1] + calcMskOffsetX, p[0] + calcMskOffsetY];
-             };
+                 return {
+                     x: Math.round((p[1] + calcMskOffsetX) * 100) / 100,
+                     y: Math.round((p[0] + calcMskOffsetY) * 100) / 100
+                 };
+             });
 
-             // 2. Получаем геометрию целевого объекта
-             let targetTurfGeom;
-             const targetMskStats = calculatePreciseGeometry(targetObject);
-             const targetMskArea = targetMskStats.area;
              const targetCadNum = targetObject.properties.get('cadastralNumber');
 
-             if (isLine) {
-                 targetTurfGeom = turf.lineString(targetObject.geometry.getCoordinates().map(c => [c[1], c[0]]));
-             } else {
-                 const rings = targetObject.geometry.getCoordinates();
-                 targetTurfGeom = turf.polygon(rings.map(ring => ring.map(c => [c[1], c[0]])));
-             }
-
-             // 3. Запрашиваем соседей по API
+             // 2. Запрашиваем соседей по API
              const rawFeatures = await searchFeaturesByGeometry(targetObject, 36368);
              const foreignMskPolygons = []; 
 
@@ -19500,135 +19477,121 @@ modal.querySelector('#show-points-btn').addEventListener('click', async () => {
                      if (!feature.geometry || !feature.geometry.coordinates) continue;
                      
                      const featureCn = feature.properties.descr;
-                     if (targetCadNum && featureCn === targetCadNum) continue;
+                     if (targetCadNum && featureCn === targetCadNum) continue; // Пропускаем самого себя по КН
 
-                     let featureTurfPolygons = [];
-                     const processRing = (ring3857) => ring3857.map(c => {
-                         const wgs = proj4('EPSG:3857', 'EPSG:4326', c);
-                         return [wgs[0] - mapOffsetX * 0.000008983, wgs[1] - mapOffsetY * 0.000008983];
-                     });
+                     let isDuplicate = false;
+                     const ringsArray = feature.geometry.type === 'Polygon' ? [feature.geometry.coordinates] : feature.geometry.coordinates;
+                     const parsedPolygons = [];
 
-                     if (feature.geometry.type === 'Polygon') {
-                         featureTurfPolygons.push(turf.polygon(feature.geometry.coordinates.map(processRing)));
-                     } else if (feature.geometry.type === 'MultiPolygon') {
-                         feature.geometry.coordinates.forEach(poly => {
-                             featureTurfPolygons.push(turf.polygon(poly.map(processRing)));
+                     for (const poly of ringsArray) {
+                         const mskRings = poly.map(ring => {
+                             return ring.map(c3857 => {
+                                 // Из API приходят 3857. Переводим в WGS84, затем в МСК
+                                 const wgs = proj4('EPSG:3857', 'EPSG:4326', c3857);
+                                 const p = proj4('EPSG:4326', destSc, wgs);
+                                 return {
+                                     x: Math.round((p[1] + calcMskOffsetX) * 100) / 100,
+                                     y: Math.round((p[0] + calcMskOffsetY) * 100) / 100
+                                 };
+                             });
                          });
+                         
+                         // Защита от полных дублей: если первая точка совпадает с первой точкой нашего объекта, считаем дублем
+                         if (mskRings[0] && targetMskPoints[0]) {
+                             const ptA = mskRings[0][0];
+                             const ptB = targetMskPoints[0];
+                             if (Math.abs(ptA.x - ptB.x) < 0.05 && Math.abs(ptA.y - ptB.y) < 0.05) {
+                                 // Проверим еще одну точку для надежности
+                                 if (mskRings[0].length > 1 && targetMskPoints.length > 1) {
+                                     const ptA2 = mskRings[0][1];
+                                     const ptB2 = targetMskPoints[1];
+                                     if (Math.abs(ptA2.x - ptB2.x) < 0.05 && Math.abs(ptA2.y - ptB2.y) < 0.05) {
+                                         isDuplicate = true;
+                                     }
+                                 }
+                             }
+                         }
+
+                         parsedPolygons.push(mskRings);
                      }
 
-                     for (const featureTurfPoly of featureTurfPolygons) {
-                         const result = checkPreciseIntersection(targetTurfGeom, featureTurfPoly, isLine, `${logPrefix} Проверка ${featureCn}`);
-
-                         if (result.isIntersecting) {
-                             if (!isLine && targetMskArea > 0) {
-                                 const overlapRatio = result.area / targetMskArea;
-                                 if (overlapRatio > 0.99) continue; // Исключаем дубли (совпадение 99%)
-                             }
-
-                             // Переводим геометрию соседа в высокоточные МСК массивы
-                             const mskRings = featureTurfPoly.geometry.coordinates.map(ring => {
-                                 return ring.map(coord => toPreciseMsk([coord[1], coord[0]])); 
-                             });
-                             foreignMskPolygons.push({ cn: featureCn, rings: mskRings });
-                         }
+                     if (!isDuplicate) {
+                         foreignMskPolygons.push({ cn: featureCn, polygons: parsedPolygons });
                      }
                  }
              }
 
-             // --- Математический аппарат ---
-             
-             // 1. Ray-Casting: проверяет, находится ли точка внутри полигона
-             const isPointInMskPolygon = (point, polygonRings) => {
-                 const x = point[0], y = point[1]; 
+             // 3. Алгоритм Ray-Casting строго из ГеоРедактора
+             function isPointInPolygonEditor(point, polygon) {
                  let inside = false;
-                 
-                 const outerRing = polygonRings[0];
-                 for (let i = 0, j = outerRing.length - 1; i < outerRing.length; j = i++) {
-                     const xi = outerRing[i][0], yi = outerRing[i][1];
-                     const xj = outerRing[j][0], yj = outerRing[j][1];
-                     const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
+                 for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+                     const xi = polygon[i].x, yi = polygon[i].y;
+                     const xj = polygon[j].x, yj = polygon[j].y;
+                     
+                     // В ГеоРедакторе совпадение с вершиной проверяется отдельно до этой функции,
+                     // но внутри тоже есть защита:
+                     if ((xi === point.x && yi === point.y) || (xj === point.x && yj === point.y)) return true;
+                     
+                     const intersect = ((yi > point.y) !== (yj > point.y)) && 
+                                       (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi);
                      if (intersect) inside = !inside;
                  }
-                 
-                 // Если внутри внешнего, проверяем дырки
-                 if (inside && polygonRings.length > 1) {
-                     for (let k = 1; k < polygonRings.length; k++) {
-                         let inHole = false;
-                         const holeRing = polygonRings[k];
-                         for (let i = 0, j = holeRing.length - 1; i < holeRing.length; j = i++) {
-                             const xi = holeRing[i][0], yi = holeRing[i][1];
-                             const xj = holeRing[j][0], yj = holeRing[j][1];
-                             const intersect = ((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
-                             if (intersect) inHole = !inHole;
-                         }
-                         if (inHole) return false; 
-                     }
-                 }
                  return inside;
-             };
+             }
 
-             // 2. Вычисление минимального квадрата расстояния от точки до линии
-             const distToSegmentSq = (p, v, w) => {
-                 const l2 = (w[0] - v[0]) ** 2 + (w[1] - v[1]) ** 2;
-                 if (l2 === 0) return (p[0] - v[0]) ** 2 + (p[1] - v[1]) ** 2;
-                 let t = ((p[0] - v[0]) * (w[0] - v[0]) + (p[1] - v[1]) * (w[1] - v[1])) / l2;
-                 t = Math.max(0, Math.min(1, t));
-                 return (p[0] - (v[0] + t * (w[0] - v[0]))) ** 2 + (p[1] - (v[1] + t * (w[1] - v[1]))) ** 2;
-             };
-
-             // Вычисляет минимальное расстояние до любой границы полигона
-             const getMinDistToPolygonBorderSq = (point, polygonRings) => {
-                 let minSq = Infinity;
-                 for (const ring of polygonRings) {
-                     for (let i = 0; i < ring.length - 1; i++) {
-                         const sq = distToSegmentSq(point, ring[i], ring[i+1]);
-                         if (sq < minSq) minSq = sq;
-                     }
-                 }
-                 return minSq;
-             };
-
-             // 4. Отрисовка точек
+             // 4. Проверка каждой точки
              let count = 0;
              let redCount = 0;
-             
-             // Допуск 2 сантиметра (0.02 метра). В квадрате = 0.0004
-             const borderToleranceSq = 0.0004; 
 
-             // --- ИЗМЕНЕНИЕ: Используем массив allCoordinates ---
-             allCoordinates.forEach((coord, index) => {
-                 const ptMsk = toPreciseMsk(coord); 
-                 let isTrueOverlap = false;
-                 let overlappedWith = "";
+             coordinates.forEach((coord, index) => {
+                 const ptMsk = targetMskPoints[index];
+                 let isInsideOther = false;
+                 let isCoincident = false;
+                 
+                 for (const foreignData of foreignMskPolygons) {
+                     for (const polyRings of foreignData.polygons) {
+                         const outerRing = polyRings[0];
+                         
+                         // ШАГ А: Проверка на смежную границу (точное совпадение с вершиной)
+                         for (const otherPoint of outerRing) {
+                             if (ptMsk.x === otherPoint.x && ptMsk.y === otherPoint.y) {
+                                 isCoincident = true;
+                                 break;
+                             }
+                         }
+                         
+                         if (isCoincident) break; // Если точка общая, это не наложение!
 
-                 for (const foreignPoly of foreignMskPolygons) {
-                     const isInside = isPointInMskPolygon(ptMsk, foreignPoly.rings);
-                     const distToBorderSq = getMinDistToPolygonBorderSq(ptMsk, foreignPoly.rings);
-
-                     // Точка является наложением ТОЛЬКО ЕСЛИ она внутри чужого участка
-                     // И при этом находится дальше 2 см от его границы (не является смежной)
-                     if (isInside && distToBorderSq > borderToleranceSq) {
-                         isTrueOverlap = true;
-                         overlappedWith = foreignPoly.cn;
-                         break;
+                         // ШАГ Б: Если вершина не совпала, проверяем, находится ли она внутри чужого участка
+                         if (isPointInPolygonEditor(ptMsk, outerRing)) {
+                             // Если внутри внешнего, проверяем дырки
+                             let inHole = false;
+                             for (let k = 1; k < polyRings.length; k++) {
+                                 if (isPointInPolygonEditor(ptMsk, polyRings[k])) {
+                                     inHole = true; 
+                                     break;
+                                 }
+                             }
+                             // Если не в дырке, значит реально наложение
+                             if (!inHole) {
+                                 isInsideOther = true;
+                                 break;
+                             }
+                         }
                      }
+                     if (isInsideOther || isCoincident) break;
                  }
 
-                 if (isTrueOverlap) {
-                     redCount++;
-                     console.log(`${logPrefix} Точка ${index + 1} [X:${ptMsk[0].toFixed(2)}, Y:${ptMsk[1].toFixed(2)}] -> КРАСНАЯ (наложение на ${overlappedWith})`);
-                 } else {
-                     console.log(`${logPrefix} Точка ${index + 1} [X:${ptMsk[0].toFixed(2)}, Y:${ptMsk[1].toFixed(2)}] -> ЧЕРНАЯ (Чисто или смежная граница)`);
-                 }
-
-                 const color = isTrueOverlap ? '#FF0000' : '#000000';
+                 // Точка КРАСНАЯ только если она внутри другого участка и НЕ является общей вершиной
+                 const color = (isInsideOther && !isCoincident) ? '#FF0000' : '#000000';
+                 if (color === '#FF0000') redCount++;
 
                  const pm = new ymaps.Placemark(coord, {}, {
                     iconLayout: 'default#image',
                     iconImageHref: 'data:image/svg+xml;base64,' + btoa(`<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><circle cx="4" cy="4" r="4" fill="${color}"/></svg>`),
                     iconImageSize: [8, 8],
                     iconImageOffset: [-4, -4],
-                    zIndex: isTrueOverlap ? 1105 : 1100 
+                    zIndex: (color === '#FF0000') ? 1105 : 1100 
                  });
                  pm.properties.set('isVertexPoint', true);
                  pm.properties.set('relatedPolygon', targetObject);
@@ -19637,12 +19600,11 @@ modal.querySelector('#show-points-btn').addEventListener('click', async () => {
                  count++;
              });
 
-             console.log(`${logPrefix} === КОНЕЦ АНАЛИЗА ===`);
              showNotification(`Отображено ${count} точек. С наложением: ${redCount}`, 'success');
 
          } catch (error) {
              console.error("Ошибка при анализе наложений точек:", error);
-             showNotification('Ошибка при анализе наложений. Смотрите консоль.', 'error');
+             showNotification('Ошибка при анализе наложений.', 'error');
          } finally {
              hideLoader();
          }
