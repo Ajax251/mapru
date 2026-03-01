@@ -19416,28 +19416,187 @@ function openColorEditorModal(targetObject) {
         polygons = polygons.filter(p => !pointsToRemove.includes(p));
     };
 
-    modal.querySelector('#show-points-btn').addEventListener('click', () => {
+
+modal.querySelector('#show-points-btn').addEventListener('click', async () => {
          clearRelatedPoints();
          const coordinates = getCoords();
          if (!coordinates.length) return;
-         
-         let count = 0;
-         coordinates.forEach(coord => {
-             const pm = new ymaps.Placemark(coord, {}, {
-                iconLayout: 'default#image',
-                iconImageHref: 'data:image/svg+xml;base64,' + btoa(`<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><circle cx="4" cy="4" r="4" fill="#000"/></svg>`),
-                iconImageSize: [8, 8],
-                iconImageOffset: [-4, -4],
-                zIndex: 1100
-             });
-             pm.properties.set('isVertexPoint', true);
-             pm.properties.set('relatedPolygon', targetObject);
-             map.geoObjects.add(pm);
-             polygons.push(pm);
-             count++;
-         });
+
          document.body.removeChild(modal);
-         showNotification(`Отображено ${count} точек`, 'success');
+         showLoader('Анализ наложений ...');
+
+         try {
+             // 1. Настройка МСК
+             const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
+             const destSystemObject = (typeof COORDINATE_SYSTEMS !== 'undefined') ? COORDINATE_SYSTEMS.find(s => s.value === destSc) : null;
+             let calcMskOffsetX = 0, calcMskOffsetY = 0;
+
+             if (destSystemObject && destSystemObject.def) {
+                 proj4.defs(destSc, destSystemObject.def);
+                 if (localStorage.getItem('autoLoadMskOffset') !== 'false') {
+                     calcMskOffsetX = destSystemObject.offsetX || 0;
+                     calcMskOffsetY = destSystemObject.offsetY || 0;
+                 } else {
+                     calcMskOffsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
+                     calcMskOffsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
+                 }
+             } else {
+                 throw new Error("Не удалось инициализировать МСК.");
+             }
+
+             // Конвертация целевых точек карты в МСК с округлением до сантиметров (как в ГеоРедакторе)
+             const targetMskPoints = coordinates.map(coord => {
+                 const trueLat = coord[0] + (mapOffsetY * 0.000008983);
+                 const trueLon = coord[1] + (mapOffsetX * 0.000008983);
+                 const p = proj4('EPSG:4326', destSc, [trueLon, trueLat]);
+                 return {
+                     x: Math.round((p[1] + calcMskOffsetX) * 100) / 100,
+                     y: Math.round((p[0] + calcMskOffsetY) * 100) / 100
+                 };
+             });
+
+             const targetCadNum = targetObject.properties.get('cadastralNumber');
+
+             // 2. Запрашиваем соседей по API
+             const rawFeatures = await searchFeaturesByGeometry(targetObject, 36368);
+             const foreignMskPolygons = []; 
+
+             if (rawFeatures && rawFeatures.length > 0) {
+                 for (const feature of rawFeatures) {
+                     if (!feature.geometry || !feature.geometry.coordinates) continue;
+                     
+                     const featureCn = feature.properties.descr;
+                     if (targetCadNum && featureCn === targetCadNum) continue; // Пропускаем самого себя по КН
+
+                     let isDuplicate = false;
+                     const ringsArray = feature.geometry.type === 'Polygon' ? [feature.geometry.coordinates] : feature.geometry.coordinates;
+                     const parsedPolygons = [];
+
+                     for (const poly of ringsArray) {
+                         const mskRings = poly.map(ring => {
+                             return ring.map(c3857 => {
+                                 // Из API приходят 3857. Переводим в WGS84, затем в МСК
+                                 const wgs = proj4('EPSG:3857', 'EPSG:4326', c3857);
+                                 const p = proj4('EPSG:4326', destSc, wgs);
+                                 return {
+                                     x: Math.round((p[1] + calcMskOffsetX) * 100) / 100,
+                                     y: Math.round((p[0] + calcMskOffsetY) * 100) / 100
+                                 };
+                             });
+                         });
+                         
+                         // Защита от полных дублей: если первая точка совпадает с первой точкой нашего объекта, считаем дублем
+                         if (mskRings[0] && targetMskPoints[0]) {
+                             const ptA = mskRings[0][0];
+                             const ptB = targetMskPoints[0];
+                             if (Math.abs(ptA.x - ptB.x) < 0.05 && Math.abs(ptA.y - ptB.y) < 0.05) {
+                                 // Проверим еще одну точку для надежности
+                                 if (mskRings[0].length > 1 && targetMskPoints.length > 1) {
+                                     const ptA2 = mskRings[0][1];
+                                     const ptB2 = targetMskPoints[1];
+                                     if (Math.abs(ptA2.x - ptB2.x) < 0.05 && Math.abs(ptA2.y - ptB2.y) < 0.05) {
+                                         isDuplicate = true;
+                                     }
+                                 }
+                             }
+                         }
+
+                         parsedPolygons.push(mskRings);
+                     }
+
+                     if (!isDuplicate) {
+                         foreignMskPolygons.push({ cn: featureCn, polygons: parsedPolygons });
+                     }
+                 }
+             }
+
+             // 3. Алгоритм Ray-Casting строго из ГеоРедактора
+             function isPointInPolygonEditor(point, polygon) {
+                 let inside = false;
+                 for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+                     const xi = polygon[i].x, yi = polygon[i].y;
+                     const xj = polygon[j].x, yj = polygon[j].y;
+                     
+                     // В ГеоРедакторе совпадение с вершиной проверяется отдельно до этой функции,
+                     // но внутри тоже есть защита:
+                     if ((xi === point.x && yi === point.y) || (xj === point.x && yj === point.y)) return true;
+                     
+                     const intersect = ((yi > point.y) !== (yj > point.y)) && 
+                                       (point.x < (xj - xi) * (point.y - yi) / (yj - yi) + xi);
+                     if (intersect) inside = !inside;
+                 }
+                 return inside;
+             }
+
+             // 4. Проверка каждой точки
+             let count = 0;
+             let redCount = 0;
+
+             coordinates.forEach((coord, index) => {
+                 const ptMsk = targetMskPoints[index];
+                 let isInsideOther = false;
+                 let isCoincident = false;
+                 
+                 for (const foreignData of foreignMskPolygons) {
+                     for (const polyRings of foreignData.polygons) {
+                         const outerRing = polyRings[0];
+                         
+                         // ШАГ А: Проверка на смежную границу (точное совпадение с вершиной)
+                         for (const otherPoint of outerRing) {
+                             if (ptMsk.x === otherPoint.x && ptMsk.y === otherPoint.y) {
+                                 isCoincident = true;
+                                 break;
+                             }
+                         }
+                         
+                         if (isCoincident) break; // Если точка общая, это не наложение!
+
+                         // ШАГ Б: Если вершина не совпала, проверяем, находится ли она внутри чужого участка
+                         if (isPointInPolygonEditor(ptMsk, outerRing)) {
+                             // Если внутри внешнего, проверяем дырки
+                             let inHole = false;
+                             for (let k = 1; k < polyRings.length; k++) {
+                                 if (isPointInPolygonEditor(ptMsk, polyRings[k])) {
+                                     inHole = true; 
+                                     break;
+                                 }
+                             }
+                             // Если не в дырке, значит реально наложение
+                             if (!inHole) {
+                                 isInsideOther = true;
+                                 break;
+                             }
+                         }
+                     }
+                     if (isInsideOther || isCoincident) break;
+                 }
+
+                 // Точка КРАСНАЯ только если она внутри другого участка и НЕ является общей вершиной
+                 const color = (isInsideOther && !isCoincident) ? '#FF0000' : '#000000';
+                 if (color === '#FF0000') redCount++;
+
+                 const pm = new ymaps.Placemark(coord, {}, {
+                    iconLayout: 'default#image',
+                    iconImageHref: 'data:image/svg+xml;base64,' + btoa(`<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><circle cx="4" cy="4" r="4" fill="${color}"/></svg>`),
+                    iconImageSize: [8, 8],
+                    iconImageOffset: [-4, -4],
+                    zIndex: (color === '#FF0000') ? 1105 : 1100 
+                 });
+                 pm.properties.set('isVertexPoint', true);
+                 pm.properties.set('relatedPolygon', targetObject);
+                 map.geoObjects.add(pm);
+                 polygons.push(pm);
+                 count++;
+             });
+
+             showNotification(`Отображено ${count} точек. С наложением: ${redCount}`, 'success');
+
+         } catch (error) {
+             console.error("Ошибка при анализе наложений точек:", error);
+             showNotification('Ошибка при анализе наложений.', 'error');
+         } finally {
+             hideLoader();
+         }
     });
 
     modal.querySelector('#show-numbered-points-btn').addEventListener('click', () => {

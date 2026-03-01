@@ -19416,224 +19416,28 @@ function openColorEditorModal(targetObject) {
         polygons = polygons.filter(p => !pointsToRemove.includes(p));
     };
 
-modal.querySelector('#show-points-btn').addEventListener('click', async () => {
+    modal.querySelector('#show-points-btn').addEventListener('click', () => {
          clearRelatedPoints();
          const coordinates = getCoords();
          if (!coordinates.length) return;
-
-         document.body.removeChild(modal);
-         showLoader('Анализ наложений для точек (МСК)...');
-
-         try {
-             const logPrefix = "[Точки-Наложения]";
-             console.log(`${logPrefix} === СТАРТ АНАЛИЗА ===`);
-
-             // 1. Настройка МСК
-             const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
-             const destSystemObject = (typeof COORDINATE_SYSTEMS !== 'undefined') ? COORDINATE_SYSTEMS.find(s => s.value === destSc) : null;
-             let calcMskOffsetX = 0, calcMskOffsetY = 0;
-
-             if (destSystemObject && destSystemObject.def) {
-                 proj4.defs(destSc, destSystemObject.def);
-                 if (localStorage.getItem('autoLoadMskOffset') !== 'false') {
-                     calcMskOffsetX = destSystemObject.offsetX || 0;
-                     calcMskOffsetY = destSystemObject.offsetY || 0;
-                 } else {
-                     calcMskOffsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
-                     calcMskOffsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
-                 }
-                 console.log(`${logPrefix} Используется ${destSc}. Смещения: X=${calcMskOffsetX}, Y=${calcMskOffsetY}`);
-             } else {
-                 throw new Error("Не удалось инициализировать МСК для точного расчета.");
-             }
-
-             // ИСПРАВЛЕНИЕ: Функция строгого перевода в МСК
-             // На вход Yandex coord = [Широта(lat), Долгота(lon)]
-             const toExactMsk = (coord) => { 
-                 const trueLat = coord[0] + (mapOffsetY * 0.000008983);
-                 const trueLon = coord[1] + (mapOffsetX * 0.000008983);
-                 
-                 // Proj4 принимает [lon, lat]
-                 const p = proj4('EPSG:4326', destSc, [trueLon, trueLat]);
-                 
-                 // В РФ: X - это север (p[1]), Y - это восток (p[0])
-                 const x = Math.round((p[1] + calcMskOffsetX) * 100) / 100;
-                 const y = Math.round((p[0] + calcMskOffsetY) * 100) / 100;
-                 return [x, y];
-             };
-
-             // 2. Получаем геометрию целевого объекта
-             let targetTurfGeom;
-             const targetMskStats = calculatePreciseGeometry(targetObject);
-             const targetMskArea = targetMskStats.area;
-             const targetCadNum = targetObject.properties.get('cadastralNumber');
-
-             if (isLine) {
-                 targetTurfGeom = turf.lineString(targetObject.geometry.getCoordinates().map(c => [c[1], c[0]]));
-             } else {
-                 const rings = targetObject.geometry.getCoordinates();
-                 targetTurfGeom = turf.polygon(rings.map(ring => ring.map(c => [c[1], c[0]])));
-             }
-
-             console.log(`${logPrefix} Целевой объект: ${targetCadNum || 'Произвольный'}. Площадь в МСК: ${targetMskArea.toFixed(2)} кв.м.`);
-
-             // 3. Запрашиваем соседей по API
-             const rawFeatures = await searchFeaturesByGeometry(targetObject, 36368);
-             const foreignMskPolygons = []; 
-
-             if (rawFeatures && rawFeatures.length > 0) {
-                 for (const feature of rawFeatures) {
-                     if (!feature.geometry || !feature.geometry.coordinates) continue;
-                     
-                     const featureCn = feature.properties.descr;
-
-                     if (targetCadNum && featureCn === targetCadNum) {
-                         console.log(`${logPrefix} Пропущен: ${featureCn} (Совпадение КН)`);
-                         continue;
-                     }
-
-                     let featureTurfPolygons = [];
-                     const processRing = (ring3857) => ring3857.map(c => {
-                         const wgs = proj4('EPSG:3857', 'EPSG:4326', c);
-                         return [wgs[0] - mapOffsetX * 0.000008983, wgs[1] - mapOffsetY * 0.000008983];
-                     });
-
-                     if (feature.geometry.type === 'Polygon') {
-                         featureTurfPolygons.push(turf.polygon(feature.geometry.coordinates.map(processRing)));
-                     } else if (feature.geometry.type === 'MultiPolygon') {
-                         feature.geometry.coordinates.forEach(poly => {
-                             featureTurfPolygons.push(turf.polygon(poly.map(processRing)));
-                         });
-                     }
-
-                     for (const featureTurfPoly of featureTurfPolygons) {
-                         const result = checkPreciseIntersection(targetTurfGeom, featureTurfPoly, isLine, `${logPrefix} Проверка ${featureCn}`);
-
-                         if (result.isIntersecting) {
-                             if (!isLine && targetMskArea > 0) {
-                                 const overlapRatio = result.area / targetMskArea;
-                                 if (overlapRatio > 0.99) {
-                                     console.log(`${logPrefix} Пропущен: ${featureCn} (Дубль, совпадение площади 99%)`);
-                                     continue;
-                                 }
-                             }
-
-                             console.log(`${logPrefix} ДОБАВЛЕН В АНАЛИЗ: ${featureCn} (Наложение: ${result.area.toFixed(4)} м2)`);
-                             
-                             // Turf использует [lon, lat], в toExactMsk передаем [lat, lon]
-                             const mskRings = featureTurfPoly.geometry.coordinates.map(ring => {
-                                 return ring.map(coord => toExactMsk([coord[1], coord[0]])); 
-                             });
-                             foreignMskPolygons.push({ cn: featureCn, rings: mskRings });
-                         }
-                     }
-                 }
-             }
-
-             // Алгоритм Ray-Casting (Точка в полигоне) для плоских координат МСК
-             const isPointInMskPolygon = (point, polygonRings) => {
-                 const x = point[0], y = point[1]; // X и Y в МСК
-                 let inside = false;
-                 
-                 const outerRing = polygonRings[0];
-                 for (let i = 0, j = outerRing.length - 1; i < outerRing.length; j = i++) {
-                     const xi = outerRing[i][0], yi = outerRing[i][1];
-                     const xj = outerRing[j][0], yj = outerRing[j][1];
-                     const intersect = ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
-                     if (intersect) inside = !inside;
-                 }
-                 
-                 if (inside && polygonRings.length > 1) {
-                     for (let k = 1; k < polygonRings.length; k++) {
-                         let inHole = false;
-                         const holeRing = polygonRings[k];
-                         for (let i = 0, j = holeRing.length - 1; i < holeRing.length; j = i++) {
-                             const xi = holeRing[i][0], yi = holeRing[i][1];
-                             const xj = holeRing[j][0], yj = holeRing[j][1];
-                             const intersect = ((yi > y) != (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi);
-                             if (intersect) inHole = !inHole;
-                         }
-                         if (inHole) return false; 
-                     }
-                 }
-                 return inside;
-             };
-
-             // Квадрат расстояния от точки до отрезка (для границ)
-             const distToSegmentSq = (p, v, w) => {
-                 const l2 = (w[0] - v[0]) ** 2 + (w[1] - v[1]) ** 2;
-                 if (l2 === 0) return (p[0] - v[0]) ** 2 + (p[1] - v[1]) ** 2;
-                 let t = ((p[0] - v[0]) * (w[0] - v[0]) + (p[1] - v[1]) * (w[1] - v[1])) / l2;
-                 t = Math.max(0, Math.min(1, t));
-                 return (p[0] - (v[0] + t * (w[0] - v[0]))) ** 2 + (p[1] - (v[1] + t * (w[1] - v[1]))) ** 2;
-             };
-
-             // 4. Отрисовка точек
-             let count = 0;
-             let redCount = 0;
-             const toleranceSq = 0.0004; // 2 см в квадрате (допуск на границу)
-
-             coordinates.forEach((coord, index) => {
-                 // coord - это [lat, lon]
-                 const ptMsk = toExactMsk(coord); 
-                 let isInsideForeign = false;
-                 let overlappedWith = "";
-
-                 // Проверяем все валидные соседние участки
-                 for (const foreignPoly of foreignMskPolygons) {
-                     // Проверка 1: Строго внутри полигона
-                     if (isPointInMskPolygon(ptMsk, foreignPoly.rings)) {
-                         isInsideForeign = true;
-                         overlappedWith = foreignPoly.cn;
-                         break;
-                     }
-
-                     // Проверка 2: Находится ровно на границе (± 2 см)
-                     for (const ring of foreignPoly.rings) {
-                         for (let i = 0; i < ring.length - 1; i++) {
-                             if (distToSegmentSq(ptMsk, ring[i], ring[i+1]) <= toleranceSq) {
-                                 isInsideForeign = true;
-                                 overlappedWith = foreignPoly.cn;
-                                 break;
-                             }
-                         }
-                         if (isInsideForeign) break;
-                     }
-                     if (isInsideForeign) break;
-                 }
-
-                 if (isInsideForeign) {
-                     redCount++;
-                     console.log(`${logPrefix} Точка ${index + 1} [X:${ptMsk[0].toFixed(2)}, Y:${ptMsk[1].toFixed(2)}] -> КРАСНАЯ (наложение на ${overlappedWith})`);
-                 } else {
-                     console.log(`${logPrefix} Точка ${index + 1} [X:${ptMsk[0].toFixed(2)}, Y:${ptMsk[1].toFixed(2)}] -> ЧЕРНАЯ`);
-                 }
-
-                 const color = isInsideForeign ? '#FF0000' : '#000000';
-
-                 const pm = new ymaps.Placemark(coord, {}, {
-                    iconLayout: 'default#image',
-                    iconImageHref: 'data:image/svg+xml;base64,' + btoa(`<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><circle cx="4" cy="4" r="4" fill="${color}"/></svg>`),
-                    iconImageSize: [8, 8],
-                    iconImageOffset: [-4, -4],
-                    zIndex: isInsideForeign ? 1105 : 1100 
-                 });
-                 pm.properties.set('isVertexPoint', true);
-                 pm.properties.set('relatedPolygon', targetObject);
-                 map.geoObjects.add(pm);
-                 polygons.push(pm);
-                 count++;
+         
+         let count = 0;
+         coordinates.forEach(coord => {
+             const pm = new ymaps.Placemark(coord, {}, {
+                iconLayout: 'default#image',
+                iconImageHref: 'data:image/svg+xml;base64,' + btoa(`<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><circle cx="4" cy="4" r="4" fill="#000"/></svg>`),
+                iconImageSize: [8, 8],
+                iconImageOffset: [-4, -4],
+                zIndex: 1100
              });
-
-             console.log(`${logPrefix} === КОНЕЦ АНАЛИЗА ===`);
-             showNotification(`Отображено ${count} точек. С наложением: ${redCount}`, 'success');
-
-         } catch (error) {
-             console.error("Ошибка при анализе наложений точек:", error);
-             showNotification('Ошибка при анализе наложений. Смотрите консоль.', 'error');
-         } finally {
-             hideLoader();
-         }
+             pm.properties.set('isVertexPoint', true);
+             pm.properties.set('relatedPolygon', targetObject);
+             map.geoObjects.add(pm);
+             polygons.push(pm);
+             count++;
+         });
+         document.body.removeChild(modal);
+         showNotification(`Отображено ${count} точек`, 'success');
     });
 
     modal.querySelector('#show-numbered-points-btn').addEventListener('click', () => {
