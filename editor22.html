@@ -427,11 +427,10 @@
         #customConfirmNoBtn:hover { background-color: #c0392b; }
         
         
-  #offsetObjectBtn { 
+    #offsetObjectBtn { 
             bottom: 560px; 
             background-color: #17a2b8; 
             display: none; 
-            color: white;
         }
         
         #offsetObjectBtn:hover { 
@@ -6461,7 +6460,7 @@ function computeDifference(subject, clipper) {
         closeOffsetDialog();
     }
 
-   function executeOffsetOperation(distance) {
+    function executeOffsetOperation(distance) {
         if (editingObjectIndex === -1) return;
         const sourceObj = userObjects[editingObjectIndex];
         
@@ -6472,120 +6471,59 @@ function computeDifference(subject, clipper) {
         }
 
         try {
+            // Создаем новый массив контуров
             const newContours = [];
             
             sourceObj.contours.forEach(contour => {
                 if (!contour || contour.length < 3) return;
                 
-                // 1. Создаем копию контура
-                // Если контур замкнут (последняя == первая), убираем последнюю для расчетов
-                let points = deepCloneContours([contour])[0];
-                const isClosed = (Math.abs(points[0].x - points[points.length-1].x) < 0.001 && 
-                                  Math.abs(points[0].y - points[points.length-1].y) < 0.001);
-                if (isClosed) points.pop();
-
-                // 2. Проверяем направление обхода (Площадь)
-                // В системе координат Canvas (Y вниз): Положительная площадь = По часовой стрелке (CW)
-                let area = 0;
-                for (let i = 0; i < points.length; i++) {
-                    const j = (i + 1) % points.length;
-                    area += (points[j].x - points[i].x) * (points[j].y + points[i].y);
-                    // Это формула (x2-x1)(y2+y1), знак суммы совпадает с удвоенной площадью
-                }
+                // 1. Нормализуем направление (делаем CCW - против часовой)
+                // Это нужно, чтобы "плюс" всегда был наружу
+                const area = getSignedArea(contour);
+                let workingContour = deepCloneContours([contour])[0];
                 
-                // Если площадь отрицательная (против часовой), разворачиваем массив,
-                // чтобы он стал по часовой. Тогда алгоритм смещения всегда будет работать "наружу".
-                if (area < 0) {
-                    points.reverse();
+                // Если площадь отрицательная (CW), разворачиваем для расчета, 
+                // чтобы алгоритм работал предсказуемо.
+                // В системе координат Canvas (Y вниз): CCW имеет отрицательную площадь? 
+                // Нет, getSignedArea у нас возвращает area/2. 
+                // В GeoEditor: forceClockwise делает area < 0 (CW).
+                // Для буфера наружу при CW обходе нам нужно смещение ВЛЕВО.
+                // Для универсальности: приведем к одному виду, посчитаем, вернем как было.
+                
+                const isClockwise = area < 0; // В нашей системе
+                if (!isClockwise) {
+                    // Если CCW, развернем в CW для алгоритма (или адаптируем алгоритм)
+                    // Давайте просто использовать математику: 
+                    // Если CW, нормаль (-dy, dx) смотрит наружу (влево по ходу движения)
                 }
 
-                // 3. Вычисляем смещенный контур
-                const offsetPoints = calculatePolygonOffset(points, distance);
+                // Вычисляем смещенный контур
+                const offsetPoly = calculatePolygonOffset(workingContour, distance, isClockwise);
                 
-                if (offsetPoints && offsetPoints.length >= 3) {
-                    // Замыкаем контур обратно перед созданием
-                    offsetPoints.push({ x: offsetPoints[0].x, y: offsetPoints[0].y });
-                    newContours.push(offsetPoints);
+                if (offsetPoly && offsetPoly.length >= 3) {
+                    newContours.push(offsetPoly);
                 }
             });
 
             if (newContours.length > 0) {
-                const sign = distance > 0 ? '+' : '';
-                const newName = `${sourceObj.name} (Буфер ${sign}${distance}м)`;
+                // Создаем новый объект
+                const newName = `${sourceObj.name || 'Объект'} (Буфер ${distance > 0 ? '+' : ''}${distance}м)`;
                 
-                // 4. Создаем объект.
-                // ВАЖНО: Мы НЕ передаем sourceObj.color.
-                // Функция addObjectInternal сама выберет следующий автоматический цвет.
+                // Добавляем как новый объект
                 const newObj = addObjectInternal(newContours, newName, 'polygon', true);
                 
                 if (newObj) {
                     finalizeBatchAdd([newObj]);
-                    showNotification(`Создан буфер ${sign}${distance}м`, "success", "expand-arrows-alt");
+                    showNotification(`Создан буфер ${distance}м`, "success", "expand-arrows-alt");
                 }
             } else {
-                showNotification("Не удалось построить буфер (возможно, значение слишком большое и объект схлопнулся).", "error");
+                showNotification("Не удалось построить буфер (возможно, схлопнулся).", "error");
             }
 
         } catch (e) {
             console.error(e);
             showNotification("Ошибка построения буфера: " + e.message, "error");
         }
-    }
-
-    // --- ИСПРАВЛЕННАЯ МАТЕМАТИКА ---
-    function calculatePolygonOffset(points, distance) {
-        // На вход подается массив точек ПО ЧАСОВОЙ СТРЕЛКЕ (CW).
-        // В координатах экрана (Y вниз) для CW полигона "наружу" — это "влево" от вектора движения.
-        // Вектор (dx, dy). Левая нормаль: (dy, -dx).
-        
-        const count = points.length;
-        const offsetLines = [];
-
-        for (let i = 0; i < count; i++) {
-            const p1 = points[i];
-            const p2 = points[(i + 1) % count];
-
-            let dx = p2.x - p1.x;
-            let dy = p2.y - p1.y;
-            const len = Math.sqrt(dx*dx + dy*dy);
-            
-            if (len === 0) continue;
-            
-            // Нормализуем вектор
-            dx /= len; 
-            dy /= len;
-
-            // Вектор нормали (Влево)
-            const nx = dy;
-            const ny = -dx;
-
-            // Смещаем точки
-            const offX = nx * distance;
-            const offY = ny * distance;
-
-            offsetLines.push({
-                p1: { x: p1.x + offX, y: p1.y + offY },
-                p2: { x: p2.x + offX, y: p2.y + offY }
-            });
-        }
-
-        // Находим пересечения смещенных линий
-        const newPoints = [];
-        for (let i = 0; i < offsetLines.length; i++) {
-            const lineA = offsetLines[i];
-            const lineB = offsetLines[(i + 1) % offsetLines.length];
-
-            const intersection = getLineIntersectionInfinite(lineA.p1, lineA.p2, lineB.p1, lineB.p2);
-            
-            if (intersection) {
-                newPoints.push({ x: roundCoord(intersection.x), y: roundCoord(intersection.y) });
-            } else {
-                // Если линии параллельны (нет угла), просто берем конец линии
-                newPoints.push(lineA.p2);
-            }
-        }
-        
-        return newPoints;
     }
 
     // Математика смещения
