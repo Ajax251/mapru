@@ -11611,7 +11611,7 @@ async function executeQuickReport(targetObject) {
 
         const results = { zu: [], oks:[], structure: [], zouit:[] };
 
-        // ЭТАП 0: Земельные участки
+       // ЭТАП 0: Земельные участки
         showLoader(getRadarLoaderHtml(0));
         const rawZu = await searchFeaturesByGeometry(objects, 36368);
         if (rawZu.length > 0) {
@@ -11629,18 +11629,38 @@ async function executeQuickReport(targetObject) {
                     feature.geometry.coordinates.forEach(poly => featureTurfPolygons.push(turf.polygon(poly.map(processRing))));
                 }
 
-                let isIntersecting = false;
+                let totalIntersectionArea = 0;
+                let featureTotalArea = 0;
+
                 for (const featureTurfPoly of featureTurfPolygons) {
+                    // Вычисляем точную площадь самого участка в МСК
+                    const selfResult = checkPreciseIntersection(featureTurfPoly, featureTurfPoly, false, '[SelfArea]');
+                    featureTotalArea += selfResult.area;
+
                     for (const target of targetTurfGeoms) {
                         const result = checkPreciseIntersection(target.geom, featureTurfPoly, target.isLine, `[QuickReport ZU ${feature.properties.descr}]`);
                         if (result.isIntersecting) {
-                            isIntersecting = true;
-                            break;
+                            totalIntersectionArea += result.area;
                         }
                     }
-                    if (isIntersecting) break;
                 }
-                if (isIntersecting) results.zu.push(feature);
+
+                if (totalIntersectionArea >= 0.0001) {
+                    let percent = 0;
+                    if (featureTotalArea > 0) {
+                        let rawPercent = (totalIntersectionArea / featureTotalArea) * 100;
+                        // Защита от погрешностей (если разница меньше 0.1 кв.м - считаем как 100%)
+                        if (rawPercent >= 99.9 || (featureTotalArea - totalIntersectionArea) < 0.1) {
+                            percent = 100;
+                        } else {
+                            // Округление строго в меньшую сторону, как просили
+                            percent = Math.floor(rawPercent);
+                        }
+                    }
+                    if (!feature.properties) feature.properties = {};
+                    feature.properties._intersectionPercent = percent;
+                    results.zu.push(feature);
+                }
             }
         }
         
@@ -11648,7 +11668,56 @@ async function executeQuickReport(targetObject) {
 
         // ЭТАП 1: ОКС
         showLoader(getRadarLoaderHtml(1));
-        const spatialOksFeatures = await searchFeaturesByGeometry(objects, 36369);
+        const rawOksFeatures = await searchFeaturesByGeometry(objects, 36369);
+        const spatialOksFeatures = [];
+
+        if (rawOksFeatures.length > 0) {
+            for (const feature of rawOksFeatures) {
+                if (!feature.geometry || !feature.geometry.coordinates) continue;
+                let featureTurfPolygons =[];
+                const processRing = (ring3857) => ring3857.map(c => {
+                    const wgs = proj4('EPSG:3857', 'EPSG:4326', c);
+                    return [wgs[0] - mapOffsetX * 0.000008983, wgs[1] - mapOffsetY * 0.000008983];
+                });
+
+                if (feature.geometry.type === 'Polygon') {
+                    featureTurfPolygons.push(turf.polygon(feature.geometry.coordinates.map(processRing)));
+                } else if (feature.geometry.type === 'MultiPolygon') {
+                    feature.geometry.coordinates.forEach(poly => featureTurfPolygons.push(turf.polygon(poly.map(processRing))));
+                }
+
+                let totalIntersectionArea = 0;
+                let featureTotalArea = 0;
+
+                for (const featureTurfPoly of featureTurfPolygons) {
+                    const selfResult = checkPreciseIntersection(featureTurfPoly, featureTurfPoly, false, '[SelfArea]');
+                    featureTotalArea += selfResult.area;
+
+                    for (const target of targetTurfGeoms) {
+                        const result = checkPreciseIntersection(target.geom, featureTurfPoly, target.isLine, `[QuickReport OKS ${feature.properties?.descr}]`);
+                        if (result.isIntersecting) {
+                            totalIntersectionArea += result.area;
+                        }
+                    }
+                }
+
+                if (totalIntersectionArea >= 0.0001) {
+                    let percent = 0;
+                    if (featureTotalArea > 0) {
+                        let rawPercent = (totalIntersectionArea / featureTotalArea) * 100;
+                        if (rawPercent >= 99.9 || (featureTotalArea - totalIntersectionArea) < 0.1) {
+                            percent = 100;
+                        } else {
+                            percent = Math.floor(rawPercent);
+                        }
+                    }
+                    if (!feature.properties) feature.properties = {};
+                    feature.properties._intersectionPercent = percent;
+                    spatialOksFeatures.push(feature);
+                }
+            }
+        }
+
         const oksMap = new Map();
         const getCn = (f) => (f.properties?.options?.cad_num || f.properties?.descr || '').trim();
 
@@ -11758,7 +11827,7 @@ function renderBottomDashboard(objName, results, targetBounds) {
         document.body.appendChild(panel);
     }
 
-    const genListHtml = (items, type) => {
+      const genListHtml = (items, type) => {
         if (!items || items.length === 0) return `<div class="bd-empty-msg">Объекты не найдены</div>`;
         return items.map((f, idx) => {
             const p = f.properties || {};
@@ -11772,31 +11841,23 @@ function renderBottomDashboard(objName, results, targetBounds) {
                 cn = o.cad_num || p.descr || 'Без номера';
                 desc = o.purpose || o.building_name || 'Назначение не указано';
                 
-                // Формируем блок иконок (НЕЗАВИСИМЫЕ проверки)
                 let icons = '';
-                
-                // 1. Иконка связи (скрепка) - если есть в списке связанных
                 if (p._isLinked) {
                     icons += `<i class="fas fa-link" style="color: #3b82f6; margin-right: 5px;" title="Связанный ОКС"></i>`;
                 }
-                
-                // 2. Иконка прицела - если найден геометрически (на карте)
-                // Важно: проверяем независимо от скрепки, чтобы выводились обе или по одной
                 if (p._isSpatial) {
                     icons += `<i class="fas fa-crosshairs" style="color: #9333ea; margin-right: 5px;" title="Найден по координатам"></i>`;
                 }
-                
                 desc = icons + desc;
 
             } else if (type === 'structure') {
                 cn = o.cad_number || p.descr || 'Без номера';
                 desc = `${o.params_name || 'Без названия'} (${o.params_extension ? o.params_extension+'м' : 'длина не указ.'})`;
-} else if (type === 'zouit') {
+            } else if (type === 'zouit') {
                 const catId = p.category;
                 const catName = (p.categoryName || '').toLowerCase();
                 const zoneTypeTag = p._zone_type || '';
 
-                // Надежная классификация
                 const isTerrZone = zoneTypeTag === 'terr_zone' || catId === 36315 || catName.includes('территориальные зоны');
                 const isSettlement = zoneTypeTag === 'settlement' || catId === 36281 || catId === 36832 || catName.includes('населённые пункты') || catName.includes('населенные пункты');
                 const isMunicipal = zoneTypeTag === 'municipal' || catId === 36278 || catName.includes('муниципальные образования');
@@ -11807,7 +11868,6 @@ function renderBottomDashboard(objName, results, targetBounds) {
                     desc = `<span style="color:#0000FF;font-weight:bold;font-size:0.85em;">Терр. зона</span><br>${o.name_by_doc || o.type_zone || 'Без названия'}`;
                 } else if (isSettlement) {
                     cn = p.label || o.brd_nmb || 'Без номера';
-                    // Берем имя из properties.descr или options.name
                     const stName = (o.name && o.name.trim()) || (p.descr && p.descr.trim()) || 'Без названия';
                     desc = `<span style="color:#B8860B;font-weight:bold;font-size:0.85em;">Нас. пункт</span><br>${stName}`;
                 } else if (isMunicipal) {
@@ -11817,21 +11877,31 @@ function renderBottomDashboard(objName, results, targetBounds) {
                     cn = o.reg_numb_border || p.descr || 'Без номера';
                     desc = `<span style="color:#228B22;font-weight:bold;font-size:0.85em;">Лесничество</span><br>${o.name_by_doc || 'Без названия'}`;
                 } else {
-                    // Если ни одно из вышеперечисленного не совпало — это чистый ЗОУИТ
                     cn = o.reg_numb_border || p.descr || 'Без номера';
                     desc = `<span style="color:#9400D3;font-weight:bold;font-size:0.85em;">ЗОУИТ</span><br>${o.name_by_doc || 'Ограничение не указано'}`;
                 }
             }
             
+            // НОВЫЙ БЛОК: Вывод процента покрытия для ЗУ и ОКС
+            let percentHtml = '';
+            if (p._intersectionPercent !== undefined) {
+                let pColor = p._intersectionPercent === 100 ? '#10b981' : '#f59e0b';
+                let pText = p._intersectionPercent === 100 ? '100%' : `${p._intersectionPercent}%`;
+                percentHtml = `<span style="float: right; font-size: 0.75rem; font-weight: bold; color: ${pColor}; background: ${pColor}1A; padding: 2px 5px; border-radius: 4px; border: 1px solid ${pColor}4D;" title="Доля объекта внутри исходного контура">${pText}</span>`;
+            }
+
             return `
                 <div class="bd-item" data-cn="${cn}" data-type="${type}">
-                    <span class="bd-item-title">${idx + 1}. ${cn}</span>
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px;">
+                        <span class="bd-item-title" style="margin-bottom: 0;">${idx + 1}. ${cn}</span>
+                        ${percentHtml}
+                    </div>
                     <span class="bd-item-desc">${desc}</span>
                 </div>
             `;
         }).join('');
     };
-
+    
     panel.innerHTML = `
         <div class="bd-minimize-bar" title="Развернуть результаты"><i class="fas fa-chevron-up" style="margin-right: 10px;"></i> Результаты анализа: ${objName}</div>
         <button class="bd-close-btn" title="Свернуть панель"><i class="fas fa-chevron-down"></i></button>
@@ -17321,55 +17391,6 @@ async function processAndDrawZouits(features) {
 /**
  * 3. ПОЛНАЯ ФУНКЦИЯ ДЛЯ ЭКСПОРТА ДАННЫХ ЗОУИТ В EXCEL
  */
-function exportZouitsToExcel() {
-    showLoader('Подготовка данных ЗОУИТ для экспорта...');
-
-    try {
-        const dataForSheet = [];
-        const headers = [
-            "Регистрационный номер", "Наименование", "Ограничения", "Дата регистрации", 
-            "Документ-основание", "Номер документа", "Дата документа", "Орган власти"
-        ];
-        dataForSheet.push(headers);
-
-        zouitFeaturesData.forEach(feature => {
-            const properties = feature.properties || {};
-            const options = properties.options || {};
-            
-            const regNumber = options.reg_numb_border || properties.descr || 'Не указан';
-            const name = options.name_by_doc || 'Не указано';
-            const restrictions = options.content_restrict_encumbrances || 'Не указаны';
-            const registrationDate = options.registration_date || 'Не указана';
-            const docName = options.legal_act_document_name || 'Не указан';
-            const docNumber = options.legal_act_document_number || 'Не указан';
-            const docDate = options.legal_act_document_date || 'Не указана';
-            const docIssuer = options.legal_act_document_issuer || 'Не указан';
-
-            const row = [
-                regNumber, name, restrictions, registrationDate,
-                docName, docNumber, docDate, docIssuer
-            ];
-            dataForSheet.push(row);
-        });
-
-        const wb = XLSX.utils.book_new();
-        const ws = XLSX.utils.aoa_to_sheet(dataForSheet);
-
-        ws['!cols'] = [ {wch:20}, {wch:50}, {wch:60}, {wch:20}, {wch:50}, {wch:20}, {wch:20}, {wch:40} ];
-
-        XLSX.utils.book_append_sheet(wb, ws, "ЗОУИТ");
-        XLSX.writeFile(wb, "Найденные_ЗОУИТ.xlsx");
-
-        showNotification('Данные ЗОУИТ успешно экспортированы в Excel', 'success', 'check-circle');
-
-    } catch (error) {
-        console.error('Ошибка при экспорте данных ЗОУИТ:', error);
-        showNotification('Ошибка при экспорте данных ЗОУИТ в Excel', 'error', 'exclamation-circle');
-    } finally {
-        hideLoader();
-    }
-}
-
 
 
 
@@ -18968,7 +18989,7 @@ async function handleMissingObjectForAnalysis(lat, lon, actionCallback) {
                 letter-spacing: 2px;
                 text-shadow: 0 0 12px rgba(59, 130, 246, 0.8);
                 min-height: 30px;
-            ">Загрузка контура...</span>
+            "></span>
         </div>
     `);
 
@@ -22248,55 +22269,7 @@ async function processAndDrawStructures(features) {
     }
 }
 
-function exportStructuresToExcel() {
-    showLoader('Подготовка данных Сооружений для экспорта...');
 
-    try {
-        const dataForSheet = [];
-        const headers = [
-            "Кадастровый номер", "Наименование", "Адрес", "Протяженность (м)", 
-            "Назначение", "Год постройки", "Форма собственности", "Тип права", "Дата внесения"
-        ];
-        dataForSheet.push(headers);
-
-        structureFeaturesData.forEach(feature => {
-            const properties = feature.properties || {};
-            const options = properties.options || {};
-            
-            const cadNumber = options.cad_number || properties.descr || 'Не указан';
-            const name = options.params_name || properties.descr || 'Не указано';
-            const address = options.address_readable_address || 'Не указан';
-            const lengthValue = (options.params_extension && isFinite(parseFloat(options.params_extension))) ? parseFloat(options.params_extension) : 'Не указана';
-            const purpose = options.params_purpose || 'Не указано';
-            const yearBuilt = options.params_year_built || 'Не указан';
-            const ownership = options.ownership_type || 'Не указана';
-            const rightType = options.right_type || 'Не указана';
-            const registrationDate = options.registration_date || 'Не указана';
-
-            const row = [
-                cadNumber, name, address, lengthValue, purpose, yearBuilt, 
-                ownership, rightType, registrationDate
-            ];
-            dataForSheet.push(row);
-        });
-
-        const wb = XLSX.utils.book_new();
-        const ws = XLSX.utils.aoa_to_sheet(dataForSheet);
-
-        ws['!cols'] = [ {wch:20}, {wch:50}, {wch:50}, {wch:20}, {wch:20}, {wch:15}, {wch:20}, {wch:20}, {wch:20} ];
-
-        XLSX.utils.book_append_sheet(wb, ws, "Сооружения");
-        XLSX.writeFile(wb, "Найденные_Сооружения.xlsx");
-
-        showNotification('Данные Сооружений успешно экспортированы в Excel', 'success', 'check-circle');
-
-    } catch (error) {
-        console.error('Ошибка при экспорте данных Сооружений:', error);
-        showNotification('Ошибка при экспорте данных Сооружений в Excel', 'error', 'exclamation-circle');
-    } finally {
-        hideLoader();
-    }
-}
 
 
 
@@ -24598,34 +24571,158 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
 }
 
 function handleExportAction() {
-        syncFeaturesDataFromMap(); 
+    // 1. Синхронизируем данные с картой перед экспортом
+    syncFeaturesDataFromMap(); 
     let somethingWasExported = false;
-
-    if (parcelFeaturesData && parcelFeaturesData.length > 0) {
-        exportParcelsToExcel(); // Вызываем экспорт ЗУ
-        somethingWasExported = true;
-    }
-
-  if (buildingFeaturesData && buildingFeaturesData.length > 0) { // ИЗМЕНЕНО
-        exportBuildingsToExcel(); // ИЗМЕНЕНО
-        somethingWasExported = true;
-    }
     
-     if (structureFeaturesData && structureFeaturesData.length > 0) {
-        exportStructuresToExcel(); // Вызываем экспорт Сооружений
-        somethingWasExported = true;
-    }
-    
-     if (zouitFeaturesData && zouitFeaturesData.length > 0) {
-        exportZouitsToExcel();
-        somethingWasExported = true;
-    }
+    showLoader('Формирование сводного Excel файла...');
 
-    if (!somethingWasExported) {
-        showNotification('Нет данных для экспорта. Сначала загрузите участки или ОКС в квартале.', 'warning', 'exclamation-triangle');
+    try {
+        // Создаем одну общую рабочую книгу Excel
+        const wb = XLSX.utils.book_new();
+
+        // --- Вкладка: Земельные участки ---
+        if (parcelFeaturesData && parcelFeaturesData.length > 0) {
+            const dataZU = [["Кадастровый номер", "Адрес", "Площадь (м²)", "Тип площади", "Стоимость (руб./м²)", "Стоимость (полная)", "Вид разрешенного использования", "Категория земель", "Статус", "Дата внесения", "Форма собственности", "Тип права"]];
+            
+            parcelFeaturesData.forEach(feature => {
+                const properties = feature.properties || {};
+                const options = properties.options || {};
+                const areaInfo = getAreaInfo(options);
+                const areaValue = (areaInfo.value !== null && !isNaN(areaInfo.value)) ? areaInfo.value : 'Не указана';
+                let costIndex = 'Не указана';
+                if (options.cost_index !== undefined && options.cost_index !== null && isFinite(parseFloat(options.cost_index))) {
+                    costIndex = Math.round(parseFloat(options.cost_index));
+                }
+                const fullCost = options.cost_value !== undefined && options.cost_value !== null && isFinite(parseFloat(options.cost_value)) ? parseFloat(options.cost_value) : 'Не указана';
+                
+                dataZU.push([
+                    properties.descr || 'Не указан',
+                    options.readable_address || 'Не указан',
+                    areaValue, areaInfo.type, costIndex, fullCost,
+                    options.permitted_use_established_by_document || 'Не указан',
+                    options.land_record_category_type || 'Не указана',
+                    options.status || 'Не указан',
+                    options.land_record_reg_date || 'Не указана',
+                    options.ownership_type || 'Не указана',
+                    options.right_type || 'Не указана'
+                ]);
+            });
+            const wsZU = XLSX.utils.aoa_to_sheet(dataZU);
+            wsZU['!cols'] = [{wch:20}, {wch:50}, {wch:15}, {wch:18}, {wch:15}, {wch:18}, {wch:30}, {wch:30}, {wch:20}, {wch:20}, {wch:20}, {wch:20}];
+            XLSX.utils.book_append_sheet(wb, wsZU, "Участки");
+            somethingWasExported = true;
+        }
+
+        // --- Вкладка: Здания ---
+        if (buildingFeaturesData && buildingFeaturesData.length > 0) {
+            const dataOKS = [["Кадастровый номер", "Наименование", "Адрес", "Площадь (м²)", "Назначение", "Год постройки", "Материал стен", "Этажность", "Стоимость (полная)", "Форма собственности", "Тип права", "Дата внесения"]];
+            
+            buildingFeaturesData.forEach(feature => {
+                const properties = feature.properties || {};
+                const options = properties.options || {};
+                const areaValue = (options.build_record_area && isFinite(parseFloat(options.build_record_area))) ? parseFloat(options.build_record_area) : 'Не указана';
+                const fullCost = (options.cost_value && isFinite(parseFloat(options.cost_value))) ? parseFloat(options.cost_value) : 'Не указана';
+                
+                dataOKS.push([
+                    options.cad_num || properties.descr || 'Не указан',
+                    properties.descr || 'Не указан',
+                    options.readable_address || 'Не указан',
+                    areaValue,
+                    options.purpose || options.building_name || 'Не указано',
+                    options.year_built || 'Не указан',
+                    options.materials || 'Не указан',
+                    options.floors || 'Не указан',
+                    fullCost,
+                    options.ownership_type || 'Не указана',
+                    options.right_type || 'Не указана',
+                    options.build_record_registration_date || 'Не указана'
+                ]);
+            });
+            const wsOKS = XLSX.utils.aoa_to_sheet(dataOKS);
+            wsOKS['!cols'] = [{wch:20}, {wch:30}, {wch:50}, {wch:15}, {wch:20}, {wch:15}, {wch:20}, {wch:12}, {wch:18}, {wch:20}, {wch:20}, {wch:20}];
+            XLSX.utils.book_append_sheet(wb, wsOKS, "Здания");
+            somethingWasExported = true;
+        }
+
+        // --- Вкладка: Сооружения ---
+        if (structureFeaturesData && structureFeaturesData.length > 0) {
+            const dataStr = [["Кадастровый номер", "Наименование", "Адрес", "Протяженность (м)", "Назначение", "Год постройки", "Форма собственности", "Тип права", "Дата внесения"]];
+            
+            structureFeaturesData.forEach(feature => {
+                const properties = feature.properties || {};
+                const options = properties.options || {};
+                const lengthValue = (options.params_extension && isFinite(parseFloat(options.params_extension))) ? parseFloat(options.params_extension) : 'Не указана';
+                
+                dataStr.push([
+                    options.cad_number || properties.descr || 'Не указан',
+                    options.params_name || properties.descr || 'Не указано',
+                    options.address_readable_address || 'Не указан',
+                    lengthValue,
+                    options.params_purpose || 'Не указано',
+                    options.params_year_built || 'Не указан',
+                    options.ownership_type || 'Не указана',
+                    options.right_type || 'Не указана',
+                    options.registration_date || 'Не указана'
+                ]);
+            });
+            const wsStr = XLSX.utils.aoa_to_sheet(dataStr);
+            wsStr['!cols'] = [{wch:20}, {wch:50}, {wch:50}, {wch:20}, {wch:20}, {wch:15}, {wch:20}, {wch:20}, {wch:20}];
+            XLSX.utils.book_append_sheet(wb, wsStr, "Сооружения");
+            somethingWasExported = true;
+        }
+
+        // --- Вкладка: ЗОУИТ ---
+        if (zouitFeaturesData && zouitFeaturesData.length > 0) {
+            const dataZouit = [["Тип объекта", "Рег. номер / Кад. номер", "Наименование", "Ограничения / Доп. инфо", "Дата регистрации"]];
+            
+            zouitFeaturesData.forEach(f => {
+                const p = f.properties || {};
+                const o = p.options || {};
+                const catId = p.category;
+                
+                let objType = 'ЗОУИТ';
+                let regNum = o.reg_numb_border || p.descr || '-';
+                let name = o.name_by_doc || '-';
+                let restrictions = o.content_restrict_encumbrances || '-';
+                let regDate = o.registration_date || '-';
+
+                if (catId === 36315) { objType = 'Территориальная зона'; name = o.type_zone || o.name_by_doc || '-'; restrictions = '-'; } 
+                else if (catId === 36281) { objType = 'Населенный пункт'; regNum = p.label || o.brd_nmb || '-'; name = o.name || '-'; restrictions = '-'; regDate = '-'; } 
+                else if (catId === 36278) { objType = 'Муниципальное образование'; regNum = p.label || '-'; name = p.descr || '-'; restrictions = '-'; regDate = '-'; } 
+                else if (catId === 36314) { objType = 'Лесничество'; }
+
+                dataZouit.push([objType, regNum, name, restrictions, regDate]);
+            });
+            const wsZouit = XLSX.utils.aoa_to_sheet(dataZouit);
+            wsZouit['!cols'] = [{wch:20}, {wch:20}, {wch:50}, {wch:60}, {wch:20}];
+            XLSX.utils.book_append_sheet(wb, wsZouit, "Зоны и территории");
+            somethingWasExported = true;
+        }
+
+        // --- Финальное сохранение файла ---
+        if (somethingWasExported) {
+            const dateStr = new Date().toISOString().slice(0, 10);
+            XLSX.writeFile(wb, `Экспорт_объектов_${dateStr}.xlsx`);
+            showNotification('Данные успешно экспортированы в Excel', 'success', 'check-circle');
+
+            // Сохраняем функционал открытия format.html и копирования текста участков
+            if (parcelFeaturesData && parcelFeaturesData.length > 0) {
+                const textToCopy = XLSX.utils.sheet_to_csv(wb.Sheets["Участки"], { FS: "\t" });
+                navigator.clipboard.writeText(textToCopy).catch(e => console.error(e));
+                window.open('format.html', '_blank');
+            }
+        } else {
+            showNotification('Нет данных для экспорта. Сначала загрузите участки или ОКС.', 'warning', 'exclamation-triangle');
+        }
+
+    } catch (error) {
+        console.error('Ошибка при экспорте в Excel:', error);
+        showNotification('Произошла ошибка при экспорте файла', 'error', 'exclamation-circle');
+    } finally {
+        hideLoader();
     }
 }
-
 
  
 
@@ -24764,60 +24861,7 @@ function exportQuickReportToExcel() {
 }
 
 
-function exportBuildingsToExcel() {
-    showLoader('Подготовка данных Зданий для экспорта...');
 
-    try {
-        const dataForSheet = [];
-        const headers = [
-            "Кадастровый номер", "Наименование", "Адрес", "Площадь (м²)", "Назначение", 
-            "Год постройки", "Материал стен", "Этажность", "Стоимость (полная)", 
-            "Форма собственности", "Тип права", "Дата внесения"
-        ];
-        dataForSheet.push(headers);
-
-        buildingFeaturesData.forEach(feature => {
-            const properties = feature.properties || {};
-            const options = properties.options || {};
-            
-            const cadNumber = options.cad_num || properties.descr || 'Не указан';
-            const name = properties.descr || 'Не указан';
-            const address = options.readable_address || 'Не указан';
-            const areaValue = (options.build_record_area && isFinite(parseFloat(options.build_record_area))) ? parseFloat(options.build_record_area) : 'Не указана';
-            const purpose = options.purpose || options.building_name || 'Не указано';
-            const yearBuilt = options.year_built || 'Не указан';
-            const materials = options.materials || 'Не указан';
-            const floors = options.floors || 'Не указан';
-            const fullCost = (options.cost_value && isFinite(parseFloat(options.cost_value))) ? parseFloat(options.cost_value) : 'Не указана';
-            const ownership = options.ownership_type || 'Не указана';
-            const rightType = options.right_type || 'Не указана';
-            const registrationDate = options.build_record_registration_date || 'Не указана';
-
-            const row = [
-                cadNumber, name, address, areaValue, purpose, yearBuilt, 
-                materials, floors, fullCost, ownership, rightType, registrationDate
-            ];
-            dataForSheet.push(row);
-        });
-
-        const wb = XLSX.utils.book_new();
-        const ws = XLSX.utils.aoa_to_sheet(dataForSheet);
-
-        const wscols = [ {wch:20}, {wch:30}, {wch:50}, {wch:15}, {wch:20}, {wch:15}, {wch:20}, {wch:12}, {wch:18}, {wch:20}, {wch:20}, {wch:20} ];
-        ws['!cols'] = wscols;
-
-        XLSX.utils.book_append_sheet(wb, ws, "Здания");
-        XLSX.writeFile(wb, "Найденные_Здания.xlsx");
-
-        showNotification('Данные Зданий успешно экспортированы в Excel', 'success', 'check-circle');
-
-    } catch (error) {
-        console.error('Ошибка при экспорте данных Зданий:', error);
-        showNotification('Ошибка при экспорте данных Зданий в Excel', 'error', 'exclamation-circle');
-    } finally {
-        hideLoader();
-    }
-}
 
 
 async function exportSidebarToExcel() {
@@ -24969,87 +25013,7 @@ async function exportSidebarToExcel() {
 }
 
 
-async function exportParcelsToExcel() { // <-- Добавлено async
-    // Начальная проверка на данные уже сделана в handleExportAction
-    showLoader('Подготовка данных ЗУ для экспорта...');
 
-    try {
-        const dataForSheet = [];
-        const headers = [
-            "Кадастровый номер", "Адрес", "Площадь (м²)", "Тип площади",
-            "Стоимость (руб./м²)", "Стоимость (полная)", "Вид разрешенного использования",
-            "Категория земель", "Статус", "Дата внесения", "Форма собственности", "Тип права"
-        ];
-        dataForSheet.push(headers);
-
-        parcelFeaturesData.forEach(feature => {
-            const properties = feature.properties || {};
-            const options = properties.options || {};
-            const areaInfo = getAreaInfo(options);
-            const areaValue = (areaInfo.value !== null && !isNaN(areaInfo.value)) ? areaInfo.value : 'Не указана';
-            const areaType = areaInfo.type;
-            const cadastralNumber = properties.descr || 'Не указан';
-            const address = options.readable_address || 'Не указан';
-            let costIndex = 'Не указана';
-            if (options.cost_index !== undefined && options.cost_index !== null && isFinite(parseFloat(options.cost_index))) {
-                costIndex = Math.round(parseFloat(options.cost_index));
-            }
-            const fullCost = options.cost_value !== undefined && options.cost_value !== null && isFinite(parseFloat(options.cost_value))
-                ? parseFloat(options.cost_value)
-                : 'Не указана';
-            const vri = options.permitted_use_established_by_document || 'Не указан';
-            const category = options.land_record_category_type || 'Не указана';
-            const status = options.status || 'Не указан';
-            const registrationDate = options.land_record_reg_date || 'Не указана';
-            const ownership = options.ownership_type || 'Не указана';
-            const rightType = options.right_type || 'Не указана';
-
-            const row = [
-                cadastralNumber, address, areaValue, areaType, costIndex, fullCost,
-                vri, category, status, registrationDate, ownership, rightType
-            ];
-            dataForSheet.push(row);
-        });
-
-        // --- НАЧАЛО ИЗМЕНЕНИЙ ---
-
-        // 1. Преобразуем массив данных в строку с разделителями-табуляцией
-        const textToCopy = dataForSheet.map(row => row.join('\t')).join('\n');
-
-        // 2. Копируем подготовленный текст в буфер обмена
-        try {
-            await navigator.clipboard.writeText(textToCopy);
-            showNotification('Данные таблицы скопированы в буфер обмена', 'success', 'check-circle');
-        } catch (err) {
-            console.error('Ошибка копирования данных таблицы:', err);
-            showNotification('Ошибка копирования данных', 'error', 'exclamation-triangle');
-        }
-        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
-
-
-        // Логика создания Excel файла остается без изменений
-        const wb = XLSX.utils.book_new();
-        const ws = XLSX.utils.aoa_to_sheet(dataForSheet);
-        const wscols = [ { wch: 20 }, { wch: 50 }, { wch: 15 }, { wch: 18 }, { wch: 15 }, { wch: 18 }, { wch: 30 }, { wch: 30 }, { wch: 20 }, { wch: 20 }, { wch: 20 }, { wch: 20 } ];
-        ws['!cols'] = wscols;
-
-        XLSX.utils.book_append_sheet(wb, ws, "Участки");
-        XLSX.writeFile(wb, "Найденные_участки.xlsx");
-
-        showNotification('Данные ЗУ успешно экспортированы в Excel', 'success', 'check-circle');
-        
-        // --- ИЗМЕНЕНИЕ ФАЙЛА ДЛЯ ОТКРЫТИЯ ---
-        window.open('format.html', '_blank');
-
-    } catch (error) {
-        console.error('Ошибка при экспорте данных ЗУ:', error);
-        showNotification('Ошибка при экспорте данных ЗУ в Excel', 'error', 'exclamation-circle');
-    } finally {
-        hideLoader();
-    }
-}
-
-// Draw found parcels on the map
 // Draw found parcels on the map
 async function drawFoundParcels(parcels, markAsFoundInArea = false) {
     let combinedBounds = null;
