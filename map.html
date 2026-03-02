@@ -11559,15 +11559,17 @@ function getRadarLoaderHtml(activeStep) {
     return html;
 }
 
-// Обновленная функция "Быстрого отчета"
 async function executeQuickReport(targetObject) {
 
     showLoader('<div style="text-align:center;"><i class="fas fa-crosshairs fa-spin" style="font-size: 2.2rem; color: #f59e0b; margin-bottom: 10px;"></i><br></div>');
     await new Promise(resolve => setTimeout(resolve, 50));
     
+    console.log("=== ЗАПУСК БЫСТРОГО ОТЧЕТА ===");
+    
     const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
     quickReportTargetObjects = objects;
+    
     const sidebar = document.getElementById('parcel-results-sidebar');
     if (sidebar) sidebar.classList.add('hidden');
     Object.values(quickReportLayers).flat().forEach(obj => {
@@ -11584,17 +11586,35 @@ async function executeQuickReport(targetObject) {
         objName = `Сборный контур (${objects.length} шт.)`;
     }
 
-    try {
-        const targetTurfGeoms =[];
-        objects.forEach(obj => {
-            const coords = obj.geometry.getCoordinates();
-            if (obj instanceof ymaps.Polygon) {
-                targetTurfGeoms.push({ geom: turf.polygon(coords.map(ring => ring.map(c => [c[1], c[0]]))), isLine: false });
-            } else if (obj instanceof ymaps.Polyline) {
-                targetTurfGeoms.push({ geom: turf.lineString(coords.map(c => [c[1], c[0]])), isLine: true });
-            }
-        });
+    // Хелпер: Гарантирует замыкание полигона для Turf.js
+    const ensureClosedRing = (ring) => {
+        if (!ring || ring.length < 3) return ring;
+        const first = ring[0];
+        const last = ring[ring.length - 1];
+        if (Math.abs(first[0] - last[0]) > 1e-9 || Math.abs(first[1] - last[1]) > 1e-9) {
+            ring.push([first[0], first[1]]);
+        }
+        return ring;
+    };
 
+    // Подготовка геометрии ЦЕЛЕВОГО объекта (в "визуальных" координатах [lon, lat], как ожидает checkPreciseIntersection)
+    const targetTurfGeoms = [];
+    objects.forEach(obj => {
+        const coords = obj.geometry.getCoordinates();
+        if (obj instanceof ymaps.Polygon) {
+            const rings = coords.map(ring => ensureClosedRing(ring.map(c => [c[1], c[0]])));
+            try { 
+                targetTurfGeoms.push({ geom: turf.polygon(rings), isLine: false }); 
+            } catch (e) { console.error("Ошибка Turf при создании целевого полигона:", e); }
+        } else if (obj instanceof ymaps.Polyline) {
+            const lineCoords = coords.map(c => [c[1], c[0]]);
+            try { 
+                targetTurfGeoms.push({ geom: turf.lineString(lineCoords), isLine: true }); 
+            } catch (e) { console.error("Ошибка Turf при создании целевой линии:", e); }
+        }
+    });
+
+    try {
         let linkedOksCns =[];
         for (const obj of objects) {
             const cn = obj.properties.get('cadastralNumber');
@@ -11611,36 +11631,87 @@ async function executeQuickReport(targetObject) {
 
         const results = { zu: [], oks:[], structure: [], zouit:[] };
 
+        // Хелпер для конвертации колец из API 3857 в визуальные координаты [lon, lat] карты
+        const processApiRing = (ring3857) => {
+            const mappedRing = ring3857.map(c => {
+                const wgs = proj4('EPSG:3857', 'EPSG:4326', c); // [lon, lat]
+                const visLon = wgs[0] - (mapOffsetX * 0.000008983);
+                const visLat = wgs[1] - (mapOffsetY * 0.000008983);
+                return [visLon, visLat];
+            });
+            return ensureClosedRing(mappedRing);
+        };
+
         // ЭТАП 0: Земельные участки
         showLoader(getRadarLoaderHtml(0));
         const rawZu = await searchFeaturesByGeometry(objects, 36368);
+        console.log(`[Анализ ЗУ] Получено от API: ${rawZu.length} участков.`);
+        
         if (rawZu.length > 0) {
             for (const feature of rawZu) {
                 if (!feature.geometry || !feature.geometry.coordinates) continue;
-                let featureTurfPolygons =[];
-                const processRing = (ring3857) => ring3857.map(c => {
-                    const wgs = proj4('EPSG:3857', 'EPSG:4326', c);
-                    return [wgs[0] - mapOffsetX * 0.000008983, wgs[1] - mapOffsetY * 0.000008983];
-                });
-
-                if (feature.geometry.type === 'Polygon') {
-                    featureTurfPolygons.push(turf.polygon(feature.geometry.coordinates.map(processRing)));
-                } else if (feature.geometry.type === 'MultiPolygon') {
-                    feature.geometry.coordinates.forEach(poly => featureTurfPolygons.push(turf.polygon(poly.map(processRing))));
+                
+                let featureTurfPolys = [];
+                try {
+                    if (feature.geometry.type === 'Polygon') {
+                        const rings = feature.geometry.coordinates.map(processApiRing);
+                        if (rings[0].length >= 4) featureTurfPolys.push(turf.polygon(rings));
+                    } else if (feature.geometry.type === 'MultiPolygon') {
+                        feature.geometry.coordinates.forEach(poly => {
+                            const rings = poly.map(processApiRing);
+                            if (rings[0].length >= 4) featureTurfPolys.push(turf.polygon(rings));
+                        });
+                    }
+                } catch (e) {
+                    console.error(`[Анализ ЗУ] Ошибка парсинга геометрии для ${feature.properties.descr}:`, e);
+                    continue;
                 }
 
-                let isIntersecting = false;
-                for (const featureTurfPoly of featureTurfPolygons) {
+                let totalIntersectionArea = 0;
+                let featureTotalArea = 0;
+
+                for (const fPoly of featureTurfPolys) {
+                    // Используем checkPreciseIntersection для расчета истинной площади участка в МСК
+                    const selfResult = checkPreciseIntersection(fPoly, fPoly, false, '[SelfArea]');
+                    featureTotalArea += selfResult.area;
+
+                    // Рассчитываем площадь наложения
                     for (const target of targetTurfGeoms) {
-                        const result = checkPreciseIntersection(target.geom, featureTurfPoly, target.isLine, `[QuickReport ZU ${feature.properties.descr}]`);
+                        const result = checkPreciseIntersection(target.geom, fPoly, target.isLine, `[Intersect]`);
                         if (result.isIntersecting) {
-                            isIntersecting = true;
-                            break;
+                            totalIntersectionArea += result.area;
                         }
                     }
-                    if (isIntersecting) break;
                 }
-                if (isIntersecting) results.zu.push(feature);
+
+                console.log(`--- ЗУ: ${feature.properties.descr} ---`);
+                console.log(`Полная площадь (МСК): ${featureTotalArea.toFixed(4)} кв.м.`);
+                console.log(`Площадь наложения: ${totalIntersectionArea.toFixed(4)} кв.м.`);
+
+                // Порог наложения 0.001 кв.м. (10 кв. см.)
+                if (totalIntersectionArea >= 0.001) {
+                    let percent = 0;
+                    if (featureTotalArea > 0) {
+                        // Допуск 0.001 м² для 100%
+                        if ((featureTotalArea - totalIntersectionArea) < 0.001) {
+                            percent = 100;
+                        } else {
+                            let rawPercent = (totalIntersectionArea / featureTotalArea) * 100;
+                            if (rawPercent < 10) {
+                                percent = Math.ceil(rawPercent); // До 10% округляем вверх
+                                if (percent === 0) percent = 1;
+                            } else {
+                                percent = Math.floor(rawPercent); // Свыше 10% округляем вниз
+                            }
+                        }
+                    }
+                    console.log(`Округлённый процент: ${percent}%`);
+                    if (!feature.properties) feature.properties = {};
+                    feature.properties._intersectionPercent = percent;
+                    results.zu.push(feature);
+                } else {
+                    console.log(`Наложение менее 0.001 кв.м., ЗУ отброшен.`);
+                }
             }
         }
         
@@ -11648,7 +11719,75 @@ async function executeQuickReport(targetObject) {
 
         // ЭТАП 1: ОКС
         showLoader(getRadarLoaderHtml(1));
-        const spatialOksFeatures = await searchFeaturesByGeometry(objects, 36369);
+        const rawOksFeatures = await searchFeaturesByGeometry(objects, 36369);
+        console.log(`[Анализ ОКС] Получено от API: ${rawOksFeatures.length} объектов.`);
+        const spatialOksFeatures = [];
+
+        if (rawOksFeatures.length > 0) {
+            for (const feature of rawOksFeatures) {
+                if (!feature.geometry || !feature.geometry.coordinates) continue;
+
+                let featureTurfPolys = [];
+                try {
+                    if (feature.geometry.type === 'Polygon') {
+                        const rings = feature.geometry.coordinates.map(processApiRing);
+                        if (rings[0].length >= 4) featureTurfPolys.push(turf.polygon(rings));
+                    } else if (feature.geometry.type === 'MultiPolygon') {
+                        feature.geometry.coordinates.forEach(poly => {
+                            const rings = poly.map(processApiRing);
+                            if (rings[0].length >= 4) featureTurfPolys.push(turf.polygon(rings));
+                        });
+                    }
+                } catch (e) {
+                    console.error(`[Анализ ОКС] Ошибка парсинга геометрии для ${feature.properties.descr}:`, e);
+                    continue;
+                }
+
+                let totalIntersectionArea = 0;
+                let featureTotalArea = 0;
+
+                for (const fPoly of featureTurfPolys) {
+                    const selfResult = checkPreciseIntersection(fPoly, fPoly, false, '[SelfArea]');
+                    featureTotalArea += selfResult.area;
+
+                    for (const target of targetTurfGeoms) {
+                        const result = checkPreciseIntersection(target.geom, fPoly, target.isLine, `[Intersect]`);
+                        if (result.isIntersecting) {
+                            totalIntersectionArea += result.area;
+                        }
+                    }
+                }
+
+                const objId = feature.properties.options?.cad_num || feature.properties.descr;
+                console.log(`--- ОКС: ${objId} ---`);
+                console.log(`Полная площадь (МСК): ${featureTotalArea.toFixed(4)} кв.м.`);
+                console.log(`Площадь наложения: ${totalIntersectionArea.toFixed(4)} кв.м.`);
+
+                if (totalIntersectionArea >= 0.001) {
+                    let percent = 0;
+                    if (featureTotalArea > 0) {
+                        if ((featureTotalArea - totalIntersectionArea) < 0.001) {
+                            percent = 100;
+                        } else {
+                            let rawPercent = (totalIntersectionArea / featureTotalArea) * 100;
+                            if (rawPercent < 10) {
+                                percent = Math.ceil(rawPercent);
+                                if (percent === 0) percent = 1;
+                            } else {
+                                percent = Math.floor(rawPercent);
+                            }
+                        }
+                    }
+                    console.log(`Округлённый процент: ${percent}%`);
+                    if (!feature.properties) feature.properties = {};
+                    feature.properties._intersectionPercent = percent;
+                    spatialOksFeatures.push(feature);
+                } else {
+                    console.log(`Наложение менее 0.001 кв.м., ОКС отброшен.`);
+                }
+            }
+        }
+
         const oksMap = new Map();
         const getCn = (f) => (f.properties?.options?.cad_num || f.properties?.descr || '').trim();
 
@@ -11684,17 +11823,17 @@ async function executeQuickReport(targetObject) {
         results.oks = Array.from(oksMap.values());
         await delay(500);
         
-       
+        // ЭТАП 2: Сооружения
         showLoader(getRadarLoaderHtml(2));
         results.structure = await searchFeaturesByGeometry(objects, 36383);
         
         await delay(500);
         
-      
+        // ЭТАП 3: ЗОУИТ
         showLoader(getRadarLoaderHtml(3));
         results.zouit = await searchFeaturesByGeometry(objects, 36940);
         
-       
+        // Отрисовка
         showLoader('<div style="text-align:center;"><i class="fas fa-paint-brush fa-spin" style="font-size: 2.5rem; color: #10b981; margin-bottom: 15px;"></i><br><span style="font-size: 1.1rem; color: #10b981; font-weight: 600;">Отрисовка слоев на карте...</span></div>');
         
         if (results.zu.length > 0) quickReportLayers.zu = await drawFoundParcels(results.zu, false);
@@ -11721,15 +11860,16 @@ async function executeQuickReport(targetObject) {
             }
         });
 
+        console.log("=== БЫСТРЫЙ ОТЧЕТ ЗАВЕРШЕН УСПЕШНО ===");
         renderBottomDashboard(objName, results, targetBounds);
 
     } catch (e) {
+        console.error(e);
         showNotification("Ошибка анализа: " + e.message, "error");
     } finally {
         hideLoader();
     }
 }
-
 
 
 // Прокси-функции для отрисовки, чтобы вернуть добавленные объекты (оригинальные функции возвращают void)
@@ -11758,7 +11898,7 @@ function renderBottomDashboard(objName, results, targetBounds) {
         document.body.appendChild(panel);
     }
 
-    const genListHtml = (items, type) => {
+      const genListHtml = (items, type) => {
         if (!items || items.length === 0) return `<div class="bd-empty-msg">Объекты не найдены</div>`;
         return items.map((f, idx) => {
             const p = f.properties || {};
@@ -11772,31 +11912,23 @@ function renderBottomDashboard(objName, results, targetBounds) {
                 cn = o.cad_num || p.descr || 'Без номера';
                 desc = o.purpose || o.building_name || 'Назначение не указано';
                 
-                // Формируем блок иконок (НЕЗАВИСИМЫЕ проверки)
                 let icons = '';
-                
-                // 1. Иконка связи (скрепка) - если есть в списке связанных
                 if (p._isLinked) {
                     icons += `<i class="fas fa-link" style="color: #3b82f6; margin-right: 5px;" title="Связанный ОКС"></i>`;
                 }
-                
-                // 2. Иконка прицела - если найден геометрически (на карте)
-                // Важно: проверяем независимо от скрепки, чтобы выводились обе или по одной
                 if (p._isSpatial) {
                     icons += `<i class="fas fa-crosshairs" style="color: #9333ea; margin-right: 5px;" title="Найден по координатам"></i>`;
                 }
-                
                 desc = icons + desc;
 
             } else if (type === 'structure') {
                 cn = o.cad_number || p.descr || 'Без номера';
                 desc = `${o.params_name || 'Без названия'} (${o.params_extension ? o.params_extension+'м' : 'длина не указ.'})`;
-} else if (type === 'zouit') {
+            } else if (type === 'zouit') {
                 const catId = p.category;
                 const catName = (p.categoryName || '').toLowerCase();
                 const zoneTypeTag = p._zone_type || '';
 
-                // Надежная классификация
                 const isTerrZone = zoneTypeTag === 'terr_zone' || catId === 36315 || catName.includes('территориальные зоны');
                 const isSettlement = zoneTypeTag === 'settlement' || catId === 36281 || catId === 36832 || catName.includes('населённые пункты') || catName.includes('населенные пункты');
                 const isMunicipal = zoneTypeTag === 'municipal' || catId === 36278 || catName.includes('муниципальные образования');
@@ -11807,7 +11939,6 @@ function renderBottomDashboard(objName, results, targetBounds) {
                     desc = `<span style="color:#0000FF;font-weight:bold;font-size:0.85em;">Терр. зона</span><br>${o.name_by_doc || o.type_zone || 'Без названия'}`;
                 } else if (isSettlement) {
                     cn = p.label || o.brd_nmb || 'Без номера';
-                    // Берем имя из properties.descr или options.name
                     const stName = (o.name && o.name.trim()) || (p.descr && p.descr.trim()) || 'Без названия';
                     desc = `<span style="color:#B8860B;font-weight:bold;font-size:0.85em;">Нас. пункт</span><br>${stName}`;
                 } else if (isMunicipal) {
@@ -11817,21 +11948,31 @@ function renderBottomDashboard(objName, results, targetBounds) {
                     cn = o.reg_numb_border || p.descr || 'Без номера';
                     desc = `<span style="color:#228B22;font-weight:bold;font-size:0.85em;">Лесничество</span><br>${o.name_by_doc || 'Без названия'}`;
                 } else {
-                    // Если ни одно из вышеперечисленного не совпало — это чистый ЗОУИТ
                     cn = o.reg_numb_border || p.descr || 'Без номера';
                     desc = `<span style="color:#9400D3;font-weight:bold;font-size:0.85em;">ЗОУИТ</span><br>${o.name_by_doc || 'Ограничение не указано'}`;
                 }
             }
             
+            // НОВЫЙ БЛОК: Вывод процента покрытия для ЗУ и ОКС
+            let percentHtml = '';
+            if (p._intersectionPercent !== undefined) {
+                let pColor = p._intersectionPercent === 100 ? '#10b981' : '#f59e0b';
+                let pText = p._intersectionPercent === 100 ? '100%' : `${p._intersectionPercent}%`;
+                percentHtml = `<span style="float: right; font-size: 0.75rem; font-weight: bold; color: ${pColor}; background: ${pColor}1A; padding: 2px 5px; border-radius: 4px; border: 1px solid ${pColor}4D;" title="Доля объекта внутри исходного контура">${pText}</span>`;
+            }
+
             return `
                 <div class="bd-item" data-cn="${cn}" data-type="${type}">
-                    <span class="bd-item-title">${idx + 1}. ${cn}</span>
+                    <div style="display: flex; justify-content: space-between; align-items: flex-start; margin-bottom: 4px;">
+                        <span class="bd-item-title" style="margin-bottom: 0;">${idx + 1}. ${cn}</span>
+                        ${percentHtml}
+                    </div>
                     <span class="bd-item-desc">${desc}</span>
                 </div>
             `;
         }).join('');
     };
-
+    
     panel.innerHTML = `
         <div class="bd-minimize-bar" title="Развернуть результаты"><i class="fas fa-chevron-up" style="margin-right: 10px;"></i> Результаты анализа: ${objName}</div>
         <button class="bd-close-btn" title="Свернуть панель"><i class="fas fa-chevron-down"></i></button>
@@ -17454,7 +17595,7 @@ async function exportQuickReportToHtml() {
         const mapImage = canvas.toDataURL('image/jpeg', 0.85);
 
         // Вспомогательная функция генерации аккуратных HTML таблиц
-            const generateTable = (features, type) => {
+           const generateTable = (features, type) => {
             if (!features || features.length === 0) return '';
             
             let title = '';
@@ -17474,14 +17615,16 @@ async function exportQuickReportToHtml() {
                 
                 let cn = "Объект";
                 let details = "";
-                let percentHtml = ""; // Переменная для бейджа с процентами
 
-                // Проверяем наличие процента наложения (для ЗУ и ОКС)
+                // --- НОВЫЙ БЛОК: Формируем бейдж с процентом наложения ---
+                let percentHtml = '';
                 if (p._intersectionPercent !== undefined) {
-                    let pColor = p._intersectionPercent === 100 ? '#10b981' : '#e67e22'; // Зеленый для 100%, Оранжевый для частичных
-                    let pText = p._intersectionPercent === 100 ? '100%' : `${p._intersectionPercent}%`;
-                    percentHtml = `<div style="margin-top: 6px; font-size: 11px; font-weight: bold; color: ${pColor}; background: ${pColor}1A; padding: 3px 6px; border-radius: 4px; display: inline-block; border: 1px solid ${pColor}4D; line-height: 1;">Наложение: ${pText}</div>`;
+                    const isFullCoverage = p._intersectionPercent === 100;
+                    const pColor = isFullCoverage ? '#10b981' : '#f59e0b'; // Зеленый для 100%, оранжевый для частичного
+                    const pText = isFullCoverage ? '100%' : `${p._intersectionPercent}%`;
+                    percentHtml = `<div style="margin-top: 8px; display: inline-block; font-size: 11px; font-weight: bold; color: ${pColor}; background: ${pColor}1A; padding: 3px 7px; border-radius: 4px; border: 1px solid ${pColor}4D;">Вхождение в контур: ${pText}</div>`;
                 }
+                // -----------------------------------------------------------
 
                 if (type === 'zu') {
                     cn = p.descr || '-';
@@ -17506,12 +17649,14 @@ async function exportQuickReportToHtml() {
                     details = `<b>Наименование:</b> ${o.name_by_doc || '-'}`;
                 }
 
+                // Добавляем бейдж с наложением в конец строки сведений, если он есть
+                if (percentHtml) {
+                    details += percentHtml;
+                }
+
                 html += `<tr>
                             <td class="col-num">${idx + 1}</td>
-                            <td class="col-cn">
-                                <span style="display: block;">${cn}</span>
-                                ${percentHtml}
-                            </td>
+                            <td class="col-cn">${cn}</td>
                             <td class="col-details">${details}</td>
                          </tr>`;
             });
