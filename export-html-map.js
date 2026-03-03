@@ -1,6 +1,6 @@
 // export-html-map.js
 
-async function generateStandaloneHtmlMap(allObjectsArray, mapInstance) {
+async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffsetX, mapOffsetY) {
     if (!mapInstance) {
         showNotification('Карта не инициализирована', 'error');
         return;
@@ -13,69 +13,78 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance) {
         const zoom = mapInstance.getZoom();
         const mapType = mapInstance.getType();
 
-        // Собираем все объекты с карты
+        // Убираем дубликаты из переданного массива объектов
+        const uniqueObjects = Array.from(new Set(allObjectsArray));
         const exportFeatures =[];
 
-        allObjectsArray.forEach(obj => {
+        // Функция для отмены визуального смещения (возврат к истинным координатам WGS84)
+        const revertOffset = (coord) => [
+            coord[0] + (mapOffsetY * 0.000008983),
+            coord[1] + (mapOffsetX * 0.000008983)
+        ];
+
+        uniqueObjects.forEach(obj => {
             if (!obj || !obj.geometry) return;
 
-            // Пропускаем рамки выделения квартала
+            // Игнорируем служебные рамки выделения квартала
             if (obj instanceof ymaps.Polygon && obj.options.get('strokeStyle') === 'dash' && !obj.properties.get('isZouit')) {
                 return;
             }
 
             const geometryType = obj.geometry.getType();
             const coordinates = obj.geometry.getCoordinates();
-            
-            // Забираем полные сырые данные объекта, если они есть
             const featureData = obj.properties.get('featureData') || null;
-            const hintContent = obj.properties.get('hintContent') || null;
-            const iconContent = obj.properties.get('iconContent') || null;
 
             if (obj instanceof ymaps.Polygon) {
+                const trueCoordinates = coordinates.map(ring => ring.map(revertOffset));
                 exportFeatures.push({
                     type: 'Polygon',
-                    coords: coordinates,
+                    coords: trueCoordinates,
                     style: {
                         strokeColor: obj.options.get('strokeColor') || '#FF0000',
                         strokeWidth: obj.options.get('strokeWidth') || 2,
                         strokeOpacity: obj.options.get('strokeOpacity') !== undefined ? obj.options.get('strokeOpacity') : 0.8,
                         fillColor: obj.options.get('fillColor') || '#00000000'
                     },
-                    featureData: featureData,
-                    hintContent: hintContent
+                    featureData: featureData
                 });
             } else if (obj instanceof ymaps.Polyline) {
+                const trueCoordinates = coordinates.map(revertOffset);
                 exportFeatures.push({
                     type: 'LineString',
-                    coords: coordinates,
+                    coords: trueCoordinates,
                     style: {
                         strokeColor: obj.options.get('strokeColor') || '#FF0000',
                         strokeWidth: obj.options.get('strokeWidth') || 2,
                         strokeOpacity: obj.options.get('strokeOpacity') !== undefined ? obj.options.get('strokeOpacity') : 0.8
                     },
-                    featureData: featureData,
-                    hintContent: hintContent
+                    featureData: featureData
                 });
             } else if (obj instanceof ymaps.Placemark) {
-                // Если это метка (кадастровый номер, нумерация точек или фото)
-                const isLabel = !!iconContent;
-                const isVertex = obj.properties.get('isVertexPoint'); // точки типа н1
+                const trueCoordinates = revertOffset(coordinates);
+                const iconContent = obj.properties.get('iconContent');
+                const isVertex = obj.properties.get('isVertexPoint'); // Точки типа н1
                 
-                exportFeatures.push({
-                    type: 'Placemark',
-                    coords: coordinates,
-                    isLabel: isLabel,
-                    isVertex: isVertex,
-                    content: iconContent,
-                    preset: obj.options.get('preset'),
-                    featureData: featureData,
-                    hintContent: hintContent
-                });
+                // Если это текстовая метка
+                if (iconContent) {
+                    // Пытаемся получить координаты родительского полигона (для расчета площади и скрытия меток при отдалении)
+                    let parentPolyCoords = null;
+                    if (obj.polygon && obj.polygon.geometry) {
+                         parentPolyCoords = obj.polygon.geometry.getCoordinates().map(ring => ring.map(revertOffset));
+                    }
+
+                    exportFeatures.push({
+                        type: 'Label',
+                        coords: trueCoordinates,
+                        content: iconContent,
+                        isVertex: isVertex,
+                        parentPolyCoords: parentPolyCoords
+                    });
+                }
             }
         });
 
-        // Защита от закрывающих тегов script внутри JSON
+        // Защита от случайного обрыва JSON
         const jsonFeatures = JSON.stringify(exportFeatures).replace(/<\//g, "<\\/");
 
         // Формируем автономный HTML
@@ -84,19 +93,20 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance) {
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Интерактивная карта (Экспорт)</title>
+    <title>Интерактивная карта объектов</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://api-maps.yandex.ru/2.1/?apikey=dde71a0e-b612-44b7-b53b-82533420240f&lang=ru_RU" type="text/javascript"></script>
     <style>
-        body, html { margin: 0; padding: 0; width: 100%; height: 100%; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; overflow: hidden; background: #eef2f7; }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; font-family: 'Segoe UI', Arial, sans-serif; overflow: hidden; background: #eef2f7; }
         .layout { display: flex; width: 100%; height: 100%; position: relative; }
         #map { flex-grow: 1; height: 100%; position: relative; z-index: 1; }
         
         /* Стили боковой панели */
         .sidebar { 
-            width: 400px; 
+            width: 420px; 
+            max-width: 90vw;
             background: #ffffff; 
-            box-shadow: -5px 0 25px rgba(0,0,0,0.1); 
+            box-shadow: -5px 0 25px rgba(0,0,0,0.15); 
             z-index: 10; 
             display: flex; 
             flex-direction: column; 
@@ -106,7 +116,7 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance) {
             height: 100%; 
             transform: translateX(100%); 
             transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1); 
-            border-left: 1px solid #e2e8f0;
+            border-left: 1px solid #cbd5e1;
         }
         .sidebar.open { transform: translateX(0); }
         
@@ -125,28 +135,37 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance) {
         .sidebar-content { padding: 0; overflow-y: auto; flex-grow: 1; background: #f8fafc; }
         
         /* Таблица свойств */
-        .prop-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-        .prop-table th, .prop-table td { padding: 10px 15px; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: top; word-wrap: break-word; }
-        .prop-table th { background: #f1f5f9; color: #475569; width: 40%; font-weight: 600; }
+        .prop-table { width: 100%; border-collapse: collapse; font-size: 0.9rem; }
+        .prop-table th, .prop-table td { padding: 12px 15px; border-bottom: 1px solid #e2e8f0; text-align: left; vertical-align: top; word-wrap: break-word; }
+        .prop-table th { background: #f1f5f9; color: #475569; width: 45%; font-weight: 600; }
         .prop-table tr:hover td { background: #f8fafc; }
         
-        /* Плашка на карте */
         .info-widget { position: absolute; top: 15px; left: 15px; z-index: 10; background: rgba(255,255,255,0.9); backdrop-filter: blur(5px); padding: 15px; border-radius: 12px; box-shadow: 0 4px 15px rgba(0,0,0,0.15); border: 1px solid rgba(0,0,0,0.05); }
         .info-widget h4 { margin: 0 0 5px 0; color: #1e293b; font-size: 1rem; }
         .info-widget p { margin: 0; color: #64748b; font-size: 0.85rem; }
 
-        /* Кастомная метка для кадастровых номеров (как в оригинале) */
+        /* Идентичное оформление меток (Черно-белое) */
         .custom-placemark {
-            position: absolute; font-weight: 700; color: #ffff00;
-            text-shadow: -2px -2px 1px rgba(0,0,0,0.9), 2px -2px 1px rgba(0,0,0,0.9), -2px 2px 1px rgba(0,0,0,0.9), 2px 2px 1px rgba(0,0,0,0.9), 0 0 6px rgba(0,0,0,0.8);
-            font-family: Arial, sans-serif; user-select: none; letter-spacing: 0.7px;
-            transform: translate(-50%, -50%); white-space: nowrap; text-align: center;
+            position: absolute; 
+            font-family: sans-serif; 
+            user-select: none; 
+            text-align: center;
+            font-weight: 700; 
+            color: #000; /* Черный текст */
+            text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff, 0 0 2px #fff; /* Белая обводка */
+            transform: translate(-50%, -50%); 
+            white-space: nowrap;
         }
-        /* Кастомная метка для точек (н1) */
+        
+        /* Оформление нумерованных точек н1 (Красный с белым) */
         .numbered-point-label {
-            color: #FF0000; font-size: 14px; font-weight: bold; font-family: Arial, sans-serif;
+            position: absolute; 
+            color: #FF0000; 
+            font-weight: bold; 
+            font-family: Arial, sans-serif;
             text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff;
-            user-select: none; transform: translate(-50%, -50%); position: absolute;
+            user-select: none; 
+            transform: translate(-50%, -50%);
         }
     </style>
 </head>
@@ -154,19 +173,17 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance) {
     <div class="layout">
         <div id="map">
             <div class="info-widget">
-                <h4>Сводная карта объектов</h4>
+                <h4>Карта объектов</h4>
                 <p><i class="fas fa-hand-pointer"></i> Кликните на объект для деталей</p>
-                <p style="margin-top: 5px;"><strong>${exportFeatures.length}</strong> объектов загружено</p>
             </div>
         </div>
         
         <div class="sidebar" id="sidebar">
             <div class="sidebar-header">
-                <h3 id="sidebar-title">Информация об объекте</h3>
+                <h3 id="sidebar-title">Сведения об объекте</h3>
                 <button class="close-sidebar-btn" id="close-sidebar" title="Закрыть">&times;</button>
             </div>
             <div class="sidebar-content" id="sidebar-content">
-                <!-- Сюда вставляется таблица свойств -->
                 <div style="padding: 20px; text-align: center; color: #94a3b8;">Выберите объект на карте</div>
             </div>
         </div>
@@ -180,13 +197,13 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance) {
                 center: [${center[0]}, ${center[1]}],
                 zoom: ${zoom},
                 type: "${mapType}",
-                controls: ['zoomControl', 'typeSelector', 'fullscreenControl', 'rulerControl']
+                controls:['zoomControl', 'typeSelector', 'fullscreenControl', 'rulerControl']
             });
 
             var mapData = ${jsonFeatures};
-            var labelsArray =[]; // Массив для текстовых меток (чтобы управлять видимостью)
+            var labelsArray =[]; // Для логики столкновений (anti-collision)
 
-            // Макет для кадастровых номеров (с авто-размером шрифта)
+            // Макет для кадастровых номеров (с автоизменением размера шрифта)
             var CustomPlacemarkLayout = ymaps.templateLayoutFactory.createClass(
                 '<div class="custom-placemark" style="font-size: $[properties.fontSize]px;">$[properties.iconContent]</div>',
                 {
@@ -198,30 +215,28 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance) {
                         this.updateFontSize();
                     },
                     updateFontSize: function() {
-                        var map = this.getData().options.get('map');
-                        if (map) {
-                            var zoom = map.getZoom();
-                            var fontSize = Math.max(10, Math.min(16, 8 + zoom * 0.4));
+                        var m = this.getData().options.get('map');
+                        if (m) {
+                            var z = m.getZoom();
+                            var fSize = Math.max(10, Math.min(16, 8 + z * 0.4));
                             var el = this.getParentElement().querySelector('.custom-placemark');
-                            if (el) el.style.fontSize = fontSize + 'px';
+                            if (el) el.style.fontSize = fSize + 'px';
                         }
                     }
                 }
             );
 
-            // Макет для точек н1
+            // Макет для точек (н1)
             var NumberedPointLayout = ymaps.templateLayoutFactory.createClass(
-                '<div class="numbered-point-label">$[properties.iconContent]</div>'
+                '<div class="numbered-point-label" style="font-size: 14px;">$[properties.iconContent]</div>'
             );
 
             mapData.forEach(function(item) {
                 var geoObject;
 
-                // 1. Полигоны
                 if (item.type === 'Polygon') {
                     geoObject = new ymaps.Polygon(item.coords, {
-                        featureData: item.featureData,
-                        hintContent: item.hintContent
+                        featureData: item.featureData
                     }, {
                         strokeColor: item.style.strokeColor,
                         strokeWidth: item.style.strokeWidth,
@@ -229,70 +244,123 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance) {
                         fillColor: item.style.fillColor,
                         cursor: 'pointer'
                     });
-                } 
-                // 2. Линии
-                else if (item.type === 'LineString') {
+                } else if (item.type === 'LineString') {
                     geoObject = new ymaps.Polyline(item.coords, {
-                        featureData: item.featureData,
-                        hintContent: item.hintContent
+                        featureData: item.featureData
                     }, {
                         strokeColor: item.style.strokeColor,
                         strokeWidth: item.style.strokeWidth,
                         strokeOpacity: item.style.strokeOpacity,
                         cursor: 'pointer'
                     });
-                } 
-                // 3. Метки (текст / точки)
-                else if (item.type === 'Placemark') {
-                    if (item.isLabel) {
-                        geoObject = new ymaps.Placemark(item.coords, {
-                            iconContent: item.content,
-                            featureData: item.featureData
-                        }, {
-                            iconLayout: item.isVertex ? NumberedPointLayout : CustomPlacemarkLayout,
-                            visible: map.getZoom() > 14,
-                            zIndex: 1000
+                } else if (item.type === 'Label') {
+                    geoObject = new ymaps.Placemark(item.coords, {
+                        iconContent: item.content
+                    }, {
+                        iconLayout: item.isVertex ? NumberedPointLayout : CustomPlacemarkLayout,
+                        zIndex: item.isVertex ? 1100 : 1000,
+                        visible: map.getZoom() > 14
+                    });
+                    
+                    // Если это номер участка, добавляем в массив для алгоритма видимости
+                    if (!item.isVertex) {
+                        labelsArray.push({
+                            placemark: geoObject,
+                            polyCoords: item.parentPolyCoords
                         });
-                        if (!item.isVertex) {
-                            labelsArray.push(geoObject); // Запоминаем для скрытия/показа
-                        }
-                    } else if (item.preset) {
-                        // Обычные точки с пресетом (например islands#redDotIcon)
-                        geoObject = new ymaps.Placemark(item.coords, {
-                            hintContent: item.hintContent,
-                            featureData: item.featureData
-                        }, { preset: item.preset });
                     }
                 }
 
                 if (geoObject) {
-                    // Добавляем обработчик клика для открытия сайдбара (только для полигонов и линий)
+                    // Открываем панель при клике
                     if (item.type === 'Polygon' || item.type === 'LineString') {
-                        geoObject.events.add('click', function (e) {
-                            openSidebar(item.featureData, item.hintContent);
+                        geoObject.events.add('click', function () {
+                            openSidebar(item.featureData);
                         });
                     }
                     map.geoObjects.add(geoObject);
                 }
             });
 
-            // Управление видимостью меток при зуме
+            // --- АЛГОРИТМ ВИДИМОСТИ МЕТОК (Как в оригинале) ---
+            function updateLabelsVisibility() {
+                var currentZoom = map.getZoom();
+                var projection = map.options.get('projection');
+                var visiblePlacemarks =[];
+
+                labelsArray.forEach(function(labelObj) {
+                    var pm = labelObj.placemark;
+                    var coords = pm.geometry.getCoordinates();
+                    
+                    // Рассчитываем примерную площадь родительского полигона в пикселях
+                    var areaInPixels = 1000; // По умолчанию большая
+                    if (labelObj.polyCoords && labelObj.polyCoords[0]) {
+                        var polyBounds = ymaps.util.bounds.fromPoints(labelObj.polyCoords[0]);
+                        var px1 = projection.toGlobalPixels(polyBounds[0], currentZoom);
+                        var px2 = projection.toGlobalPixels(polyBounds[1], currentZoom);
+                        areaInPixels = Math.abs(px2[0] - px1[0]) * Math.abs(px2[1] - px1[1]);
+                    }
+
+                    // Условие видимости: достаточная площадь ИЛИ сильное приближение
+                    if (areaInPixels > 500 || currentZoom > 16) {
+                        if (map.geoObjects.indexOf(pm) !== -1) {
+                            pm.options.set('visible', true);
+                            var fSize = Math.max(10, Math.min(16, 8 + currentZoom * 0.4));
+                            var textLen = (pm.properties.get('iconContent') || "").length;
+                            var textWidth = fSize * textLen * 0.6;
+                            var textHeight = fSize * 1.5;
+                            var pixelCenter = projection.toGlobalPixels(coords, currentZoom);
+
+                            visiblePlacemarks.push({
+                                placemark: pm,
+                                area: areaInPixels,
+                                bbox: {
+                                    left: pixelCenter[0] - textWidth / 2,
+                                    right: pixelCenter[0] + textWidth / 2,
+                                    top: pixelCenter[1] - textHeight / 2,
+                                    bottom: pixelCenter[1] + textHeight / 2
+                                }
+                            });
+                        }
+                    } else {
+                        pm.options.set('visible', false);
+                    }
+                });
+
+                // Исключаем наложения (оставляем те метки, чей полигон больше)
+                for (var i = 0; i < visiblePlacemarks.length; i++) {
+                    var curr = visiblePlacemarks[i];
+                    if (!curr.placemark.options.get('visible')) continue;
+
+                    for (var j = 0; j < i; j++) {
+                        var other = visiblePlacemarks[j];
+                        if (!other.placemark.options.get('visible')) continue;
+
+                        if (curr.bbox.left < other.bbox.right &&
+                            curr.bbox.right > other.bbox.left &&
+                            curr.bbox.top < other.bbox.bottom &&
+                            curr.bbox.bottom > other.bbox.top) {
+                            
+                            if (curr.area < other.area) {
+                                curr.placemark.options.set('visible', false);
+                            } else {
+                                other.placemark.options.set('visible', false);
+                            }
+                        }
+                    }
+                }
+            }
+
             map.events.add('boundschange', function (e) {
                 if (e.get('newZoom') !== e.get('oldZoom')) {
-                    var zoom = map.getZoom();
-                    var isVisible = zoom > 14;
-                    labelsArray.forEach(function(label) {
-                        label.options.set('visible', isVisible);
-                        // Вызываем обновление размера шрифта
-                        var layout = label.getOverlaySync() && label.getOverlaySync().getLayoutSync();
-                        if (layout && typeof layout.updateFontSize === 'function') {
-                            layout.updateFontSize();
-                        }
-                    });
+                    updateLabelsVisibility();
                 }
             });
+            
+            // Первичный запуск алгоритма
+            setTimeout(updateLabelsVisibility, 500);
 
-            // Логика боковой панели
+            // --- ЛОГИКА ИНФО-ПАНЕЛИ (Перевод и чистка данных) ---
             var sidebar = document.getElementById('sidebar');
             var sidebarContent = document.getElementById('sidebar-content');
             var sidebarTitle = document.getElementById('sidebar-title');
@@ -301,93 +369,90 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance) {
                 sidebar.classList.remove('open');
             });
 
-            function openSidebar(featureData, hintContent) {
-                sidebarContent.innerHTML = '';
-                var html = '<table class="prop-table"><tbody>';
-                
-                if (featureData && featureData.properties) {
-                    var props = featureData.properties;
-                    var opts = props.options || {};
-                    
-                    sidebarTitle.textContent = opts.cad_num || opts.cad_number || opts.reg_numb_border || props.descr || 'Объект';
+            // Словарь для перевода и фильтрации
+            var propDict = {
+                'cadastralNumber': 'Кадастровый номер', 'cad_num': 'Кадастровый номер', 'cad_number': 'Кадастровый номер',
+                'reg_numb_border': 'Реестровый номер', 'quarter_cad_number': 'Кадастровый квартал',
+                'readable_address': 'Адрес', 'address_readable_address': 'Адрес',
+                'categoryName': 'Категория объекта', 'land_record_category_type': 'Категория земель',
+                'area': 'Площадь (м²)', 'build_record_area': 'Площадь ОКС (м²)', 
+                'declared_area': 'Площадь декларированная', 'specified_area': 'Площадь уточненная',
+                'cost_value': 'Кадастровая стоимость (руб.)', 'cost_index': 'Удельный показатель (руб/м²)', 
+                'cost_application_date': 'Дата применения стоимости', 'cost_determination_date': 'Дата определения стоимости',
+                'determination_couse': 'Основание стоимости', 'registration_date': 'Дата регистрации', 
+                'land_record_reg_date': 'Дата внесения в ЕГРН', 'build_record_registration_date': 'Дата внесения в ЕГРН',
+                'permitted_use_established_by_document': 'ВРИ по документу', 'purpose': 'Назначение',
+                'land_record_type': 'Тип объекта', 'land_record_subtype': 'Подтип объекта', 'subtype': 'Подтип',
+                'status': 'Статус', 'common_data_status': 'Статус данных', 'previously_posted': 'Учет',
+                'ownership_type': 'Форма собственности', 'right_type': 'Тип права',
+                'year_built': 'Год постройки', 'materials': 'Материал стен', 'floors': 'Этажность',
+                'params_extension': 'Протяженность (м)', 'name_by_doc': 'Наименование по документу', 'params_name': 'Наименование'
+            };
 
-                    // Основные свойства
-                    for (var key in props) {
-                        if (key !== 'options' && key !== 'geometry' && !key.startsWith('_')) {
-                            var val = props[key] !== null ? props[key] : '-';
-                            html += '<tr><th>' + translateKey(key) + '</th><td>' + val + '</td></tr>';
-                        }
-                    }
-                    // Свойства из options (сырые данные Росреестра)
-                    html += '<tr><th colspan="2" style="background:#e2e8f0; text-align:center;">Подробные данные ЕГРН</th></tr>';
-                    for (var oKey in opts) {
-                        var oVal = opts[oKey] !== null ? opts[oKey] : '-';
-                        html += '<tr><th>' + translateKey(oKey) + '</th><td>' + oVal + '</td></tr>';
-                    }
-                } else if (hintContent) {
-                    sidebarTitle.textContent = 'Информация';
-                    if (typeof hintContent === 'object') {
-                        for (var hKey in hintContent) {
-                            if (hintContent[hKey]) {
-                                html += '<tr><th>' + translateKey(hKey) + '</th><td>' + hintContent[hKey] + '</td></tr>';
-                            }
-                        }
-                    } else {
-                        html += '<tr><th>Описание</th><td>' + hintContent + '</td></tr>';
-                    }
-                } else {
+            // Системные ключи, которые мы НЕ показываем
+            var skipKeys =['id', 'category', 'systemInfo', 'externalKey', 'interactionId', 'subcategory', 'adastralDistrictsCode', 'options', 'geometry', 'label', 'cost_approvement_date', 'land_record_area', 'land_record_area_declaration', 'land_record_area_verified'];
+
+            function openSidebar(featureData) {
+                sidebarContent.innerHTML = '';
+                if (!featureData || !featureData.properties) {
                     sidebarTitle.textContent = 'Объект';
-                    html += '<tr><td colspan="2" style="text-align:center;">Нет подробных данных</td></tr>';
+                    sidebarContent.innerHTML = '<div style="padding: 20px; text-align:center;">Нет подробных данных</div>';
+                    sidebar.classList.add('open');
+                    return;
                 }
+
+                var props = featureData.properties;
+                var opts = props.options || {};
+                
+                // Ставим заголовок
+                var titleText = opts.cad_num || opts.cad_number || opts.reg_numb_border || props.descr || 'Объект';
+                sidebarTitle.textContent = titleText;
+
+                var html = '<table class="prop-table"><tbody>';
+                var addedKeys =[]; // Для защиты от дублей (например, cad_num и descr)
+
+                function renderRows(source) {
+                    for (var k in source) {
+                        if (skipKeys.indexOf(k) !== -1 || k.startsWith('_')) continue;
+                        var val = source[k];
+                        if (val === null || val === undefined || val === '-' || val === '') continue;
+                        if (typeof val === 'object') continue; // Пропускаем [object Object]
+                        
+                        var translatedKey = propDict[k] || k;
+                        
+                        // Проверяем, не выводили ли мы уже это значение под этим же именем (чтобы не было двух КН)
+                        var isDuplicate = addedKeys.some(function(item) { return item.key === translatedKey && item.val === val; });
+                        
+                        if (!isDuplicate) {
+                            html += '<tr><th>' + translatedKey + '</th><td>' + val + '</td></tr>';
+                            addedKeys.push({ key: translatedKey, val: val });
+                        }
+                    }
+                }
+
+                renderRows(props);
+                html += '<tr><th colspan="2" style="background:#e2e8f0; text-align:center; font-size: 0.95rem; padding: 15px;">Подробные данные ЕГРН</th></tr>';
+                renderRows(opts);
 
                 html += '</tbody></table>';
                 sidebarContent.innerHTML = html;
                 sidebar.classList.add('open');
-            }
-
-            // Простой словарь для перевода ключей в читаемый вид
-            function translateKey(key) {
-                var dict = {
-                    'descr': 'Номер / Описание',
-                    'categoryName': 'Категория объекта',
-                    'readable_address': 'Адрес',
-                    'address_readable_address': 'Адрес',
-                    'area': 'Площадь',
-                    'build_record_area': 'Площадь ОКС',
-                    'declared_area': 'Площадь декларированная',
-                    'specified_area': 'Площадь уточненная',
-                    'cost_value': 'Кадастровая стоимость',
-                    'cost_index': 'Удельный показатель (руб/м²)',
-                    'permitted_use_established_by_document': 'ВРИ по документу',
-                    'land_record_category_type': 'Категория земель',
-                    'purpose': 'Назначение',
-                    'year_built': 'Год постройки',
-                    'materials': 'Материал стен',
-                    'floors': 'Этажность',
-                    'params_extension': 'Протяженность',
-                    'name_by_doc': 'Наименование по документу',
-                    'ownership_type': 'Форма собственности',
-                    'right_type': 'Тип права',
-                    'registration_date': 'Дата регистрации',
-                    'land_record_reg_date': 'Дата внесения в ЕГРН'
-                };
-                return dict[key] || key;
             }
         }
     </script>
 </body>
 </html>`;
 
-        // Создаем файл и скачиваем его
+        // 3. Создаем файл и скачиваем
         const blob = new Blob([htmlString], { type: "text/html;charset=utf-8" });
         const dateStr = new Date().toISOString().slice(0, 10);
-        saveAs(blob, `Интерактивная_Карта_${dateStr}.html`);
+        saveAs(blob, `Интерактивная_карта_${dateStr}.html`);
 
-        showNotification('HTML-карта успешно сформирована и сохранена', 'success', 'check-circle');
+        showNotification('HTML-карта успешно сохранена', 'success');
 
     } catch (error) {
         console.error('Ошибка генерации HTML карты:', error);
-        showNotification('Ошибка при экспорте HTML карты', 'error', 'exclamation-triangle');
+        showNotification('Ошибка при экспорте HTML карты', 'error');
     } finally {
         hideLoader();
     }
