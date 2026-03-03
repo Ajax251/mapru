@@ -47,7 +47,7 @@ window.open3DVisualization = function () {
                 const p = f.properties || {};
                 const o = p.options || {};
                 // Собираем весь текст в кучу для поиска ключевых слов
-                const text = `${p.descr || ''} ${o.name || ''} ${o.params_name || ''} ${o.purpose || ''} ${o.params_purpose || ''} ${o.building_name || ''} ${o.name_by_doc || ''} ${o.content_restrict_encumbrances || ''}`.toLowerCase();
+                const text = `${p.descr || ''} ${o.name || ''} ${o.params_name || ''} ${o.purpose || ''} ${o.params_purpose || ''} ${o.building_name || ''} ${o.name_by_doc || ''}`.toLowerCase();
                 
                 let meta = { name: o.name || o.params_name || o.name_by_doc || p.descr || 'Объект' };
 
@@ -61,13 +61,10 @@ window.open3DVisualization = function () {
                 else if (category === 'structure' || category === 'zouit') {
                     meta.isGas = text.includes('газ');
                     meta.isWater = text.includes('вод') || text.includes('канализ') || text.includes('сток');
-                    meta.isElectric = text.includes('электр') || text.includes('лэп') || text.includes('кабель') || text.includes('вл ') || text.includes('кв');
+                    meta.isElectric = text.includes('электр') || text.includes('лэп') || text.includes('кабель');
                     meta.isTelecom = text.includes('связ') || text.includes('оптик');
                     meta.isRoad = text.includes('дорог') || text.includes('шоссе');
                     
-                    // Флаг линейности для ЗОУИТ (чтобы рисовать туннелем)
-                    meta.isLinearZone = meta.isGas || meta.isWater || meta.isElectric || meta.isTelecom || text.includes('трубопровод') || text.includes('линия');
-
                     meta.isUnderground = text.includes('подзем');
                     meta.isAboveground = text.includes('надзем') || text.includes('назем');
                     
@@ -344,43 +341,22 @@ window.open3DVisualization = function () {
             return shape;
         };
 
-        // Генерация Трубы (для сетей и туннельных ЗОУИТ)
-        const buildPipe = (pointsArray, radius, color, isUnderground, opacity = 1) => {
+        // Генерация Трубы (для сетей)
+        const buildPipe = (pointsArray, radius, color, isUnderground) => {
             const group = new THREE.Group();
+            const yOffset = isUnderground ? -2 : 3; // Под землей или на опорах
             
-            // Опускаем под землю или поднимаем на опоры в зависимости от типа
-            // Для подземных делаем -2м, для надземных +3м, для ЗОУИТ-туннелей +2м
-            let yOffset = 3;
-            if (isUnderground) yOffset = -2;
-            else if (opacity < 1) yOffset = 2; // ЗОУИТ чуть ниже опор
-
             const vecPoints = pointsArray.map(p => new THREE.Vector3(p.x, yOffset, -p.y));
-            
-            // Создаем плавную кривую через точки
-            const path = new THREE.CatmullRomCurve3(vecPoints, false, 'catmullrom', 0.05); 
-            
-            const tubeGeo = new THREE.TubeGeometry(path, Math.max(20, vecPoints.length * 5), radius, 12, false);
-            
-            const materialParams = { color: color };
-            if (opacity < 1) {
-                materialParams.transparent = true;
-                materialParams.opacity = opacity;
-                materialParams.depthWrite = false; // Чтобы прозрачные объекты корректно накладывались
-                materialParams.side = THREE.DoubleSide;
-            } else {
-                materialParams.metalness = 0.4;
-                materialParams.roughness = 0.5;
-            }
-
-            const tube = new THREE.Mesh(tubeGeo, new THREE.MeshStandardMaterial(materialParams));
-            
-            // Тени только для непрозрачных объектов
-            if (opacity === 1) tube.castShadow = !isUnderground;
-            
+            const path = new THREE.CatmullRomCurve3(vecPoints, false, 'catmullrom', 0.05); // Небольшое сглаживание
+            const tube = new THREE.Mesh(
+                new THREE.TubeGeometry(path, Math.max(20, vecPoints.length * 2), radius, 8, false), 
+                new THREE.MeshStandardMaterial({ color: color, metalness: 0.4, roughness: 0.5 })
+            );
+            tube.castShadow = !isUnderground;
             group.add(tube);
 
-            // Опоры только для надземных НЕПРОЗРАЧНЫХ труб
-            if (!isUnderground && opacity === 1) {
+            // Опоры для надземных
+            if (!isUnderground) {
                 const supportMat = new THREE.MeshStandardMaterial({ color: 0x94a3b8 });
                 vecPoints.forEach(pt => {
                     const support = new THREE.Mesh(new THREE.CylinderGeometry(radius*0.8, radius*0.8, yOffset), supportMat);
@@ -474,21 +450,13 @@ window.open3DVisualization = function () {
             else if (s.meta.isTelecom) { color = 0x10b981; radius = 0.1; } // Связь тонкая зеленая
 
             s.polygons.forEach(poly => {
-                // Берем внешний контур как линию для генерации трубы
-                // (если полигон очень узкий, это сработает как линия)
-                // Если это честный LineString, берем его точки.
-                // Если Polygon - берем внешний контур poly[0].
-                
-                // Для реалистичности берем внешний контур как осевую линию
-                // Это упрощение для визуализации (по центру полигона было бы сложнее)
-                const points = poly[0];
-                
-                const pipe = buildPipe(points, radius, color, s.meta.isUnderground);
+                // Берем внешний контур как линию
+                const pipe = buildPipe(poly[0], radius, color, s.meta.isUnderground);
                 groups.structures.add(pipe);
             });
         });
 
-        // 5. ЗОУИТ (Туннели или Объемные зоны)
+        // 5. ЗОУИТ (Объемные прозрачные зоны)
         data.zouits.forEach(z => {
             let color = 0xc084fc; // Фиолетовый по умолчанию
             if (z.meta.isGas) color = 0xfbbf24;
@@ -496,22 +464,13 @@ window.open3DVisualization = function () {
             else if (z.meta.isElectric) color = 0xef4444; // ЛЭП красная зона
 
             z.polygons.forEach(poly => {
-                if (z.meta.isLinearZone) {
-                    // ЕСЛИ ЭТО ЛИНЕЙНАЯ ЗОНА (ГАЗ, ЛЭП) -> РИСУЕМ КАК ТУННЕЛЬ
-                    // Строим "туннель" из внешнего контура.
-                    // Радиус туннеля делаем 2 метра для наглядности
-                    const tunnel = buildPipe(poly[0], 2.0, color, false, 0.25);
-                    groups.zouit.add(tunnel);
-                } else {
-                    // ЕСЛИ ЭТО ПЛОЩАДНАЯ ЗОНА -> РИСУЕМ КАК ЭКСТРУЗИЮ (СТЕНЫ ВВЕРХ)
-                    const shape = createShapeFromPolygon(poly);
-                    const mesh = new THREE.Mesh(
-                        new THREE.ExtrudeGeometry(shape, { depth: 20, bevelEnabled: false }), // Высота зоны 20м
-                        new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.25, depthWrite: false, side: THREE.DoubleSide })
-                    );
-                    mesh.rotation.x = Math.PI / 2; mesh.position.y = 20; // Ставим на землю
-                    groups.zouit.add(mesh);
-                }
+                const shape = createShapeFromPolygon(poly);
+                const mesh = new THREE.Mesh(
+                    new THREE.ExtrudeGeometry(shape, { depth: 20, bevelEnabled: false }), // Высота зоны 20м
+                    new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.25, depthWrite: false, side: THREE.DoubleSide })
+                );
+                mesh.rotation.x = Math.PI / 2; mesh.position.y = 20; // Ставим на землю
+                groups.zouit.add(mesh);
             });
         });
 
@@ -546,15 +505,6 @@ window.open3DVisualization = function () {
             iframe.srcdoc = srcDocContent;
             modal.appendChild(iframe);
             document.body.appendChild(modal);
-
-            // Закрытие по Escape
-            const escHandler = (e) => {
-                if (e.key === 'Escape') {
-                    modal.remove();
-                    document.removeEventListener('keydown', escHandler);
-                }
-            };
-            document.addEventListener('keydown', escHandler);
 
         } catch (error) {
             console.error("Ошибка генерации 3D:", error);
