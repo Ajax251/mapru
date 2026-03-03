@@ -33,11 +33,7 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
 
             const geometryType = obj.geometry.getType();
             const coordinates = obj.geometry.getCoordinates();
-            
-            // Забираем полные сырые данные объекта, если они есть
             const featureData = obj.properties.get('featureData') || null;
-            const hintContent = obj.properties.get('hintContent') || null;
-            const iconContent = obj.properties.get('iconContent') || null;
 
             if (obj instanceof ymaps.Polygon) {
                 const trueCoordinates = coordinates.map(ring => ring.map(revertOffset));
@@ -65,12 +61,13 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
                     featureData: featureData
                 });
             } else if (obj instanceof ymaps.Placemark) {
-                // Если это метка (кадастровый номер, нумерация точек или фото)
                 const trueCoordinates = revertOffset(coordinates);
-                const isLabel = !!iconContent;
+                const iconContent = obj.properties.get('iconContent');
                 const isVertex = obj.properties.get('isVertexPoint'); // Точки типа н1
                 
+                // Если это текстовая метка
                 if (iconContent) {
+                    // Пытаемся получить координаты родительского полигона (для расчета площади и скрытия меток при отдалении)
                     let parentPolyCoords = null;
                     if (obj.polygon && obj.polygon.geometry) {
                          parentPolyCoords = obj.polygon.geometry.getCoordinates().map(ring => ring.map(revertOffset));
@@ -96,11 +93,11 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0, user-scalable=no">
-    <title>Интерактивная карта (Экспорт)</title>
+    <title>Интерактивная карта объектов</title>
     <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://api-maps.yandex.ru/2.1/?apikey=dde71a0e-b612-44b7-b53b-82533420240f&lang=ru_RU" type="text/javascript"></script>
     <style>
-        body, html { margin: 0; padding: 0; width: 100%; height: 100%; font-family: 'Segoe UI', Roboto, Helvetica, Arial, sans-serif; overflow: hidden; background: #eef2f7; }
+        body, html { margin: 0; padding: 0; width: 100%; height: 100%; font-family: 'Segoe UI', Arial, sans-serif; overflow: hidden; background: #eef2f7; }
         .layout { display: flex; width: 100%; height: 100%; position: relative; }
         #map { flex-grow: 1; height: 100%; position: relative; z-index: 1; }
         
@@ -204,13 +201,9 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
             });
 
             var mapData = ${jsonFeatures};
-            var labelsArray =[]; 
-            
-            // Переменные для хранения состояния выделенного объекта
-            var activeGeoObject = null;
-            var activeGeoObjectOriginalStyle = null;
+            var labelsArray =[]; // Для логики столкновений (anti-collision)
 
-            // Макет для кадастровых номеров
+            // Макет для кадастровых номеров (с автоизменением размера шрифта)
             var CustomPlacemarkLayout = ymaps.templateLayoutFactory.createClass(
                 '<div class="custom-placemark" style="font-size: $[properties.fontSize]px;">$[properties.iconContent]</div>',
                 {
@@ -233,22 +226,10 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
                 }
             );
 
+            // Макет для точек (н1)
             var NumberedPointLayout = ymaps.templateLayoutFactory.createClass(
                 '<div class="numbered-point-label" style="font-size: 14px;">$[properties.iconContent]</div>'
             );
-
-            // Функция для сброса выделения
-            function clearSelection() {
-                if (activeGeoObject && activeGeoObjectOriginalStyle) {
-                    activeGeoObject.options.set({
-                        strokeColor: activeGeoObjectOriginalStyle.strokeColor,
-                        strokeWidth: activeGeoObjectOriginalStyle.strokeWidth,
-                        strokeOpacity: activeGeoObjectOriginalStyle.strokeOpacity
-                    });
-                }
-                activeGeoObject = null;
-                activeGeoObjectOriginalStyle = null;
-            }
 
             mapData.forEach(function(item) {
                 var geoObject;
@@ -281,6 +262,7 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
                         visible: map.getZoom() > 14
                     });
                     
+                    // Если это номер участка, добавляем в массив для алгоритма видимости
                     if (!item.isVertex) {
                         labelsArray.push({
                             placemark: geoObject,
@@ -290,50 +272,17 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
                 }
 
                 if (geoObject) {
-                    // Обработчик клика для открытия сайдбара и выделения желтым контуром
+                    // Открываем панель при клике
                     if (item.type === 'Polygon' || item.type === 'LineString') {
-                        geoObject.events.add('click', function (e) {
-                            e.stopPropagation(); // Предотвращаем клик по подложке карты
-                            var target = e.get('target');
-
-                            // Если кликнули по уже выделенному объекту
-                            if (activeGeoObject === target) {
-                                clearSelection();
-                                sidebar.classList.remove('open');
-                            } else {
-                                // Если кликнули по новому объекту, сначала снимаем выделение со старого
-                                clearSelection();
-
-                                // Сохраняем его исходный стиль
-                                activeGeoObjectOriginalStyle = {
-                                    strokeColor: target.options.get('strokeColor'),
-                                    strokeWidth: target.options.get('strokeWidth'),
-                                    strokeOpacity: target.options.get('strokeOpacity')
-                                };
-
-                                // Применяем стиль выделения (Желтая толстая обводка)
-                                target.options.set({
-                                    strokeColor: '#FFFF00',
-                                    strokeWidth: Math.max(activeGeoObjectOriginalStyle.strokeWidth + 2, 4),
-                                    strokeOpacity: 1
-                                });
-
-                                activeGeoObject = target;
-                                openSidebar(item.featureData);
-                            }
+                        geoObject.events.add('click', function () {
+                            openSidebar(item.featureData);
                         });
                     }
                     map.geoObjects.add(geoObject);
                 }
             });
 
-            // Сброс выделения при клике на пустую область карты
-            map.events.add('click', function (e) {
-                clearSelection();
-                sidebar.classList.remove('open');
-            });
-
-            // АЛГОРИТМ ВИДИМОСТИ МЕТОК ПРИ ЗУМЕ
+            // --- АЛГОРИТМ ВИДИМОСТИ МЕТОК (Как в оригинале) ---
             function updateLabelsVisibility() {
                 var currentZoom = map.getZoom();
                 var projection = map.options.get('projection');
@@ -343,7 +292,8 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
                     var pm = labelObj.placemark;
                     var coords = pm.geometry.getCoordinates();
                     
-                    var areaInPixels = 1000; 
+                    // Рассчитываем примерную площадь родительского полигона в пикселях
+                    var areaInPixels = 1000; // По умолчанию большая
                     if (labelObj.polyCoords && labelObj.polyCoords[0]) {
                         var polyBounds = ymaps.util.bounds.fromPoints(labelObj.polyCoords[0]);
                         var px1 = projection.toGlobalPixels(polyBounds[0], currentZoom);
@@ -351,6 +301,7 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
                         areaInPixels = Math.abs(px2[0] - px1[0]) * Math.abs(px2[1] - px1[1]);
                     }
 
+                    // Условие видимости: достаточная площадь ИЛИ сильное приближение
                     if (areaInPixels > 500 || currentZoom > 16) {
                         if (map.geoObjects.indexOf(pm) !== -1) {
                             pm.options.set('visible', true);
@@ -376,6 +327,7 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
                     }
                 });
 
+                // Исключаем наложения (оставляем те метки, чей полигон больше)
                 for (var i = 0; i < visiblePlacemarks.length; i++) {
                     var curr = visiblePlacemarks[i];
                     if (!curr.placemark.options.get('visible')) continue;
@@ -404,23 +356,21 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
                     updateLabelsVisibility();
                 }
             });
+            
+            // Первичный запуск алгоритма
             setTimeout(updateLabelsVisibility, 500);
 
-            // --- ЛОГИКА ИНФО-ПАНЕЛИ ---
+            // --- ЛОГИКА ИНФО-ПАНЕЛИ (Перевод и чистка данных) ---
             var sidebar = document.getElementById('sidebar');
             var sidebarContent = document.getElementById('sidebar-content');
             var sidebarTitle = document.getElementById('sidebar-title');
 
             document.getElementById('close-sidebar').addEventListener('click', function() {
                 sidebar.classList.remove('open');
-                clearSelection(); // Сбрасываем контур при закрытии панели
             });
 
-            // Словарь для перевода ключей
+            // Словарь для перевода и фильтрации
             var propDict = {
-                'descr': 'Кадастровый номер / Описание',
-                'cadastralDistrictsCode': 'Кадастровый округ',
-                'adastralDistrictsCode': 'Кадастровый округ', // Учтена возможная опечатка ЕГРН
                 'cadastralNumber': 'Кадастровый номер', 'cad_num': 'Кадастровый номер', 'cad_number': 'Кадастровый номер',
                 'reg_numb_border': 'Реестровый номер', 'quarter_cad_number': 'Кадастровый квартал',
                 'readable_address': 'Адрес', 'address_readable_address': 'Адрес',
@@ -429,7 +379,6 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
                 'declared_area': 'Площадь декларированная', 'specified_area': 'Площадь уточненная',
                 'cost_value': 'Кадастровая стоимость (руб.)', 'cost_index': 'Удельный показатель (руб/м²)', 
                 'cost_application_date': 'Дата применения стоимости', 'cost_determination_date': 'Дата определения стоимости',
-                'cost_registration_date': 'Дата регистрации стоимости',
                 'determination_couse': 'Основание стоимости', 'registration_date': 'Дата регистрации', 
                 'land_record_reg_date': 'Дата внесения в ЕГРН', 'build_record_registration_date': 'Дата внесения в ЕГРН',
                 'permitted_use_established_by_document': 'ВРИ по документу', 'purpose': 'Назначение',
@@ -441,8 +390,7 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
             };
 
             // Системные ключи, которые мы НЕ показываем
-            // adastralDistrictsCode убран из списка исключений!
-            var skipKeys =['id', 'category', 'systemInfo', 'externalKey', 'interactionId', 'subcategory', 'options', 'geometry', 'label', 'cost_approvement_date', 'land_record_area', 'land_record_area_declaration', 'land_record_area_verified'];
+            var skipKeys =['id', 'category', 'systemInfo', 'externalKey', 'interactionId', 'subcategory', 'adastralDistrictsCode', 'options', 'geometry', 'label', 'cost_approvement_date', 'land_record_area', 'land_record_area_declaration', 'land_record_area_verified'];
 
             function openSidebar(featureData) {
                 sidebarContent.innerHTML = '';
@@ -456,11 +404,12 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
                 var props = featureData.properties;
                 var opts = props.options || {};
                 
+                // Ставим заголовок
                 var titleText = opts.cad_num || opts.cad_number || opts.reg_numb_border || props.descr || 'Объект';
                 sidebarTitle.textContent = titleText;
 
                 var html = '<table class="prop-table"><tbody>';
-                var addedKeys =[]; // Защита от дублирования значений
+                var addedKeys =[]; // Для защиты от дублей (например, cad_num и descr)
 
                 function renderRows(source) {
                     for (var k in source) {
@@ -471,7 +420,7 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
                         
                         var translatedKey = propDict[k] || k;
                         
-                        // Проверка на дубликаты
+                        // Проверяем, не выводили ли мы уже это значение под этим же именем (чтобы не было двух КН)
                         var isDuplicate = addedKeys.some(function(item) { return item.key === translatedKey && item.val === val; });
                         
                         if (!isDuplicate) {
@@ -494,7 +443,7 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
 </body>
 </html>`;
 
-        // Создаем файл и скачиваем
+        // 3. Создаем файл и скачиваем
         const blob = new Blob([htmlString], { type: "text/html;charset=utf-8" });
         const dateStr = new Date().toISOString().slice(0, 10);
         saveAs(blob, `Интерактивная_карта_${dateStr}.html`);
