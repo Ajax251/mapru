@@ -201,7 +201,7 @@ window.open3DVisualization = function () {
     <div id="ui-panel">
         <h3>Управление слоями</h3>
         <label class="layer-toggle"><input type="checkbox" id="t-target" checked><div class="color-box" style="background:#ef4444;"></div> Исходный объект</label>
-        <label class="layer-toggle"><input type="checkbox" id="t-parcels" checked><div class="color-box" style="background:#86efac;"></div> Земля (Лужайки)</label>
+        <label class="layer-toggle"><input type="checkbox" id="t-parcels" checked><div class="color-box" style="background:#86efac;"></div> Земля</label>
         <label class="layer-toggle"><input type="checkbox" id="t-buildings" checked><div class="color-box" style="background:#fcd34d;"></div> Здания / Дома</label>
         <label class="layer-toggle"><input type="checkbox" id="t-structures" checked><div class="color-box" style="background:#3b82f6;"></div> Сети / Трубы</label>
         <label class="layer-toggle"><input type="checkbox" id="t-zouit" checked><div class="color-box" style="background:linear-gradient(135deg, #fbbf24 50%, #c084fc 50%); opacity: 0.7;"></div> Охранные зоны</label>
