@@ -20,7 +20,6 @@ window.open3DVisualization = function () {
                 throw new Error("Нет исходного объекта для построения сцены.");
             }
 
-            // Вычисляем центр сцены по целевому объекту
             window.quickReportTargetObjects.forEach(obj => {
                 if (!obj || !obj.geometry) return;
                 const coords = obj.geometry.getCoordinates();
@@ -54,8 +53,7 @@ window.open3DVisualization = function () {
                 const o = p.options || {};
                 const descr = p.descr || '';
                 const purpose = o.purpose || o.params_purpose || '';
-                // Приоритетно берем полное название из документов
-                const name = o.name_by_doc || o.name || o.params_name || o.building_name || ''; 
+                const name = o.name || o.params_name || o.building_name || o.name_by_doc || '';
                 
                 const text = (descr + ' ' + name + ' ' + purpose).toLowerCase();
                 
@@ -84,16 +82,12 @@ window.open3DVisualization = function () {
                     meta.floors = parseInt(o.floors) || defaultFloors;
                     meta.height = meta.floors * 3.5;
                 }
-                else if (category === 'structure' || category === 'zouit' || category === 'target') {
+                else if (category === 'structure' || category === 'zouit') {
                     meta.isGas = text.includes('газ');
                     meta.isWater = text.includes('вод') || text.includes('канализ') || text.includes('сток');
                     meta.isElectric = text.includes('электр') || text.includes('лэп') || text.includes('вл ') || text.includes('воздушн');
                     meta.isUnderground = text.includes('подзем') || (!text.includes('надзем') && meta.isWater);
                     meta.diameter = parseFloat(o.diameter) || (meta.isGas ? 0.3 : 0.4);
-                }
-                if (category === 'parcel') {
-                    meta.isParcel = true;
-                    if (meta.name === 'Объект' || meta.name === meta.id) meta.name = 'Земельный участок';
                 }
                 return meta;
             };
@@ -130,35 +124,10 @@ window.open3DVisualization = function () {
                 return result;
             };
 
-            // Улучшенный парсинг целевых объектов (чтобы ЗОУИТ-цель правильно красился)
             window.quickReportTargetObjects.forEach(obj => {
                 const coords = obj.geometry.getCoordinates();
                 const type = obj.geometry.getType();
-                
-                const featureData = obj.properties.get('featureData');
-                const catId = featureData ? featureData.properties.category : null;
-                let logicCategory = 'target';
-                if (catId === 36368) logicCategory = 'parcel';
-                else if (catId === 36940 || catId === 36315) logicCategory = 'zouit';
-                
-                const pseudoFeature = featureData || { 
-                    properties: { descr: obj.properties.get('cadastralNumber') || 'Целевой объект' },
-                    options: obj.properties.get('hintContent') || {}
-                };
-                
-                // Извлекаем правильное имя
-                let tName = 'Целевой объект';
-                if (featureData && featureData.properties && featureData.properties.options) {
-                    const o = featureData.properties.options;
-                    tName = o.name_by_doc || o.name || o.reg_numb_border || tName;
-                } else if (typeof pseudoFeature.options === 'object' && pseudoFeature.options.address) {
-                    tName = pseudoFeature.options.address;
-                }
-
-                const meta = analyzeFeature(pseudoFeature, logicCategory);
-                meta.name = "Целевой: " + tName;
-                meta.isSpatial = true;
-
+                const isTargetParcel = obj.properties.get('isParcelInQuarter') || obj.properties.get('isFoundInArea') || (obj.properties.get('featureData') && obj.properties.get('featureData').properties.category === 36368);
                 let rings = [];
                 if (type === 'Point') rings = [[coords]];
                 else if (type === 'LineString') rings = [coords];
@@ -171,7 +140,7 @@ window.open3DVisualization = function () {
                 allLocalFeatures.target.push({
                     type: (type === 'Polygon' || type === 'MultiPolygon') ? 'Polygon' : 'Line',
                     polygons: [localPoly],
-                    meta: meta
+                    meta: { isParcel: isTargetParcel, name: 'Целевой объект', id: obj.properties.get('cadastralNumber') || '', isSpatial: true }
                 });
             });
             
@@ -183,7 +152,7 @@ window.open3DVisualization = function () {
             const safeDataString = JSON.stringify(allLocalFeatures).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
 
             // ====================================================================
-            // 3. СОЗДАНИЕ UI (Модальное окно + Iframe)
+            // 4. СОЗДАНИЕ UI (Модальное окно + Iframe)
             // ====================================================================
             const modalId = 'modal-3d-view-advanced';
             let modal = document.getElementById(modalId);
@@ -328,7 +297,7 @@ try {
             wall: 0xfde68a, base: 0x78350f, roof: 0x7f1d1d, win: 0x60a5fa, winType: 'standard', parapet: false, hippedRoof: true
         },
         commercial: {
-            keys: ['магазин', 'торгов', 'офис', 'бизнес', 'тц', 'трц', 'коммерч', 'центр'],
+            keys: ['магазин', 'торгов', 'офис', 'бизнес', 'тц', 'трц', 'коммерч'],
             wall: 0x6ee7b7, base: 0x064e3b, roof: 0x1f2937, win: 0x1e3a8a, winType: 'large', parapet: true
         },
         industrial: {
@@ -444,27 +413,15 @@ try {
         return { x: cx/points.length, z: cy/points.length };
     };
 
-    // ЭВРИСТИКА: ВЫДЕЛЕНИЕ ЦЕНТРАЛЬНОЙ ОСИ ИЗ ПОЛИГОНА ЗОУИТ
-    const getCenterlineFromPolygon = (pts) => {
-        if (!pts || pts.length < 4) return pts.map(p => new THREE.Vector3(p.x, 0, -p.y));
-        const line = [];
-        const half = Math.floor(pts.length / 2);
-        for(let i=0; i<=half; i++) {
-            const p1 = pts[i];
-            const p2 = pts[pts.length - 1 - i];
-            line.push(new THREE.Vector3((p1.x+p2.x)/2, 0, -(p1.y+p2.y)/2));
-        }
-        return line;
-    };
-
-    // ТЕКСТОВЫЕ МЕТКИ С АДАПТИВНОЙ ШИРИНОЙ
+    // ТЕКСТОВЫЕ МЕТКИ
     const createLabel = (name, id, areaText, isSmall = false) => {
         const canvas = document.createElement("canvas");
+        // Динамическая ширина для длинных текстов (например ЗОУИТ)
         const ctxMeasure = canvas.getContext("2d");
         ctxMeasure.font = "bold 56px sans-serif";
         const textWidth = ctxMeasure.measureText(name || "Объект").width;
         
-        canvas.width = isSmall ? 512 : Math.max(800, textWidth + 150); 
+        canvas.width = isSmall ? 512 : Math.max(1024, textWidth + 100); 
         canvas.height = isSmall ? 256 : 256;
         const ctx = canvas.getContext("2d");
         
@@ -480,13 +437,13 @@ try {
             ctx.fillStyle = "#3b82f6"; ctx.font = "bold 28px monospace"; ctx.fillText(id, centerX, 140, 480);
             if (areaText) { ctx.fillStyle = "#ef4444"; ctx.font = "bold 26px sans-serif"; ctx.fillText(areaText, centerX, 200, 480); }
         } else {
-            ctx.fillStyle = "#1e293b"; ctx.font = "bold 48px sans-serif"; ctx.fillText(name || "Объект", centerX, 90, canvas.width - 40);
-            ctx.fillStyle = "#3b82f6"; ctx.font = "bold 40px monospace"; ctx.fillText(id || "", centerX, 160, canvas.width - 40);
-            if (areaText) { ctx.fillStyle = "#64748b"; ctx.font = "34px sans-serif"; ctx.fillText(areaText, centerX, 215, canvas.width - 40); }
+            ctx.fillStyle = "#1e293b"; ctx.font = "bold 56px sans-serif"; ctx.fillText(name || "Объект", centerX, 90, canvas.width - 40);
+            ctx.fillStyle = "#3b82f6"; ctx.font = "bold 44px monospace"; ctx.fillText(id || "", centerX, 155, canvas.width - 40);
+            if (areaText) { ctx.fillStyle = "#64748b"; ctx.font = "38px sans-serif"; ctx.fillText(areaText, centerX, 210, canvas.width - 40); }
         }
         
         const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), depthTest: false }));
-        sprite.scale.set((canvas.width / 1024) * 20, isSmall ? 5 : 5, 1); 
+        sprite.scale.set((canvas.width / 1024) * 16, 4, 1); // Масштабируем пропорционально ширине
         return sprite;
     };
 
@@ -506,7 +463,7 @@ try {
         return group;
     };
 
-    // УМНЫЙ ГЕНЕРАТОР ЗДАНИЙ (ИСПРАВЛЕНЫ ОКНА)
+    // УМНЫЙ ГЕНЕРАТОР ЗДАНИЙ 
     const createBuildingModel = (shape, height, style, isMiniature = false) => {
         const building = new THREE.Group();
         const pts = shape.getPoints();
@@ -523,6 +480,7 @@ try {
         if(!isMiniature) { walls.castShadow = true; walls.receiveShadow = true; }
         building.add(walls);
 
+        // Крыша
         if (style.hippedRoof && pts.length === 5) { 
             const w = Math.abs(pts[0].x - pts[1].x) + 1;
             const l = Math.abs(pts[1].y - pts[2].y) + 1;
@@ -551,7 +509,7 @@ try {
             building.add(cg);
         }
 
-        // ИСПРАВЛЕННЫЙ АЛГОРИТМ РАССТАНОВКИ ОКОН (Используем lookAt)
+        // ИСПРАВЛЕННЫЙ АЛГОРИТМ РАССТАНОВКИ ОКОН
         if (style.winType !== 'none' && style.win) {
             let winW = 1.5, winH = 1.8, winSpace = 1.5;
             if (style.winType === 'dense') { winW = 1.2; winSpace = 0.8; }
@@ -563,16 +521,20 @@ try {
             const floors = Math.max(1, Math.floor(height / 3.5));
 
             for (let i = 0; i < pts.length - 1; i++) {
-                // Точки в 3D
+                // Точки в 3D (x, 0, z)
                 const p1 = new THREE.Vector3(pts[i].x, 0, -pts[i].y);
                 const p2 = new THREE.Vector3(pts[i+1].x, 0, -pts[i+1].y);
                 
                 const dir = new THREE.Vector3().subVectors(p2, p1);
                 const len = dir.length();
-                dir.normalize(); 
+                dir.normalize(); // Вектор направления стены
                 
-                // Вектор нормали: поворот вектора направления на 90 градусов
+                // Вектор нормали: поворот dir на 90 градусов (учитывая, что Y направлен вниз в 2D)
+                // Для стандартного обхода полигонов нормаль наружу это:
                 const normal = new THREE.Vector3(-dir.z, 0, dir.x).normalize();
+                
+                // Угол для поворота самого окна (чтобы оно лежало на стене)
+                const angle = Math.atan2(dir.x, dir.z);
 
                 const count = Math.floor(len / (winW + winSpace));
                 if (count > 0) {
@@ -581,19 +543,14 @@ try {
                         const yPos = 1.1 + (f * 3.5) + 1.75;
                         for (let w = 0; w < count; w++) {
                             const offset = pad + (winW / 2) + w * (winW + winSpace);
-                            
-                            // Центр окна
+                            // Позиция окна вдоль стены
                             const wx = p1.x + dir.x * offset;
                             const wz = p1.z + dir.z * offset;
                             
                             const m = new THREE.Mesh(winGeo, winMat);
-                            // Сдвигаем на 5 см наружу по нормали
-                            m.position.set(wx + normal.x * 0.05, yPos, wz + normal.z * 0.05);
-                            
-                            // Идеальный поворот: смотрим в точку, находящуюся прямо перед окном
-                            const target = new THREE.Vector3(wx + normal.x * 2, yPos, wz + normal.z * 2);
-                            m.lookAt(target);
-                            
+                            // Сдвигаем окно чуть наружу по вектору нормали, чтобы избежать мерцания
+                            m.position.set(wx + normal.x * 0.1, yPos, wz + normal.z * 0.1);
+                            m.rotation.y = angle; 
                             building.add(m);
                         }
                     }
@@ -609,50 +566,29 @@ try {
 
     // 1. ЦЕЛЕВОЙ ОБЪЕКТ
     data.target.forEach(t => {
-        // Если целевой объект - ЗОУИТ Газа/ЛЭП, строим его как туннель!
-        if (t.meta.isGas || t.meta.isElectric) {
-            const isPower = t.meta.isElectric;
-            const color = isPower ? 0xa855f7 : 0xfbbf24;
-            t.polygons.forEach(poly => {
-                if(!poly || !poly[0] || poly[0].length < 2) return;
-                const pts3D = t.type === "Line" ? poly[0].map(p => new THREE.Vector3(p.x, isPower?5:2, -p.y)) : getCenterlineFromPolygon(poly[0]).map(p=>new THREE.Vector3(p.x, isPower?5:2, p.z));
-                if(pts3D.length > 1) {
-                    const tunnel = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts3D), 64, isPower?6:4, 16, false), new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.25, depthWrite: false }));
-                    groups.target.add(tunnel);
+        const color = (t.meta && t.meta.isParcel) ? 0x22c55e : 0xef4444;
+        t.polygons.forEach(poly => {
+            if (!poly || !poly[0]) return;
+            if (t.type === "Line") {
+                const vecPoints = poly[0].map(p => new THREE.Vector3(p.x, 1.5, -p.y));
+                if (vecPoints.length > 1) {
+                    const tube = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(vecPoints, false, "chordal"), 64, 0.6, 8, false), new THREE.MeshStandardMaterial({ color: color }));
+                    tube.castShadow = true; groups.target.add(tube);
                 }
-            });
-            if(t.meta && t.polygons[0]) {
-                let closestPt = t.polygons[0][0][0]; let minDist = Infinity;
-                t.polygons[0][0].forEach(p => { const dist = p.x*p.x + p.y*p.y; if(dist < minDist){ minDist = dist; closestPt = p; } });
-                const lbl = createLabel(t.meta.name, t.meta.id, "Целевой объект");
-                lbl.position.set(closestPt.x, isPower ? 14 : 10, -closestPt.y); groups.labels.add(lbl);
-            }
-        } else {
-            // Обычный целевой объект (красный) или ЗУ (зеленый)
-            const color = (t.meta && t.meta.isParcel) ? 0x22c55e : 0xef4444;
-            t.polygons.forEach(poly => {
-                if (!poly || !poly[0]) return;
-                if (t.type === "Line") {
-                    const vecPoints = poly[0].map(p => new THREE.Vector3(p.x, 1.5, -p.y));
-                    if (vecPoints.length > 1) {
-                        const tube = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(vecPoints, false, "chordal"), 64, 0.6, 8, false), new THREE.MeshStandardMaterial({ color: color }));
-                        tube.castShadow = true; groups.target.add(tube);
-                    }
-                } else {
-                    const shape = createShape(poly);
-                    if(shape.getPoints().length > 2) {
-                        const mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: 0.8, bevelEnabled: false }), new THREE.MeshStandardMaterial({ color: color, opacity: 0.8, transparent: true }));
-                        mesh.rotation.x = Math.PI / 2; mesh.position.y = 0.4;
-                        const edges = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0x7f1d1d, linewidth: 2 }));
-                        mesh.add(edges); mesh.castShadow = true; groups.target.add(mesh);
-                    }
+            } else {
+                const shape = createShape(poly);
+                if(shape.getPoints().length > 2) {
+                    const mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: 0.8, bevelEnabled: false }), new THREE.MeshStandardMaterial({ color: color, opacity: 0.8, transparent: true }));
+                    mesh.rotation.x = Math.PI / 2; mesh.position.y = 0.4;
+                    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0x7f1d1d, linewidth: 2 }));
+                    mesh.add(edges); mesh.castShadow = true; groups.target.add(mesh);
                 }
-            });
-            if(t.meta && t.polygons[0]) {
-                const c = getCentroid(t.polygons[0][0]);
-                const lbl = createLabel(t.meta.name, t.meta.id, t.meta.area);
-                lbl.position.set(c.x, 12, c.z); groups.labels.add(lbl);
             }
+        });
+        if(t.meta && t.polygons[0]) {
+            const c = getCentroid(t.polygons[0][0]);
+            const lbl = createLabel(t.meta.name, t.meta.id, t.meta.area);
+            lbl.position.set(c.x, 12, c.z); groups.labels.add(lbl);
         }
     });
 
@@ -688,6 +624,7 @@ try {
                 }
             });
         } else {
+            // Расстановка парящих объектов по кругу
             const radius = 25 + (linkedObjectsCount % 2) * 8; 
             const angle = (linkedObjectsCount * Math.PI * 2) / 6; 
             const posX = Math.cos(angle) * radius;
@@ -722,118 +659,103 @@ try {
     data.structures.forEach(s => {
         s.polygons.forEach(poly => {
             if(!poly || !poly[0] || poly[0].length < 2) return;
-            
-            // Если это газопровод или ЛЭП в виде полигона, вытягиваем из него центральную ось
-            const pts3D = s.type === "Line" 
-                ? poly[0].map(pt => new THREE.Vector3(pt.x, 0, -pt.y)) 
-                : getCenterlineFromPolygon(poly[0]);
-
-            if(pts3D.length < 2) return;
-
-            if(s.meta.isGas && !s.meta.isUnderground) {
-                const pipeH = 3;
-                pts3D.forEach(p => p.y = pipeH);
-                const pipe = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts3D), 64, s.meta.diameter, 8, false), new THREE.MeshStandardMaterial({ color: 0xfbbf24, roughness: 0.4 }));
-                pipe.castShadow = true; groups.structures.add(pipe);
-                
-                pts3D.forEach((pt, i) => {
-                    if(i % 2 === 0) {
-                        const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, pipeH), new THREE.MeshStandardMaterial({ color: 0x94a3b8 }));
-                        pole.position.set(pt.x, pipeH/2, pt.z); pole.castShadow = true; groups.structures.add(pole);
-                    }
-                });
-                const midPt = pts3D[Math.floor(pts3D.length/2)];
-                const lbl = createLabel("Газопровод", s.meta.id, "Ø " + s.meta.diameter + "м");
-                lbl.position.set(midPt.x, pipeH + 4, midPt.z); groups.labels.add(lbl);
-            }
-            else if(s.meta.isElectric) {
-                const poleH = 10;
-                pts3D.forEach(p => p.y = poleH);
-                pts3D.forEach((pt, index) => {
-                    const poleGroup = new THREE.Group();
-                    const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.3, poleH), new THREE.MeshStandardMaterial({ color: 0x5c4033 }));
-                    pole.position.y = poleH/2; pole.castShadow = true; poleGroup.add(pole);
-                    const cross = new THREE.Mesh(new THREE.BoxGeometry(3, 0.2, 0.2), new THREE.MeshStandardMaterial({ color: 0x5c4033 }));
-                    cross.position.y = poleH - 0.5;
-                    if (index < pts3D.length - 1) cross.rotation.y = Math.atan2(pts3D[index+1].x - pt.x, pts3D[index+1].z - pt.z);
-                    else if (index > 0) cross.rotation.y = Math.atan2(pt.x - pts3D[index-1].x, pt.z - pts3D[index-1].z);
-                    poleGroup.add(cross); poleGroup.position.set(pt.x, 0, pt.z); groups.structures.add(poleGroup);
-                });
-                
-                const wireMat = new THREE.LineBasicMaterial({ color: 0x111827 });
-                for(let i=0; i<pts3D.length-1; i++) {
-                    const p1 = pts3D[i].clone(); p1.y -= 0.5; const p2 = pts3D[i+1].clone(); p2.y -= 0.5;
-                    const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5); mid.y -= 1.5;
-                    const curve = new THREE.QuadraticBezierCurve3(p1, mid, p2);
-                    groups.structures.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(curve.getPoints(20)), wireMat));
+            if(s.type === "Line") {
+                if(s.meta.isGas && !s.meta.isUnderground) {
+                    const pipeH = 3;
+                    const pts = poly[0].map(pt => new THREE.Vector3(pt.x, pipeH, -pt.y));
+                    const pipe = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 64, s.meta.diameter, 8, false), new THREE.MeshStandardMaterial({ color: 0xfbbf24, roughness: 0.4 }));
+                    pipe.castShadow = true; groups.structures.add(pipe);
+                    
+                    pts.forEach((pt, i) => {
+                        if(i % 2 === 0) {
+                            const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, pipeH), new THREE.MeshStandardMaterial({ color: 0x94a3b8 }));
+                            pole.position.set(pt.x, pipeH/2, pt.z); pole.castShadow = true; groups.structures.add(pole);
+                        }
+                    });
+                    const midPt = pts[Math.floor(pts.length/2)];
+                    const lbl = createLabel("Газопровод", s.meta.id, "Ø " + s.meta.diameter + "м");
+                    lbl.position.set(midPt.x, pipeH + 4, midPt.z); groups.labels.add(lbl);
                 }
-                const midPt = pts3D[Math.floor(pts3D.length/2)];
-                const lbl = createLabel("ЛЭП", s.meta.id, s.meta.voltage);
-                lbl.position.set(midPt.x, poleH + 5, midPt.z); groups.labels.add(lbl);
-            }
-            else {
-                const yOff = s.meta.isUnderground ? -1 : 1;
-                pts3D.forEach(p => p.y = yOff);
-                groups.structures.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts3D), 50, s.meta.diameter, 12, false), new THREE.MeshStandardMaterial({ color: 0x3b82f6 })));
+                else if(s.meta.isElectric) {
+                    const poleH = 10;
+                    const pts = poly[0].map(pt => new THREE.Vector3(pt.x, poleH, -pt.y));
+                    pts.forEach((pt, index) => {
+                        const poleGroup = new THREE.Group();
+                        const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.3, poleH), new THREE.MeshStandardMaterial({ color: 0x5c4033 }));
+                        pole.position.y = poleH/2; pole.castShadow = true; poleGroup.add(pole);
+                        const cross = new THREE.Mesh(new THREE.BoxGeometry(3, 0.2, 0.2), new THREE.MeshStandardMaterial({ color: 0x5c4033 }));
+                        cross.position.y = poleH - 0.5;
+                        if (index < pts.length - 1) cross.rotation.y = Math.atan2(pts[index+1].x - pt.x, pts[index+1].z - pt.z);
+                        else if (index > 0) cross.rotation.y = Math.atan2(pt.x - pts[index-1].x, pt.z - pts[index-1].z);
+                        poleGroup.add(cross); poleGroup.position.set(pt.x, 0, pt.z); groups.structures.add(poleGroup);
+                    });
+                    
+                    const wireMat = new THREE.LineBasicMaterial({ color: 0x111827 });
+                    for(let i=0; i<pts.length-1; i++) {
+                        const p1 = pts[i].clone(); p1.y -= 0.5; const p2 = pts[i+1].clone(); p2.y -= 0.5;
+                        const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5); mid.y -= 1.5;
+                        const curve = new THREE.QuadraticBezierCurve3(p1, mid, p2);
+                        groups.structures.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(curve.getPoints(20)), wireMat));
+                    }
+                    const midPt = pts[Math.floor(pts.length/2)];
+                    const lbl = createLabel("ЛЭП", s.meta.id, s.meta.voltage);
+                    lbl.position.set(midPt.x, poleH + 5, midPt.z); groups.labels.add(lbl);
+                }
+                else {
+                    const yOff = s.meta.isUnderground ? -1 : 1;
+                    const pts = poly[0].map(pt => new THREE.Vector3(pt.x, yOff, -pt.y));
+                    groups.structures.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 50, s.meta.diameter, 12, false), new THREE.MeshStandardMaterial({ color: 0x3b82f6 })));
+                }
+            } else {
+                const shape = createShape(poly);
+                if(shape.getPoints().length > 2) {
+                    const mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: 1, bevelEnabled: false }), new THREE.MeshStandardMaterial({ color: 0x94a3b8 }));
+                    mesh.rotation.x = Math.PI / 2; mesh.position.y = 0.5; mesh.castShadow = true; groups.structures.add(mesh);
+                    const c = getCentroid(poly[0]);
+                    const lbl = createLabel(s.meta.name, s.meta.id, ""); lbl.position.set(c.x, 5, c.z); groups.labels.add(lbl);
+                }
             }
         });
     });
 
     // 5. ЗОУИТ
+    // ИСПРАВЛЕНИЕ: Теперь ЗОУИТ-Полигоны, содержащие "газ" или "электр", корректно красятся!
     data.zouits.forEach(z => {
         const isGas = z.meta.isGas;
         const isPower = z.meta.isElectric;
-        const color = isGas ? 0xfbbf24 : (isPower ? 0xa855f7 : 0x3b82f6); 
+        const color = isGas ? 0xfbbf24 : (isPower ? 0xa855f7 : 0x3b82f6); // Желтый / Фиолетовый / Синий
+        const labelText = z.meta.name || (isGas ? "Охранная зона газа" : (isPower ? "Охранная зона ЛЭП" : "ЗОУИТ"));
 
         z.polygons.forEach(poly => {
             if(!poly || !poly[0] || poly[0].length < 2) return;
             
-            // Если это ГАЗ или ЛЭП (даже если пришел полигоном) - делаем туннель + трубу/провода!
-            if (isGas || isPower) {
-                const height = isPower ? 5 : 2;
-                const radius = isPower ? 6 : 4;
+            if (z.type === "Line") {
+                const pts = poly[0].map(p => new THREE.Vector3(p.x, isPower ? 5 : 2, -p.y));
+                const zone = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 64, isPower ? 6 : 4, 16, false), new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.2, depthWrite: false }));
+                groups.zouit.add(zone);
                 
-                const pts3D = z.type === "Line" 
-                    ? poly[0].map(p => new THREE.Vector3(p.x, height, -p.y)) 
-                    : getCenterlineFromPolygon(poly[0]).map(p => new THREE.Vector3(p.x, height, p.z));
-
-                if (pts3D.length > 1) {
-                    // Рисуем полупрозрачный туннель (САМ ЗОУИТ)
-                    const tunnel = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts3D), 64, radius, 16, false), new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.25, depthWrite: false }));
-                    groups.zouit.add(tunnel);
-
-                    // Рисуем условную трубу внутри
-                    if (isGas) {
-                        const pipe = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts3D), 64, 0.4, 8, false), new THREE.MeshStandardMaterial({ color: 0xfbbf24 }));
-                        groups.zouit.add(pipe);
-                    } else {
-                        // Для ЛЭП можно нарисовать условный провод
-                        const wire = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts3D), 64, 0.1, 4, false), new THREE.MeshStandardMaterial({ color: 0x111827 }));
-                        groups.zouit.add(wire);
-                    }
-                }
-                
-                // Табличка БЛИЖЕ К ЦЕНТРУ (Камере)
-                let closestPt = poly[0][0]; let minDist = Infinity;
-                poly[0].forEach(p => { const dist = p.x*p.x + p.y*p.y; if(dist < minDist){ minDist = dist; closestPt = p; } });
-                const lbl = createLabel(z.meta.name, z.meta.id, "");
-                lbl.position.set(closestPt.x, isPower ? 14 : 8, -closestPt.y); groups.labels.add(lbl);
-
+                const midPt = pts[Math.floor(pts.length/2)];
+                const lbl = createLabel(labelText, z.meta.id, "");
+                lbl.position.set(midPt.x, isPower ? 14 : 8, midPt.z); groups.labels.add(lbl);
             } else {
-                // Если это обычный площадной ЗОУИТ
                 const shape = createShape(poly);
                 if(shape.getPoints().length > 2) {
-                    const h = 6; 
+                    const h = isPower ? 15 : (isGas ? 4 : 6); // Разная высота зон
                     const mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false }), new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.15, depthWrite: false }));
                     mesh.rotation.x = Math.PI / 2; mesh.position.y = h/2; groups.zouit.add(mesh);
                     
                     const edges = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: color, transparent: true, opacity: 0.5 }));
                     mesh.add(edges);
 
-                    // Табличка БЛИЖЕ К ЦЕНТРУ (Камере)
-                    let closestPt = poly[0][0]; let minDist = Infinity;
-                    poly[0].forEach(p => { const dist = p.x*p.x + p.y*p.y; if(dist < minDist){ minDist = dist; closestPt = p; } });
-                    const lbl = createLabel(z.meta.name, z.meta.id, ""); 
+                    // ИСПРАВЛЕНИЕ: Метка ставится на ближайшей к центру точке, а не в центроиде!
+                    let closestPt = poly[0][0];
+                    let minDist = Infinity;
+                    poly[0].forEach(p => {
+                        const dist = p.x*p.x + p.y*p.y;
+                        if(dist < minDist) { minDist = dist; closestPt = p; }
+                    });
+
+                    const lbl = createLabel(labelText, z.meta.id, ""); 
                     lbl.position.set(closestPt.x, h + 3, -closestPt.y); 
                     groups.labels.add(lbl);
                 }
@@ -861,6 +783,7 @@ try {
         requestAnimationFrame(animate);
         controls.update();
         
+        // Анимация парящих миниатюр
         const time = performance.now() * 0.002;
         animateables.forEach(obj => {
             obj.position.y = obj.userData.baseY + Math.sin(time + obj.userData.offset) * 1.5;
