@@ -145,7 +145,7 @@ window.open3DVisualization = function () {
                 color: '#1e293b', display: 'flex', justifyContent: 'space-between', alignItems: 'center',
                 fontWeight: 'bold', fontSize: '15px', fontFamily: 'system-ui, sans-serif'
             });
-            header.innerHTML = '<span><i class="fas fa-cube" style="color:#3b82f6; margin-right:8px;"></i> 3D Кадастровая визуализация</span>';
+            header.innerHTML = '<span><i class="fas fa-cube" style="color:#3b82f6; margin-right:8px;"></i> 3D визуализация</span>';
             
             const btnContainer = document.createElement('div');
             btnContainer.style.display = 'flex';
