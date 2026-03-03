@@ -14985,20 +14985,16 @@ async function exportMapToJson() {
             texts: []
         };
 
+        // Собираем уникальные объекты
         const allObjects = new Set([...polygons, ...areaObjects, ...parcelPlacemarks]);
         
-        allObjects.forEach(obj => {
-            if (!obj.properties.get('_exportId')) {
-                obj.properties.set('_exportId', 'id_' + Math.random().toString(36).substr(2, 9));
-            }
-        });
-
         allObjects.forEach(obj => {
             if (!obj.geometry) return;
 
             let geometryType = obj.geometry.getType();
             let coordinates = obj.geometry.getCoordinates();
             
+            // Убираем смещение (нормализация к чистому WGS84)
             let trueCoordinates;
             const revertOffset = (coord) => [
                 coord[0] + (mapOffsetY * 0.000008983),
@@ -15013,12 +15009,14 @@ async function exportMapToJson() {
                 trueCoordinates = coordinates.map(ring => ring.map(revertOffset));
             }
 
+            // Получаем "сырые" данные и очищаем их
             const rawProperties = obj.properties.getAll();
             const rawOptions = obj.options.getAll();
             
             const cleanProperties = getSafeData(rawProperties);
             const cleanOptions = getSafeData(rawOptions);
 
+            // Дополнительная чистка options
             delete cleanOptions.iconLayout; 
             delete cleanOptions.hintLayout;
 
@@ -15027,6 +15025,7 @@ async function exportMapToJson() {
                 const currentLayout = obj.options.get('iconLayout');
                 isCustomLabel = (obj instanceof ymaps.Placemark) && (currentLayout === customPlacemarkLayout);
             } catch (e) {
+                // Игнорируем ошибки доступа
             }
 
             const serializedFeature = {
@@ -15046,9 +15045,8 @@ async function exportMapToJson() {
                     isManuallyDrawn: obj.properties.get('isManuallyDrawn'),
                     isAreaMeasurement: areaObjects.includes(obj),
                     isVertexPoint: obj.properties.get('isVertexPoint'),
-                    _exportId: obj.properties.get('_exportId'),
-                    relatedPolygonId: obj.properties.get('relatedPolygon') ? obj.properties.get('relatedPolygon').properties.get('_exportId') : null,
-                    relatedPolygonCadastralNumber: obj.properties.get('relatedPolygon') ? obj.properties.get('relatedPolygon').properties.get('cadastralNumber') : null,
+                     relatedPolygonCadastralNumber: obj.properties.get('relatedPolygon') ? 
+                        obj.properties.get('relatedPolygon').properties.get('cadastralNumber') : null,
                     isCustomLabel: isCustomLabel 
                 }
             };
@@ -15056,6 +15054,7 @@ async function exportMapToJson() {
             mapData.features.push(serializedFeature);
         });
 
+        // Экспорт Draggable Text
         draggableTexts.forEach(el => {
             const span = el.querySelector('span');
             if (!span) return;
@@ -15080,19 +15079,23 @@ async function exportMapToJson() {
             }
         });
 
+        // --- НАЧАЛО ИЗМЕНЕНИЙ (Архивация) ---
         const jsonString = JSON.stringify(mapData, null, 2);
         
         const zip = new JSZip();
+        // Кладем JSON внутрь архива с фиксированным именем
         zip.file("map_data.json", jsonString);
 
+        // Генерируем с максимальным сжатием
         const blob = await zip.generateAsync({
             type: "blob",
             compression: "DEFLATE",
             compressionOptions: { level: 9 }
         });
+        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         const dateStr = new Date().toISOString().slice(0,10);
-        saveAs(blob, `Map_Export_${dateStr}.map`); 
+        saveAs(blob, `Map_Export_${dateStr}.map`); // Сохраняем как .map, но внутри это zip
         
         showNotification(`Экспортировано объектов: ${mapData.features.length + mapData.texts.length}`, 'success', 'file-export');
 
@@ -15106,6 +15109,8 @@ async function exportMapToJson() {
 
 
 
+// --- НОВАЯ ФУНКЦИЯ ДЛЯ ФОРМИРОВАНИЯ XML ПО ТИПАМ ОБЪЕКТОВ ---
+// --- НОВАЯ ФУНКЦИЯ ДЛЯ ФОРМИРОВАНИЯ XML ПО ТИПАМ ОБЪЕКТОВ (ФИНАЛЬНАЯ) ---
 async function generateTypedXmlForAllObjects() {
     try {
         const allDrawableObjects = new Set([...polygons, ...areaObjects]);
@@ -15386,6 +15391,7 @@ async function generateTypedXmlForAllObjects() {
 }
 // --- КОНЕЦ НОВОЙ ФУНКЦИИ ---
 
+// --- ФУНКЦИЯ ИМПОРТА (Обработчик input) ---
 function handleMapJsonImport(event) {
     const file = event.target.files[0];
     if (!file) return;
@@ -15399,6 +15405,7 @@ function handleMapJsonImport(event) {
             const arrayBuffer = e.target.result;
             let jsonContent;
 
+            // --- Распаковка (поддержка ZIP и обычного JSON) ---
             try {
                 const zip = await JSZip.loadAsync(arrayBuffer);
                 let jsonFile = zip.file("map_data.json");
@@ -15422,11 +15429,12 @@ function handleMapJsonImport(event) {
 
             const parsedData = JSON.parse(jsonContent);
 
+            // === ЛОГИКА ДЛЯ STANDARD GeoJSON (NSPD формат) ===
             if (parsedData.type === 'FeatureCollection' || parsedData.type === 'Feature' || (parsedData.data && parsedData.data.features)) {
                 
                 clearMapAndResetTheme();
                 
-                let featuresToImport =[];
+                let featuresToImport = [];
                 if (parsedData.type === 'Feature') {
                     featuresToImport = [parsedData];
                 } else if (parsedData.type === 'FeatureCollection') {
@@ -15439,11 +15447,12 @@ function handleMapJsonImport(event) {
                     throw new Error("JSON файл не содержит объектов (features).");
                 }
 
+                // --- НОВАЯ ЛОГИКА РАСПРЕДЕЛЕНИЯ ПО ТИПАМ ---
                 const parcels = [];
-                const buildings =[];
+                const buildings = [];
                 const structures = [];
                 const zouits = [];
-                const others =[];
+                const others = [];
 
                 featuresToImport.forEach(f => {
                     const props = f.properties || {};
@@ -15451,6 +15460,7 @@ function handleMapJsonImport(event) {
                     const cat = props.category;
                     const catName = props.categoryName;
 
+                    // Определение типа объекта по категории или косвенным признакам
                     const isBuilding = cat === 36369 || catName === 'Здания' || opts.build_record_area || (opts.cad_num && opts.purpose);
                     const isStructure = cat === 36383 || catName === 'Сооружения' || (opts.cad_number && opts.params_extension);
                     const isZouit = cat === 36940 || catName?.includes('Зоны') || opts.content_restrict_encumbrances || (opts.reg_numb_border && !opts.type_zone);
@@ -15464,18 +15474,23 @@ function handleMapJsonImport(event) {
                     } else if (isZouit) {
                         zouits.push(f);
                     } else if (isTerrZone) {
+                        // Терр. зоны отрисовываем как ЗОУИТ (они похожи по структуре)
                         zouits.push(f);
                     } else {
+                        // По умолчанию считаем участком (или если явно участок)
                         parcels.push(f);
                     }
                 });
 
+                // Обновляем глобальные массивы
                 parcelFeaturesData = parcels;
                 buildingFeaturesData = buildings;
                 structureFeaturesData = structures;
                 zouitFeaturesData = zouits;
 
-                if (parels.length > 0) {
+                // Отрисовываем каждую категорию своей функцией
+                // Используем await, чтобы отрисовка шла последовательно
+                if (parcels.length > 0) {
                     await processAndDrawParcels(parcels, 'quarter');
                 }
                 if (buildings.length > 0) {
@@ -15488,6 +15503,7 @@ function handleMapJsonImport(event) {
                     await processAndDrawZouits(zouits);
                 }
 
+                // Обновляем боковую панель (приоритет: участки -> ОКС -> ЗОУИТ)
                 const importDate = new Date().toLocaleDateString('ru-RU');
                 if (parcels.length > 0) {
                     populateSidebarWithParcels(parcels, `Импорт (${importDate})`);
@@ -15497,6 +15513,7 @@ function handleMapJsonImport(event) {
                     await populateSidebarWithFoundObjects(zouits, 'ЗОУИТ (Импорт)');
                 }
 
+                // Центрируем карту на всех объектах
                 let allBounds = null;
                 polygons.forEach(obj => {
                     if (obj instanceof ymaps.Polygon) {
@@ -15519,15 +15536,16 @@ function handleMapJsonImport(event) {
 
                 showNotification(`Импортировано: ЗУ: ${parcels.length}, ОКС: ${buildings.length + structures.length}, Зон: ${zouits.length}`, 'success', 'file-import');
             } 
+            // === ЛОГИКА ДЛЯ MapData (.map формат) ===
             else if (parsedData.type === 'MapData') {
                 const mapData = parsedData;
                 clearMapAndResetTheme();
 
                 let importedCount = 0;
-                const restoredParcelsData =[];
+                const restoredParcelsData = [];
                 const restoredBuildingsData = [];
                 const restoredStructuresData = [];
-                const restoredZouitsData =[];
+                const restoredZouitsData = [];
                 const pendingVertexPoints = [];
 
                 const applyOffset = (coord) => [
@@ -15559,11 +15577,7 @@ function handleMapJsonImport(event) {
                                 else if (props.dotSize) ymapsObj.options.set('iconLayout', redDotLayout);
                                 else if (props.fontSize) ymapsObj.options.set('iconLayout', numberedPointLayout);
                                 
-                                pendingVertexPoints.push({ 
-                                    placemark: ymapsObj, 
-                                    parentCn: flags.relatedPolygonCadastralNumber,
-                                    parentId: flags.relatedPolygonId
-                                });
+                                pendingVertexPoints.push({ placemark: ymapsObj, parentCn: flags.relatedPolygonCadastralNumber });
                             }
                         } else if (type === 'LineString') {
                             ymapsObj = new ymaps.Polyline(visualCoords, props, opts);
@@ -15576,7 +15590,7 @@ function handleMapJsonImport(event) {
 
                         if (ymapsObj) {
                             Object.keys(flags).forEach(key => {
-                                if (key !== 'relatedPolygonCadastralNumber' && key !== 'relatedPolygonId') ymapsObj.properties.set(key, flags[key]);
+                                if (key !== 'relatedPolygonCadastralNumber') ymapsObj.properties.set(key, flags[key]);
                             });
 
                             map.geoObjects.add(ymapsObj);
@@ -15589,8 +15603,10 @@ function handleMapJsonImport(event) {
                                 parcelPlacemarks.push(ymapsObj);
                             }
 
+                            // Восстановление данных для экспорта/сайдбара
                             let featureData = props.featureData;
                             if ((!featureData || !featureData.properties) && (props.cadastralNumber)) {
+                                // Минимальная реконструкция для старых сохранений
                                 featureData = { 
                                     type: "Feature", 
                                     geometry: f.geometry, 
@@ -15611,6 +15627,7 @@ function handleMapJsonImport(event) {
                                 else if (flags.isBuilding) restoredBuildingsData.push(featureData);
                                 else if (flags.isStructure) restoredStructuresData.push(featureData);
                                 else if (flags.isZouit) restoredZouitsData.push(featureData);
+                                // Фолбек по свойствам, если флагов нет
                                 else if (featureData.properties.categoryName === 'Здания') restoredBuildingsData.push(featureData);
                                 else if (featureData.properties.categoryName === 'Сооружения') restoredStructuresData.push(featureData);
                                 else if (featureData.properties.categoryName?.includes('Зоны')) restoredZouitsData.push(featureData);
@@ -15621,21 +15638,13 @@ function handleMapJsonImport(event) {
                     });
 
                     pendingVertexPoints.forEach(item => {
-                        let parentPolygon = null;
-                        
-                        if (item.parentId) {
-                            parentPolygon = polygons.find(p => p.properties.get('_exportId') === item.parentId) || 
-                                            areaObjects.find(p => p.properties.get('_exportId') === item.parentId);
-                        } 
-                        
-                        if (!parentPolygon && item.parentCn) {
-                            parentPolygon = polygons.find(p => p instanceof ymaps.Polygon && p.properties.get('cadastralNumber') === item.parentCn);
-                        }
-
-                        if (parentPolygon) {
-                            item.placemark.properties.set('relatedPolygon', parentPolygon);
-                            if (item.placemark.properties.get('isCoordLabel')) parentPolygon.properties.set('coordsPointsVisible', true);
-                            else parentPolygon.properties.set('numberedPointsVisible', true);
+                        if (item.parentCn) {
+                            const parentPolygon = polygons.find(p => p instanceof ymaps.Polygon && p.properties.get('cadastralNumber') === item.parentCn);
+                            if (parentPolygon) {
+                                item.placemark.properties.set('relatedPolygon', parentPolygon);
+                                if (item.placemark.properties.get('isCoordLabel')) parentPolygon.properties.set('coordsPointsVisible', true);
+                                else parentPolygon.properties.set('numberedPointsVisible', true);
+                            }
                         }
                     });
                 }
