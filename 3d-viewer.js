@@ -416,7 +416,6 @@ try {
     // ТЕКСТОВЫЕ МЕТКИ
     const createLabel = (name, id, areaText, isSmall = false) => {
         const canvas = document.createElement("canvas");
-        // Динамическая ширина для длинных текстов (например ЗОУИТ)
         const ctxMeasure = canvas.getContext("2d");
         ctxMeasure.font = "bold 56px sans-serif";
         const textWidth = ctxMeasure.measureText(name || "Объект").width;
@@ -443,7 +442,7 @@ try {
         }
         
         const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas), depthTest: false }));
-        sprite.scale.set((canvas.width / 1024) * 16, 4, 1); // Масштабируем пропорционально ширине
+        sprite.scale.set((canvas.width / 1024) * 16, 4, 1);
         return sprite;
     };
 
@@ -465,250 +464,224 @@ try {
 
     // УМНЫЙ ГЕНЕРАТОР ЗДАНИЙ 
     const createBuildingModel = (shape, height, style, isMiniature = false) => {
-    const building = new THREE.Group();
-    const pts = shape.getPoints();
-    if (pts.length < 3) return building;
+        const building = new THREE.Group();
+        const pts = shape.getPoints();
+        if (pts.length < 3) return building;
 
-    // --- ЦОКОЛЬ ---
-    const baseGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.6, bevelEnabled: false });
-    const baseMesh = new THREE.Mesh(baseGeo, new THREE.MeshStandardMaterial({ color: style.base, roughness: 0.8 }));
-    baseMesh.rotation.x = -Math.PI / 2;
-    baseMesh.position.y = 0.3;
-    building.add(baseMesh);
+        // --- ЦОКОЛЬ ---
+        const baseGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.6, bevelEnabled: false });
+        const baseMesh = new THREE.Mesh(baseGeo, new THREE.MeshStandardMaterial({ color: style.base, roughness: 0.8 }));
+        baseMesh.rotation.x = -Math.PI / 2;
+        baseMesh.position.y = 0.3;
+        building.add(baseMesh);
 
-    // --- СТЕНЫ ---
-    const wallGeo = new THREE.ExtrudeGeometry(shape, { depth: height, bevelEnabled: false });
-    const walls = new THREE.Mesh(wallGeo, new THREE.MeshStandardMaterial({ color: style.wall, roughness: 0.85 }));
-    walls.rotation.x = -Math.PI / 2;
-    walls.position.y = 0.6;
-    if (!isMiniature) { walls.castShadow = true; walls.receiveShadow = true; }
-    building.add(walls);
+        // --- СТЕНЫ ---
+        const wallGeo = new THREE.ExtrudeGeometry(shape, { depth: height, bevelEnabled: false });
+        const walls = new THREE.Mesh(wallGeo, new THREE.MeshStandardMaterial({ color: style.wall, roughness: 0.85 }));
+        walls.rotation.x = -Math.PI / 2;
+        walls.position.y = 0.6;
+        if (!isMiniature) { walls.castShadow = true; walls.receiveShadow = true; }
+        building.add(walls);
 
-    // --- КРЫША ---
-    const roofY = 0.6 + height;
+        // --- КРЫША ---
+        const roofY = 0.6 + height;
 
-    if (style.hippedRoof) {
-        // Вычисляем центр и радиус из точек shape
-        let cx = 0, cy = 0;
-        pts.forEach(p => { cx += p.x; cy += p.y; });
-        cx /= pts.length; cy /= pts.length;
-        let maxR = 0;
-        pts.forEach(p => { const d = Math.hypot(p.x - cx, p.y - cy); if (d > maxR) maxR = d; });
+        if (style.hippedRoof) {
+            let cx = 0, cy = 0;
+            pts.forEach(p => { cx += p.x; cy += p.y; });
+            cx /= pts.length; cy /= pts.length;
+            let maxR = 0;
+            pts.forEach(p => { const d = Math.hypot(p.x - cx, p.y - cy); if (d > maxR) maxR = d; });
 
-        const roofGeo = new THREE.ConeGeometry(maxR * 1.05, Math.max(3, height * 0.5), Math.max(4, pts.length));
-        const roofMesh = new THREE.Mesh(roofGeo, new THREE.MeshStandardMaterial({ color: style.roof, roughness: 0.7 }));
-        roofMesh.position.set(cx, roofY + Math.max(3, height * 0.5) / 2, -cy);
-        if (!isMiniature) roofMesh.castShadow = true;
-        building.add(roofMesh);
-    } else {
-        if (style.parapet) {
-            const parapetGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.7, bevelEnabled: false });
-            const parapet = new THREE.Mesh(parapetGeo, new THREE.MeshStandardMaterial({ color: style.roof, roughness: 0.7 }));
-            parapet.rotation.x = -Math.PI / 2;
-            parapet.position.y = roofY;
-            building.add(parapet);
-        }
-        const flatRoofGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.15, bevelEnabled: false });
-        const flatRoof = new THREE.Mesh(flatRoofGeo, new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.6 }));
-        flatRoof.rotation.x = -Math.PI / 2;
-        flatRoof.position.y = roofY + (style.parapet ? 0.7 : 0);
-        building.add(flatRoof);
-    }
-
-    // --- КРЕСТ (медицина) ---
-    if (style.addon === 'cross') {
-        let cx = 0, cy = 0;
-        pts.forEach(p => { cx += p.x; cy += p.y; });
-        cx /= pts.length; cy /= pts.length;
-        const crossMat = new THREE.MeshBasicMaterial({ color: 0xef4444 });
-        const crossGroup = new THREE.Group();
-        crossGroup.add(new THREE.Mesh(new THREE.BoxGeometry(0.8, 4, 0.8), crossMat));
-        crossGroup.add(new THREE.Mesh(new THREE.BoxGeometry(3, 0.8, 0.8), crossMat));
-        crossGroup.position.set(cx, roofY + 4, -cy);
-        building.add(crossGroup);
-    }
-
-    // ============================================================
-    // --- ОКНА (ИСПРАВЛЕННЫЙ АЛГОРИТМ) ---
-    // Здание строится как ExtrudeGeometry по оси Y (глубина = высота),
-    // затем поворачивается rotation.x = -PI/2.
-    // Значит: в системе координат GROUP здания:
-    //   shape.x  -> мировой X
-    //   shape.y  -> мировой -Z (после поворота)
-    //   depth    -> мировой Y (высота)
-    //
-    // Окна строим прямо в пространстве GROUP, обходя рёбра shape.
-    // ============================================================
-    if (style.winType !== 'none' && style.win && !isMiniature) {
-        let winW, winH, winStep;
-        switch (style.winType) {
-            case 'dense':   winW = 1.1; winH = 1.6; winStep = 1.8;  break;
-            case 'ribbon':  winW = 3.5; winH = 1.4; winStep = 4.2;  break;
-            case 'large':   winW = 2.8; winH = 2.2; winStep = 3.8;  break;
-            case 'minimal': winW = 1.2; winH = 1.5; winStep = 3.0;  break;
-            default:        winW = 1.4; winH = 1.7; winStep = 2.4;  break; // standard
+            const roofGeo = new THREE.ConeGeometry(maxR * 1.05, Math.max(3, height * 0.5), Math.max(4, pts.length));
+            const roofMesh = new THREE.Mesh(roofGeo, new THREE.MeshStandardMaterial({ color: style.roof, roughness: 0.7 }));
+            roofMesh.position.set(cx, roofY + Math.max(3, height * 0.5) / 2, -cy);
+            if (!isMiniature) roofMesh.castShadow = true;
+            building.add(roofMesh);
+        } else {
+            if (style.parapet) {
+                const parapetGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.7, bevelEnabled: false });
+                const parapet = new THREE.Mesh(parapetGeo, new THREE.MeshStandardMaterial({ color: style.roof, roughness: 0.7 }));
+                parapet.rotation.x = -Math.PI / 2;
+                parapet.position.y = roofY;
+                building.add(parapet);
+            }
+            const flatRoofGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.15, bevelEnabled: false });
+            const flatRoof = new THREE.Mesh(flatRoofGeo, new THREE.MeshStandardMaterial({ color: 0x1e293b, roughness: 0.6 }));
+            flatRoof.rotation.x = -Math.PI / 2;
+            flatRoof.position.y = roofY + (style.parapet ? 0.7 : 0);
+            building.add(flatRoof);
         }
 
-        const winMat = new THREE.MeshStandardMaterial({
-            color: style.win,
-            roughness: 0.05,
-            metalness: 0.6,
-            transparent: true,
-            opacity: 0.85
-        });
+        // --- КРЕСТ (медицина) ---
+        if (style.addon === 'cross') {
+            let cx = 0, cy = 0;
+            pts.forEach(p => { cx += p.x; cy += p.y; });
+            cx /= pts.length; cy /= pts.length;
+            const crossMat = new THREE.MeshBasicMaterial({ color: 0xef4444 });
+            const crossGroup = new THREE.Group();
+            crossGroup.add(new THREE.Mesh(new THREE.BoxGeometry(0.8, 4, 0.8), crossMat));
+            crossGroup.add(new THREE.Mesh(new THREE.BoxGeometry(3, 0.8, 0.8), crossMat));
+            crossGroup.position.set(cx, roofY + 4, -cy);
+            building.add(crossGroup);
+        }
 
-        const floors = Math.max(1, Math.round(height / 3.5));
-        const floorH = height / floors;
+        // --- ОКНА ---
+        if (style.winType !== 'none' && style.win && !isMiniature) {
+            let winW, winH, winStep;
+            switch (style.winType) {
+                case 'dense':   winW = 1.1; winH = 1.6; winStep = 1.8;  break;
+                case 'ribbon':  winW = 3.5; winH = 1.4; winStep = 4.2;  break;
+                case 'large':   winW = 2.8; winH = 2.2; winStep = 3.8;  break;
+                case 'minimal': winW = 1.2; winH = 1.5; winStep = 3.0;  break;
+                default:        winW = 1.4; winH = 1.7; winStep = 2.4;  break;
+            }
 
-        // Обходим рёбра контура shape (pts — массив Vector2)
-        for (let i = 0; i < pts.length - 1; i++) {
-            const ax = pts[i].x,   az = -pts[i].y;    // 3D X,Z первой точки
-            const bx = pts[i+1].x, bz = -pts[i+1].y;  // 3D X,Z второй точки
+            const winMat = new THREE.MeshStandardMaterial({ color: style.win, roughness: 0.05, metalness: 0.6, transparent: true, opacity: 0.85 });
+            const floors = Math.max(1, Math.round(height / 3.5));
+            const floorH = height / floors;
 
-            const edgeDX = bx - ax;
-            const edgeDZ = bz - az;
-            const edgeLen = Math.sqrt(edgeDX * edgeDX + edgeDZ * edgeDZ);
-            if (edgeLen < winStep * 1.5) continue; // Слишком короткое ребро
+            for (let i = 0; i < pts.length - 1; i++) {
+                const ax = pts[i].x,   az = -pts[i].y;
+                const bx = pts[i+1].x, bz = -pts[i+1].y;
 
-            // Единичный вектор вдоль ребра
-            const ux = edgeDX / edgeLen;
-            const uz = edgeDZ / edgeLen;
+                const edgeDX = bx - ax;
+                const edgeDZ = bz - az;
+                const edgeLen = Math.sqrt(edgeDX * edgeDX + edgeDZ * edgeDZ);
+                if (edgeLen < winStep * 1.5) continue; 
 
-            // Нормаль к стене (наружу, в плоскости XZ)
-            // Для CCW-полигона нормаль наружу: (-uz, 0, ux)... но порядок обхода
-            // может быть разным, поэтому просто делаем небольшой офсет наружу
-            const nx = -uz;
-            const nz = ux;
+                const ux = edgeDX / edgeLen;
+                const uz = edgeDZ / edgeLen;
+                const nx = -uz;
+                const nz = ux;
 
-            // Угол поворота окна вокруг Y, чтобы лежать на плоскости стены
-            const wallAngle = Math.atan2(edgeDX, edgeDZ);
+                const wallAngle = Math.atan2(edgeDX, edgeDZ);
+                const count = Math.floor((edgeLen - winStep * 0.5) / winStep);
+                if (count <= 0) continue;
+                const totalWidth = count * winStep;
+                const startOffset = (edgeLen - totalWidth) / 2 + winStep / 2;
 
-            const count = Math.floor((edgeLen - winStep * 0.5) / winStep);
-            if (count <= 0) continue;
-            const totalWidth = count * winStep;
-            const startOffset = (edgeLen - totalWidth) / 2 + winStep / 2;
+                for (let f = 0; f < floors; f++) {
+                    const winY = 0.6 + f * floorH + floorH * 0.55;
+                    for (let w = 0; w < count; w++) {
+                        const t = startOffset + w * winStep;
+                        const wx = ax + ux * t + nx * 0.05; 
+                        const wz = az + uz * t + nz * 0.05;
 
-            for (let f = 0; f < floors; f++) {
-                // Центр окна по высоте на данном этаже
-                const winY = 0.6 + f * floorH + floorH * 0.55;
-
-                for (let w = 0; w < count; w++) {
-                    const t = startOffset + w * winStep;
-
-                    // Позиция центра окна вдоль ребра
-                    const wx = ax + ux * t + nx * 0.05; // 0.05 — офсет от стены
-                    const wz = az + uz * t + nz * 0.05;
-
-                    const winMesh = new THREE.Mesh(
-                        new THREE.PlaneGeometry(winW, winH),
-                        winMat
-                    );
-                    winMesh.position.set(wx, winY, wz);
-                    winMesh.rotation.y = wallAngle;
-                    building.add(winMesh);
+                        const winMesh = new THREE.Mesh(new THREE.PlaneGeometry(winW, winH), winMat);
+                        winMesh.position.set(wx, winY, wz);
+                        winMesh.rotation.y = wallAngle;
+                        building.add(winMesh);
+                    }
                 }
             }
         }
-    }
+        return building;
+    };
 
-    return building;
-};
+    // ============================================================
+    // ГЕНЕРАТОР ЦВЕТОВ И ТРАВЫ ДЛЯ УЧАСТКОВ
+    // ============================================================
+    const createFlower = (x, z, scale = 1) => {
+        const group = new THREE.Group();
 
+        const stemMat = new THREE.MeshStandardMaterial({ color: 0x16a34a, roughness: 0.9 });
+        const stem = new THREE.Mesh(new THREE.CylinderGeometry(0.04 * scale, 0.06 * scale, 1.0 * scale, 5), stemMat);
+        stem.position.y = 0.5 * scale;
+        group.add(stem);
 
-// ============================================================
-// ГЕНЕРАТОР ЦВЕТОВ И ТРАВЫ ДЛЯ УЧАСТКОВ
-// ============================================================
-const createFlower = (x, z, scale = 1) => {
-    const group = new THREE.Group();
+        const leafMat = new THREE.MeshStandardMaterial({ color: 0x22c55e, roughness: 0.9, side: THREE.DoubleSide });
+        [-1, 1].forEach(side => {
+            const leaf = new THREE.Mesh(new THREE.PlaneGeometry(0.5 * scale, 0.25 * scale), leafMat);
+            leaf.position.set(side * 0.2 * scale, 0.4 * scale, 0);
+            leaf.rotation.z = side * 0.6;
+            leaf.rotation.y = Math.random() * Math.PI;
+            group.add(leaf);
+        });
 
-    // Стебель
-    const stemMat = new THREE.MeshStandardMaterial({ color: 0x16a34a, roughness: 0.9 });
-    const stem = new THREE.Mesh(
-        new THREE.CylinderGeometry(0.04 * scale, 0.06 * scale, 1.0 * scale, 5),
-        stemMat
-    );
-    stem.position.y = 0.5 * scale;
-    group.add(stem);
+        const petalColors = [0xf43f5e, 0xfbbf24, 0xa78bfa, 0xfb7185, 0xf97316, 0x34d399];
+        const petalColor = petalColors[Math.floor(Math.random() * petalColors.length)];
+        const petalMat = new THREE.MeshStandardMaterial({ color: petalColor, roughness: 0.6, side: THREE.DoubleSide });
+        const petalCount = 5;
+        for (let i = 0; i < petalCount; i++) {
+            const angle = (i / petalCount) * Math.PI * 2;
+            const petal = new THREE.Mesh(new THREE.PlaneGeometry(0.35 * scale, 0.2 * scale), petalMat);
+            petal.position.set(Math.cos(angle) * 0.28 * scale, 1.02 * scale, Math.sin(angle) * 0.28 * scale);
+            petal.rotation.x = -Math.PI / 2;
+            petal.rotation.z = angle;
+            group.add(petal);
+        }
 
-    // Листья
-    const leafMat = new THREE.MeshStandardMaterial({ color: 0x22c55e, roughness: 0.9, side: THREE.DoubleSide });
-    [-1, 1].forEach(side => {
-        const leaf = new THREE.Mesh(new THREE.PlaneGeometry(0.5 * scale, 0.25 * scale), leafMat);
-        leaf.position.set(side * 0.2 * scale, 0.4 * scale, 0);
-        leaf.rotation.z = side * 0.6;
-        leaf.rotation.y = Math.random() * Math.PI;
-        group.add(leaf);
-    });
+        const centerMat = new THREE.MeshStandardMaterial({ color: 0xfef08a, roughness: 0.5 });
+        const center = new THREE.Mesh(new THREE.SphereGeometry(0.18 * scale, 8, 8), centerMat);
+        center.position.y = 1.03 * scale;
+        group.add(center);
 
-    // Лепестки (5 штук)
-    const petalColors = [0xf43f5e, 0xfbbf24, 0xa78bfa, 0xfb7185, 0xf97316, 0x34d399];
-    const petalColor = petalColors[Math.floor(Math.random() * petalColors.length)];
-    const petalMat = new THREE.MeshStandardMaterial({ color: petalColor, roughness: 0.6, side: THREE.DoubleSide });
-    const petalCount = 5;
-    for (let i = 0; i < petalCount; i++) {
-        const angle = (i / petalCount) * Math.PI * 2;
-        const petal = new THREE.Mesh(new THREE.PlaneGeometry(0.35 * scale, 0.2 * scale), petalMat);
-        petal.position.set(
-            Math.cos(angle) * 0.28 * scale,
-            1.02 * scale,
-            Math.sin(angle) * 0.28 * scale
-        );
-        petal.rotation.x = -Math.PI / 2;
-        petal.rotation.z = angle;
-        group.add(petal);
-    }
+        group.position.set(x, 0.1, z);
+        group.rotation.y = Math.random() * Math.PI * 2;
+        return group;
+    };
 
-    // Сердцевина
-    const centerMat = new THREE.MeshStandardMaterial({ color: 0xfef08a, roughness: 0.5 });
-    const center = new THREE.Mesh(new THREE.SphereGeometry(0.18 * scale, 8, 8), centerMat);
-    center.position.y = 1.03 * scale;
-    group.add(center);
+    const createGrassTuft = (x, z) => {
+        const group = new THREE.Group();
+        const mat = new THREE.MeshStandardMaterial({ color: 0x4ade80, roughness: 1, side: THREE.DoubleSide });
+        for (let i = 0; i < 4; i++) {
+            const blade = new THREE.Mesh(new THREE.PlaneGeometry(0.08, 0.4 + Math.random() * 0.3), mat);
+            blade.position.set((Math.random() - 0.5) * 0.3, 0.2, (Math.random() - 0.5) * 0.3);
+            blade.rotation.y = Math.random() * Math.PI;
+            blade.rotation.z = (Math.random() - 0.5) * 0.5;
+            group.add(blade);
+        }
+        group.position.set(x, 0.05, z);
+        return group;
+    };
 
-    group.position.set(x, 0.1, z);
-    // Случайный поворот для естественности
-    group.rotation.y = Math.random() * Math.PI * 2;
-    return group;
-};
+    // Функция: засеять участок цветами по полигону
+    const seedParcelWithFlowers = (polyRing, groupTarget) => {
+        if (!polyRing || polyRing.length < 3) return;
 
-// Простая трава (пучок)
-const createGrassTuft = (x, z) => {
-    const group = new THREE.Group();
-    const mat = new THREE.MeshStandardMaterial({ color: 0x4ade80, roughness: 1, side: THREE.DoubleSide });
-    for (let i = 0; i < 4; i++) {
-        const blade = new THREE.Mesh(new THREE.PlaneGeometry(0.08, 0.4 + Math.random() * 0.3), mat);
-        blade.position.set(
-            (Math.random() - 0.5) * 0.3,
-            0.2,
-            (Math.random() - 0.5) * 0.3
-        );
-        blade.rotation.y = Math.random() * Math.PI;
-        blade.rotation.z = (Math.random() - 0.5) * 0.5;
-        group.add(blade);
-    }
-    group.position.set(x, 0.05, z);
-    return group;
-};
+        let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
+        polyRing.forEach(p => {
+            if (p.x < minX) minX = p.x;
+            if (p.x > maxX) maxX = p.x;
+            if (-p.y < minZ) minZ = -p.y;
+            if (-p.y > maxZ) maxZ = -p.y;
+        });
 
-// Функция: засеять участок цветами по полигону
-const seedParcelWithFlowers = (polyRing, groupTarget) => {
-    if (!polyRing || polyRing.length < 3) return;
+        const width  = maxX - minX;
+        const depth  = maxZ - minZ;
+        const area   = width * depth;
 
-    // Вычисляем bounding box полигона
-    let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-    polyRing.forEach(p => {
-        if (p.x < minX) minX = p.x;
-        if (p.x > maxX) maxX = p.x;
-        if (-p.y < minZ) minZ = -p.y;
-        if (-p.y > maxZ) maxZ = -p.y;
-    });
+        // Адаптивная плотность: не больше 40 растений
+        const targetPlants = Math.min(40, Math.floor(area / 20));
 
-    const width  = maxX - minX;
-    const depth  = maxZ - minZ;
-    const area   = width * depth;
+        // Ray-casting для проверки попадания точки внутрь полигона
+        const pointInPoly = (x, z, poly) => {
+            let inside = false;
+            for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+                const xi = poly[i].x, zi = -poly[i].y;
+                const xj = poly[j].x, zj = -poly[j].y;
+                const intersect = ((zi > z) !== (zj > z)) && (x < (xj - xi) * (z - zi) / (zj - zi) + xi);
+                if (intersect) inside = !inside;
+            }
+            return inside;
+        };
 
-    // Адаптивная плотность: не больше 40 цветков
-    const targetFlowers = Math.min(40, Math
-\<Streaming stoppped because the conversation grew too long for this model\>
+        let placed = 0, attempts = 0;
+        while (placed < targetPlants && attempts < targetPlants * 3) {
+            attempts++;
+            const x = minX + Math.random() * width;
+            const z = minZ + Math.random() * depth;
+            if (pointInPoly(x, z, polyRing)) {
+                if (Math.random() > 0.6) {
+                    groupTarget.add(createFlower(x, z, 0.4 + Math.random() * 0.4));
+                } else {
+                    groupTarget.add(createGrassTuft(x, z));
+                }
+                placed++;
+            }
+        }
+    };
 
     // ====================================================================
     // ПОСТРОЕНИЕ ОБЪЕКТОВ ИЗ ДАННЫХ
@@ -751,6 +724,9 @@ const seedParcelWithFlowers = (polyRing, groupTarget) => {
                 mesh.rotation.x = Math.PI / 2; mesh.position.y = 0.1;
                 const edges = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0x166534 }));
                 mesh.add(edges); mesh.receiveShadow = true; groups.parcels.add(mesh);
+                
+                // Засеиваем участки травой и цветами
+                seedParcelWithFlowers(poly[0], groups.parcels);
             }
             const c = getCentroid(poly[0]);
             const lbl = createLabel(p.meta.name, p.meta.id, p.meta.area);
@@ -869,11 +845,10 @@ const seedParcelWithFlowers = (polyRing, groupTarget) => {
     });
 
     // 5. ЗОУИТ
-    // ИСПРАВЛЕНИЕ: Теперь ЗОУИТ-Полигоны, содержащие "газ" или "электр", корректно красятся!
     data.zouits.forEach(z => {
         const isGas = z.meta.isGas;
         const isPower = z.meta.isElectric;
-        const color = isGas ? 0xfbbf24 : (isPower ? 0xa855f7 : 0x3b82f6); // Желтый / Фиолетовый / Синий
+        const color = isGas ? 0xfbbf24 : (isPower ? 0xa855f7 : 0x3b82f6); 
         const labelText = z.meta.name || (isGas ? "Охранная зона газа" : (isPower ? "Охранная зона ЛЭП" : "ЗОУИТ"));
 
         z.polygons.forEach(poly => {
@@ -890,14 +865,13 @@ const seedParcelWithFlowers = (polyRing, groupTarget) => {
             } else {
                 const shape = createShape(poly);
                 if(shape.getPoints().length > 2) {
-                    const h = isPower ? 15 : (isGas ? 4 : 6); // Разная высота зон
+                    const h = isPower ? 15 : (isGas ? 4 : 6); 
                     const mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false }), new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.15, depthWrite: false }));
                     mesh.rotation.x = Math.PI / 2; mesh.position.y = h/2; groups.zouit.add(mesh);
                     
                     const edges = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: color, transparent: true, opacity: 0.5 }));
                     mesh.add(edges);
 
-                    // ИСПРАВЛЕНИЕ: Метка ставится на ближайшей к центру точке, а не в центроиде!
                     let closestPt = poly[0][0];
                     let minDist = Infinity;
                     poly[0].forEach(p => {
