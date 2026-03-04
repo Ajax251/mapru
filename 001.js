@@ -353,7 +353,7 @@ try {
     sunLight.shadow.bias = -0.0005;
     scene.add(sunLight);
 
-    // ЗЕМЛЯ
+    // ЗЕМЛЯ (Матовая)
     const groundGeo = new THREE.PlaneGeometry(1000, 1000);
     const groundMat = new THREE.MeshStandardMaterial({ color: 0xf8fafc, roughness: 0.9, metalness: 0.0 });
     const ground = new THREE.Mesh(groundGeo, groundMat);
@@ -386,34 +386,12 @@ try {
     }
     scene.add(createCompass());
 
-    // ИСПРАВЛЕНИЕ: ГРУППИРОВКА СЛОЕВ И МЕТОК
-    // Создаем отдельные группы геометрии
-    const groups = { 
-        target: new THREE.Group(), 
-        parcels: new THREE.Group(), 
-        buildings: new THREE.Group(), 
-        structures: new THREE.Group(), 
-        zouit: new THREE.Group() 
-    };
-    
-    // Создаем соответствующие подгруппы для меток каждого слоя
-    const labelGroups = {
-        target: new THREE.Group(), 
-        parcels: new THREE.Group(), 
-        buildings: new THREE.Group(), 
-        structures: new THREE.Group(), 
-        zouit: new THREE.Group()
-    };
-    
-    // Глобальная группа-контейнер для ВСЕХ меток (чтобы выключать их разом)
-    const masterLabelsGroup = new THREE.Group();
-
-    // Добавляем все на сцену
+    // ГРУППЫ СЛОЕВ
+    const groups = { target: new THREE.Group(), parcels: new THREE.Group(), buildings: new THREE.Group(), structures: new THREE.Group(), zouit: new THREE.Group(), labels: new THREE.Group() };
     for (let k in groups) scene.add(groups[k]);
-    for (let k in labelGroups) masterLabelsGroup.add(labelGroups[k]);
-    scene.add(masterLabelsGroup);
 
-    // ХЕЛПЕРЫ ГЕОМЕТРИИ
+    // ИСПРАВЛЕНИЕ: Убран минус у координат Y в генераторе 2D контуров
+    // Это исправляет зеркальное искажение Зданий по оси Z
     const createShape = (polyRings) => {
         const shape = new THREE.Shape();
         if (!polyRings || !polyRings[0] || polyRings[0].length < 3) return shape;
@@ -491,12 +469,14 @@ try {
         const pts = shape.getPoints();
         if (pts.length < 3) return building;
 
+        // --- ЦОКОЛЬ ---
         const baseGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.6, bevelEnabled: false });
         const baseMesh = new THREE.Mesh(baseGeo, new THREE.MeshStandardMaterial({ color: style.base, roughness: 0.8 }));
         baseMesh.rotation.x = -Math.PI / 2;
         baseMesh.position.y = 0.3;
         building.add(baseMesh);
 
+        // --- СТЕНЫ ---
         const wallGeo = new THREE.ExtrudeGeometry(shape, { depth: height, bevelEnabled: false });
         const walls = new THREE.Mesh(wallGeo, new THREE.MeshStandardMaterial({ color: style.wall, roughness: 0.85 }));
         walls.rotation.x = -Math.PI / 2;
@@ -504,6 +484,7 @@ try {
         if (!isMiniature) { walls.castShadow = true; walls.receiveShadow = true; }
         building.add(walls);
 
+        // --- КРЫША ---
         const roofY = 0.6 + height;
 
         if (style.hippedRoof) {
@@ -515,7 +496,7 @@ try {
 
             const roofGeo = new THREE.ConeGeometry(maxR * 1.05, Math.max(3, height * 0.5), Math.max(4, pts.length));
             const roofMesh = new THREE.Mesh(roofGeo, new THREE.MeshStandardMaterial({ color: style.roof, roughness: 0.7 }));
-            roofMesh.position.set(cx, roofY + Math.max(3, height * 0.5) / 2, -cy); 
+            roofMesh.position.set(cx, roofY + Math.max(3, height * 0.5) / 2, -cy); // -cy теперь идеально соотносится с 3D миром
             if (!isMiniature) roofMesh.castShadow = true;
             building.add(roofMesh);
         } else {
@@ -533,6 +514,7 @@ try {
             building.add(flatRoof);
         }
 
+        // --- КРЕСТ (медицина) ---
         if (style.addon === 'cross') {
             let cx = 0, cy = 0;
             pts.forEach(p => { cx += p.x; cy += p.y; });
@@ -545,6 +527,7 @@ try {
             building.add(crossGroup);
         }
 
+        // --- ОКНА ---
         if (style.winType !== 'none' && style.win && !isMiniature) {
             let winW, winH, winStep;
             switch (style.winType) {
@@ -597,6 +580,9 @@ try {
         return building;
     };
 
+    // ============================================================
+    // ГЕНЕРАТОР ЦВЕТОВ И ТРАВЫ ДЛЯ УЧАСТКОВ
+    // ============================================================
     const createFlower = (x, z, scale = 1) => {
         const group = new THREE.Group();
         const stemMat = new THREE.MeshStandardMaterial({ color: 0x16a34a, roughness: 0.9 });
@@ -713,7 +699,7 @@ try {
                 const shape = createShape(poly);
                 if(shape.getPoints().length > 2) {
                     const mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: 0.8, bevelEnabled: false }), new THREE.MeshStandardMaterial({ color: color, opacity: 0.8, transparent: true }));
-                    mesh.rotation.x = -Math.PI / 2; 
+                    mesh.rotation.x = -Math.PI / 2; // ИСПРАВЛЕНИЕ ВРАЩЕНИЯ
                     mesh.position.y = 0.4;
                     const edges = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0x7f1d1d, linewidth: 2 }));
                     mesh.add(edges); mesh.castShadow = true; groups.target.add(mesh);
@@ -723,8 +709,7 @@ try {
         if(t.meta && t.polygons[0]) {
             const c = getCentroid(t.polygons[0][0]);
             const lbl = createLabel(t.meta.name, t.meta.id, t.meta.area);
-            lbl.position.set(c.x, 12, c.z); 
-            labelGroups.target.add(lbl); // Привязываем метку к слою target
+            lbl.position.set(c.x, 12, c.z); groups.labels.add(lbl);
         }
     });
 
@@ -734,7 +719,7 @@ try {
             const shape = createShape(poly);
             if(shape.getPoints().length > 2) {
                 const mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: 0.2, bevelEnabled: false }), new THREE.MeshStandardMaterial({ color: 0xa8d5ba, roughness: 0.8 }));
-                mesh.rotation.x = -Math.PI / 2; 
+                mesh.rotation.x = -Math.PI / 2;  // ИСПРАВЛЕНИЕ ВРАЩЕНИЯ
                 mesh.position.y = 0.1;
                 const edges = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0x166534 }));
                 mesh.add(edges); mesh.receiveShadow = true; groups.parcels.add(mesh);
@@ -743,8 +728,7 @@ try {
             }
             const c = getCentroid(poly[0]);
             const lbl = createLabel(p.meta.name, p.meta.id, p.meta.area);
-            lbl.position.set(c.x, 6, c.z); 
-            labelGroups.parcels.add(lbl); // Привязываем метку к слою parcels
+            lbl.position.set(c.x, 6, c.z); groups.labels.add(lbl);
         });
     });
 
@@ -760,8 +744,7 @@ try {
                     groups.buildings.add(createBuildingModel(shape, b.meta.height, style));
                     const c = getCentroid(poly[0]);
                     const lbl = createLabel(b.meta.name, b.meta.id, b.meta.area);
-                    lbl.position.set(c.x, b.meta.height + 8, c.z); 
-                    labelGroups.buildings.add(lbl); // Привязываем метку к слою buildings
+                    lbl.position.set(c.x, b.meta.height + 8, c.z); groups.labels.add(lbl);
                 }
             });
         } else {
@@ -814,8 +797,7 @@ try {
                     });
                     const midPt = pts[Math.floor(pts.length/2)];
                     const lbl = createLabel("Газопровод", s.meta.id, "Ø " + s.meta.diameter + "м");
-                    lbl.position.set(midPt.x, pipeH + 4, midPt.z); 
-                    labelGroups.structures.add(lbl); // Привязываем метку к слою structures
+                    lbl.position.set(midPt.x, pipeH + 4, midPt.z); groups.labels.add(lbl);
                 }
                 else if(s.meta.isElectric) {
                     const poleH = 10;
@@ -840,8 +822,7 @@ try {
                     }
                     const midPt = pts[Math.floor(pts.length/2)];
                     const lbl = createLabel("ЛЭП", s.meta.id, s.meta.voltage);
-                    lbl.position.set(midPt.x, poleH + 5, midPt.z); 
-                    labelGroups.structures.add(lbl); // Привязываем метку к слою structures
+                    lbl.position.set(midPt.x, poleH + 5, midPt.z); groups.labels.add(lbl);
                 }
                 else {
                     const yOff = s.meta.isUnderground ? -1 : 1;
@@ -852,11 +833,10 @@ try {
                 const shape = createShape(poly);
                 if(shape.getPoints().length > 2) {
                     const mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: 1, bevelEnabled: false }), new THREE.MeshStandardMaterial({ color: 0x94a3b8 }));
-                    mesh.rotation.x = -Math.PI / 2;
+                    mesh.rotation.x = -Math.PI / 2;  // ИСПРАВЛЕНИЕ ВРАЩЕНИЯ
                     mesh.position.y = 0.5; mesh.castShadow = true; groups.structures.add(mesh);
                     const c = getCentroid(poly[0]);
-                    const lbl = createLabel(s.meta.name, s.meta.id, ""); lbl.position.set(c.x, 5, c.z); 
-                    labelGroups.structures.add(lbl); // Привязываем метку к слою structures
+                    const lbl = createLabel(s.meta.name, s.meta.id, ""); lbl.position.set(c.x, 5, c.z); groups.labels.add(lbl);
                 }
             }
         });
@@ -879,14 +859,13 @@ try {
                 
                 const midPt = pts[Math.floor(pts.length/2)];
                 const lbl = createLabel(labelText, z.meta.id, "");
-                lbl.position.set(midPt.x, isPower ? 14 : 8, midPt.z); 
-                labelGroups.zouit.add(lbl); // Привязываем метку к слою ZOUIT
+                lbl.position.set(midPt.x, isPower ? 14 : 8, midPt.z); groups.labels.add(lbl);
             } else {
                 const shape = createShape(poly);
                 if(shape.getPoints().length > 2) {
                     const h = isPower ? 15 : (isGas ? 4 : 6); 
                     const mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false }), new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.15, depthWrite: false }));
-                    mesh.rotation.x = -Math.PI / 2;
+                    mesh.rotation.x = -Math.PI / 2;  // ИСПРАВЛЕНИЕ ВРАЩЕНИЯ
                     mesh.position.y = h/2; groups.zouit.add(mesh);
                     
                     const edges = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: color, transparent: true, opacity: 0.5 }));
@@ -901,38 +880,19 @@ try {
 
                     const lbl = createLabel(labelText, z.meta.id, ""); 
                     lbl.position.set(closestPt.x, h + 3, -closestPt.y); 
-                    labelGroups.zouit.add(lbl); // Привязываем метку к слою ZOUIT
+                    groups.labels.add(lbl);
                 }
             }
         });
     });
 
-    // УПРАВЛЕНИЕ СЛОЯМИ (Теперь выключает и геометрию, и подгруппу меток этого слоя)
-    document.getElementById("t-target").onchange = (e) => {
-        groups.target.visible = e.target.checked;
-        labelGroups.target.visible = e.target.checked;
-    };
-    document.getElementById("t-parcels").onchange = (e) => {
-        groups.parcels.visible = e.target.checked;
-        labelGroups.parcels.visible = e.target.checked;
-    };
-    document.getElementById("t-buildings").onchange = (e) => {
-        groups.buildings.visible = e.target.checked;
-        labelGroups.buildings.visible = e.target.checked;
-    };
-    document.getElementById("t-structures").onchange = (e) => {
-        groups.structures.visible = e.target.checked;
-        labelGroups.structures.visible = e.target.checked;
-    };
-    document.getElementById("t-zouit").onchange = (e) => {
-        groups.zouit.visible = e.target.checked;
-        labelGroups.zouit.visible = e.target.checked;
-    };
-    
-    // Главный выключатель для ВСЕХ меток разом
-    document.getElementById("t-labels").onchange = (e) => {
-        masterLabelsGroup.visible = e.target.checked;
-    };
+    // УПРАВЛЕНИЕ СЛОЯМИ
+    document.getElementById("t-target").onchange = (e) => groups.target.visible = e.target.checked;
+    document.getElementById("t-parcels").onchange = (e) => groups.parcels.visible = e.target.checked;
+    document.getElementById("t-buildings").onchange = (e) => groups.buildings.visible = e.target.checked;
+    document.getElementById("t-structures").onchange = (e) => groups.structures.visible = e.target.checked;
+    document.getElementById("t-zouit").onchange = (e) => groups.zouit.visible = e.target.checked;
+    document.getElementById("t-labels").onchange = (e) => groups.labels.visible = e.target.checked;
 
     window.addEventListener("resize", () => {
         camera.aspect = window.innerWidth / window.innerHeight;
