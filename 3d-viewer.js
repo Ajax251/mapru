@@ -489,8 +489,11 @@ const createCat = () => {
         const pupil = new THREE.Mesh(new THREE.SphereGeometry(0.025,6,6), dark);
         pupil.position.set(0.8,0.7,z); g.add(pupil);
     });
-    // нос
-    g.add(Object.assign(new THREE.Mesh(new THREE.SphereGeometry(0.03,6,6), pinkM),{position:new THREE.Vector3(0.82,0.63,0)}));
+  
+ // нос
+    const nose = new THREE.Mesh(new THREE.SphereGeometry(0.03,6,6), pinkM);
+    nose.position.set(0.82, 0.63, 0);
+    g.add(nose);
     // хвост (изогнутый)
     const tailPts = [new THREE.Vector3(-0.45,0.4,0),new THREE.Vector3(-0.7,0.7,0.1),new THREE.Vector3(-0.6,1.0,0.15)];
     const tailCurve = new THREE.CatmullRomCurve3(tailPts);
@@ -520,7 +523,9 @@ const createDog = () => {
     const snout = new THREE.Mesh(new THREE.BoxGeometry(0.2,0.15,0.2), fur);
     snout.position.set(0.82,0.68,0); g.add(snout);
     // нос
-    g.add(Object.assign(new THREE.Mesh(new THREE.SphereGeometry(0.04,6,6), dark),{position:new THREE.Vector3(0.93,0.7,0)}));
+      const nose = new THREE.Mesh(new THREE.SphereGeometry(0.04,6,6), dark);
+    nose.position.set(0.93, 0.7, 0);
+    g.add(nose);
     // глаза
     [-0.1,0.1].forEach(z => {
         const eye = new THREE.Mesh(new THREE.SphereGeometry(0.04,6,6), dark);
