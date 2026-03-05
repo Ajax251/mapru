@@ -73,7 +73,7 @@ window.open3DVisualization = function () {
                     meta.height = meta.floors * 3.5;
                 }
                 else if (category === 'structure' || category === 'zouit') {
-                    meta.isSewer = text.includes('канализ') || text.includes('канал') || text.includes('сток');
+                    meta.isSewer = text.includes('канализ') || text.includes('канали') || text.includes('сток');
                     meta.isGas = text.includes('газ');
                     meta.isHeat = text.includes('тепло');
                     meta.isWater = (text.includes('водо') || text.includes('вод')) && !meta.isSewer;
