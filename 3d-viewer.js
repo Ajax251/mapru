@@ -571,7 +571,7 @@ const spawnAnimals = (count) => {
 };
 
 spawnAnimals(8);
-scene.add(animalGroup);
+
 
     /* ── СТИЛИ ЗДАНИЙ ── */
   const BUILDING_DICT = {
@@ -607,6 +607,7 @@ scene.add(animalGroup);
 
     /* ── СЦЕНА ── */
     const scene = new THREE.Scene();
+    scene.add(animalGroup);
 
     const skyCanvas = document.createElement('canvas');
     skyCanvas.width=1;skyCanvas.height=512;
