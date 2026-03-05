@@ -984,40 +984,41 @@ try {
         }
     });
 
-document.getElementById('export-html-btn').onclick = () => {
-        const cloneDoc = document.documentElement.cloneNode(true);
-        
-     
-        const canvases = cloneDoc.querySelectorAll('canvas');
-        canvases.forEach(c => c.remove());
-        
-       
-        const layersContainer = cloneDoc.querySelector('#layers-container');
-        if (layersContainer) {
-            layersContainer.innerHTML = '';
-        }
-        
-     
-        const labelsCheckbox = cloneDoc.querySelector('#t-labels');
-        if (labelsCheckbox) {
-            labelsCheckbox.checked = true;
-        }
+const exportBtnEl = document.getElementById('export-html-btn');
+    if (exportBtnEl) {
+        exportBtnEl.onclick = () => {
+            const cloneDoc = document.documentElement.cloneNode(true);
+            
+            // Удаляем холсты (сгенерируются заново)
+            const canvases = cloneDoc.querySelectorAll('canvas');
+            canvases.forEach(c => c.remove());
+            
+            // Очищаем сгенерированный интерфейс слоев (построится заново, без дублей)
+            const layersContainer = cloneDoc.querySelector('#layers-container');
+            if (layersContainer) {
+                layersContainer.innerHTML = '';
+            }
+            
+            // Сбрасываем галочку "Подписи"
+            const labelsCheckbox = cloneDoc.querySelector('#t-labels');
+            if (labelsCheckbox) {
+                labelsCheckbox.checked = true;
+            }
 
-      
-        const exportBtn = cloneDoc.querySelector('#export-html-btn');
-        if (exportBtn && exportBtn.parentElement) {
-          
-            exportBtn.parentElement.remove();
-        }
-       
+            // Удаление кнопки из сохраняемого файла
+            const exportBtnNode = cloneDoc.querySelector('#export-html-btn');
+            if (exportBtnNode && exportBtnNode.parentElement) {
+                exportBtnNode.parentElement.remove();
+            }
 
-        const finalHtmlStr = '<!DOCTYPE html>\\n<html lang="ru">\\n' + cloneDoc.innerHTML + '\\n</html>';
-        const blob = new Blob([finalHtmlStr], { type: 'text/html;charset=utf-8' });
-        const url = URL.createObjectURL(blob);
-        const a = document.createElement('a');
-        a.href = url; a.download = '3D_Кадастровая_модель_' + new Date().toISOString().slice(0, 10) + '.html';
-        document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
-    };
+            const finalHtmlStr = '<!DOCTYPE html>\\n<html lang="ru">\\n' + cloneDoc.innerHTML + '\\n</html>';
+            const blob = new Blob([finalHtmlStr], { type: 'text/html;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url; a.download = '3D_Кадастровая_модель_' + new Date().toISOString().slice(0, 10) + '.html';
+            document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+        };
+    }
 
     window.addEventListener("resize", () => {
         camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
