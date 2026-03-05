@@ -1,7 +1,7 @@
 window.open3DVisualization = function () {
- //   if (typeof showLoader === 'function') showLoader("Анализ данных и генерация 3D сцены...");
     setTimeout(() => {
         try {
+
             const destSc = 'EPSG:3857';
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
             const allLocalFeatures = { target: [], parcels: [], buildings: [], structures: [], zouits: [], intersections:[] };
@@ -298,7 +298,6 @@ h3 { margin: 0 0 15px 0; color: #1e293b; font-size: 16px; border-bottom: 2px sol
     </div>
 </div>
 <div class="info-text">Home: Сброс | 2x-клик: приблизить метку | ЛКМ: вращение | ПКМ: движение |Колесо: масштаб</div>
-
 
 <script type="module">
 import * as THREE from "three";
@@ -1032,13 +1031,8 @@ try {
         // Клонируем документ целиком
         const cloneDoc = document.documentElement.cloneNode(true);
         
-        // Удаляем холст (canvas), созданный Three.js (чтобы при следующем открытии он не дублировался)
         const canvases = cloneDoc.querySelectorAll('canvas');
         canvases.forEach(c => c.remove());
-        
-        // Включаем обратно экран загрузки, чтобы при оффлайн-запуске он был виден до рендеринга
-        const loader = cloneDoc.querySelector('#loading');
-        if (loader) loader.style.display = 'block';
         
         // Собираем итоговую HTML строку
         const finalHtmlStr = '<!DOCTYPE html>\\n<html lang="ru">\\n' + cloneDoc.innerHTML + '\\n</html>';
@@ -1056,13 +1050,11 @@ try {
         URL.revokeObjectURL(url);
     };
 
-    window.addEventListener("resize", () => {
+window.addEventListener("resize", () => {
         camera.aspect = window.innerWidth / window.innerHeight;
         camera.updateProjectionMatrix();
         renderer.setSize(window.innerWidth, window.innerHeight);
     });
-
-    document.getElementById("loading").style.display = "none";
 
     function animate() {
         requestAnimationFrame(animate);
@@ -1088,7 +1080,7 @@ try {
     animate();
 
 } catch (err) {
-    document.getElementById("loading").innerHTML = "<div style='color:#fca5a5; font-size:14px;'><b>Ошибка построения 3D сцены:</b><br>" + err.message + "</div>";
+    document.body.innerHTML += "<div style='position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(0,0,0,0.8); padding:20px; border-radius:8px; color:#fca5a5; font-size:14px; z-index:1000;'><b>Ошибка построения 3D сцены:</b><br>" + err.message + "</div>";
 }
 </script>
 </body>
@@ -1106,12 +1098,10 @@ try {
             };
             document.addEventListener('keydown', escHandler);
 
-        } catch (error) {
+   } catch (error) {
             if (typeof showNotification === 'function') {
                 showNotification("Ошибка генерации 3D сцены: " + error.message, "error");
             }
-        } finally {
-            if (typeof hideLoader === 'function') hideLoader();
         }
     }, 100);
 };
