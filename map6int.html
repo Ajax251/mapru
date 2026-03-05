@@ -3519,54 +3519,68 @@ const FIXED_CATEGORY_COLORS = {
 };
 
 
-let nspdRequestQueue = Promise.resolve();
-
-const MIN_NSPD_INTERVAL = 500; 
-
 async function fetchNspd(url, options = {}) {
-    return new Promise((resolve, reject) => {
-     
-        nspdRequestQueue = nspdRequestQueue.then(async () => {
-            try {
-            
-                await new Promise(r => setTimeout(r, MIN_NSPD_INTERVAL));
+ const delay = Math.floor(Math.random() * 1000) + 1000;
+    await new Promise(resolve => setTimeout(resolve, delay));
 
-                if (!useVercelProxyFeature) {
-                    const response = await fetch(url, options);
-                    resolve(response);
-                    return;
-                }
+    if (!useVercelProxyFeature) {
+        try {
+            return await fetch(url, options);
+        } catch (directError) {
+            console.error("Direct fetch failed:", directError);
+            throw directError;
+        }
+    }
 
-                if (isVercelProxyBlocked) {
-                    resolve(new Response(JSON.stringify({ error: "Vercel proxy is blocked" }), {
-                        status: 403, headers: { 'Content-Type': 'application/json' }
-                    }));
-                    return;
-                }
-                
-                const urlObject = new URL(url);
-                const targetPath = `${urlObject.pathname}${urlObject.search}`;
-                const refererParam = encodeURIComponent('https://nspd.gov.ru/map');
-                const originParam = encodeURIComponent('https://nspd.gov.ru');
-                const proxyRequestUrl = `${vercelProxyUrl}?target=${encodeURIComponent(targetPath)}&referer=${refererParam}&origin=${originParam}`;
-               
-                const response = await fetch(proxyRequestUrl, { ...options }); 
 
-                if (!response.ok && response.status === 403) {
-                    isVercelProxyBlocked = true;
-                    const currentTime = Date.now();
-                    if (currentTime - lastVercelBlockTime > 30000) lastVercelBlockTime = currentTime;
-                }
-                resolve(response);
-
-            } catch (error) {
-                console.error("Fetch failed:", error);
-                resolve(new Response(JSON.stringify({ error: `Request failed: ${error.message}` }), {
-                    status: 502, headers: { 'Content-Type': 'application/json' }
-                }));
-            }
+    if (isVercelProxyBlocked) {
+        return new Response(JSON.stringify({ error: "Vercel proxy is blocked" }), {
+            status: 403,
+            headers: { 'Content-Type': 'application/json' }
         });
-    });
+    }
+    
+    const urlObject = new URL(url);
+    const targetPath = `${urlObject.pathname}${urlObject.search}`;
+    
+    const refererParam = encodeURIComponent('https://nspd.gov.ru/map');
+    const originParam = encodeURIComponent('https://nspd.gov.ru');
+    const proxyRequestUrl = `${vercelProxyUrl}?target=${encodeURIComponent(targetPath)}&referer=${refererParam}&origin=${originParam}`;
+   
+    const proxyOptions = { ...options };
+   
+    try {
+        const response = await fetch(proxyRequestUrl, proxyOptions); 
+
+        if (!response.ok && response.status === 403) {
+            isVercelProxyBlocked = true;
+            const currentTime = Date.now();
+            if (currentTime - lastVercelBlockTime > 30000) {
+                lastVercelBlockTime = currentTime;
+            }
+        }
+        
+        if (response.ok) {
+            const clonedResponse = response.clone(); 
+            try {
+                const data = await clonedResponse.json();
+                if (data && data.error) {
+                    throw new Error(data.error); 
+                }
+            } catch (e) {
+              
+            }
+        }
+        
+        return response; 
+
+    } catch (error) {
+        console.error("Fetch via Vercel proxy failed:", error);
+        return new Response(JSON.stringify({ error: `Proxy request failed: ${error.message}` }), {
+            status: 502,
+            headers: { 'Content-Type': 'application/json' }
+        });
+    }
 }
 
 function setLoadedObjectOpacity(opacity) {
@@ -11601,15 +11615,19 @@ async function executeQuickReport(targetObject) {
     });
 
     try {
-         const linkedPromises = objects.map(async obj => {
+        let linkedOksCns =[];
+        for (const obj of objects) {
             const cn = obj.properties.get('cadastralNumber');
             if (cn && cn.includes(':')) {
-                try { return await fetchLinkedOks(cn); } catch(e) { return []; }
+                try {
+                    const linked = await fetchLinkedOks(cn);
+                    if (linked && linked.length > 0) {
+                        linkedOksCns.push(...linked);
+                    }
+                } catch(e) {}
             }
-            return[];
-        });
-        const linkedResults = await Promise.all(linkedPromises);
-        let linkedOksCns = [...new Set(linkedResults.flat())];
+        }
+        linkedOksCns = [...new Set(linkedOksCns)];
 
         const results = { zu: [], oks:[], structure: [], zouit:[] };
 
@@ -12383,7 +12401,7 @@ async function drawAdditionalZonesForReport(features) {
 
 
 async function enrichDashboardLayer(layerType, panelElement) {
-   
+    // Находим все элементы списка выбранного типа
     const items = panelElement.querySelectorAll(`.bd-item[data-type="${layerType}"]`);
     if (items.length === 0) return;
 
@@ -12392,54 +12410,60 @@ async function enrichDashboardLayer(layerType, panelElement) {
     for (const item of items) {
         const cn = item.dataset.cn;
         
-       
+        // Пропускаем, если КН некорректный
         if (!cn || !cn.includes(':')) continue;
 
         const descSpan = item.querySelector('.bd-item-desc');
         const originalText = descSpan.innerHTML;
         
-      
+        // Сохраняем иконки (скрепка/прицел), они обычно в начале HTML
+        // Регулярка ищет все теги <i>...</i> в начале строки
         const iconsMatch = originalText.match(/^(<i[^>]*><\/i>\s*)+/i); 
         const iconsHtml = iconsMatch ? iconsMatch[0] : '';
 
-       
+        // Ставим индикатор загрузки
         descSpan.innerHTML = `${iconsHtml} <span style="color:#f59e0b; font-size: 0.9em;">Загрузка данных...</span>`;
 
         try {
-         
+            // Пауза перед запросом (1.2 сек)
+            await new Promise(r => setTimeout(r, 1200));
+
+            // Запрос данных
             const feature = await fetchCadastralData(cn);
 
             if (feature && feature.properties) {
                 const opts = feature.properties.options || {};
                 
-             
+                // Формируем новую строку описания
                 let newDescParts = [];
                 
-            
+                // Наименование / Назначение
                 const name = opts.name || opts.params_name || opts.building_name || opts.purpose;
                 if (name) newDescParts.push(`<b>${name}</b>`);
                 
-              
+                // Площадь
                 if (opts.build_record_area) {
                     newDescParts.push(`Площадь: ${opts.build_record_area} м²`);
                 } 
-              
+                // Или Протяженность (для сооружений)
                 else if (opts.params_extension) {
                     newDescParts.push(`Протяженность: ${opts.params_extension} м`);
                 }
 
-           
+                // Адрес (опционально, если нужно)
+                // if (opts.readable_address) newDescParts.push(opts.readable_address);
+
                 if (newDescParts.length > 0) {
                     descSpan.innerHTML = iconsHtml + newDescParts.join('<br>');
                     
-                
+                    // Обновляем глобальные данные (чтобы экспорт в Excel подхватил новые данные)
                     const globalArr = (layerType === 'oks') ? buildingFeaturesData : structureFeaturesData;
                     const existingFeatureIndex = globalArr.findIndex(f => 
                         (f.properties?.options?.cad_num === cn) || (f.properties?.descr === cn)
                     );
                     
                     if (existingFeatureIndex !== -1) {
-                   
+                        // Мержим новые опции в существующий объект
                         globalArr[existingFeatureIndex].properties.options = {
                             ...globalArr[existingFeatureIndex].properties.options,
                             ...opts
@@ -12455,7 +12479,7 @@ async function enrichDashboardLayer(layerType, panelElement) {
             }
         } catch (e) {
             console.error(`Ошибка обновления ${cn}:`, e);
-            descSpan.innerHTML = iconsHtml + "Ошибка запроса"; 
+            descSpan.innerHTML = iconsHtml + "Ошибка запроса"; // Возвращаем иконки и пишем ошибку
         }
     }
     
