@@ -297,7 +297,7 @@ h3 { margin: 0 0 15px 0; color: #1e293b; font-size: 16px; border-bottom: 2px sol
         </button>
     </div>
 </div>
-<div class="info-text">Home: Сбросить камеру | 2x-клик: приблизить метку | ЛКМ: вращение | Колесо: масштаб</div>
+<div class="info-text">Home: Сброс | 2x-клик: приблизить метку | ЛКМ: вращение | ПКМ: движение |Колесо: масштаб</div>
 <div id="loading">Построение 3D архитектуры...</div>
 
 <script type="module">
