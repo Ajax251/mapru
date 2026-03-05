@@ -3,8 +3,8 @@ window.open3DVisualization = function () {
         try {
             const destSc = 'EPSG:3857';
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            const allLocalFeatures = { target: [], parcels: [], buildings: [], structures: [], zouits: [], intersections:[] };
-            
+            const allLocalFeatures = { target: [], parcels: [], buildings: [], structures: [], zouits: [], intersections: [] };
+
             const to3857 = (yandexCoord) => {
                 if (!yandexCoord || typeof yandexCoord[0] !== 'number') return [0, 0];
                 const trueLat = yandexCoord[0] + (window.mapOffsetY * 0.000008983);
@@ -25,7 +25,6 @@ window.open3DVisualization = function () {
                 else if (type === 'LineString') rings = [coords];
                 else if (type === 'Polygon') rings = coords;
                 else if (type === 'MultiPolygon') rings = coords.flat();
-
                 rings.forEach(ring => {
                     ring.forEach(c => {
                         const pt = to3857(c);
@@ -47,9 +46,8 @@ window.open3DVisualization = function () {
                 const descr = p.descr || '';
                 const purpose = o.purpose || o.params_purpose || '';
                 const name = o.name || o.params_name || o.building_name || o.name_by_doc || '';
-                
                 const text = (descr + ' ' + name + ' ' + purpose).toLowerCase();
-                
+
                 let meta = {
                     id: o.cad_num || o.cad_number || o.reg_numb_border || descr || '',
                     name: name || purpose || descr || 'Объект',
@@ -59,29 +57,29 @@ window.open3DVisualization = function () {
                     isParcel: false,
                     isSpatial: p._isSpatial !== false,
                 };
-                
+
                 if (meta.area && !isNaN(parseFloat(meta.area))) {
                     meta.area = parseFloat(meta.area).toLocaleString('ru-RU') + ' м²';
                 } else if (o.params_extension) {
                     meta.area = o.params_extension + ' м (длина)';
                 }
-                
+
                 if (category === 'building') {
                     let defaultFloors = 1;
                     if (text.includes('многоквартир') || text.includes('мкд')) defaultFloors = 9;
                     else if (text.includes('жило') || text.includes('дом')) defaultFloors = 2;
                     else if (text.includes('школ') || text.includes('больниц')) defaultFloors = 3;
-                    
                     meta.floors = parseInt(o.floors) || defaultFloors;
                     meta.height = meta.floors * 3.5;
                 }
                 else if (category === 'structure' || category === 'zouit') {
+                    meta.isSewer = text.includes('канализ') || text.includes('канал') || text.includes('сток');
                     meta.isGas = text.includes('газ');
-                    meta.isWater = text.includes('вод') || text.includes('канализ') || text.includes('сток');
-                    meta.isElectric = text.includes('электр') || text.includes('лэп') || text.includes('вл ') || text.includes('воздушн');
-                    meta.isHeat = text.includes('тепл') || text.includes('отоп');
-                    meta.isUnderground = text.includes('подзем') || (!text.includes('надзем') && (meta.isWater || meta.isHeat));
-                    meta.diameter = parseFloat(o.diameter) || (meta.isGas ? 0.3 : 0.4);
+                    meta.isHeat = text.includes('тепло');
+                    meta.isWater = (text.includes('водо') || text.includes('вод')) && !meta.isSewer;
+                    meta.isElectric = text.includes('электро') || text.includes('электр') || text.includes('лэп') || text.includes('вл ') || text.includes('воздушн');
+                    meta.isUnderground = text.includes('подзем') || (!text.includes('надзем') && (meta.isWater || meta.isSewer));
+                    meta.diameter = parseFloat(o.diameter) || (meta.isGas ? 0.3 : (meta.isHeat ? 0.4 : (meta.isSewer ? 0.5 : 0.35)));
                 }
                 return meta;
             };
@@ -90,12 +88,10 @@ window.open3DVisualization = function () {
                 const result = [];
                 (featuresArray || []).forEach(f => {
                     const meta = analyzeFeature(f, type);
-                    
                     if (!meta.isSpatial) {
-                        result.push({ type: 'Point', polygons:[], meta: meta });
+                        result.push({ type: 'Point', polygons: [], meta: meta });
                         return;
                     }
-
                     if (!f.geometry || !f.geometry.coordinates) return;
                     let ringsList = [];
                     if (f.geometry.type === 'Polygon') ringsList = [f.geometry.coordinates];
@@ -103,12 +99,10 @@ window.open3DVisualization = function () {
                     else if (f.geometry.type.includes('Line')) {
                         ringsList = f.geometry.type === 'LineString' ? [[f.geometry.coordinates]] : f.geometry.coordinates.map(c => [c]);
                     }
-                    
                     const localPolys = ringsList.map(poly => poly.map(ring => ring.map(c => {
                         if (!c || typeof c[0] !== 'number') return { x: 0, y: 0 };
                         return { x: c[0] - originX, y: c[1] - originY };
                     })));
-                    
                     result.push({
                         type: f.geometry.type.includes('Line') ? 'Line' : 'Polygon',
                         polygons: localPolys,
@@ -127,7 +121,6 @@ window.open3DVisualization = function () {
                 else if (type === 'LineString') rings = [coords];
                 else if (type === 'Polygon') rings = coords;
                 else if (type === 'MultiPolygon') rings = coords.flat();
-
                 const localPoly = rings.map(ring => ring.map(c => {
                     const pt = to3857(c); return { x: pt[0] - originX, y: pt[1] - originY };
                 }));
@@ -137,7 +130,7 @@ window.open3DVisualization = function () {
                     meta: { isParcel: isTargetParcel, name: 'Целевой объект', id: obj.properties.get('cadastralNumber') || '', isSpatial: true }
                 });
             });
-            
+
             allLocalFeatures.parcels = processFeatureArray(window.parcelFeaturesData, 'parcel');
             allLocalFeatures.buildings = processFeatureArray(window.buildingFeaturesData, 'building');
             allLocalFeatures.structures = processFeatureArray(window.structureFeaturesData, 'structure');
@@ -154,18 +147,17 @@ window.open3DVisualization = function () {
                                 return [pt[0] - originX, pt[1] - originY];
                             }));
                             localRings = localRings.map(ring => {
-                                if (ring.length > 0 && (ring[0][0] !== ring[ring.length-1][0] || ring[0][1] !== ring[ring.length-1][1])) {
+                                if (ring.length > 0 && (ring[0][0] !== ring[ring.length - 1][0] || ring[0][1] !== ring[ring.length - 1][1])) {
                                     ring.push([...ring[0]]);
                                 }
                                 return ring;
                             });
                             if (localRings[0].length >= 4) {
-                                try { localPolysForTurf.push(window.turf.polygon(localRings)); } catch(e) {}
+                                try { localPolysForTurf.push(window.turf.polygon(localRings)); } catch (e) { }
                             }
                         });
                     }
                 });
-
                 for (let i = 0; i < localPolysForTurf.length; i++) {
                     for (let j = i + 1; j < localPolysForTurf.length; j++) {
                         try {
@@ -173,11 +165,11 @@ window.open3DVisualization = function () {
                             if (intersection && intersection.geometry) {
                                 let iRingsList = intersection.geometry.type === 'Polygon' ? [intersection.geometry.coordinates] : intersection.geometry.coordinates;
                                 iRingsList.forEach(poly => {
-                                    const formattedPoly = poly.map(ring => ring.map(c => ({x: c[0], y: c[1]})));
+                                    const formattedPoly = poly.map(ring => ring.map(c => ({ x: c[0], y: c[1] })));
                                     allLocalFeatures.intersections.push({ type: 'Polygon', polygons: [formattedPoly], meta: { name: 'Наложение', id: 'Конфликт границ' } });
                                 });
                             }
-                        } catch(e) {}
+                        } catch (e) { }
                     }
                 }
             }
@@ -187,16 +179,16 @@ window.open3DVisualization = function () {
             const modalId = 'modal-3d-view-advanced';
             let modal = document.getElementById(modalId);
             if (modal) modal.remove();
-            
+
             modal = document.createElement('div');
             modal.id = modalId;
             Object.assign(modal.style, {
                 position: 'fixed', top: '2.5%', left: '2.5%', width: '95%', height: '95%',
                 backgroundColor: '#ffffff', borderRadius: '16px', zIndex: '20000',
-                boxShadow: '0 25px 80px rgba(0, 0, 0, 0.4)', display: 'flex', flexDirection: 'column',
-                overflow: 'hidden', border: '1px solid #cbd5e1', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
+                boxShadow: '0 25px 80px rgba(0,0,0,0.4)', display: 'flex', flexDirection: 'column',
+                overflow: 'hidden', border: '1px solid rgba(37,99,235,0.2)', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
             });
-            
+
             const header = document.createElement('div');
             Object.assign(header.style, {
                 padding: '12px 20px', background: 'linear-gradient(135deg, #1e3a5f 0%, #2563eb 100%)',
@@ -204,29 +196,30 @@ window.open3DVisualization = function () {
                 fontWeight: '600', fontSize: '16px', fontFamily: 'system-ui, -apple-system, sans-serif',
                 borderBottom: 'none'
             });
-            header.innerHTML = '<span style="display:flex; align-items:center;"><i class="fas fa-cube" style="color:#ffffff; font-size:20px; margin-right:10px;"></i> Кадастровая 3D Модель</span>';
-            
+            header.innerHTML = '<span style="display:flex;align-items:center;"><i class="fas fa-cube" style="color:#93c5fd;font-size:20px;margin-right:10px;"></i> Кадастровая 3D Модель</span>';
+
             const btnContainer = document.createElement('div');
             btnContainer.style.display = 'flex'; btnContainer.style.gap = '8px';
+
             const createWinBtn = (iconClass, hoverColor, bgColor = 'rgba(255,255,255,0.15)') => {
                 const btn = document.createElement('button');
                 btn.innerHTML = `<i class="${iconClass}"></i>`;
                 Object.assign(btn.style, {
-                    background: bgColor, border: 'none', color: 'rgba(255,255,255,0.8)', fontSize: '14px',
+                    background: bgColor, border: 'none', color: 'rgba(255,255,255,0.85)', fontSize: '14px',
                     cursor: 'pointer', width: '32px', height: '32px',
                     borderRadius: '6px', transition: 'all 0.2s', display: 'flex', alignItems: 'center', justifyContent: 'center'
                 });
                 btn.onmouseenter = () => { btn.style.background = hoverColor; btn.style.color = '#fff'; };
-                btn.onmouseleave = () => { btn.style.background = bgColor; btn.style.color = 'rgba(255,255,255,0.8)'; };
+                btn.onmouseleave = () => { btn.style.background = bgColor; btn.style.color = 'rgba(255,255,255,0.85)'; };
                 return btn;
             };
-            
-            const minBtn = createWinBtn('fas fa-minus', '#3b82f6');
+
+            const minBtn = createWinBtn('fas fa-minus', 'rgba(255,255,255,0.3)');
             const closeBtn = createWinBtn('fas fa-times', '#ef4444');
-            
+
             const iframe = document.createElement('iframe');
             Object.assign(iframe.style, { width: '100%', height: '100%', border: 'none', flexGrow: '1', background: '#87CEEB' });
-            
+
             let isMinimized = false;
             minBtn.onclick = () => {
                 if (!isMinimized) {
@@ -245,7 +238,7 @@ window.open3DVisualization = function () {
                 isMinimized = !isMinimized;
             };
             closeBtn.onclick = () => modal.remove();
-            
+
             btnContainer.appendChild(minBtn);
             btnContainer.appendChild(closeBtn);
             header.appendChild(btnContainer);
@@ -256,45 +249,40 @@ window.open3DVisualization = function () {
 <head>
 <meta charset="UTF-8">
 <style>
-body { margin: 0; overflow: hidden; background: #87CEEB; font-family: "Segoe UI", system-ui, sans-serif; }
-#ui-toggle-btn { display: none; position: absolute; top: 15px; right: 15px; background: rgba(255,255,255,0.95); border: 1px solid #cbd5e1; border-radius: 8px; width: 44px; height: 44px; box-shadow: 0 4px 12px rgba(0,0,0,0.15); z-index: 101; cursor: pointer; align-items: center; justify-content: center; }
+body { margin: 0; overflow: hidden; background: #1e3a5f; font-family: "Segoe UI", system-ui, sans-serif; }
+#ui-toggle-btn { display: none; position: absolute; top: 15px; right: 15px; background: rgba(255,255,255,0.95); border: 1px solid #c7d9f1; border-radius: 10px; width: 44px; height: 44px; box-shadow: 0 4px 16px rgba(37,99,235,0.12); z-index: 101; cursor: pointer; align-items: center; justify-content: center; }
 #ui-toggle-btn svg { width: 20px; height: 20px; }
-#ui-panel { position: absolute; top: 20px; right: 20px; background: rgba(255, 255, 255, 0.97); padding: 20px; border-radius: 14px; box-shadow: 0 8px 32px rgba(0,0,0,0.12), 0 2px 8px rgba(37,99,235,0.08); backdrop-filter: blur(12px); width: 270px; max-height: 85vh; overflow-y: auto; z-index: 100; border: 1px solid rgba(37,99,235,0.15); transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s; }
-#close-ui-btn { display: none; position: absolute; top: 15px; right: 20px; background: none; border: none; font-size: 24px; cursor: pointer; color: #64748b; }
-h3 { margin: 0 0 15px 0; color: #1e293b; font-size: 15px; border-bottom: 2px solid #3b82f6; padding-bottom: 10px; font-weight: 700; padding-right: 25px; letter-spacing: 0.3px; }
-
-/* Tree view styles */
+#ui-panel { position: absolute; top: 20px; right: 20px; background: rgba(255,255,255,0.97); padding: 20px; border-radius: 14px; box-shadow: 0 8px 32px rgba(0,0,0,0.12), 0 2px 8px rgba(37,99,235,0.08); backdrop-filter: blur(12px); width: 270px; max-height: 85vh; overflow-y: auto; z-index: 100; border: 1px solid rgba(37,99,235,0.12); transition: transform 0.3s cubic-bezier(0.4, 0, 0.2, 1), opacity 0.3s; }
+#close-ui-btn { display: none; position: absolute; top: 12px; right: 16px; background: none; border: none; font-size: 22px; cursor: pointer; color: #94a3b8; line-height: 1; }
+#close-ui-btn:hover { color: #ef4444; }
+h3 { margin: 0 0 15px 0; color: #1e293b; font-size: 15px; border-bottom: 2px solid #2563eb; padding-bottom: 10px; font-weight: 700; padding-right: 25px; letter-spacing: 0.3px; }
 .layer-item { margin-bottom: 6px; }
 .layer-header { display: flex; align-items: center; }
 .caret { cursor: pointer; user-select: none; margin-right: 6px; font-size: 12px; color: #64748b; display: inline-block; width: 14px; text-align: center; transition: transform 0.2s; }
 .caret::before { content: "▶"; }
 .caret-down::before { content: "▼"; }
-.nested { display: none; margin: 4px 0 4px 24px; padding: 0; list-style: none; border-left: 1px solid #cbd5e1; }
+.nested { display: none; margin: 4px 0 4px 24px; padding: 0; list-style: none; border-left: 2px solid #e2e8f0; }
 .active { display: block; }
 .nested li { display: flex; align-items: center; margin-bottom: 4px; padding-left: 8px; }
 .nested li label { font-size: 11px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; max-width: 160px; }
-
-.layer-control { display: flex; align-items: center; cursor: pointer; padding: 3px; border-radius: 6px; transition: background 0.2s; }
-.layer-control:hover { background: #f1f5f9; }
-.layer-control input { margin-right: 10px; cursor: pointer; width: 15px; height: 15px; accent-color: #3b82f6; }
+.layer-control { display: flex; align-items: center; cursor: pointer; padding: 4px; border-radius: 6px; transition: background 0.15s; }
+.layer-control:hover { background: #f0f7ff; }
+.layer-control input { margin-right: 10px; cursor: pointer; width: 15px; height: 15px; accent-color: #2563eb; }
 .layer-control label { cursor: pointer; font-size: 13px; color: #334155; font-weight: 500; }
-.color-box { width: 14px; height: 14px; display: inline-block; margin-right: 10px; border-radius: 3px; border: 1px solid rgba(0,0,0,0.2); flex-shrink: 0; }
+.color-box { width: 14px; height: 14px; display: inline-block; margin-right: 10px; border-radius: 4px; border: 1px solid rgba(0,0,0,0.15); flex-shrink: 0; }
 .info-text { position: absolute; bottom: 20px; left: 20px; background: rgba(255,255,255,0.97); color: #334155; padding: 14px 18px; border-radius: 10px; font-size: 13px; font-weight: 500; pointer-events: none; box-shadow: 0 4px 16px rgba(0,0,0,0.1); border-left: 4px solid #2563eb; z-index: 100; line-height: 1.6; backdrop-filter: blur(8px); }
-.export-btn { width: 100%; margin-top: 15px; padding: 10px; background: #10b981; color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: background 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px; }
-.export-btn:hover { background: #059669; box-shadow: 0 4px 12px rgba(16,185,129,0.3); }
-
-/* Scrollbar for UI panel */
-#ui-panel::-webkit-scrollbar { width: 6px; }
-#ui-panel::-webkit-scrollbar-track { background: #f1f5f9; border-radius: 4px; }
-#ui-panel::-webkit-scrollbar-thumb { background: #cbd5e1; border-radius: 4px; }
-
+.export-btn { width: 100%; margin-top: 15px; padding: 10px; background: linear-gradient(135deg, #059669, #10b981); color: white; border: none; border-radius: 8px; font-weight: 600; cursor: pointer; transition: all 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px; font-size: 13px; }
+.export-btn:hover { box-shadow: 0 4px 12px rgba(16,185,129,0.35); transform: translateY(-1px); }
+#ui-panel::-webkit-scrollbar { width: 5px; }
+#ui-panel::-webkit-scrollbar-track { background: #f8fafc; border-radius: 4px; }
+#ui-panel::-webkit-scrollbar-thumb { background: #c7d9f1; border-radius: 4px; }
 @media (max-width: 768px) { #ui-toggle-btn { display: flex; } #ui-panel { right: 0; top: 0; height: 100vh; width: 280px; border-radius: 0; max-height: 100vh; box-shadow: -5px 0 30px rgba(0,0,0,0.3); } #ui-panel.hidden { transform: translateX(120%); opacity: 0; pointer-events: none; } #close-ui-btn { display: block; } .info-text { display: none; } }
 </style>
-<script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"></script>
-<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}</script>
+<script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"><\/script>
+<script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}<\/script>
 </head>
 <body>
-<button id="ui-toggle-btn"><svg viewBox="0 0 24 24" fill="none" stroke="#3b82f6" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 12 12 17 22 12"></polyline><polyline points="2 17 12 22 22 17"></polyline></svg></button>
+<button id="ui-toggle-btn"><svg viewBox="0 0 24 24" fill="none" stroke="#2563eb" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 12 12 17 22 12"></polyline><polyline points="2 17 12 22 22 17"></polyline></svg></button>
 <div id="ui-panel" class="hidden">
     <button id="close-ui-btn">&times;</button>
     <h3>Слои сцены</h3>
@@ -302,13 +290,11 @@ h3 { margin: 0 0 15px 0; color: #1e293b; font-size: 15px; border-bottom: 2px sol
     <div class="layer-control" style="margin-top: 10px; border-top: 1px solid #e2e8f0; padding-top: 10px;">
         <span style="width:20px;display:inline-block;"></span>
         <input type="checkbox" id="t-labels" checked>
-        <div class="color-box" style="background: #fff; border: 2px solid #3b82f6;"></div>
+        <div class="color-box" style="background: #fff; border: 2px solid #2563eb;"></div>
         <label for="t-labels">Подписи объектов</label>
     </div>
     <div style="margin-top: 15px; border-top: 1px solid #e2e8f0; padding-top: 15px;">
-        <button id="export-html-btn" class="export-btn">
-            Сохранить в HTML
-        </button>
+        <button id="export-html-btn" class="export-btn">Сохранить в HTML</button>
     </div>
 </div>
 <div class="info-text">ЛКМ: Вращение | ПКМ: Перемещение<br><b>2x клик по табличке:</b> Быстрый фокус</div>
@@ -320,782 +306,670 @@ import { OrbitControls } from "three/addons/controls/OrbitControls.js";
 const uiPanel = document.getElementById('ui-panel');
 const uiToggleBtn = document.getElementById('ui-toggle-btn');
 const closeUiBtn = document.getElementById('close-ui-btn');
-
-if (window.innerWidth > 768) {
-    uiPanel.classList.remove('hidden');
-}
-
+if (window.innerWidth > 768) uiPanel.classList.remove('hidden');
 uiToggleBtn.onclick = () => uiPanel.classList.toggle('hidden');
 closeUiBtn.onclick = () => uiPanel.classList.add('hidden');
 
 try {
     const data = ${safeDataString};
-    const animateables = []; 
+    const animateables = [];
 
-    ['target', 'parcels', 'intersections', 'buildings', 'structures', 'zouits'].forEach(key => {
-        if(data[key]) {
-            data[key].forEach((item, idx) => { item.uid = key + '_' + idx; });
-        }
+    ['target','parcels','intersections','buildings','structures','zouits'].forEach(key => {
+        if(data[key]) data[key].forEach((item, idx) => { item.uid = key + '_' + idx; });
     });
 
-    // === ПАЛИТРА ЦВЕТОВ ДЛЯ УЧАСТКОВ ===
+    /* ── ИНФРАСТРУКТУРНЫЕ ЦВЕТА ── */
+    const INFRA_COLORS = { gas: 0xf59e0b, water: 0x3b82f6, heat: 0xef4444, electric: 0x8b5cf6, sewer: 0x6b7280, default: 0x94a3b8 };
+    const getInfraColor = (m) => {
+        if(m.isGas) return INFRA_COLORS.gas;
+        if(m.isWater) return INFRA_COLORS.water;
+        if(m.isHeat) return INFRA_COLORS.heat;
+        if(m.isElectric) return INFRA_COLORS.electric;
+        if(m.isSewer) return INFRA_COLORS.sewer;
+        return INFRA_COLORS.default;
+    };
+    const getInfraHex = (m) => '#' + new THREE.Color(getInfraColor(m)).getHexString();
+    const getInfraName = (m) => {
+        if(m.isGas) return 'Газопровод';
+        if(m.isWater) return 'Водопровод';
+        if(m.isHeat) return 'Теплотрасса';
+        if(m.isElectric) return 'ЛЭП';
+        if(m.isSewer) return 'Канализация';
+        return m.name || 'Сооружение';
+    };
+    const getZouitName = (m) => {
+        if(m.isGas) return 'Охр. зона газа';
+        if(m.isWater) return 'Охр. зона водопровода';
+        if(m.isHeat) return 'Охр. зона теплосети';
+        if(m.isElectric) return 'Охр. зона ЛЭП';
+        if(m.isSewer) return 'Охр. зона канализации';
+        return m.name || 'ЗОУИТ';
+    };
+
     const PARCEL_PALETTE = [
         0x4ade80, 0x34d399, 0xa3e635, 0x2dd4bf, 0x86efac,
-        0x6ee7b7, 0xbef264, 0x5eead4, 0x22d3ee, 0x38bdf8,
-        0xa78bfa, 0xfbbf24, 0xf0abfc, 0xfb7185, 0x67e8f9
+        0x6ee7b7, 0xbef264, 0x5eead4, 0x67e8f9, 0x38bdf8,
+        0xa78bfa, 0xfbbf24, 0xf0abfc, 0xfb7185, 0x22d3ee
     ];
-    
-    const darkenColor = (hex, factor = 0.6) => {
-        const c = new THREE.Color(hex);
-        c.r *= factor; c.g *= factor; c.b *= factor;
-        return c;
-    };
-    
-    // === ЦВЕТА ДЛЯ СЕТЕЙ ===
-    const NETWORK_COLORS = {
-        gas: { main: 0xfbbf24, edge: 0xd97706 },      // газ - желтый
-        water: { main: 0x3b82f6, edge: 0x1d4ed8 },   // вода - синий
-        heat: { main: 0xef4444, edge: 0xb91c1c },    // тепло - красный
-        electric: { main: 0xa855f7, edge: 0x7e22ce },// электро - фиолетовый
-        sewer: { main: 0x64748b, edge: 0x475569 },   // канал/связь - серый
-        default: { main: 0x0ea5e9, edge: 0x0369a1 }  // остальные
-    };
+    const darken = (hex, f=0.55) => { const c = new THREE.Color(hex); c.r*=f; c.g*=f; c.b*=f; return c; };
 
-    // === ФЛОРА И РАСТИТЕЛЬНОСТЬ ===
+    /* ── ФЛОРА ── */
     const plantGeos = {
-        stem: new THREE.CylinderGeometry(0.04, 0.06, 1.0, 4), 
+        stem: new THREE.CylinderGeometry(0.04, 0.06, 1.0, 4),
         leaf: new THREE.PlaneGeometry(0.5, 0.25),
         petal: new THREE.PlaneGeometry(0.35, 0.2),
-        center: new THREE.SphereGeometry(0.18, 6, 6), 
+        center: new THREE.SphereGeometry(0.18, 6, 6),
         grass: new THREE.PlaneGeometry(0.08, 0.6)
     };
-
     const plantMats = {
         stem: new THREE.MeshStandardMaterial({ color: 0x16a34a, roughness: 0.9 }),
         leaf: new THREE.MeshStandardMaterial({ color: 0x22c55e, roughness: 0.9, side: THREE.DoubleSide }),
         center: new THREE.MeshStandardMaterial({ color: 0xfef08a, roughness: 0.5 }),
         grass: new THREE.MeshStandardMaterial({ color: 0x4ade80, roughness: 1, side: THREE.DoubleSide }),
-        petals: [0xf43f5e, 0xfbbf24, 0xa78bfa, 0xfb7185, 0xf97316, 0x34d399].map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.6, side: THREE.DoubleSide }))
+        petals: [0xf43f5e,0xfbbf24,0xa78bfa,0xfb7185,0xf97316,0x34d399].map(c => new THREE.MeshStandardMaterial({ color: c, roughness: 0.6, side: THREE.DoubleSide }))
     };
 
-    const createFlower = (x, z, scale = 1, baseY = 0.2) => {
-        const group = new THREE.Group();
+    const createFlower = (x, z, scale=1, baseY=0.2) => {
+        const g = new THREE.Group();
         const stem = new THREE.Mesh(plantGeos.stem, plantMats.stem);
-        stem.position.y = 0.5 * scale; stem.scale.set(scale, scale, scale); stem.castShadow = true; group.add(stem);
-        [-1, 1].forEach(side => {
+        stem.position.y = 0.5*scale; stem.scale.set(scale,scale,scale); stem.castShadow = true; g.add(stem);
+        [-1,1].forEach(side => {
             const leaf = new THREE.Mesh(plantGeos.leaf, plantMats.leaf);
-            leaf.position.set(side * 0.2 * scale, 0.4 * scale, 0); leaf.rotation.z = side * 0.6; leaf.rotation.y = Math.random() * Math.PI;
-            leaf.scale.set(scale, scale, scale); leaf.castShadow = true; group.add(leaf);
+            leaf.position.set(side*0.2*scale, 0.4*scale, 0); leaf.rotation.z = side*0.6; leaf.rotation.y = Math.random()*Math.PI;
+            leaf.scale.set(scale,scale,scale); leaf.castShadow = true; g.add(leaf);
         });
-        const petalMat = plantMats.petals[Math.floor(Math.random() * plantMats.petals.length)];
-        for (let i = 0; i < 5; i++) {
-            const angle = (i / 5) * Math.PI * 2;
-            const petal = new THREE.Mesh(plantGeos.petal, petalMat);
-            petal.position.set(Math.cos(angle) * 0.28 * scale, 1.02 * scale, Math.sin(angle) * 0.28 * scale);
-            petal.rotation.x = -Math.PI / 2; petal.rotation.z = angle; petal.scale.set(scale, scale, scale); petal.castShadow = true; group.add(petal);
+        const pm = plantMats.petals[Math.floor(Math.random()*plantMats.petals.length)];
+        for(let i=0;i<5;i++){
+            const a=(i/5)*Math.PI*2;
+            const p=new THREE.Mesh(plantGeos.petal, pm);
+            p.position.set(Math.cos(a)*0.28*scale, 1.02*scale, Math.sin(a)*0.28*scale);
+            p.rotation.x=-Math.PI/2; p.rotation.z=a; p.scale.set(scale,scale,scale); p.castShadow=true; g.add(p);
         }
-        const center = new THREE.Mesh(plantGeos.center, plantMats.center);
-        center.position.y = 1.03 * scale; center.scale.set(scale, scale, scale); group.add(center);
-        group.position.set(x, baseY, z); group.rotation.y = Math.random() * Math.PI * 2;
-        return group;
+        const ctr = new THREE.Mesh(plantGeos.center, plantMats.center);
+        ctr.position.y = 1.03*scale; ctr.scale.set(scale,scale,scale); g.add(ctr);
+        g.position.set(x, baseY, z); g.rotation.y = Math.random()*Math.PI*2;
+        return g;
     };
 
-    const createGrassTuft = (x, z, baseY = 0.2) => {
-        const group = new THREE.Group();
-        for (let i = 0; i < 4; i++) {
-            const blade = new THREE.Mesh(plantGeos.grass, plantMats.grass);
-            const heightScale = 0.7 + Math.random() * 0.6;
-            blade.scale.set(1, heightScale, 1);
-            blade.position.set((Math.random() - 0.5) * 0.3, 0.3 * heightScale, (Math.random() - 0.5) * 0.3);
-            blade.rotation.y = Math.random() * Math.PI; blade.rotation.z = (Math.random() - 0.5) * 0.5; blade.castShadow = true; group.add(blade);
+    const createGrassTuft = (x, z, baseY=0.2) => {
+        const g = new THREE.Group();
+        for(let i=0;i<4;i++){
+            const b=new THREE.Mesh(plantGeos.grass, plantMats.grass);
+            const hs=0.7+Math.random()*0.6;
+            b.scale.set(1,hs,1);
+            b.position.set((Math.random()-0.5)*0.3, 0.3*hs, (Math.random()-0.5)*0.3);
+            b.rotation.y=Math.random()*Math.PI; b.rotation.z=(Math.random()-0.5)*0.5; b.castShadow=true; g.add(b);
         }
-        group.position.set(x, baseY, z); return group;
+        g.position.set(x, baseY, z); return g;
     };
 
-    const seedParcelWithFlowers = (polyRing, groupTarget, baseY = 0.2) => {
-        if (!polyRing || polyRing.length < 3) return;
-        let minX = Infinity, maxX = -Infinity, minZ = Infinity, maxZ = -Infinity;
-        polyRing.forEach(p => { minX=Math.min(minX,p.x); maxX=Math.max(maxX,p.x); minZ=Math.min(minZ,-p.y); maxZ=Math.max(maxZ,-p.y); });
-        const area = (maxX - minX) * (maxZ - minZ);
-        const targetPlants = Math.min(25, Math.floor(area / 25));
-        const pointInPoly = (x, z, poly) => {
-            let inside = false;
-            for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-                const xi = poly[i].x, zi = -poly[i].y, xj = poly[j].x, zj = -poly[j].y;
-                if (((zi > z) !== (zj > z)) && (x < (xj - xi) * (z - zi) / (zj - zi) + xi)) inside = !inside;
-            }
-            return inside;
-        };
-        let placed = 0, attempts = 0;
-        while (placed < targetPlants && attempts < targetPlants * 3) {
-            attempts++; const x = minX + Math.random() * (maxX - minX), z = minZ + Math.random() * (maxZ - minZ);
-            if (pointInPoly(x, z, polyRing)) {
-                groupTarget.add(Math.random() > 0.65 ? createFlower(x, z, 0.3 + Math.random() * 0.3, baseY) : createGrassTuft(x, z, baseY));
-                placed++;
-            }
+    const seedParcelWithFlowers = (polyRing, groupTarget, baseY=0.2) => {
+        if(!polyRing||polyRing.length<3) return;
+        let mnX=Infinity,mxX=-Infinity,mnZ=Infinity,mxZ=-Infinity;
+        polyRing.forEach(p=>{mnX=Math.min(mnX,p.x);mxX=Math.max(mxX,p.x);mnZ=Math.min(mnZ,-p.y);mxZ=Math.max(mxZ,-p.y);});
+        const area=(mxX-mnX)*(mxZ-mnZ);
+        const target=Math.min(25,Math.floor(area/25));
+        const pip=(x,z,poly)=>{let ins=false;for(let i=0,j=poly.length-1;i<poly.length;j=i++){const xi=poly[i].x,zi=-poly[i].y,xj=poly[j].x,zj=-poly[j].y;if(((zi>z)!==(zj>z))&&(x<(xj-xi)*(z-zi)/(zj-zi)+xi))ins=!ins;}return ins;};
+        let placed=0,att=0;
+        while(placed<target&&att<target*3){att++;const x=mnX+Math.random()*(mxX-mnX),z=mnZ+Math.random()*(mxZ-mnZ);
+            if(pip(x,z,polyRing)){groupTarget.add(Math.random()>0.65?createFlower(x,z,0.3+Math.random()*0.3,baseY):createGrassTuft(x,z,baseY));placed++;}
         }
     };
 
-    // === СТИЛИ ЗДАНИЙ ===
+    /* ── СТИЛИ ЗДАНИЙ ── */
     const BUILDING_DICT = {
-        education: { keys:['школ','детск','сад','учебн','институт','образоват','ясли'], wall: 0xfcd34d, base: 0x92400e, roof: 0x1e293b, win: 0x93c5fd, winType: 'ribbon', parapet: true },
-        medical: { keys:['больниц','поликлиник','мед','здрав','госпитал','фап','амбулатор'], wall: 0xffffff, base: 0x94a3b8, roof: 0xcbd5e1, win: 0x7dd3fc, winType: 'standard', parapet: true, addon: 'cross' },
-        mkd: { keys:['многоквартирный','мкд','общежити','квартир'], wall: 0x94a3b8, base: 0x475569, roof: 0x334155, win: 0x60a5fa, winType: 'dense', parapet: true },
-        private: { keys:['жилой дом','индивидуальн','частн','дачн','садов'], wall: 0xfde68a, base: 0x78350f, roof: 0x7f1d1d, win: 0x93c5fd, winType: 'standard', parapet: false, hippedRoof: true },
-        commercial: { keys:['магазин','торгов','офис','бизнес','тц','трц','коммерч'], wall: 0x6ee7b7, base: 0x064e3b, roof: 0x1f2937, win: 0x1e3a8a, winType: 'large', parapet: true },
-        industrial: { keys:['склад','цех','завод','производств','промышлен','гараж','ангар'], wall: 0x64748b, base: 0x334155, roof: 0x475569, win: null, winType: 'none', parapet: false },
-        default: { wall: 0xf1f5f9, base: 0x64748b, roof: 0x334155, win: 0x93c5fd, winType: 'standard', parapet: true }
+        education:{keys:['школ','детск','сад','учебн','институт','образоват','ясли'],wall:0xfcd34d,base:0x92400e,roof:0x1e293b,win:0x93c5fd,winType:'ribbon',parapet:true},
+        medical:{keys:['больниц','поликлиник','мед','здрав','госпитал','фап','амбулатор'],wall:0xffffff,base:0x94a3b8,roof:0xcbd5e1,win:0x7dd3fc,winType:'standard',parapet:true,addon:'cross'},
+        mkd:{keys:['многоквартирный','мкд','общежити','квартир'],wall:0x94a3b8,base:0x475569,roof:0x334155,win:0x60a5fa,winType:'dense',parapet:true},
+        private:{keys:['жилой дом','индивидуальн','частн','дачн','садов'],wall:0xfde68a,base:0x78350f,roof:0x7f1d1d,win:0x93c5fd,winType:'standard',parapet:false,hippedRoof:true},
+        commercial:{keys:['магазин','торгов','офис','бизнес','тц','трц','коммерч'],wall:0x6ee7b7,base:0x064e3b,roof:0x1f2937,win:0x1e3a8a,winType:'large',parapet:true},
+        industrial:{keys:['склад','цех','завод','производств','промышлен','гараж','ангар'],wall:0x64748b,base:0x334155,roof:0x475569,win:null,winType:'none',parapet:false},
+        default:{wall:0xf1f5f9,base:0x64748b,roof:0x334155,win:0x93c5fd,winType:'standard',parapet:true}
     };
-
-    function getBuildingStyle(rawText) {
-        for (const [type, config] of Object.entries(BUILDING_DICT)) {
-            if (config.keys && config.keys.some(k => rawText.includes(k))) return config;
-        }
-        return BUILDING_DICT.default;
-    }
+    function getBuildingStyle(rawText){for(const[,cfg]of Object.entries(BUILDING_DICT)){if(cfg.keys&&cfg.keys.some(k=>rawText.includes(k)))return cfg;}return BUILDING_DICT.default;}
 
     const windowMaterialCache = {};
-    function getWindowMaterial(style) {
-        if (style.winType === 'none' || !style.win) return new THREE.MeshStandardMaterial({ color: style.wall, roughness: 0.9 });
-        
-        const cacheKey = style.wall + '_' + style.winType;
-        if (windowMaterialCache[cacheKey]) return windowMaterialCache[cacheKey];
-
-        const canvas = document.createElement('canvas');
-        canvas.width = 256; canvas.height = 256;
-        const ctx = canvas.getContext('2d');
-        
-        ctx.fillStyle = '#' + new THREE.Color(style.wall).getHexString();
-        ctx.fillRect(0, 0, 256, 256);
-
-        let winW = 120, winH = 160;
-        if (style.winType === 'dense') { winW = 160; winH = 180; }
-        else if (style.winType === 'ribbon') { winW = 220; winH = 100; }
-        else if (style.winType === 'large') { winW = 180; winH = 200; }
-
-        const startX = (256 - winW) / 2;
-        const startY = (256 - winH) / 2;
-
-        ctx.fillStyle = '#' + new THREE.Color(style.win).getHexString();
-        ctx.fillRect(startX, startY, winW, winH);
-        
-        ctx.strokeStyle = '#1e293b'; 
-        ctx.lineWidth = 8;
-        ctx.strokeRect(startX, startY, winW, winH);
-
-        const tex = new THREE.CanvasTexture(canvas);
-        tex.colorSpace = THREE.SRGBColorSpace;
-        tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.RepeatWrapping;
-
-        const tileSizeX = style.winType === 'dense' ? 3 : (style.winType === 'ribbon' ? 5 : 4);
-        tex.repeat.set(1 / tileSizeX, 1 / 3.5);
-
-        const mat = new THREE.MeshStandardMaterial({ map: tex, roughness: 0.6 });
-        windowMaterialCache[cacheKey] = mat;
-        return mat;
+    function getWindowMaterial(style){
+        if(style.winType==='none'||!style.win)return new THREE.MeshStandardMaterial({color:style.wall,roughness:0.9});
+        const ck=style.wall+'_'+style.winType;
+        if(windowMaterialCache[ck])return windowMaterialCache[ck];
+        const cv=document.createElement('canvas');cv.width=256;cv.height=256;const ctx=cv.getContext('2d');
+        ctx.fillStyle='#'+new THREE.Color(style.wall).getHexString();ctx.fillRect(0,0,256,256);
+        let wW=120,wH=160;
+        if(style.winType==='dense'){wW=160;wH=180;}else if(style.winType==='ribbon'){wW=220;wH=100;}else if(style.winType==='large'){wW=180;wH=200;}
+        const sX=(256-wW)/2,sY=(256-wH)/2;
+        ctx.fillStyle='#'+new THREE.Color(style.win).getHexString();ctx.fillRect(sX,sY,wW,wH);
+        ctx.strokeStyle='#1e293b';ctx.lineWidth=8;ctx.strokeRect(sX,sY,wW,wH);
+        const tex=new THREE.CanvasTexture(cv);tex.colorSpace=THREE.SRGBColorSpace;
+        tex.wrapS=THREE.RepeatWrapping;tex.wrapT=THREE.RepeatWrapping;
+        const tsX=style.winType==='dense'?3:(style.winType==='ribbon'?5:4);
+        tex.repeat.set(1/tsX,1/3.5);
+        const mat=new THREE.MeshStandardMaterial({map:tex,roughness:0.6});
+        windowMaterialCache[ck]=mat;return mat;
     }
 
-    // === НАСТРОЙКА СЦЕНЫ И КАМЕРЫ ===
+    /* ── СЦЕНА ── */
     const scene = new THREE.Scene();
-    
-    // --- ГРАДИЕНТНОЕ НЕБО БЕЗ ТУМАНА ---
-    const skyCanvas = document.createElement('canvas');
-    skyCanvas.width = 1; skyCanvas.height = 512;
-    const skyCtx = skyCanvas.getContext('2d');
-    const skyGrad = skyCtx.createLinearGradient(0, 0, 0, 512);
-    skyGrad.addColorStop(0, '#1e40af');
-    skyGrad.addColorStop(0.3, '#3b82f6');
-    skyGrad.addColorStop(0.6, '#7dd3fc');
-    skyGrad.addColorStop(1, '#e0f2fe');
-    skyCtx.fillStyle = skyGrad;
-    skyCtx.fillRect(0, 0, 1, 512);
-    const skyTex = new THREE.CanvasTexture(skyCanvas);
-    skyTex.colorSpace = THREE.SRGBColorSpace;
-    scene.background = skyTex;
-    
-    const camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 2000);
-    camera.position.set(40, 60, 100);
 
+    const skyCanvas = document.createElement('canvas');
+    skyCanvas.width=1;skyCanvas.height=512;
+    const skyCtx=skyCanvas.getContext('2d');
+    const skyGrad=skyCtx.createLinearGradient(0,0,0,512);
+    skyGrad.addColorStop(0,'#1e3a5f');
+    skyGrad.addColorStop(0.25,'#2563eb');
+    skyGrad.addColorStop(0.5,'#60a5fa');
+    skyGrad.addColorStop(0.75,'#93c5fd');
+    skyGrad.addColorStop(1,'#e0f2fe');
+    skyCtx.fillStyle=skyGrad;skyCtx.fillRect(0,0,1,512);
+    const skyTex=new THREE.CanvasTexture(skyCanvas);
+    skyTex.colorSpace=THREE.SRGBColorSpace;
+    scene.background=skyTex;
+
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 2000);
+    camera.position.set(40, 60, 100);
     const renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
-    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2)); 
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
     document.body.appendChild(renderer.domElement);
 
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true; controls.dampingFactor = 0.05; controls.maxPolarAngle = Math.PI / 2 - 0.02; 
-    controls.target.set(0, 0, 0); controls.zoomSpeed = 2.5;
+    controls.enableDamping=true;controls.dampingFactor=0.05;controls.maxPolarAngle=Math.PI/2-0.02;
+    controls.target.set(0,0,0);controls.zoomSpeed=2.5;
 
-    // Освещение (Ясный день)
-    scene.add(new THREE.AmbientLight(0xffffff, 0.6));
+    scene.add(new THREE.AmbientLight(0xffffff, 0.65));
     scene.add(new THREE.HemisphereLight(0xffffff, 0xd1d5db, 0.5));
-    
-    const sunLight = new THREE.DirectionalLight(0xfff8e7, 1.5);
-    sunLight.position.set(100, 150, 50); sunLight.castShadow = true;
-    sunLight.shadow.mapSize.width = 2048; sunLight.shadow.mapSize.height = 2048;
-    sunLight.shadow.camera.top = 150; sunLight.shadow.camera.bottom = -150;
-    sunLight.shadow.camera.left = -150; sunLight.shadow.camera.right = 150;
-    sunLight.shadow.bias = -0.0005;
+    const sunLight=new THREE.DirectionalLight(0xfff8e7, 1.5);
+    sunLight.position.set(100,150,50);sunLight.castShadow=true;
+    sunLight.shadow.mapSize.width=2048;sunLight.shadow.mapSize.height=2048;
+    sunLight.shadow.camera.top=150;sunLight.shadow.camera.bottom=-150;
+    sunLight.shadow.camera.left=-150;sunLight.shadow.camera.right=150;
+    sunLight.shadow.bias=-0.0005;
     scene.add(sunLight);
 
-    // Основание (Пол в клеточку с текстурой)
-    function createGroundTexture() {
-        const canvas = document.createElement('canvas');
-        canvas.width = 512; canvas.height = 512;
-        const ctx = canvas.getContext('2d');
-        ctx.fillStyle = '#eef2f7'; ctx.fillRect(0, 0, 512, 512);
-        ctx.fillStyle = '#e4e9f0'; ctx.fillRect(0, 0, 256, 256); ctx.fillRect(256, 256, 256, 256);
-        for (let i = 0; i < 80; i++) {
-            ctx.fillStyle = 'rgba(0,0,0,' + (Math.random() * 0.03) + ')';
-            ctx.fillRect(Math.random()*512, Math.random()*512, Math.random()*8+2, Math.random()*8+2);
-        }
-        const tex = new THREE.CanvasTexture(canvas);
-        tex.colorSpace = THREE.SRGBColorSpace; 
-        tex.wrapS = THREE.RepeatWrapping; tex.wrapT = THREE.RepeatWrapping;
-        tex.repeat.set(100, 100);
-        return tex;
+    /* ── ЗЕМЛЯ ── */
+    function createGroundTexture(){
+        const cv=document.createElement('canvas');cv.width=512;cv.height=512;const ctx=cv.getContext('2d');
+        ctx.fillStyle='#eef2f7';ctx.fillRect(0,0,512,512);
+        ctx.fillStyle='#e4e9f0';ctx.fillRect(0,0,256,256);ctx.fillRect(256,256,256,256);
+        for(let i=0;i<100;i++){ctx.fillStyle='rgba(0,0,0,'+(Math.random()*0.025)+')';ctx.fillRect(Math.random()*512,Math.random()*512,Math.random()*6+2,Math.random()*6+2);}
+        const t=new THREE.CanvasTexture(cv);t.colorSpace=THREE.SRGBColorSpace;t.wrapS=THREE.RepeatWrapping;t.wrapT=THREE.RepeatWrapping;t.repeat.set(100,100);return t;
     }
-    const ground = new THREE.Mesh(new THREE.PlaneGeometry(2000, 2000), new THREE.MeshStandardMaterial({ map: createGroundTexture(), roughness: 0.9 }));
-    ground.rotation.x = -Math.PI / 2; ground.receiveShadow = true; scene.add(ground);
-    scene.add(new THREE.GridHelper(2000, 200, 0x94a3b8, 0xcbd5e1).translateY(0.05));
+    const ground=new THREE.Mesh(new THREE.PlaneGeometry(2000,2000),new THREE.MeshStandardMaterial({map:createGroundTexture(),roughness:0.9}));
+    ground.rotation.x=-Math.PI/2;ground.receiveShadow=true;scene.add(ground);
+    scene.add(new THREE.GridHelper(2000,200,0x94a3b8,0xcbd5e1).translateY(0.05));
 
-    // Компас
-    function createCompass() {
-        const compGroup = new THREE.Group();
-        const base = new THREE.Mesh(new THREE.CylinderGeometry(8, 8, 0.5, 32), new THREE.MeshStandardMaterial({ color: 0x334155, roughness: 0.5 }));
-        base.position.y = 0.25; compGroup.add(base);
-        const arrowN = new THREE.Mesh(new THREE.ConeGeometry(2, 10, 4).translate(0, 5, 0).rotateX(Math.PI/2), new THREE.MeshStandardMaterial({ color: 0xef4444 }));
-        arrowN.position.y = 0.6; arrowN.rotation.y = Math.PI; compGroup.add(arrowN);
-        const arrowS = new THREE.Mesh(new THREE.ConeGeometry(2, 10, 4).translate(0, 5, 0).rotateX(Math.PI/2), new THREE.MeshStandardMaterial({ color: 0xffffff }));
-        arrowS.position.y = 0.6; arrowS.rotation.y = 0; compGroup.add(arrowS);
-        const addLetter = (text, rotY, color) => {
-            const canvas = document.createElement('canvas'); canvas.width = 128; canvas.height = 128;
-            const ctx = canvas.getContext('2d'); ctx.font = 'bold 80px sans-serif'; ctx.fillStyle = color; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(text, 64, 64);
-            const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: new THREE.CanvasTexture(canvas) }));
-            sprite.scale.set(6, 6, 1); sprite.position.set(Math.sin(rotY)*11, 2, Math.cos(rotY)*11); compGroup.add(sprite);
+    /* ── КОМПАС ── */
+    function createCompass(){
+        const cg=new THREE.Group();
+        cg.add(new THREE.Mesh(new THREE.CylinderGeometry(8,8,0.5,32),new THREE.MeshStandardMaterial({color:0x1e293b,roughness:0.4,metalness:0.3})).translateY(0.25));
+        const aN=new THREE.Mesh(new THREE.ConeGeometry(2,10,4).translate(0,5,0).rotateX(Math.PI/2),new THREE.MeshStandardMaterial({color:0xef4444}));
+        aN.position.y=0.6;aN.rotation.y=Math.PI;cg.add(aN);
+        const aS=new THREE.Mesh(new THREE.ConeGeometry(2,10,4).translate(0,5,0).rotateX(Math.PI/2),new THREE.MeshStandardMaterial({color:0xe2e8f0}));
+        aS.position.y=0.6;cg.add(aS);
+        const addL=(text,rotY,color)=>{
+            const cv=document.createElement('canvas');cv.width=128;cv.height=128;
+            const ctx=cv.getContext('2d');ctx.font='bold 80px sans-serif';ctx.fillStyle=color;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(text,64,64);
+            const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv)}));
+            sp.scale.set(6,6,1);sp.position.set(Math.sin(rotY)*11,2.5,Math.cos(rotY)*11);cg.add(sp);
         };
-        addLetter('С', Math.PI, '#ef4444'); addLetter('Ю', 0, '#1e293b'); addLetter('В', Math.PI/2, '#1e293b'); addLetter('З', -Math.PI/2, '#1e293b');
-        compGroup.position.set(-60, 0, 60); return compGroup;
+        addL('С',Math.PI,'#ef4444');addL('Ю',0,'#1e293b');addL('В',Math.PI/2,'#1e293b');addL('З',-Math.PI/2,'#1e293b');
+        cg.position.set(-60,0,60);return cg;
     }
     scene.add(createCompass());
 
-    // === ГРУППЫ СЛОЕВ ===
-    const groups = { target: new THREE.Group(), parcels: new THREE.Group(), intersections: new THREE.Group(), buildings: new THREE.Group(), structures: new THREE.Group(), zouit: new THREE.Group() };
-    const labelGroups = { target: new THREE.Group(), parcels: new THREE.Group(), buildings: new THREE.Group(), structures: new THREE.Group(), zouit: new THREE.Group() };
-    const masterLabelsGroup = new THREE.Group();
-    for (let k in groups) scene.add(groups[k]);
-    for (let k in labelGroups) masterLabelsGroup.add(labelGroups[k]);
+    /* ── ГРУППЫ СЛОЁВ ── */
+    const groups={target:new THREE.Group(),parcels:new THREE.Group(),intersections:new THREE.Group(),buildings:new THREE.Group(),structures:new THREE.Group(),zouit:new THREE.Group()};
+    const labelGroups={target:new THREE.Group(),parcels:new THREE.Group(),buildings:new THREE.Group(),structures:new THREE.Group(),zouit:new THREE.Group()};
+    const masterLabelsGroup=new THREE.Group();
+    for(let k in groups)scene.add(groups[k]);
+    for(let k in labelGroups)masterLabelsGroup.add(labelGroups[k]);
     scene.add(masterLabelsGroup);
 
-    // Геометрия
-    const createShape = (polyRings) => {
-        const shape = new THREE.Shape();
-        if (!polyRings || !polyRings[0] || polyRings[0].length < 3) return shape;
-        shape.moveTo(polyRings[0][0].x, polyRings[0][0].y);
-        for(let i=1; i<polyRings[0].length; i++) shape.lineTo(polyRings[0][i].x, polyRings[0][i].y);
-        for(let i=1; i<polyRings.length; i++) {
-            if (!polyRings[i] || polyRings[i].length < 3) continue;
-            const hole = new THREE.Path(); hole.moveTo(polyRings[i][0].x, polyRings[i][0].y);
-            for(let j=1; j<polyRings[i].length; j++) hole.lineTo(polyRings[i][j].x, polyRings[i][j].y);
+    /* ── ГЕОМЕТРИЯ ── */
+    const createShape=(polyRings)=>{
+        const shape=new THREE.Shape();
+        if(!polyRings||!polyRings[0]||polyRings[0].length<3)return shape;
+        shape.moveTo(polyRings[0][0].x,polyRings[0][0].y);
+        for(let i=1;i<polyRings[0].length;i++)shape.lineTo(polyRings[0][i].x,polyRings[0][i].y);
+        for(let i=1;i<polyRings.length;i++){
+            if(!polyRings[i]||polyRings[i].length<3)continue;
+            const hole=new THREE.Path();hole.moveTo(polyRings[i][0].x,polyRings[i][0].y);
+            for(let j=1;j<polyRings[i].length;j++)hole.lineTo(polyRings[i][j].x,polyRings[i][j].y);
             shape.holes.push(hole);
         }
         return shape;
     };
 
-    const getCentroid = (points) => {
-        if (!points || points.length === 0) return {x:0, z:0};
-        let cx=0, cy=0; points.forEach(p => { cx+=p.x; cy+= p.y; });
-        return { x: cx/points.length, z: -cy/points.length };
-    };
+    const getCentroid=(pts)=>{if(!pts||!pts.length)return{x:0,z:0};let cx=0,cy=0;pts.forEach(p=>{cx+=p.x;cy+=p.y;});return{x:cx/pts.length,z:-cy/pts.length};};
 
-    // Таблички фиксированного размера (без искажений и лишних анимаций)
-    const createLabel = (name, id, areaText, isSmall = false, themeColor = '#3b82f6') => {
-        const canvas = document.createElement("canvas");
-        const ctxMeasure = canvas.getContext("2d");
-        ctxMeasure.font = "bold 56px sans-serif";
-        const textWidth = ctxMeasure.measureText(name || "Объект").width;
-        
-        canvas.width = isSmall ? 512 : Math.max(1024, textWidth + 100); 
-        canvas.height = 256;
-        const ctx = canvas.getContext("2d");
-        
-        ctx.fillStyle = "rgba(255, 255, 255, 0.95)";
-        ctx.beginPath(); ctx.roundRect(10, 10, canvas.width-20, canvas.height-20, 15); ctx.fill();
-        ctx.strokeStyle = themeColor; ctx.lineWidth = 6; ctx.stroke();
-        
-        ctx.textAlign = "center";
-        const centerX = canvas.width / 2;
-        
-        if (isSmall) {
-            ctx.fillStyle = "#1e293b"; ctx.font = "bold 36px sans-serif"; ctx.fillText(name, centerX, 80, 480);
-            ctx.fillStyle = themeColor; ctx.font = "bold 28px monospace"; ctx.fillText(id, centerX, 140, 480); 
-            if (areaText) { ctx.fillStyle = "#ef4444"; ctx.font = "bold 26px sans-serif"; ctx.fillText(areaText, centerX, 200, 480); }
-        } else {
-            ctx.fillStyle = "#1e293b"; ctx.font = "bold 56px sans-serif"; ctx.fillText(name || "Объект", centerX, 90, canvas.width - 40);
-            ctx.fillStyle = themeColor; ctx.font = "bold 44px monospace"; ctx.fillText(id || "", centerX, 155, canvas.width - 40);
-            if (areaText) { ctx.fillStyle = "#64748b"; ctx.font = "38px sans-serif"; ctx.fillText(areaText, centerX, 210, canvas.width - 40); }
+    /* ── ТАБЛИЧКИ ── */
+    const createLabel=(name,id,areaText,isSmall=false,themeColor='#2563eb')=>{
+        const cv=document.createElement('canvas');
+        const ctxM=cv.getContext('2d');ctxM.font='bold 56px sans-serif';
+        const tw=ctxM.measureText(name||'Объект').width;
+        cv.width=isSmall?512:Math.max(1024,tw+100);cv.height=256;
+        const ctx=cv.getContext('2d');
+        ctx.fillStyle='rgba(255,255,255,0.95)';ctx.beginPath();ctx.roundRect(10,10,cv.width-20,cv.height-20,15);ctx.fill();
+        ctx.strokeStyle=themeColor;ctx.lineWidth=6;ctx.stroke();
+        ctx.textAlign='center';const cx=cv.width/2;
+        if(isSmall){
+            ctx.fillStyle='#1e293b';ctx.font='bold 36px sans-serif';ctx.fillText(name,cx,80,480);
+            ctx.fillStyle=themeColor;ctx.font='bold 28px monospace';ctx.fillText(id,cx,140,480);
+            if(areaText){ctx.fillStyle='#64748b';ctx.font='bold 26px sans-serif';ctx.fillText(areaText,cx,200,480);}
+        }else{
+            ctx.fillStyle='#1e293b';ctx.font='bold 56px sans-serif';ctx.fillText(name||'Объект',cx,90,cv.width-40);
+            ctx.fillStyle=themeColor;ctx.font='bold 44px monospace';ctx.fillText(id||'',cx,155,cv.width-40);
+            if(areaText){ctx.fillStyle='#64748b';ctx.font='38px sans-serif';ctx.fillText(areaText,cx,210,cv.width-40);}
         }
-        
-        const tex = new THREE.CanvasTexture(canvas);
-        tex.colorSpace = THREE.SRGBColorSpace;
-        
-        const sprite = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, sizeAttenuation: false }));
-        const targetScreenHeight = isSmall ? 0.04 : 0.06; 
-        const aspect = canvas.width / canvas.height;
-        sprite.scale.set(aspect * targetScreenHeight, targetScreenHeight, 1);
-        sprite.center.set(0.5, 0); 
-
-        return sprite;
+        const tex=new THREE.CanvasTexture(cv);tex.colorSpace=THREE.SRGBColorSpace;
+        const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:tex,depthTest:false,sizeAttenuation:false}));
+        const th=isSmall?0.04:0.06;const asp=cv.width/cv.height;
+        sp.scale.set(asp*th,th,1);sp.center.set(0.5,0);
+        return sp;
     };
 
-    // Исправленный колышек без белой доски
-    const createStake = (position) => {
-        const group = new THREE.Group();
-        const stick = new THREE.Mesh(new THREE.CylinderGeometry(0.12, 0.15, 5), new THREE.MeshStandardMaterial({ color: 0x8b5a2b, roughness: 0.9 }));
-        stick.position.y = 2.5; stick.castShadow = true; group.add(stick);
-        const cap = new THREE.Mesh(new THREE.SphereGeometry(0.25, 8, 8), new THREE.MeshStandardMaterial({ color: 0xef4444 }));
-        cap.position.y = 5; group.add(cap);
-        group.position.set(position.x, 0, position.z);
-        return group;
+    /* ── КОЛЫШЕК (без пустой доски) ── */
+    const createStake=(position)=>{
+        const g=new THREE.Group();
+        const stick=new THREE.Mesh(new THREE.CylinderGeometry(0.12,0.15,5),new THREE.MeshStandardMaterial({color:0x8b5a2b,roughness:0.9}));
+        stick.position.y=2.5;stick.castShadow=true;g.add(stick);
+        const cap=new THREE.Mesh(new THREE.SphereGeometry(0.3,8,8),new THREE.MeshStandardMaterial({color:0xef4444,roughness:0.3,metalness:0.2}));
+        cap.position.y=5.1;g.add(cap);
+        g.position.set(position.x,0,position.z);
+        return g;
     };
 
-    const createBuildingModel = (shape, height, style, isMiniature = false) => {
-        const building = new THREE.Group();
-        const pts = shape.getPoints();
-        if(pts.length < 3) return building;
-
-        const baseGeo = new THREE.ExtrudeGeometry(shape, { depth: 0.5, bevelEnabled: false });
-        const base = new THREE.Mesh(baseGeo, new THREE.MeshStandardMaterial({ color: style.base }));
-        base.rotation.x = -Math.PI / 2; base.position.y = 0; building.add(base);
-
-        const roofMat = new THREE.MeshStandardMaterial({ color: style.roof });
-        const wallMat = isMiniature ? new THREE.MeshStandardMaterial({ color: style.wall }) : getWindowMaterial(style);
-        
-        const wallGeo = new THREE.ExtrudeGeometry(shape, { depth: height, bevelEnabled: false });
-        const walls = new THREE.Mesh(wallGeo, [roofMat, wallMat]);
-        walls.rotation.x = -Math.PI / 2; walls.position.y = 0.5; 
-        if(!isMiniature) { walls.castShadow = true; walls.receiveShadow = true; }
-        building.add(walls);
-
-        if (style.hippedRoof) { 
-            let mx = Infinity, Mx = -Infinity, my = Infinity, My = -Infinity;
-            pts.forEach(p => { mx=Math.min(mx, p.x); Mx=Math.max(Mx, p.x); my=Math.min(my, p.y); My=Math.max(My, p.y); });
-            const w = Mx - mx, d = My - my, cx = (mx + Mx)/2, cy = (my + My)/2;
-            
-            const roofH = Math.max(3, height * 0.5);
-            const roofBaseDim = Math.sqrt(w*w + d*d) * 0.72;
-            const roofGeo = new THREE.ConeGeometry(roofBaseDim, roofH, 4);
-            roofGeo.rotateY(Math.PI / 4);
-            const roof = new THREE.Mesh(roofGeo, new THREE.MeshStandardMaterial({ color: style.roof }));
-            roof.position.set(cx, 0.5 + height + roofH / 2, -cy);
-            roof.scale.set(w / roofBaseDim, 1, d / roofBaseDim);
-            if(!isMiniature) roof.castShadow = true;
-            building.add(roof);
-        } else {
-            if (style.parapet) {
-                const parapet = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: 0.8, bevelEnabled: true, bevelSize: 0.2, bevelThickness: 0.2 }), new THREE.MeshStandardMaterial({ color: style.roof }));
-                parapet.rotation.x = -Math.PI / 2; parapet.position.y = 0.5 + height; building.add(parapet);
+    /* ── ЗДАНИЯ ── */
+    const createBuildingModel=(shape,height,style,isMini=false)=>{
+        const b=new THREE.Group();const pts=shape.getPoints();if(pts.length<3)return b;
+        const baseGeo=new THREE.ExtrudeGeometry(shape,{depth:0.5,bevelEnabled:false});
+        const base=new THREE.Mesh(baseGeo,new THREE.MeshStandardMaterial({color:style.base}));
+        base.rotation.x=-Math.PI/2;base.position.y=0;b.add(base);
+        const roofMat=new THREE.MeshStandardMaterial({color:style.roof});
+        const wallMat=isMini?new THREE.MeshStandardMaterial({color:style.wall}):getWindowMaterial(style);
+        const wallGeo=new THREE.ExtrudeGeometry(shape,{depth:height,bevelEnabled:false});
+        const walls=new THREE.Mesh(wallGeo,[roofMat,wallMat]);
+        walls.rotation.x=-Math.PI/2;walls.position.y=0.5;
+        if(!isMini){walls.castShadow=true;walls.receiveShadow=true;}
+        b.add(walls);
+        if(style.hippedRoof){
+            let mx=Infinity,Mx=-Infinity,my=Infinity,My=-Infinity;
+            pts.forEach(p=>{mx=Math.min(mx,p.x);Mx=Math.max(Mx,p.x);my=Math.min(my,p.y);My=Math.max(My,p.y);});
+            const w=Mx-mx,d=My-my,ccx=(mx+Mx)/2,ccy=(my+My)/2;
+            const rH=Math.max(3,height*0.5),rD=Math.sqrt(w*w+d*d)*0.72;
+            const rGeo=new THREE.ConeGeometry(rD,rH,4);rGeo.rotateY(Math.PI/4);
+            const roof=new THREE.Mesh(rGeo,new THREE.MeshStandardMaterial({color:style.roof}));
+            roof.position.set(ccx,0.5+height+rH/2,-ccy);roof.scale.set(w/rD,1,d/rD);
+            if(!isMini)roof.castShadow=true;b.add(roof);
+        }else{
+            if(style.parapet){
+                const par=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:0.8,bevelEnabled:true,bevelSize:0.2,bevelThickness:0.2}),new THREE.MeshStandardMaterial({color:style.roof}));
+                par.rotation.x=-Math.PI/2;par.position.y=0.5+height;b.add(par);
             }
-            const flatRoof = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: 0.1, bevelEnabled: false }), new THREE.MeshStandardMaterial({ color: 0x1e293b }));
-            flatRoof.rotation.x = -Math.PI / 2; flatRoof.position.y = 0.5 + height + (style.parapet ? 0.8 : 0); building.add(flatRoof);
+            const fr=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:0.1,bevelEnabled:false}),new THREE.MeshStandardMaterial({color:0x1e293b}));
+            fr.rotation.x=-Math.PI/2;fr.position.y=0.5+height+(style.parapet?0.8:0);b.add(fr);
         }
-
-        if (style.addon === 'cross') {
-            const c = getCentroid(pts);
-            const cg = new THREE.Group(), mat = new THREE.MeshBasicMaterial({ color: 0xef4444 });
-            cg.add(new THREE.Mesh(new THREE.BoxGeometry(1, 4, 1), mat)); cg.add(new THREE.Mesh(new THREE.BoxGeometry(4, 1, 1), mat));
-            cg.position.set(c.x, 0.5 + height + 4, c.z); building.add(cg);
+        if(style.addon==='cross'){
+            const cc=getCentroid(pts);const cGrp=new THREE.Group();const mat=new THREE.MeshBasicMaterial({color:0xef4444});
+            cGrp.add(new THREE.Mesh(new THREE.BoxGeometry(1,4,1),mat));cGrp.add(new THREE.Mesh(new THREE.BoxGeometry(4,1,1),mat));
+            cGrp.position.set(cc.x,0.5+height+4,cc.z);b.add(cGrp);
         }
-        return building;
+        return b;
     };
 
-    const addToGroups = (groupDest, labelDest, item, meshObj, lblObj) => {
-        meshObj.userData.uid = item.uid;
-        groupDest.add(meshObj);
-        if (lblObj && labelDest) {
-            lblObj.userData.uid = item.uid;
-            labelDest.add(lblObj);
-        }
+    const addToGroups=(gD,lD,item,meshObj,lblObj)=>{
+        meshObj.userData.uid=item.uid;gD.add(meshObj);
+        if(lblObj&&lD){lblObj.userData.uid=item.uid;lD.add(lblObj);}
     };
 
-    // Отрисовка
-    data.target.forEach(t => {
-        const color = (t.meta && t.meta.isParcel) ? 0x7cb342 : 0xef4444;
-        const targetGroup = new THREE.Group();
-        t.polygons.forEach(poly => {
-            if (!poly || !poly[0]) return;
-            if (t.type === "Line") {
-                const vecPoints = poly[0].map(p => new THREE.Vector3(p.x, 1.5, -p.y));
-                if (vecPoints.length > 1) {
-                    const tube = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(vecPoints, false, "chordal"), 64, 0.6, 8, false), new THREE.MeshStandardMaterial({ color: color }));
-                    tube.castShadow = true; targetGroup.add(tube);
+    /* ══════ ОТРИСОВКА ══════ */
+
+    /* ── Целевые объекты ── */
+    data.target.forEach(t=>{
+        const color=(t.meta&&t.meta.isParcel)?0x4ade80:0xef4444;
+        const tG=new THREE.Group();
+        t.polygons.forEach(poly=>{
+            if(!poly||!poly[0])return;
+            if(t.type==='Line'){
+                const vp=poly[0].map(p=>new THREE.Vector3(p.x,1.5,-p.y));
+                if(vp.length>1){
+                    const tube=new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(vp,false,'chordal'),64,0.6,8,false),new THREE.MeshStandardMaterial({color}));
+                    tube.castShadow=true;tG.add(tube);
                 }
-            } else {
-                const shape = createShape(poly);
-                if(shape.getPoints().length > 2) {
-                    const mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: 0.8, bevelEnabled: false }), new THREE.MeshStandardMaterial({ color: color, opacity: 0.8, transparent: true }));
-                    mesh.rotation.x = -Math.PI / 2; mesh.position.y = 0; 
-                    const edges = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0x7f1d1d, linewidth: 2 }));
-                    mesh.add(edges); mesh.castShadow = true; targetGroup.add(mesh);
+            }else{
+                const shape=createShape(poly);
+                if(shape.getPoints().length>2){
+                    const mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:0.8,bevelEnabled:false}),new THREE.MeshStandardMaterial({color,opacity:0.8,transparent:true}));
+                    mesh.rotation.x=-Math.PI/2;mesh.position.y=0;
+                    mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color:0x7f1d1d,linewidth:2})));
+                    mesh.castShadow=true;tG.add(mesh);
                 }
             }
         });
-        let lbl = null;
-        if(t.meta && t.polygons[0]) {
-            const c = getCentroid(t.polygons[0][0]);
-            lbl = createLabel(t.meta.name, t.meta.id, t.meta.area, false, TYPE_COLORS.target);
-            lbl.position.set(c.x, 12, c.z); 
+        let lbl=null;
+        if(t.meta&&t.polygons[0]){
+            const c=getCentroid(t.polygons[0][0]);
+            lbl=createLabel(t.meta.name,t.meta.id,t.meta.area,false,'#ef4444');
+            lbl.position.set(c.x,12,c.z);
         }
-        addToGroups(groups.target, labelGroups.target, t, targetGroup, lbl);
+        addToGroups(groups.target,labelGroups.target,t,tG,lbl);
     });
 
-    // --- Отрисовка участков с уникальными цветами ---
-    data.parcels.forEach((p, index) => {
-        const parcelGroup = new THREE.Group();
-        const yOffset = index * 0.015; const depth = 0.2;
-        
-        const parcelHex = PARCEL_PALETTE[index % PARCEL_PALETTE.length];
-        const parcelColor = new THREE.Color(parcelHex);
-        const edgeColor = darkenColor(parcelHex, 0.55);
-        const labelColor = '#' + parcelColor.getHexString();
+    /* ── Земельные участки (уникальные цвета) ── */
+    data.parcels.forEach((p,index)=>{
+        const pG=new THREE.Group();
+        const yOff=index*0.015;const depth=0.2;
+        const pHex=PARCEL_PALETTE[index%PARCEL_PALETTE.length];
+        const pColor=new THREE.Color(pHex);
+        const eColor=darken(pHex);
+        const lblColor='#'+pColor.getHexString();
 
-        p.polygons.forEach(poly => {
-            const shape = createShape(poly);
-            if(shape.getPoints().length > 2) {
-                const mat = new THREE.MeshStandardMaterial({ color: parcelColor, roughness: 0.85, metalness: 0.05 });
-                const mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: depth, bevelEnabled: false }), mat);
-                mesh.rotation.x = -Math.PI / 2; mesh.position.y = yOffset;
-                const edges = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: edgeColor }));
-                mesh.add(edges); mesh.receiveShadow = true; parcelGroup.add(mesh);
-                seedParcelWithFlowers(poly[0], parcelGroup, yOffset + depth);
+        p.polygons.forEach(poly=>{
+            const shape=createShape(poly);
+            if(shape.getPoints().length>2){
+                const mat=new THREE.MeshStandardMaterial({color:pColor,roughness:0.85,metalness:0.05});
+                const mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth,bevelEnabled:false}),mat);
+                mesh.rotation.x=-Math.PI/2;mesh.position.y=yOff;
+                mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color:eColor})));
+                mesh.receiveShadow=true;pG.add(mesh);
+                seedParcelWithFlowers(poly[0],pG,yOff+depth);
             }
         });
-        const c = p.polygons[0] ? getCentroid(p.polygons[0][0]) : {x:0, z:0};
-        const lbl = createLabel(p.meta.name, p.meta.id, p.meta.area, false, labelColor);
-        lbl.position.set(c.x, 6 + yOffset, c.z); 
-        addToGroups(groups.parcels, labelGroups.parcels, p, parcelGroup, lbl);
+        const c=p.polygons[0]?getCentroid(p.polygons[0][0]):{x:0,z:0};
+        const lbl=createLabel(p.meta.name,p.meta.id,p.meta.area,false,lblColor);
+        lbl.position.set(c.x,6+yOff,c.z);
+        addToGroups(groups.parcels,labelGroups.parcels,p,pG,lbl);
     });
 
-    data.intersections.forEach(iObj => {
-        const intGroup = new THREE.Group();
-        iObj.polygons.forEach(poly => {
-            const shape = createShape(poly);
-            if(shape.getPoints().length > 2) {
-                const mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: 0.5, bevelEnabled: false }), new THREE.MeshBasicMaterial({ color: 0xdc2626, transparent: true, opacity: 0.7, depthWrite: false }));
-                mesh.rotation.x = -Math.PI / 2; mesh.position.y = 1.0;
-                const edges = new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: 0x991b1b, linewidth: 3 }));
-                mesh.add(edges); intGroup.add(mesh);
+    /* ── Наложения ── */
+    data.intersections.forEach(iObj=>{
+        const iG=new THREE.Group();
+        iObj.polygons.forEach(poly=>{
+            const shape=createShape(poly);
+            if(shape.getPoints().length>2){
+                const mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:0.5,bevelEnabled:false}),new THREE.MeshBasicMaterial({color:0xdc2626,transparent:true,opacity:0.7,depthWrite:false}));
+                mesh.rotation.x=-Math.PI/2;mesh.position.y=1.0;
+                mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color:0x991b1b,linewidth:3})));
+                iG.add(mesh);
             }
         });
-        addToGroups(groups.intersections, null, iObj, intGroup, null);
+        addToGroups(groups.intersections,null,iObj,iG,null);
     });
 
-    let linkedObjectsCount = 0; 
-    data.buildings.forEach(b => {
-        const bGroup = new THREE.Group();
-        const style = getBuildingStyle(b.meta.rawText);
-        let lbl = null;
-
-        if (b.meta.isSpatial) {
-            b.polygons.forEach(poly => {
-                const shape = createShape(poly);
-                if(shape.getPoints().length > 2) {
-                    bGroup.add(createBuildingModel(shape, b.meta.height, style));
-                    const c = getCentroid(poly[0]);
-                    lbl = createLabel(b.meta.name, b.meta.id, b.meta.area, false, TYPE_COLORS.building);
-                    lbl.position.set(c.x, b.meta.height + 6, c.z); 
+    /* ── Здания ── */
+    let linkedCount=0;
+    data.buildings.forEach(b=>{
+        const bG=new THREE.Group();
+        const style=getBuildingStyle(b.meta.rawText);
+        let lbl=null;
+        if(b.meta.isSpatial){
+            b.polygons.forEach(poly=>{
+                const shape=createShape(poly);
+                if(shape.getPoints().length>2){
+                    bG.add(createBuildingModel(shape,b.meta.height,style));
+                    const c=getCentroid(poly[0]);
+                    lbl=createLabel(b.meta.name,b.meta.id,b.meta.area,false,'#2563eb');
+                    lbl.position.set(c.x,b.meta.height+6,c.z);
                 }
             });
-        } else {
-            const radius = 25 + (linkedObjectsCount % 2) * 8; 
-            const angle = (linkedObjectsCount * Math.PI * 2) / 6; 
-            const posX = Math.cos(angle) * radius, posZ = Math.sin(angle) * radius;
-            
-            if (b.meta.hasExtendedData) {
-                const dummyShape = new THREE.Shape();
-                dummyShape.moveTo(-5, -5); dummyShape.lineTo(5, -5); dummyShape.lineTo(5, 5); dummyShape.lineTo(-5, 5);
-                const miniModel = createBuildingModel(dummyShape, b.meta.height, style, true);
-                miniModel.scale.set(0.4, 0.4, 0.4); bGroup.add(miniModel);
-                const laser = new THREE.Mesh(new THREE.CylinderGeometry(0.1, 0.1, 15), new THREE.MeshBasicMaterial({ color: 0x3b82f6, transparent: true, opacity: 0.3 }));
-                laser.position.y = -7.5; bGroup.add(laser);
-                bGroup.position.set(posX, 15, posZ); bGroup.userData = { baseY: 15, offset: linkedObjectsCount };
-                animateables.push(bGroup);
-                lbl = createLabel(b.meta.name, b.meta.id, "Привязка к ЗУ", true, TYPE_COLORS.building);
-                lbl.position.set(posX, 15 + (b.meta.height * 0.4) + 4, posZ); 
-            } else {
-                bGroup.add(createStake({ x: posX, z: posZ }));
-                lbl = createLabel("ОКС (Связан)", b.meta.id, "Нет данных", true, TYPE_COLORS.building);
-                lbl.position.set(posX, 7, posZ); // Поднята выше колышка
+        }else{
+            const radius=25+(linkedCount%2)*8;
+            const angle=(linkedCount*Math.PI*2)/6;
+            const posX=Math.cos(angle)*radius,posZ=Math.sin(angle)*radius;
+            if(b.meta.hasExtendedData){
+                const ds=new THREE.Shape();ds.moveTo(-5,-5);ds.lineTo(5,-5);ds.lineTo(5,5);ds.lineTo(-5,5);
+                const mm=createBuildingModel(ds,b.meta.height,style,true);
+                mm.scale.set(0.4,0.4,0.4);bG.add(mm);
+                const laser=new THREE.Mesh(new THREE.CylinderGeometry(0.1,0.1,15),new THREE.MeshBasicMaterial({color:0x3b82f6,transparent:true,opacity:0.3}));
+                laser.position.y=-7.5;bG.add(laser);
+                bG.position.set(posX,15,posZ);bG.userData={baseY:15,offset:linkedCount};
+                animateables.push(bG);
+                lbl=createLabel(b.meta.name,b.meta.id,'Привязка к ЗУ',true,'#2563eb');
+                lbl.position.set(posX,15+(b.meta.height*0.4)+4,posZ);
+            }else{
+                bG.add(createStake({x:posX,z:posZ}));
+                lbl=createLabel('ОКС (Связан)',b.meta.id,'Нет данных',true,'#2563eb');
+                lbl.position.set(posX,7,posZ);
             }
-            linkedObjectsCount++;
+            linkedCount++;
         }
-        addToGroups(groups.buildings, labelGroups.buildings, b, bGroup, lbl);
+        addToGroups(groups.buildings,labelGroups.buildings,b,bG,lbl);
     });
 
-    // --- Структуры с цветовой классификацией по типам ---
-    data.structures.forEach(s => {
-        const sGroup = new THREE.Group();
-        let lbl = null;
-        
-        // Определение типа сети
-        let netType = 'default';
-        if (s.meta.isGas) netType = 'gas';
-        else if (s.meta.isWater) netType = 'water';
-        else if (s.meta.isHeat) netType = 'heat';
-        else if (s.meta.isElectric) netType = 'electric';
-        else if (text.includes('каналь') || text.includes('связь')) netType = 'sewer';
-        
-        const netColors = NETWORK_COLORS[netType];
+    /* ── Сооружения / Инженерные сети (ЦВЕТОВАЯ КОДИРОВКА) ── */
+    data.structures.forEach(s=>{
+        const sG=new THREE.Group();
+        let lbl=null;
+        const infraColor=getInfraColor(s.meta);
+        const infraHex=getInfraHex(s.meta);
+        const infraName=getInfraName(s.meta);
 
-        s.polygons.forEach(poly => {
-            if(!poly || !poly[0] || poly[0].length < 2) return;
-            if(s.type === "Line") {
-                if(s.meta.isGas && !s.meta.isUnderground) {
-                    const pipeH = 3; const pts = poly[0].map(pt => new THREE.Vector3(pt.x, pipeH, -pt.y));
-                    const pipe = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 64, s.meta.diameter, 8, false), new THREE.MeshStandardMaterial({ color: netColors.main, roughness: 0.4 }));
-                    pipe.castShadow = true; sGroup.add(pipe);
-                    pts.forEach((pt, i) => {
-                        if(i % 2 === 0) {
-                            const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.15, 0.15, pipeH), new THREE.MeshStandardMaterial({ color: netColors.edge }));
-                            pole.position.set(pt.x, pipeH/2, pt.z); pole.castShadow = true; sGroup.add(pole);
+        s.polygons.forEach(poly=>{
+            if(!poly||!poly[0]||poly[0].length<2)return;
+
+            if(s.type==='Line'){
+                /* Надземные трубы на опорах (газ — жёлтый, тепло — красный) */
+                if((s.meta.isGas||s.meta.isHeat)&&!s.meta.isUnderground){
+                    const pipeH=3;
+                    const pts=poly[0].map(pt=>new THREE.Vector3(pt.x,pipeH,-pt.y));
+                    const pipe=new THREE.Mesh(
+                        new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts),64,s.meta.diameter,8,false),
+                        new THREE.MeshStandardMaterial({color:infraColor,roughness:0.4,metalness:0.1})
+                    );
+                    pipe.castShadow=true;sG.add(pipe);
+                    pts.forEach((pt,i)=>{
+                        if(i%2===0){
+                            const pole=new THREE.Mesh(new THREE.CylinderGeometry(0.15,0.15,pipeH),new THREE.MeshStandardMaterial({color:0x94a3b8}));
+                            pole.position.set(pt.x,pipeH/2,pt.z);pole.castShadow=true;sG.add(pole);
                         }
                     });
-                    const midPt = pts[Math.floor(pts.length/2)];
-                    lbl = createLabel("Газопровод", s.meta.id, "Ø " + s.meta.diameter + "м", false, netColors.main);
-                    lbl.position.set(midPt.x, pipeH + 4, midPt.z); 
+                    const midPt=pts[Math.floor(pts.length/2)];
+                    lbl=createLabel(infraName,s.meta.id,'Ø '+s.meta.diameter+'м',false,infraHex);
+                    lbl.position.set(midPt.x,pipeH+4,midPt.z);
                 }
-                else if(s.meta.isElectric) {
-                    const poleH = 10; const pts = poly[0].map(pt => new THREE.Vector3(pt.x, poleH, -pt.y));
-                    pts.forEach((pt, index) => {
-                        const poleGroup = new THREE.Group();
-                        const pole = new THREE.Mesh(new THREE.CylinderGeometry(0.2, 0.3, poleH), new THREE.MeshStandardMaterial({ color: netColors.edge }));
-                        pole.position.y = poleH/2; pole.castShadow = true; poleGroup.add(pole);
-                        const cross = new THREE.Mesh(new THREE.BoxGeometry(3, 0.2, 0.2), new THREE.MeshStandardMaterial({ color: netColors.edge }));
-                        cross.position.y = poleH - 0.5;
-                        if (index < pts.length - 1) cross.rotation.y = Math.atan2(pts[index+1].x - pt.x, pts[index+1].z - pt.z);
-                        else if (index > 0) cross.rotation.y = Math.atan2(pt.x - pts[index-1].x, pt.z - pts[index-1].z);
-                        poleGroup.add(cross); poleGroup.position.set(pt.x, 0, pt.z); sGroup.add(poleGroup);
+                /* ЛЭП — столбы и провода (фиолетовый) */
+                else if(s.meta.isElectric){
+                    const poleH=10;
+                    const pts=poly[0].map(pt=>new THREE.Vector3(pt.x,poleH,-pt.y));
+                    pts.forEach((pt,idx)=>{
+                        const pG2=new THREE.Group();
+                        const pole=new THREE.Mesh(new THREE.CylinderGeometry(0.2,0.3,poleH),new THREE.MeshStandardMaterial({color:0x5c4033}));
+                        pole.position.y=poleH/2;pole.castShadow=true;pG2.add(pole);
+                        const cross=new THREE.Mesh(new THREE.BoxGeometry(3,0.2,0.2),new THREE.MeshStandardMaterial({color:0x5c4033}));
+                        cross.position.y=poleH-0.5;
+                        if(idx<pts.length-1)cross.rotation.y=Math.atan2(pts[idx+1].x-pt.x,pts[idx+1].z-pt.z);
+                        else if(idx>0)cross.rotation.y=Math.atan2(pt.x-pts[idx-1].x,pt.z-pts[idx-1].z);
+                        pG2.add(cross);pG2.position.set(pt.x,0,pt.z);sG.add(pG2);
                     });
-                    const wireMat = new THREE.LineBasicMaterial({ color: netColors.main });
-                    for(let i=0; i<pts.length-1; i++) {
-                        const p1 = pts[i].clone(); p1.y -= 0.5; const p2 = pts[i+1].clone(); p2.y -= 0.5;
-                        const mid = new THREE.Vector3().addVectors(p1, p2).multiplyScalar(0.5); mid.y -= 1.5;
-                        const curve = new THREE.QuadraticBezierCurve3(p1, mid, p2);
-                        sGroup.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(curve.getPoints(20)), wireMat));
+                    const wireMat=new THREE.LineBasicMaterial({color:0x8b5cf6});
+                    for(let i=0;i<pts.length-1;i++){
+                        const p1=pts[i].clone();p1.y-=0.5;const p2=pts[i+1].clone();p2.y-=0.5;
+                        const mid=new THREE.Vector3().addVectors(p1,p2).multiplyScalar(0.5);mid.y-=1.5;
+                        sG.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(new THREE.QuadraticBezierCurve3(p1,mid,p2).getPoints(20)),wireMat));
                     }
-                    const midPt = pts[Math.floor(pts.length/2)];
-                    lbl = createLabel("ЛЭП", s.meta.id, s.meta.voltage, false, netColors.main);
-                    lbl.position.set(midPt.x, poleH + 5, midPt.z); 
+                    const midPt=pts[Math.floor(pts.length/2)];
+                    lbl=createLabel('ЛЭП',s.meta.id,s.meta.area||'',false,'#8b5cf6');
+                    lbl.position.set(midPt.x,poleH+5,midPt.z);
                 }
-                else {
-                    const pts = poly[0].map(pt => new THREE.Vector3(pt.x, s.meta.isUnderground ? -1 : 1, -pt.y));
-                    sGroup.add(new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 50, s.meta.diameter, 12, false), new THREE.MeshStandardMaterial({ color: netColors.main })));
+                /* Прочие трубы: водо (синий), канал (серый) и т.д. */
+                else{
+                    const yPos=s.meta.isUnderground?-1:1;
+                    const pts=poly[0].map(pt=>new THREE.Vector3(pt.x,yPos,-pt.y));
+                    if(pts.length>1){
+                        sG.add(new THREE.Mesh(
+                            new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts,false,'chordal'),50,s.meta.diameter,12,false),
+                            new THREE.MeshStandardMaterial({color:infraColor,roughness:0.5,metalness:0.1})
+                        ));
+                        const midPt=pts[Math.floor(pts.length/2)];
+                        lbl=createLabel(infraName,s.meta.id,s.meta.area||('Ø '+s.meta.diameter+'м'),false,infraHex);
+                        lbl.position.set(midPt.x,(s.meta.isUnderground?3:5),midPt.z);
+                    }
                 }
-            } else {
-                const shape = createShape(poly);
-                if(shape.getPoints().length > 2) {
-                    const mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: 1, bevelEnabled: false }), new THREE.MeshStandardMaterial({ color: 0x94a3b8 }));
-                    mesh.rotation.x = -Math.PI / 2; mesh.position.y = 0; mesh.castShadow = true; sGroup.add(mesh);
-                    const c = getCentroid(poly[0]);
-                    lbl = createLabel(s.meta.name, s.meta.id, "", false, netColors.main); 
-                    lbl.position.set(c.x, 5, c.z); 
-                }
-            }
-        });
-        addToGroups(groups.structures, labelGroups.structures, s, sGroup, lbl);
-    });
-
-    // ЗОУИТ
-    data.zouits.forEach(z => {
-        const zGroup = new THREE.Group();
-        let lbl = null;
-        const color = z.meta.isGas ? 0xfbbf24 : (z.meta.isElectric ? 0xa855f7 : 0x3b82f6); 
-        const labelText = z.meta.name || (z.meta.isGas ? "Охранная зона газа" : (z.meta.isElectric ? "Охранная зона ЛЭП" : "ЗОУИТ"));
-
-        z.polygons.forEach(poly => {
-            if(!poly || !poly[0] || poly[0].length < 2) return;
-            if (z.type === "Line") {
-                const pts = poly[0].map(p => new THREE.Vector3(p.x, z.meta.isElectric ? 5 : 2, -p.y));
-                const zone = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts), 64, z.meta.isElectric ? 6 : 4, 16, false), new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.2, depthWrite: false }));
-                zGroup.add(zone);
-                const midPt = pts[Math.floor(pts.length/2)];
-                lbl = createLabel(labelText, z.meta.id, "", false, color);
-                lbl.position.set(midPt.x, z.meta.isElectric ? 14 : 8, midPt.z); 
-            } else {
-                const shape = createShape(poly);
-                if(shape.getPoints().length > 2) {
-                    const h = z.meta.isElectric ? 15 : (z.meta.isGas ? 4 : 6); 
-                    const mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shape, { depth: h, bevelEnabled: false }), new THREE.MeshBasicMaterial({ color: color, transparent: true, opacity: 0.15, depthWrite: false }));
-                    mesh.rotation.x = -Math.PI / 2; mesh.position.y = 0; zGroup.add(mesh);
-                    mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry), new THREE.LineBasicMaterial({ color: color, transparent: true, opacity: 0.5 })));
-                    lbl = createLabel(labelText, z.meta.id, "", false, color); 
-                    lbl.position.set(poly[0][0].x, h + 3, -poly[0][0].y); 
+            }else{
+                const shape=createShape(poly);
+                if(shape.getPoints().length>2){
+                    const mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:1,bevelEnabled:false}),new THREE.MeshStandardMaterial({color:infraColor,roughness:0.7}));
+                    mesh.rotation.x=-Math.PI/2;mesh.position.y=0;mesh.castShadow=true;sG.add(mesh);
+                    const c=getCentroid(poly[0]);
+                    lbl=createLabel(infraName,s.meta.id,s.meta.area||'',false,infraHex);
+                    lbl.position.set(c.x,5,c.z);
                 }
             }
         });
-        addToGroups(groups.zouit, labelGroups.zouit, z, zGroup, lbl);
+        addToGroups(groups.structures,labelGroups.structures,s,sG,lbl);
     });
 
-    // === UI И ЛОГИКА ===
-    const buildLayersUI = () => {
-        const container = document.getElementById('layers-container');
-        
-        const createLayer = (id, label, color, groupRef, labelGroupRef, items) => {
-            if (!items || items.length === 0) return;
-            
-            const wrapper = document.createElement('div');
-            wrapper.className = 'layer-item';
-            
-            const header = document.createElement('div');
-            header.className = 'layer-header layer-control';
-            
-            let caretHtml = items.length > 1 ? '<span class="caret"></span>' : '<span style="width:20px;display:inline-block;"></span>';
-            header.innerHTML = \`
-                \${caretHtml}
-                <input type="checkbox" id="main-\${id}" checked>
-                <div class="color-box" style="background: \${color};"></div>
-                <label for="main-\${id}">\${label}</label>
-            \`;
+    /* ── ЗОУИТ (цвет по типу инфраструктуры) ── */
+    data.zouits.forEach(z=>{
+        const zG=new THREE.Group();
+        let lbl=null;
+        const color=getInfraColor(z.meta);
+        const labelText=getZouitName(z.meta);
+        const labelHex=getInfraHex(z.meta);
+
+        z.polygons.forEach(poly=>{
+            if(!poly||!poly[0]||poly[0].length<2)return;
+            if(z.type==='Line'){
+                const pts=poly[0].map(p=>new THREE.Vector3(p.x,z.meta.isElectric?5:2,-p.y));
+                const zone=new THREE.Mesh(
+                    new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts),64,z.meta.isElectric?6:4,16,false),
+                    new THREE.MeshBasicMaterial({color,transparent:true,opacity:0.2,depthWrite:false})
+                );
+                zG.add(zone);
+                const midPt=pts[Math.floor(pts.length/2)];
+                lbl=createLabel(labelText,z.meta.id,'',false,labelHex);
+                lbl.position.set(midPt.x,z.meta.isElectric?14:8,midPt.z);
+            }else{
+                const shape=createShape(poly);
+                if(shape.getPoints().length>2){
+                    const h=z.meta.isElectric?15:(z.meta.isGas?4:(z.meta.isHeat?5:6));
+                    const mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:h,bevelEnabled:false}),new THREE.MeshBasicMaterial({color,transparent:true,opacity:0.15,depthWrite:false}));
+                    mesh.rotation.x=-Math.PI/2;mesh.position.y=0;zG.add(mesh);
+                    mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color,transparent:true,opacity:0.5})));
+                    const c=getCentroid(poly[0]);
+                    lbl=createLabel(labelText,z.meta.id,'',false,labelHex);
+                    lbl.position.set(c.x,h+3,c.z);
+                }
+            }
+        });
+        addToGroups(groups.zouit,labelGroups.zouit,z,zG,lbl);
+    });
+
+    /* ══════ UI ══════ */
+    const buildLayersUI=()=>{
+        const container=document.getElementById('layers-container');
+        const createLayer=(id,label,color,groupRef,labelGroupRef,items)=>{
+            if(!items||!items.length)return;
+            const wrapper=document.createElement('div');wrapper.className='layer-item';
+            const header=document.createElement('div');header.className='layer-header layer-control';
+            let caretHtml=items.length>1?'<span class="caret"></span>':'<span style="width:20px;display:inline-block;"></span>';
+            header.innerHTML=caretHtml+'<input type="checkbox" id="main-'+id+'" checked><div class="color-box" style="background:'+color+';"></div><label for="main-'+id+'">'+label+'</label>';
             wrapper.appendChild(header);
-
-            const mainCheckbox = header.querySelector('input');
-            mainCheckbox.onchange = (e) => {
-                if(groupRef) groupRef.visible = e.target.checked;
-                if(labelGroupRef) labelGroupRef.visible = e.target.checked;
-                if (ul) {
-                    ul.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = e.target.checked);
-                    items.forEach(item => {
-                        if(groupRef) groupRef.children.forEach(c => { if(c.userData.uid === item.uid) c.visible = e.target.checked; });
-                        if(labelGroupRef) labelGroupRef.children.forEach(c => { if(c.userData.uid === item.uid) c.visible = e.target.checked; });
+            const mainCb=header.querySelector('input');
+            let ul=null;
+            mainCb.onchange=(e)=>{
+                if(groupRef)groupRef.visible=e.target.checked;
+                if(labelGroupRef)labelGroupRef.visible=e.target.checked;
+                if(ul){
+                    ul.querySelectorAll('input[type="checkbox"]').forEach(cb=>cb.checked=e.target.checked);
+                    items.forEach(item=>{
+                        if(groupRef)groupRef.children.forEach(c=>{if(c.userData.uid===item.uid)c.visible=e.target.checked;});
+                        if(labelGroupRef)labelGroupRef.children.forEach(c=>{if(c.userData.uid===item.uid)c.visible=e.target.checked;});
                     });
                 }
             };
-
-            let ul = null;
-            const caret = header.querySelector('.caret');
-            if (caret && items.length > 1) {
-                ul = document.createElement('ul');
-                ul.className = 'nested';
-                items.forEach((item) => {
-                    const li = document.createElement('li');
-                    li.className = 'layer-control';
-                    li.innerHTML = \`<input type="checkbox" id="child-\${item.uid}" checked><label title="\${item.meta.id}" for="child-\${item.uid}">\${item.meta.name || item.meta.id || 'Объект'}</label>\`;
+            const caret=header.querySelector('.caret');
+            if(caret&&items.length>1){
+                ul=document.createElement('ul');ul.className='nested';
+                items.forEach(item=>{
+                    const li=document.createElement('li');li.className='layer-control';
+                    li.innerHTML='<input type="checkbox" id="child-'+item.uid+'" checked><label title="'+item.meta.id+'" for="child-'+item.uid+'">'+(item.meta.name||item.meta.id||'Объект')+'</label>';
                     ul.appendChild(li);
-
-                    li.querySelector('input').onchange = (e) => {
-                        const isChecked = e.target.checked;
-                        if(groupRef) groupRef.children.forEach(c => { if(c.userData.uid === item.uid) c.visible = isChecked; });
-                        if(labelGroupRef) labelGroupRef.children.forEach(c => { if(c.userData.uid === item.uid) c.visible = isChecked; });
-                        
-                        const anyChecked = Array.from(ul.querySelectorAll('input')).some(cb => cb.checked);
-                        mainCheckbox.checked = anyChecked;
-                        if(groupRef) groupRef.visible = true; 
-                        if(labelGroupRef) labelGroupRef.visible = true;
+                    li.querySelector('input').onchange=(e)=>{
+                        const chk=e.target.checked;
+                        if(groupRef)groupRef.children.forEach(c=>{if(c.userData.uid===item.uid)c.visible=chk;});
+                        if(labelGroupRef)labelGroupRef.children.forEach(c=>{if(c.userData.uid===item.uid)c.visible=chk;});
+                        const any=Array.from(ul.querySelectorAll('input')).some(cb=>cb.checked);
+                        mainCb.checked=any;if(groupRef)groupRef.visible=true;if(labelGroupRef)labelGroupRef.visible=true;
                     };
                 });
                 wrapper.appendChild(ul);
-
-                caret.onclick = () => {
-                    ul.classList.toggle('active');
-                    caret.classList.toggle('caret-down');
-                };
+                caret.onclick=()=>{ul.classList.toggle('active');caret.classList.toggle('caret-down');};
             }
             container.appendChild(wrapper);
         };
-
-        createLayer('target', 'Целевой объект', '#ef4444', groups.target, labelGroups.target, data.target);
-        createLayer('parcels', 'Земельные участки', '#7cb342', groups.parcels, labelGroups.parcels, data.parcels);
-        createLayer('intersections', 'Наложения участков', '#dc2626', groups.intersections, null, data.intersections);
-        createLayer('buildings', 'Здания (ОКС)', '#f1f5f9', groups.buildings, labelGroups.buildings, data.buildings);
-        createLayer('structures', 'Инженерия / Сети', '#fbbf24', groups.structures, labelGroups.structures, data.structures);
-        createLayer('zouit', 'ЗОУИТ', '#a855f7', groups.zouit, labelGroups.zouit, data.zouits);
+        createLayer('target','Целевой объект','#ef4444',groups.target,labelGroups.target,data.target);
+        createLayer('parcels','Земельные участки','#4ade80',groups.parcels,labelGroups.parcels,data.parcels);
+        createLayer('intersections','Наложения','#dc2626',groups.intersections,null,data.intersections);
+        createLayer('buildings','Здания (ОКС)','#2563eb',groups.buildings,labelGroups.buildings,data.buildings);
+        createLayer('structures','Инженерные сети','#f59e0b',groups.structures,labelGroups.structures,data.structures);
+        createLayer('zouit','ЗОУИТ','#8b5cf6',groups.zouit,labelGroups.zouit,data.zouits);
     };
-
     buildLayersUI();
-    document.getElementById("t-labels").onchange = (e) => { masterLabelsGroup.visible = e.target.checked; };
+    document.getElementById('t-labels').onchange=(e)=>{masterLabelsGroup.visible=e.target.checked;};
 
-    // Управление и клики
-    const raycaster = new THREE.Raycaster();
-    const mouse = new THREE.Vector2();
-
-    window.addEventListener('dblclick', (event) => {
-        mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
-        mouse.y = -(event.clientY / window.innerHeight) * 2 + 1;
-        raycaster.setFromCamera(mouse, camera);
-        
-        const sprites = []; masterLabelsGroup.traverse(child => { if (child.isSprite && child.visible) sprites.push(child); });
-        const intersects = raycaster.intersectObjects(sprites);
-        
-        if (intersects.length > 0) {
-            const hit = intersects[0].object;
-            const targetPoint = new THREE.Vector3(hit.position.x, 0, hit.position.z);
-            const currentDir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
-            
-            controls.target.copy(targetPoint);
-            camera.position.copy(targetPoint).add(currentDir.multiplyScalar(45));
-            camera.position.y = Math.max(camera.position.y, 10); 
+    /* ── Клики ── */
+    const raycaster=new THREE.Raycaster();const mouse=new THREE.Vector2();
+    window.addEventListener('dblclick',(event)=>{
+        mouse.x=(event.clientX/window.innerWidth)*2-1;
+        mouse.y=-(event.clientY/window.innerHeight)*2+1;
+        raycaster.setFromCamera(mouse,camera);
+        const sprites=[];masterLabelsGroup.traverse(child=>{if(child.isSprite&&child.visible)sprites.push(child);});
+        const intersects=raycaster.intersectObjects(sprites);
+        if(intersects.length>0){
+            const hit=intersects[0].object;
+            const tp=new THREE.Vector3(hit.position.x,0,hit.position.z);
+            const cd=new THREE.Vector3().subVectors(camera.position,controls.target).normalize();
+            controls.target.copy(tp);camera.position.copy(tp).add(cd.multiplyScalar(45));
+            camera.position.y=Math.max(camera.position.y,10);
         }
     });
 
-    const exportBtnEl = document.getElementById('export-html-btn');
-    if (exportBtnEl) {
-        exportBtnEl.onclick = () => {
-            const cloneDoc = document.documentElement.cloneNode(true);
-            
-            const canvases = cloneDoc.querySelectorAll('canvas');
-            canvases.forEach(c => c.remove());
-            
-            const layersContainer = cloneDoc.querySelector('#layers-container');
-            if (layersContainer) layersContainer.innerHTML = '';
-            
-            const labelsCheckbox = cloneDoc.querySelector('#t-labels');
-            if (labelsCheckbox) labelsCheckbox.checked = true;
-
-            const exportBtnNode = cloneDoc.querySelector('#export-html-btn');
-            if (exportBtnNode && exportBtnNode.parentElement) exportBtnNode.parentElement.remove();
-
-            const finalHtmlStr = '<!DOCTYPE html>\\n<html lang="ru">\\n' + cloneDoc.innerHTML + '\\n</html>';
-            const blob = new Blob([finalHtmlStr], { type: 'text/html;charset=utf-8' });
-            const url = URL.createObjectURL(blob);
-            const a = document.createElement('a');
-            a.href = url; a.download = '3D_Кадастровая_модель_' + new Date().toISOString().slice(0, 10) + '.html';
-            document.body.appendChild(a); a.click(); document.body.removeChild(a); URL.revokeObjectURL(url);
+    /* ── Экспорт ── */
+    const exportBtn=document.getElementById('export-html-btn');
+    if(exportBtn){
+        exportBtn.onclick=()=>{
+            const cloneDoc=document.documentElement.cloneNode(true);
+            cloneDoc.querySelectorAll('canvas').forEach(c=>c.remove());
+            const lc=cloneDoc.querySelector('#layers-container');if(lc)lc.innerHTML='';
+            const lcb=cloneDoc.querySelector('#t-labels');if(lcb)lcb.checked=true;
+            const eb=cloneDoc.querySelector('#export-html-btn');if(eb&&eb.parentElement)eb.parentElement.remove();
+            const finalHtml='<!DOCTYPE html>\\n<html lang="ru">\\n'+cloneDoc.innerHTML+'\\n</html>';
+            const blob=new Blob([finalHtml],{type:'text/html;charset=utf-8'});
+            const url=URL.createObjectURL(blob);
+            const a=document.createElement('a');a.href=url;a.download='3D_Кадастровая_модель_'+new Date().toISOString().slice(0,10)+'.html';
+            document.body.appendChild(a);a.click();document.body.removeChild(a);URL.revokeObjectURL(url);
         };
     }
 
-    window.addEventListener("resize", () => {
-        camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix();
-        renderer.setSize(window.innerWidth, window.innerHeight);
+    window.addEventListener('resize',()=>{
+        camera.aspect=window.innerWidth/window.innerHeight;camera.updateProjectionMatrix();
+        renderer.setSize(window.innerWidth,window.innerHeight);
     });
 
-    function animate() {
-        requestAnimationFrame(animate);
-        controls.update();
-        
-        const time = performance.now() * 0.002;
-        animateables.forEach(obj => { obj.position.y = obj.userData.baseY + Math.sin(time + obj.userData.offset) * 1.5; });
-
-        renderer.render(scene, camera);
+    function animate(){
+        requestAnimationFrame(animate);controls.update();
+        const time=performance.now()*0.002;
+        animateables.forEach(obj=>{obj.position.y=obj.userData.baseY+Math.sin(time+obj.userData.offset)*1.5;});
+        renderer.render(scene,camera);
     }
     animate();
 
-} catch (err) {
-    document.body.innerHTML += "<div style='position:absolute; top:50%; left:50%; transform:translate(-50%,-50%); background:rgba(0,0,0,0.8); padding:20px; border-radius:8px; color:#fca5a5; font-size:14px; z-index:1000;'><b>Ошибка построения 3D сцены:</b><br>" + err.message + "</div>";
+} catch(err){
+    document.body.innerHTML+="<div style='position:absolute;top:50%;left:50%;transform:translate(-50%,-50%);background:rgba(0,0,0,0.85);padding:24px;border-radius:12px;color:#fca5a5;font-size:14px;z-index:1000;max-width:500px;'><b>Ошибка построения 3D сцены:</b><br>"+err.message+"</div>";
 }
-</script>
+<\/script>
 </body>
 </html>`;
 
             iframe.srcdoc = srcDocContent;
             modal.appendChild(iframe);
             document.body.appendChild(modal);
-            
+
             const escHandler = (e) => {
-                if (e.key === 'Escape') {
-                    modal.remove();
-                    document.removeEventListener('keydown', escHandler);
-                }
+                if (e.key === 'Escape') { modal.remove(); document.removeEventListener('keydown', escHandler); }
             };
             document.addEventListener('keydown', escHandler);
 
