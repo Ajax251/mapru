@@ -60,7 +60,6 @@ window.open3DVisualization = function () {
                 const purpose = o.purpose || o.params_purpose || '';
                 
                 let rawName = o.name || o.params_name || o.building_name || o.name_by_doc || '';
-                // Чистим имя/адрес, если включен глобальный режим
                 let name = window.isGlobalMapMode ? cleanAddress(rawName) : rawName;
                 
                 const text = (descr + ' ' + name + ' ' + purpose).toLowerCase();
@@ -132,7 +131,6 @@ window.open3DVisualization = function () {
             window.quickReportTargetObjects.forEach(obj => {
                 const coords = obj.geometry.getCoordinates();
                 const type = obj.geometry.getType();
-                // Проверяем флаг isFoundInArea, чтобы не рисовать огромный красный фундамент для "Центра экрана"
                 const isTargetParcel = obj.properties.get('isParcelInQuarter') || obj.properties.get('isFoundInArea') || (obj.properties.get('featureData') && obj.properties.get('featureData').properties.category === 36368);
                 let rings = [];
                 if (type === 'Point') rings = [[coords]];
@@ -259,7 +257,7 @@ window.open3DVisualization = function () {
                 isMinimized = !isMinimized;
             };
             closeBtn.onclick = () => {
-                window.isGlobalMapMode = false; // Сбрасываем флаг при закрытии
+                window.isGlobalMapMode = false;
                 modal.remove();
             }
 
@@ -302,14 +300,15 @@ h3 { margin: 0 0 15px 0; color: #1e293b; font-size: 15px; border-bottom: 2px sol
 #ui-panel::-webkit-scrollbar { width: 5px; }
 #ui-panel::-webkit-scrollbar-track { background: #f8fafc; border-radius: 4px; }
 #ui-panel::-webkit-scrollbar-thumb { background: #c7d9f1; border-radius: 4px; }
-/* --- СТИЛИ ДЛЯ ТУЛТИПА --- */
+
+/* ТУЛТИП ПРИ НАВЕДЕНИИ */
 #hover-tooltip {
     position: absolute;
-    background: rgba(255, 255, 255, 0.95);
+    background: rgba(255, 255, 255, 0.98);
     border-left: 4px solid #2563eb;
-    padding: 10px 15px;
-    border-radius: 6px;
-    box-shadow: 0 10px 25px rgba(0,0,0,0.2);
+    padding: 12px 16px;
+    border-radius: 8px;
+    box-shadow: 0 10px 30px rgba(0,0,0,0.25);
     color: #1e293b;
     font-size: 13px;
     pointer-events: none;
@@ -317,11 +316,12 @@ h3 { margin: 0 0 15px 0; color: #1e293b; font-size: 15px; border-bottom: 2px sol
     transform: translateY(10px);
     transition: opacity 0.2s, transform 0.2s;
     z-index: 1000;
-    max-width: 300px;
+    max-width: 320px;
+    line-height: 1.4;
 }
-#hover-tooltip strong { color: #2563eb; display: block; font-size: 14px; margin-bottom: 4px;}
-#hover-tooltip span.area { color: #059669; font-weight: bold; margin-top:4px; display:block; }
-/* ------------------------- */
+#hover-tooltip strong { color: #2563eb; display: block; font-size: 15px; margin-bottom: 6px;}
+#hover-tooltip span.area { color: #059669; font-weight: bold; margin-top:6px; display:block; font-size: 14px; }
+
 @media (max-width: 768px) { #ui-toggle-btn { display: flex; } #ui-panel { right: 0; top: 0; height: 100vh; width: 280px; border-radius: 0; max-height: 100vh; box-shadow: -5px 0 30px rgba(0,0,0,0.3); } #ui-panel.hidden { transform: translateX(120%); opacity: 0; pointer-events: none; } #close-ui-btn { display: block; } .info-text { display: none; } }
 </style>
 <script async src="https://unpkg.com/es-module-shims@1.8.0/dist/es-module-shims.js"><\/script>
@@ -344,7 +344,7 @@ h3 { margin: 0 0 15px 0; color: #1e293b; font-size: 15px; border-bottom: 2px sol
         <button id="export-html-btn" class="export-btn">Сохранить в HTML</button>
     </div>
 </div>
-<div class="info-text">ЛКМ: Вращение | ПКМ: Перемещение<br><b>Наведите курсор на табличку</b> для инфо<br><b>2x клик по табличке:</b> Фокус</div>
+<div class="info-text">ЛКМ: Вращение | ПКМ: Перемещение<br><b>Наведите курсор на номер</b> для информации<br><b>2x клик по номеру:</b> Центрировать</div>
 
 <!-- ТУЛТИП -->
 <div id="hover-tooltip"></div>
@@ -360,7 +360,6 @@ if (window.innerWidth > 768) uiPanel.classList.remove('hidden');
 uiToggleBtn.onclick = () => uiPanel.classList.toggle('hidden');
 closeUiBtn.onclick = () => uiPanel.classList.add('hidden');
 
-// Прокидываем флаг режима из основного окна
 const IS_GLOBAL_MODE = ${!!window.isGlobalMapMode};
 
 try {
@@ -371,7 +370,6 @@ try {
         if(data[key]) data[key].forEach((item, idx) => { item.uid = key + '_' + idx; });
     });
 
-    /* ── ИНФРАСТРУКТУРНЫЕ ЦВЕТА ── */
     const INFRA_COLORS = { gas: 0xf59e0b, water: 0x3b82f6, heat: 0xef4444, electric: 0x8b5cf6, sewer: 0x6b7280, default: 0x94a3b8 };
     const getInfraColor = (m) => {
         if(m.isGas) return INFRA_COLORS.gas;
@@ -408,7 +406,6 @@ try {
     ];
     const darken = (hex, f=0.55) => { const c = new THREE.Color(hex); c.r*=f; c.g*=f; c.b*=f; return c; };
 
-    /* ── ФЛОРА ── */
     const plantGeos = {
         stem: new THREE.CylinderGeometry(0.04, 0.06, 1.0, 4),
         leaf: new THREE.PlaneGeometry(0.5, 0.25),
@@ -474,7 +471,6 @@ try {
         }
     };
 
-    /* ── СТИЛИ ЗДАНИЙ ── */
     const BUILDING_DICT = {
         education:{keys:['школ','детск','сад','учебн','институт','образоват','ясли'],wall:0xfce4c8,base:0x8b6f47,roof:0x5c4033,win:0x93c5fd,winType:'ribbon',parapet:true},
         medical:{keys:['больниц','поликлиник','мед','здрав','госпитал','фап','амбулатор'],wall:0xf0f4f8,base:0x8294a8,roof:0x94a3b8,win:0x7dd3fc,winType:'standard',parapet:true,addon:'cross'},
@@ -506,7 +502,6 @@ try {
         windowMaterialCache[ck]=mat;return mat;
     }
 
-    /* ── СЦЕНА ── */
     const scene = new THREE.Scene();
 
     const skyCanvas = document.createElement('canvas');
@@ -554,7 +549,6 @@ try {
     sunLight.shadow.bias=-0.0005;
     scene.add(sunLight);
 
-    /* ── ЗЕМЛЯ ── */
     function createGroundTexture(){
         const cv=document.createElement('canvas');cv.width=512;cv.height=512;const ctx=cv.getContext('2d');
         ctx.fillStyle='#eef2f7';ctx.fillRect(0,0,512,512);
@@ -566,7 +560,6 @@ try {
     ground.rotation.x=-Math.PI/2;ground.receiveShadow=true;scene.add(ground);
     scene.add(new THREE.GridHelper(2000,200,0x94a3b8,0xcbd5e1).translateY(0.05));
 
-    /* ── КОМПАС ── */
     function createCompass(){
         const cg=new THREE.Group();
         cg.add(new THREE.Mesh(new THREE.CylinderGeometry(8,8,0.5,32),new THREE.MeshStandardMaterial({color:0x1e293b,roughness:0.4,metalness:0.3})).translateY(0.25));
@@ -585,7 +578,6 @@ try {
     }
     scene.add(createCompass());
 
-    /* ── ГРУППЫ СЛОЁВ ── */
     const groups={target:new THREE.Group(),parcels:new THREE.Group(),intersections:new THREE.Group(),buildings:new THREE.Group(),structures:new THREE.Group(),zouit:new THREE.Group()};
     const labelGroups={target:new THREE.Group(),parcels:new THREE.Group(),buildings:new THREE.Group(),structures:new THREE.Group(),zouit:new THREE.Group()};
     const masterLabelsGroup=new THREE.Group();
@@ -593,7 +585,6 @@ try {
     for(let k in labelGroups)masterLabelsGroup.add(labelGroups[k]);
     scene.add(masterLabelsGroup);
 
-    /* ── ГЕОМЕТРИЯ ── */
     const createShape=(polyRings)=>{
         const shape=new THREE.Shape();
         if(!polyRings||!polyRings[0]||polyRings[0].length<3)return shape;
@@ -610,24 +601,24 @@ try {
 
     const getCentroid=(pts)=>{if(!pts||!pts.length)return{x:0,z:0};let cx=0,cy=0;pts.forEach(p=>{cx+=p.x;cy+=p.y;});return{x:cx/pts.length,z:-cy/pts.length};};
 
-    /* ── ТАБЛИЧКИ ── */
-     const createLabel = (name, id, areaText, isSmall = false, themeColor = '#2563eb') => {
+    /* ── СОЗДАНИЕ ТАБЛИЧЕК (ИСПРАВЛЕНО ДЛЯ КРУПНЫХ НОМЕРОВ) ── */
+    const createLabel = (name, id, areaText, isSmall = false, themeColor = '#2563eb') => {
         const cv = document.createElement('canvas');
         const ctx = cv.getContext('2d');
         
         if (isSmall) {
-            // КОМПАКТНАЯ МЕТКА (плотная капсула для номера)
-            ctx.font = 'bold 70px sans-serif';
+            // КОМПАКТНАЯ МЕТКА (капсула для номера)
+            ctx.font = 'bold 75px sans-serif';
             const textWidth = ctx.measureText(name).width;
-            cv.width = textWidth + 50; // Плотные отступы
-            cv.height = 90;
+            cv.width = textWidth + 60; // Плотные отступы
+            cv.height = 100;
             
-            ctx.fillStyle = 'rgba(255, 255, 255, 0.95)';
+            ctx.fillStyle = 'rgba(255, 255, 255, 0.98)';
             ctx.beginPath();
             ctx.roundRect(5, 5, cv.width - 10, cv.height - 10, 25);
             ctx.fill();
             ctx.strokeStyle = themeColor;
-            ctx.lineWidth = 6;
+            ctx.lineWidth = 8;
             ctx.stroke();
             
             ctx.textAlign = 'center';
@@ -635,7 +626,7 @@ try {
             ctx.fillStyle = '#1e293b';
             ctx.fillText(name, cv.width / 2, cv.height / 2 + 5);
         } else {
-            // СТАНДАРТНАЯ МЕТКА (для одиночного отчета)
+            // СТАНДАРТНАЯ МЕТКА (для быстрого отчета)
             ctx.font = 'bold 56px sans-serif';
             const tw = ctx.measureText(name || 'Объект').width;
             cv.width = Math.max(1024, tw + 100);
@@ -666,10 +657,12 @@ try {
         
         const tex = new THREE.CanvasTexture(cv);
         tex.colorSpace = THREE.SRGBColorSpace;
-        tex.minFilter = THREE.LinearFilter; // Делает текст четче
+        tex.minFilter = THREE.LinearFilter;
         
+        // sizeAttenuation = false сохраняет читаемость текста независимо от зума
         const sp = new THREE.Sprite(new THREE.SpriteMaterial({ map: tex, depthTest: false, sizeAttenuation: false }));
-        const baseScale = isSmall ? 0.055 : 0.06; // Делаем мини-метки крупными в 3D
+        // Увеличили baseScale, чтобы номера были большими и заметными
+        const baseScale = isSmall ? 0.065 : 0.06;
         const asp = cv.width / cv.height;
         sp.scale.set(asp * baseScale, baseScale, 1);
         sp.center.set(0.5, 0);
@@ -686,7 +679,6 @@ try {
         return g;
     };
 
-    /* ── ЗДАНИЯ ── */
     const createBuildingModel=(shape,height,style,isMini=false)=>{
         const b=new THREE.Group();const pts=shape.getPoints();if(pts.length<3)return b;
         const baseGeo=new THREE.ExtrudeGeometry(shape,{depth:0.5,bevelEnabled:false});
@@ -731,13 +723,10 @@ try {
 
     /* ══════ ОТРИСОВКА ══════ */
 
-    /* ── Целевые объекты ── */
     data.target.forEach(t=>{
-        // Пропускаем отрисовку целевого объекта-плиты, если это глобальная карта
         if (IS_GLOBAL_MODE) {
-            // Но мы всё равно можем повесить метку "Центр экрана", если хотим
             if (t.meta && t.meta.id === 'Центр экрана') {
-                let lbl = createLabel('Центр экрана', '', '', true, '#ef4444');
+                let lbl = createLabel('Центр', '', '', true, '#ef4444');
                 lbl.position.set(0, 10, 0);
                 addToGroups(groups.target, labelGroups.target, t, new THREE.Group(), lbl);
             }
@@ -775,7 +764,6 @@ try {
         addToGroups(groups.target,labelGroups.target,t,tG,lbl);
     });
 
-    /* ── Земельные участки (уникальные цвета) ── */
     data.parcels.forEach((p,index)=>{
         const pG=new THREE.Group();
         const yOff=index*0.015;const depth=0.2;
@@ -798,10 +786,9 @@ try {
         const c=p.polygons[0]?getCentroid(p.polygons[0][0]):{x:0,z:0};
         
         let lbl=null;
-if (IS_GLOBAL_MODE) {
+        if (IS_GLOBAL_MODE) {
             const shortId = p.meta.id ? ':' + p.meta.id.split(':').pop() : '';
             lbl = createLabel(shortId, '', '', true, lblColor);
-            // УДАЛЕНА СТРОКА СО SCALE
             lbl.position.set(c.x, 3 + yOff, c.z);
             lbl.userData.fullInfo = { title: p.meta.id, desc: p.meta.name, area: p.meta.area };
         } else {
@@ -812,7 +799,6 @@ if (IS_GLOBAL_MODE) {
         addToGroups(groups.parcels,labelGroups.parcels,p,pG,lbl);
     });
 
-    /* ── Наложения ── */
     data.intersections.forEach(iObj=>{
         const iG=new THREE.Group();
         iObj.polygons.forEach(poly=>{
@@ -827,7 +813,6 @@ if (IS_GLOBAL_MODE) {
         addToGroups(groups.intersections,null,iObj,iG,null);
     });
 
-    /* ── Здания ── */
     let linkedCount=0;
     data.buildings.forEach(b=>{
         const bG=new THREE.Group();
@@ -840,9 +825,8 @@ if (IS_GLOBAL_MODE) {
                     bG.add(createBuildingModel(shape,b.meta.height,style));
                     const c=getCentroid(poly[0]);
                     
-            if (IS_GLOBAL_MODE) {
-                        lbl=createLabel('ОКС', '', '', true, '#2563eb');
-                        // УДАЛЕНА СТРОКА СО SCALE
+                    if (IS_GLOBAL_MODE) {
+                        lbl = createLabel('ОКС', '', '', true, '#2563eb');
                         lbl.position.set(c.x, b.meta.height + 2, c.z);
                         lbl.userData.fullInfo = { title: b.meta.id, desc: b.meta.name, area: b.meta.area };
                     } else {
@@ -865,21 +849,16 @@ if (IS_GLOBAL_MODE) {
                 animateables.push(bG);
                 lbl=createLabel(b.meta.name,b.meta.id,'Привязка к ЗУ',true,'#2563eb');
                 lbl.position.set(posX,15+(b.meta.height*0.4)+4,posZ);
-                lbl.material.sizeAttenuation = true;
-                lbl.scale.set(14, 7, 1);
             }else{
                bG.add(createStake({x:posX,z:posZ}));
                 lbl=createLabel('ОКС (Связан)',b.meta.id,'Нет данных',true,'#2563eb');
                 lbl.position.set(posX,7,posZ);
-                lbl.material.sizeAttenuation = true;
-                lbl.scale.set(14, 7, 1);
             }
             linkedCount++;
         }
         addToGroups(groups.buildings,labelGroups.buildings,b,bG,lbl);
     });
 
-    /* ── Сооружения / Инженерные сети ── */
     data.structures.forEach(s=>{
         const sG=new THREE.Group();
         let lbl=null;
@@ -954,11 +933,9 @@ if (IS_GLOBAL_MODE) {
             }
 
             if (midPt) {
-       if (midPt) {
                 if (IS_GLOBAL_MODE) {
                     lbl = createLabel('Сеть', '', '', true, infraHex);
-            
-                    lbl.position.set(midPt.x, drawH + 1, midPt.z);
+                    lbl.position.set(midPt.x, drawH + 2, midPt.z);
                     lbl.userData.fullInfo = { title: s.meta.id, desc: infraName, area: s.meta.area };
                 } else {
                     lbl = createLabel(infraName, s.meta.id, s.meta.area||'', false, infraHex);
@@ -969,7 +946,6 @@ if (IS_GLOBAL_MODE) {
         addToGroups(groups.structures,labelGroups.structures,s,sG,lbl);
     });
 
-    /* ── ЗОУИТ ── */
     data.zouits.forEach(z=>{
         const zG=new THREE.Group();
         let lbl=null;
@@ -1003,10 +979,8 @@ if (IS_GLOBAL_MODE) {
             }
 
             if (midPt) {
-         if (midPt) {
                 if (IS_GLOBAL_MODE) {
                     lbl = createLabel('ЗОУИТ', '', '', true, labelHex);
-                   
                     lbl.position.set(midPt.x, h + 1, midPt.z);
                     lbl.userData.fullInfo = { title: z.meta.id, desc: labelText, area: '' };
                 } else {
@@ -1093,7 +1067,6 @@ if (IS_GLOBAL_MODE) {
     let hoveredObject = null;
 
     window.addEventListener('mousemove', (event) => {
-        // Если мы не в глобальном режиме, тултип не нужен
         if (!IS_GLOBAL_MODE) return;
 
         mouse.x = (event.clientX / window.innerWidth) * 2 - 1;
@@ -1139,7 +1112,6 @@ if (IS_GLOBAL_MODE) {
             const lcb=cloneDoc.querySelector('#t-labels');if(lcb)lcb.checked=true;
             const eb=cloneDoc.querySelector('#export-html-btn');if(eb&&eb.parentElement)eb.parentElement.remove();
             
-            // Удаляем тултип из экспорта, чтобы он не висел мертвым грузом в сохраненном HTML
             const tt = cloneDoc.querySelector('#hover-tooltip');
             if (tt) tt.remove();
 
@@ -1177,7 +1149,7 @@ if (IS_GLOBAL_MODE) {
 
             const escHandler = (e) => {
                 if (e.key === 'Escape') { 
-                    window.isGlobalMapMode = false; // Сбрасываем флаг при выходе по ESC
+                    window.isGlobalMapMode = false;
                     modal.remove(); 
                     document.removeEventListener('keydown', escHandler); 
                 }
