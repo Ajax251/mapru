@@ -454,8 +454,10 @@ try {
     };
 
     const INFRA_COLORS = { gas: 0xf59e0b, water: 0x3b82f6, heat: 0xef4444, electric: 0xff0000, sewer: 0x6b7280, def: 0x8b5cf6 };
-    const getInfraColor = function(m) { if (m.isGas) return INFRA_COLORS.gas; if (m.isWater) return INFRA_COLORS.water; if (m.isHeat) return INFRA_COLORS.heat; if (m.isElectric) return INFRA_COLORS.electric; if (m.isSewer) return INFRA_COLORS.sewer; return INFRA_COLORS.def; };
+   const getInfraColor = function(m) { if (m.isGas) return INFRA_COLORS.gas; if (m.isWater) return INFRA_COLORS.water; if (m.isHeat) return INFRA_COLORS.heat; if (m.isElectric) return INFRA_COLORS.electric; if (m.isSewer) return INFRA_COLORS.sewer; return INFRA_COLORS.def; };
     const getInfraHex = function(m) { return "#" + new THREE.Color(getInfraColor(m)).getHexString(); };
+    const getInfraName = function(m) { if (m.name && m.name !== "Объект" && m.name.length > 2) return m.name; if (m.isGas) return "Газопровод"; if (m.isWater) return "Водопровод"; if (m.isHeat) return "Теплотрасса"; if (m.isElectric) return "ЛЭП"; if (m.isSewer) return "Канализация"; return "Сооружение"; };
+    const getZouitName = function(m) { if (m.name && m.name !== "Объект" && m.name.length > 2) return m.name; if (m.isGas) return "Охр. зона газа"; if (m.isWater) return "Охр. зона водопровода"; if (m.isHeat) return "Охр. зона теплосети"; if (m.isElectric) return "Охр. зона ЛЭП"; if (m.isSewer) return "Охр. зона канализации"; return "ЗОУИТ"; };
     
     const PARCEL_PALETTE =[0x4ade80, 0x34d399, 0xa3e635, 0x2dd4bf, 0x86efac, 0x6ee7b7, 0xbef264, 0x5eead4, 0x67e8f9, 0x38bdf8, 0xa78bfa, 0xfbbf24, 0xf0abfc, 0xfb7185, 0x22d3ee];
     const darken = function(hex, f) { f = f || 0.7; var c = new THREE.Color(hex); c.r*=f; c.g*=f; c.b*=f; return c; };
@@ -911,7 +913,7 @@ try {
                     });
                     midPt=pts[Math.floor(pts.length/2)];
                 } else if(s.meta.isElectric){
-                    drawH=10;
+                    drawH=5;
                     var pts2=poly[0].map(function(pt){return new THREE.Vector3(pt.x,drawH,-pt.y);});
                     pts2.forEach(function(pt,idx){
                         var pole=new THREE.Mesh(new THREE.CylinderGeometry(0.2,0.3,drawH),new THREE.MeshStandardMaterial({color:0x5c4033}));
@@ -967,8 +969,8 @@ try {
             var zGrp = new THREE.Group();
             var midPt=null, h=5;
             
-            if(z.type==="Line"){
-                h = z.meta.isElectric ? 20 : (z.meta.isGas ? 6 : 8);
+     if(z.type==="Line"){
+                h = z.meta.isElectric ? 5 : (z.meta.isGas ? 6 : 8);
                 var pts=poly[0].map(function(p){return new THREE.Vector3(p.x,h/2,-p.y);});
                 var zone=new THREE.Mesh(
                     new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts),64,z.meta.isElectric?6:4,16,false),
@@ -976,10 +978,10 @@ try {
                 );
                 zGrp.add(zone);
                 midPt=pts[Math.floor(pts.length/2)];
-            } else {
+} else {
                 var shape=createShape(poly);
                 if(shape.getPoints().length>2){
-                    h = z.meta.isElectric ? 25 : (z.meta.isGas ? 6 : (z.meta.isHeat ? 8 : 10)); 
+                    h = z.meta.isElectric ? 5 : (z.meta.isGas ? 6 : (z.meta.isHeat ? 8 : 10));
                     var mesh=new THREE.Mesh(
                         new THREE.ExtrudeGeometry(shape,{depth:h,bevelEnabled:false}),
                         new THREE.MeshPhysicalMaterial({color:color, transmission: 0.5, transparent:true, opacity:0.4, depthWrite:false, side: THREE.DoubleSide})
