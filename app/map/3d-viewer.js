@@ -195,7 +195,7 @@ const mercatorScale = 1 / Math.cos(mapLatRad);
                 return { x: (mx+Mx)/2, y: (my+My)/2 };
             };
 
-            // --- ПРОЦЕДУРНАЯ ГЕНЕРАЦИЯ УСЛОВНЫХ ОКС (УМНАЯ РАССТАНОВКА) ---
+         // --- ПРОЦЕДУРНАЯ ГЕНЕРАЦИЯ УСЛОВНЫХ ОКС (УМНАЯ РАССТАНОВКА) ---
             // 1. Создаем карту участков для быстрого поиска
             let parcelMap = new Map();
             allLocalFeatures.parcels.forEach(p => {
@@ -213,9 +213,18 @@ const mercatorScale = 1 / Math.cos(mapLatRad);
                     let pt = (b.type === 'Point' && b.polygons[0]?.[0]?.[0]) ? b.polygons[0][0][0] : null;
                     let parentCn = null;
                     let parentPoly = null;
+                    let targetObj = allLocalFeatures.target.length > 0 ? allLocalFeatures.target[0] : null;
 
-                    // А. Ищем участок по вхождению точки
-                    if (pt) {
+                    // А. Строгий приоритет: проверяем вхождение точки в ЦЕЛЕВОЙ объект
+                    if (pt && targetObj && targetObj.type === 'Polygon' && targetObj.polygons[0]?.[0]) {
+                        if (isPointInPolyEditor(pt, targetObj.polygons[0][0])) {
+                            parentCn = targetObj.meta.id || 'target';
+                            parentPoly = targetObj.polygons[0][0];
+                        }
+                    }
+
+                    // Б. Если не целевой, ищем по всем остальным участкам
+                    if (!parentPoly && pt) {
                         for (let parcel of allLocalFeatures.parcels) {
                             if (parcel.polygons[0]?.[0] && isPointInPolyEditor(pt, parcel.polygons[0][0])) {
                                 parentCn = parcel.meta.id;
@@ -225,7 +234,13 @@ const mercatorScale = 1 / Math.cos(mapLatRad);
                         }
                     }
 
-                    // Б. Если не нашли, ищем по совпадению кадастрового номера
+                    // В. Если точки нет (или она с погрешностью) и мы анализируем конкретный участок - принудительно сажаем на него
+                    if (!parentPoly && targetObj && targetObj.type === 'Polygon' && targetObj.meta.isParcel && targetObj.polygons[0]?.[0]) {
+                        parentCn = targetObj.meta.id || 'target';
+                        parentPoly = targetObj.polygons[0][0];
+                    }
+
+                    // Г. Резерв по совпадению кадастрового номера
                     if (!parentPoly) {
                         let bCnMatch = b.meta.id.match(/^(\d{2}:\d{2}:\d{6,7}:\d+)/);
                         if (bCnMatch && parcelMap.has(bCnMatch[1])) {
@@ -234,10 +249,10 @@ const mercatorScale = 1 / Math.cos(mapLatRad);
                         }
                     }
 
-                    // В. Резервный вариант - берем первый участок из массива
-                    if (!parentPoly && allLocalFeatures.parcels.length > 0) {
-                        parentCn = allLocalFeatures.parcels[0].meta.id;
-                        parentPoly = allLocalFeatures.parcels[0].polygons[0][0];
+                    // Д. Глухой резерв (на целевой контур, даже если это просто нарисованный полигон)
+                    if (!parentPoly && targetObj && targetObj.type === 'Polygon' && targetObj.polygons[0]?.[0]) {
+                        parentCn = targetObj.meta.id || 'target';
+                        parentPoly = targetObj.polygons[0][0];
                     }
 
                     if (parentPoly) {
