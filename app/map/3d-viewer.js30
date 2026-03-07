@@ -178,7 +178,7 @@ const mercatorScale = 1 / Math.cos(mapLatRad);
             allLocalFeatures.zouits = processFeatureArray(window.zouitFeaturesData, 'zouit');
 
             // --- ХЕЛПЕРЫ ДЛЯ ПРОЦЕДУРНОЙ ГЕНЕРАЦИИ ---
-              const isPointInPolyEditor = function(pt, poly) {
+            const isPointInPolyEditor = function(pt, poly) {
                 let inside = false;
                 for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
                     let xi = poly[i].x, yi = poly[i].y;
@@ -195,140 +195,90 @@ const mercatorScale = 1 / Math.cos(mapLatRad);
                 return { x: (mx+Mx)/2, y: (my+My)/2 };
             };
 
-            // --- ПРОЦЕДУРНАЯ ГЕНЕРАЦИЯ УСЛОВНЫХ ОКС (УМНАЯ РАССТАНОВКА) ---
-            // 1. Создаем карту участков для быстрого поиска
-            let parcelMap = new Map();
-            allLocalFeatures.parcels.forEach(p => {
-                if (p.meta && p.meta.id) parcelMap.set(p.meta.id, p);
-            });
-
-            // 2. Группируем процедурные здания по участкам
-            let proceduralByParcel = new Map();
-
+            // --- ПРОЦЕДУРНАЯ ГЕНЕРАЦИЯ УСЛОВНЫХ ОКС ---
             allLocalFeatures.buildings.forEach(b => {
                 if ((b.type === 'Point' || !b.meta.isSpatial) && b.meta.rawArea) {
                     let footprintArea = b.meta.rawArea / (b.meta.floorsNumeric || 1);
                     if (isNaN(footprintArea) || footprintArea <= 5) return; 
 
-                    let pt = (b.type === 'Point' && b.polygons[0]?.[0]?.[0]) ? b.polygons[0][0][0] : null;
-                    let parentCn = null;
+                    let pt = null;
                     let parentPoly = null;
 
-                    // А. Ищем участок по вхождению точки
-                    if (pt) {
-                        for (let parcel of allLocalFeatures.parcels) {
-                            if (parcel.polygons[0]?.[0] && isPointInPolyEditor(pt, parcel.polygons[0][0])) {
-                                parentCn = parcel.meta.id;
-                                parentPoly = parcel.polygons[0][0];
-                                break;
-                            }
-                        }
+                    if (b.type === 'Point' && b.polygons[0] && b.polygons[0][0] && b.polygons[0][0][0]) {
+                        pt = b.polygons[0][0][0]; 
                     }
 
-                    // Б. Если не нашли, ищем по совпадению кадастрового номера
-                    if (!parentPoly) {
-                        let bCnMatch = b.meta.id.match(/^(\d{2}:\d{2}:\d{6,7}:\d+)/);
-                        if (bCnMatch && parcelMap.has(bCnMatch[1])) {
-                            parentCn = bCnMatch[1];
-                            parentPoly = parcelMap.get(parentCn).polygons[0][0];
+                    // 1. Ищем родительский земельный участок
+                    allLocalFeatures.parcels.forEach(parcel => {
+                        if (!parcel.polygons[0] || !parcel.polygons[0][0]) return;
+                        if (pt && isPointInPolyEditor(pt, parcel.polygons[0][0])) {
+                            parentPoly = parcel.polygons[0][0];
                         }
-                    }
+                    });
 
-                    // В. Резервный вариант - берем первый участок из массива
+                    // 2. Если по точке не нашли, берём первый целевой участок
                     if (!parentPoly && allLocalFeatures.parcels.length > 0) {
-                        parentCn = allLocalFeatures.parcels[0].meta.id;
-                        parentPoly = allLocalFeatures.parcels[0].polygons[0][0];
+                         parentPoly = allLocalFeatures.parcels[0].polygons[0][0];
                     }
 
+                    // 3. Устанавливаем точку в центр участка
+                    if (!pt && parentPoly) {
+                        pt = getBBoxCenter(parentPoly);
+                    }
+
+                    if (!pt) return;
+
+                    b.meta.isProcedural = true;
+                    b.meta.isSpatial = true; 
+
+                    // Определяем угол поворота по самой длинной стороне ЗУ
+                    let angle = 0;
                     if (parentPoly) {
-                        b._parentPoly = parentPoly; // Сохраняем временно
-                        b._footprintArea = footprintArea; // Сохраняем вычисленную площадь
-                        if (!proceduralByParcel.has(parentCn)) proceduralByParcel.set(parentCn,[]);
-                        proceduralByParcel.get(parentCn).push(b);
+                        let maxLenSq = 0;
+                        for(let i=0; i<parentPoly.length-1; i++) {
+                            let dx = parentPoly[i+1].x - parentPoly[i].x;
+                            let dy = parentPoly[i+1].y - parentPoly[i].y;
+                            let lenSq = dx*dx + dy*dy;
+                            if(lenSq > maxLenSq) { maxLenSq = lenSq; angle = Math.atan2(dy, dx); }
+                        }
                     }
-                }
-            });
 
-            // 3. Выстраиваем здания в ряд на каждом участке
-            proceduralByParcel.forEach((buildingsGroup, parcelCn) => {
-                let parentPoly = buildingsGroup[0]._parentPoly;
+                    // Выбираем пропорции прямоугольника (Длина к Ширине)
+                    let ratio = 1.2; // Частный дом (почти квадрат)
+                    if (b.meta.rawText.includes('многоквартир') || b.meta.rawText.includes('мкд') || b.meta.rawText.includes('школ')) {
+                        ratio = 2.5; // Вытянутый МКД
+                    } else if (b.meta.rawText.includes('гараж') || b.meta.rawText.includes('склад') || b.meta.rawText.includes('цех')) {
+                        ratio = 2.0; 
+                    }
 
-                // Определяем самую длинную сторону участка
-                let angle = 0;
-                let maxLenSq = 0;
-                for(let i = 0; i < parentPoly.length - 1; i++) {
-                    let dx = parentPoly[i+1].x - parentPoly[i].x;
-                    let dy = parentPoly[i+1].y - parentPoly[i].y;
-                    let lenSq = dx*dx + dy*dy;
-                    if(lenSq > maxLenSq) { maxLenSq = lenSq; angle = Math.atan2(dy, dx); }
-                }
-
-                let dirX = Math.cos(angle);
-                let dirY = Math.sin(angle);
-                let center = getBBoxCenter(parentPoly);
-
-                // Рассчитываем габариты всех зданий
-                let totalLength = 0;
-                const gap = 3 * mercatorScale; // Отступ 3 метра между домами
-
-                buildingsGroup.forEach(b => {
-                    let ratio = 1.2; 
-                    if (b.meta.rawText.includes('многоквартир') || b.meta.rawText.includes('мкд') || b.meta.rawText.includes('школ')) ratio = 2.5;
-                    else if (b.meta.rawText.includes('гараж') || b.meta.rawText.includes('склад') || b.meta.rawText.includes('цех')) ratio = 2.0;
-
-                    let trueWidth = Math.sqrt(b._footprintArea / ratio);
+                    // Считаем истинные метры
+                    let trueWidth = Math.sqrt(footprintArea / ratio);
                     let trueLength = trueWidth * ratio;
 
-                    b._scaledW = trueWidth * mercatorScale;
-                    b._scaledL = trueLength * mercatorScale;
-                    
-                    totalLength += b._scaledL;
-                });
+                    // Умножаем на масштаб проекции, чтобы 10м в цифрах выглядели как 10м на карте
+                    let scaledW = trueWidth * mercatorScale;
+                    let scaledL = trueLength * mercatorScale;
 
-                // Добавляем отступы между домами к общей длине
-                totalLength += gap * (buildingsGroup.length - 1);
+                    let halfW = scaledW / 2;
+                    let halfL = scaledL / 2;
 
-                // Определяем начальную точку (смещаемся от центра назад на половину общей длины)
-                let currentX = center.x - dirX * (totalLength / 2);
-                let currentY = center.y - dirY * (totalLength / 2);
-
-                // Расставляем здания по очереди
-                buildingsGroup.forEach(b => {
-                    // Центр конкретного здания
-                    let bCenterX = currentX + dirX * (b._scaledL / 2);
-                    let bCenterY = currentY + dirY * (b._scaledL / 2);
-
-                    let halfW = b._scaledW / 2;
-                    let halfL = b._scaledL / 2;
-
+                    // Вытягиваем дом вдоль оси X локальных координат (которая будет повернута вдоль забора)
                     let rect =[
                         {x: -halfL, y: -halfW}, {x: halfL, y: -halfW},
                         {x: halfL, y: halfW}, {x: -halfL, y: halfW}
                     ];
 
-                    // Вращаем и смещаем к центру
+                    let cosA = Math.cos(angle);
+                    let sinA = Math.sin(angle);
                     let rotatedPoly = rect.map(p => ({
-                        x: bCenterX + (p.x * dirX - p.y * dirY),
-                        y: bCenterY + (p.x * dirY + p.y * dirX)
+                        x: pt.x + (p.x * cosA - p.y * sinA),
+                        y: pt.y + (p.x * sinA + p.y * cosA)
                     }));
-                    rotatedPoly.push(rotatedPoly[0]); // замыкаем полигон
+                    rotatedPoly.push(rotatedPoly[0]); // замыкаем
 
-                    // Обновляем данные объекта
                     b.type = 'Polygon';
                     b.polygons = [[rotatedPoly]];
-                    b.meta.isProcedural = true;
-                    b.meta.isSpatial = true;
-
-                    // Сдвигаем курсор для следующего здания
-                    currentX += dirX * (b._scaledL + gap);
-                    currentY += dirY * (b._scaledL + gap);
-
-                    // Очищаем временные свойства
-                    delete b._parentPoly;
-                    delete b._footprintArea;
-                    delete b._scaledW;
-                    delete b._scaledL;
-                });
+                }
             });
             // --- КОНЕЦ ГЕНЕРАЦИИ ---
 
