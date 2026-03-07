@@ -185,7 +185,7 @@ window.open3DVisualization = function () {
                                 iRingsList.forEach(poly => {
                                     const formattedPoly = poly.map(ring => ring.map(c => ({ x: c[0], y: c[1] })));
                                     // Делаем уникальный ID для каждого куска
-                                    allLocalFeatures.intersections.push({ type: 'Polygon', polygons: [formattedPoly], meta: { name: 'Наложение', id: 'Конфликт ' + (allLocalFeatures.intersections.length + 1), isSpatial: true } });
+                                    allLocalFeatures.intersections.push({ type: 'Polygon', polygons: [formattedPoly], meta: { name: 'Наложение', id: 'Наложение ' + (allLocalFeatures.intersections.length + 1), isSpatial: true } });
                                 });
                             }
                         } catch (e) { }
