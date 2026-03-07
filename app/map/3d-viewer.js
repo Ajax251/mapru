@@ -964,7 +964,7 @@ function createGroundTexture(type, hexColor){
         if (mData.year) extra += "<div><b>Год постройки:</b> " + mData.year + "</div>";
         if (mData.material) extra += "<div><b>Материал:</b> " + mData.material + "</div>";
         if (mData.extent) extra += "<div><b>Протяженность:</b> " + mData.extent + " м</div>";
-        if (mData.isProcedural) extra += "<div style='color:#8b5cf6; font-size:11px; margin-top:4px;'><b>Сгенерировано алгоритмом</b> (условные границы)</div>";
+        if (mData.isProcedural) extra += "<div style='color:#8b5cf6; font-size:11px; margin-top:4px;'><b>Объект без координат</b> (условные границы)</div>";
         
         if (mData.parent1 && mData.parent2) extra += "<div style='margin-top:4px; font-size:11px; border-top:1px solid rgba(255,255,255,0.2); padding-top:4px;'>Между:<br>• "+mData.parent1+"<br>• "+mData.parent2+"</div>";
         
