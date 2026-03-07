@@ -74,10 +74,11 @@ window.open3DVisualization = function () {
                     id: o.cad_num || o.cad_number || o.reg_numb_border || descr || 'Без номера',
                     name: name || 'Объект',
                     rawText: text,
+                    area: o.build_record_area || o.area || o.specified_area || o.declared_area || o.land_record_area || '',
                     hasExtendedData: !!(purpose || name || o.build_record_area || o.year_built || o.floors),
                     isParcel: false,
                     isSpatial: p._isSpatial !== false,
-                    isProcedural: false, 
+                    isProcedural: false, // Флаг для искусственно созданных ОКС
                     
                     floors: o.floors || '',
                     year: o.year_built || o.params_year_built || '',
@@ -85,16 +86,10 @@ window.open3DVisualization = function () {
                     extent: o.params_extension || ''
                 };
 
-                // СОХРАНЯЕМ ЧИСТОЕ ЧИСЛОВОЕ ЗНАЧЕНИЕ ПЛОЩАДИ ДЛЯ МАТЕМАТИКИ
-                let rawAreaVal = o.build_record_area || o.area || o.specified_area || o.declared_area || o.land_record_area || '';
-                meta.rawArea = parseFloat(String(rawAreaVal).replace(/[\s\xA0]/g, '').replace(',', '.'));
-
-                if (meta.rawArea && !isNaN(meta.rawArea)) {
-                    meta.area = meta.rawArea.toLocaleString('ru-RU') + ' м²';
+                if (meta.area && !isNaN(parseFloat(meta.area))) {
+                    meta.area = parseFloat(meta.area).toLocaleString('ru-RU') + ' м²';
                 } else if (o.content_restrict_encumbrances) {
                      meta.area = "Ограничение"; 
-                } else {
-                     meta.area = '';
                 }
 
                 if (category === 'building') {
@@ -132,7 +127,7 @@ window.open3DVisualization = function () {
                     else if (f.geometry.type.includes('Line')) {
                         ringsList = f.geometry.type === 'LineString' ? [[f.geometry.coordinates]] : f.geometry.coordinates.map(c => [c]);
                     } else if (f.geometry.type === 'Point') {
-                        ringsList = [[[f.geometry.coordinates]]]; 
+                        ringsList = [[[f.geometry.coordinates]]]; // Поддержка точек для процедурной генерации
                     }
 
                     const localPolys = ringsList.map(poly => poly.map(ring => ring.map(c => {
@@ -185,45 +180,54 @@ window.open3DVisualization = function () {
                 return inside;
             };
 
-            const getBBoxCenter = function(pts) {
-                let mx = Infinity, my = Infinity, Mx = -Infinity, My = -Infinity;
-                pts.forEach(p => { mx=Math.min(mx,p.x); Mx=Math.max(Mx,p.x); my=Math.min(my,p.y); My=Math.max(My,p.y); });
-                return { x: (mx+Mx)/2, y: (my+My)/2 };
+            const getCentroidEditor = function(pts) {
+                let cx = 0, cy = 0;
+                pts.forEach(p => { cx += p.x; cy += p.y; });
+                return { x: cx / pts.length, y: cy / pts.length };
             };
 
             // --- ПРОЦЕДУРНАЯ ГЕНЕРАЦИЯ УСЛОВНЫХ ОКС ---
             allLocalFeatures.buildings.forEach(b => {
-                // ИСПОЛЬЗУЕМ rawArea ДЛЯ ИСКЛЮЧЕНИЯ ОШИБОК ПАРСИНГА СТРОК
-                if ((b.type === 'Point' || !b.meta.isSpatial) && b.meta.rawArea) {
-                    let footprintArea = b.meta.rawArea / (b.meta.floorsNumeric || 1);
-                    if (isNaN(footprintArea) || footprintArea <= 5) return; 
+                // Если это точка или объект без геометрии, но у него известна площадь
+                if ((b.type === 'Point' || !b.meta.isSpatial) && b.meta.area) {
+                    let footprintArea = parseFloat(b.meta.area) / (b.meta.floorsNumeric || 1);
+                    if (isNaN(footprintArea) || footprintArea <= 5) return; // Минимум 5 кв.м.
 
                     let pt = null;
                     let parentPoly = null;
 
+                    // Если есть координата точки - берем её
                     if (b.type === 'Point' && b.polygons[0] && b.polygons[0][0] && b.polygons[0][0][0]) {
                         pt = b.polygons[0][0][0]; 
                     }
 
-                    // 1. Ищем родительский земельный участок по пересечению
+                    // 1. Ищем родительский земельный участок по пересечению или совпадению номера
                     allLocalFeatures.parcels.forEach(parcel => {
                         if (!parcel.polygons[0] || !parcel.polygons[0][0]) return;
+                        // Если точка лежит внутри участка
                         if (pt && isPointInPolyEditor(pt, parcel.polygons[0][0])) {
                             parentPoly = parcel.polygons[0][0];
                         }
                     });
 
-                    // 2. Если участок не найден по точке, берём первый попавшийся целевой участок
-                    if (!parentPoly && allLocalFeatures.parcels.length > 0) {
-                         parentPoly = allLocalFeatures.parcels[0].polygons[0][0];
+                    // 2. Если по точке не нашли, но знаем КН участка (из номера ОКС)
+                    if (!parentPoly) {
+                        let bCnMatch = b.meta.id.match(/^(\d{2}:\d{2}:\d{6,7}:\d+)/);
+                        if (bCnMatch) {
+                            let baseQuarter = b.meta.id.split(':').slice(0,3).join(':'); // Квартал
+                            // Берем первый попавшийся участок (на практике он обычно один целевой)
+                            if (allLocalFeatures.parcels.length > 0) {
+                                parentPoly = allLocalFeatures.parcels[0].polygons[0][0];
+                            }
+                        }
                     }
 
-                    // 3. Устанавливаем точку в центр найденного участка, если изначальной не было
+                    // 3. Если точку не нашли в геометрии API, берем центр найденного участка
                     if (!pt && parentPoly) {
-                        pt = getBBoxCenter(parentPoly);
+                        pt = getCentroidEditor(parentPoly);
                     }
 
-                    if (!pt) return;
+                    if (!pt) return; // Если не к чему привязаться - сдаемся
 
                     b.meta.isProcedural = true;
                     b.meta.isSpatial = true; 
@@ -240,7 +244,7 @@ window.open3DVisualization = function () {
                         }
                     }
 
-                    // Формируем квадрат
+                    // Формируем квадрат площади
                     let half = Math.sqrt(footprintArea) / 2;
                     let square =[
                         {x: -half, y: -half}, {x: half, y: -half},
@@ -415,8 +419,7 @@ window.open3DVisualization = function () {
         --btn-bg: rgba(255, 255, 255, 0.95);
         --btn-text: #3b82f6;
         --scroll-thumb: #cbd5e1;
-    }
-    [data-theme="dark"] {
+    }[data-theme="dark"] {
         --bg-color: #0f172a;
         --text-color: #f8fafc;
         --text-muted: #94a3b8;
@@ -784,6 +787,7 @@ function createGroundTexture(type, hexColor){
         var wallGeo=new THREE.ExtrudeGeometry(shape,{depth:height,bevelEnabled:false});
         
         if (isProcedural) {
+            // Прозрачный макет для сгенерированных ОКС
             var procMat = new THREE.MeshStandardMaterial({
                 color: 0x60a5fa,
                 transparent: true,
@@ -794,6 +798,7 @@ function createGroundTexture(type, hexColor){
             var walls = new THREE.Mesh(wallGeo, procMat);
             walls.rotation.x = -Math.PI/2; walls.position.y = 0.5;
             
+            // Добавляем красивую сетку
             var edges = new THREE.LineSegments(new THREE.EdgesGeometry(wallGeo), new THREE.LineBasicMaterial({color: 0x2563eb, opacity: 0.8, transparent: true}));
             walls.add(edges);
             b.add(walls);
@@ -1308,7 +1313,7 @@ function createGroundTexture(type, hexColor){
         // Кнопка призрака для ОКС
         if (name === "Здания (ОКС)") {
             var toggleProcBtn = document.createElement("button");
-            toggleProcBtn.innerHTML = '<i class="fas fa-magic"></i>';
+            toggleProcBtn.innerHTML = '<i class="fas fa-ghost"></i>';
             toggleProcBtn.title = "Скрыть/Показать условные (сгенерированные) ОКС";
             toggleProcBtn.style.cssText = "background:none; border:none; color:#8b5cf6; cursor:pointer; font-size:13px; padding:2px 6px; border-radius:4px; margin-left: auto;";
             let procVisible = true;
@@ -1372,7 +1377,7 @@ function createGroundTexture(type, hexColor){
                 let itemMeta = uniqueItems[id][0].meta;
                 if (itemMeta.isProcedural) {
                     iconHtml = '<i class="fas fa-magic" title="Сгенерировано (условные границы)" style="color:#8b5cf6; font-size:11px; margin-right:5px;"></i>';
-                } else if (itemMeta.isSpatial && name !== "Участки (ЗУ)" && name !== "Наложения" && name !== "Целевой объект") {
+                } else if (itemMeta.isSpatial && name !== "Земельные участки" && name !== "Наложения" && name !== "Целевой объект") {
                     iconHtml = '<i class="fas fa-crosshairs" title="Реальные координаты" style="color:#10b981; font-size:11px; margin-right:5px;"></i>';
                 }
                 
