@@ -1469,7 +1469,7 @@ function createGroundTexture(type, hexColor){
     };
 
     addLayerUi("Целевой объект", "#ef4444", sceneGroups.target, data.target);
-    addLayerUi("Участки (ЗУ)", "#10b981", sceneGroups.parels, data.parcels);
+    addLayerUi("Участки (ЗУ)", "#10b981", sceneGroups.parcels, data.parcels);
     addLayerUi("Наложения", "#dc2626", sceneGroups.intersections, data.intersections);
     addLayerUi("Здания (ОКС)", "#3b82f6", sceneGroups.buildings, data.buildings);
     addLayerUi("Инфраструктура", "#f59e0b", sceneGroups.structures, data.structures);
