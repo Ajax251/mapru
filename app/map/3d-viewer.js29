@@ -55,9 +55,6 @@ window.open3DVisualization = function () {
             if (minX === Infinity) { minX = 0; maxX = 0; minY = 0; maxY = 0; }
             const originX = (minX + maxX) / 2;
             const originY = (minY + maxY) / 2;
-            
-            const mapLatRad = Math.atan(Math.sinh(originY / 6378137.0));
-const mercatorScale = 1 / Math.cos(mapLatRad);
 
             const analyzeFeature = (f, category) => {
                 const p = f.properties || {};
@@ -100,15 +97,14 @@ const mercatorScale = 1 / Math.cos(mapLatRad);
                      meta.area = '';
                 }
 
-            if (category === 'building') {
-    let defaultFloors = 1;
-    if (text.includes('многоквартир') || text.includes('мкд')) defaultFloors = 9;
-    else if (text.includes('жило') || text.includes('дом')) defaultFloors = 2;
-    else if (text.includes('школ') || text.includes('больниц')) defaultFloors = 3;
-    meta.floorsNumeric = parseInt(o.floors) || defaultFloors;
-    // Корректируем высоту пропорционально искажениям карты
-    meta.height = (meta.floorsNumeric * 3.5) * mercatorScale;
-} else if (category === 'structure' || category === 'zouit') {
+                if (category === 'building') {
+                    let defaultFloors = 1;
+                    if (text.includes('многоквартир') || text.includes('мкд')) defaultFloors = 9;
+                    else if (text.includes('жило') || text.includes('дом')) defaultFloors = 2;
+                    else if (text.includes('школ') || text.includes('больниц')) defaultFloors = 3;
+                    meta.floorsNumeric = parseInt(o.floors) || defaultFloors;
+                    meta.height = meta.floorsNumeric * 3.5;
+                } else if (category === 'structure' || category === 'zouit') {
                     meta.isSewer = text.includes('канализ') || text.includes('канал') || text.includes('сток');
                     meta.isGas = text.includes('газ');
                     meta.isHeat = text.includes('тепло');
@@ -197,6 +193,7 @@ const mercatorScale = 1 / Math.cos(mapLatRad);
 
             // --- ПРОЦЕДУРНАЯ ГЕНЕРАЦИЯ УСЛОВНЫХ ОКС ---
             allLocalFeatures.buildings.forEach(b => {
+                // ИСПОЛЬЗУЕМ rawArea ДЛЯ ИСКЛЮЧЕНИЯ ОШИБОК ПАРСИНГА СТРОК
                 if ((b.type === 'Point' || !b.meta.isSpatial) && b.meta.rawArea) {
                     let footprintArea = b.meta.rawArea / (b.meta.floorsNumeric || 1);
                     if (isNaN(footprintArea) || footprintArea <= 5) return; 
@@ -208,7 +205,7 @@ const mercatorScale = 1 / Math.cos(mapLatRad);
                         pt = b.polygons[0][0][0]; 
                     }
 
-                    // 1. Ищем родительский земельный участок
+                    // 1. Ищем родительский земельный участок по пересечению
                     allLocalFeatures.parcels.forEach(parcel => {
                         if (!parcel.polygons[0] || !parcel.polygons[0][0]) return;
                         if (pt && isPointInPolyEditor(pt, parcel.polygons[0][0])) {
@@ -216,12 +213,12 @@ const mercatorScale = 1 / Math.cos(mapLatRad);
                         }
                     });
 
-                    // 2. Если по точке не нашли, берём первый целевой участок
+                    // 2. Если участок не найден по точке, берём первый попавшийся целевой участок
                     if (!parentPoly && allLocalFeatures.parcels.length > 0) {
                          parentPoly = allLocalFeatures.parcels[0].polygons[0][0];
                     }
 
-                    // 3. Устанавливаем точку в центр участка
+                    // 3. Устанавливаем точку в центр найденного участка, если изначальной не было
                     if (!pt && parentPoly) {
                         pt = getBBoxCenter(parentPoly);
                     }
@@ -231,7 +228,7 @@ const mercatorScale = 1 / Math.cos(mapLatRad);
                     b.meta.isProcedural = true;
                     b.meta.isSpatial = true; 
 
-                    // Определяем угол поворота по самой длинной стороне ЗУ
+                    // Определяем угол поворота (параллельно самому длинному забору участка)
                     let angle = 0;
                     if (parentPoly) {
                         let maxLenSq = 0;
@@ -243,34 +240,16 @@ const mercatorScale = 1 / Math.cos(mapLatRad);
                         }
                     }
 
-                    // Выбираем пропорции прямоугольника (Длина к Ширине)
-                    let ratio = 1.2; // Частный дом (почти квадрат)
-                    if (b.meta.rawText.includes('многоквартир') || b.meta.rawText.includes('мкд') || b.meta.rawText.includes('школ')) {
-                        ratio = 2.5; // Вытянутый МКД
-                    } else if (b.meta.rawText.includes('гараж') || b.meta.rawText.includes('склад') || b.meta.rawText.includes('цех')) {
-                        ratio = 2.0; 
-                    }
-
-                    // Считаем истинные метры
-                    let trueWidth = Math.sqrt(footprintArea / ratio);
-                    let trueLength = trueWidth * ratio;
-
-                    // Умножаем на масштаб проекции, чтобы 10м в цифрах выглядели как 10м на карте
-                    let scaledW = trueWidth * mercatorScale;
-                    let scaledL = trueLength * mercatorScale;
-
-                    let halfW = scaledW / 2;
-                    let halfL = scaledL / 2;
-
-                    // Вытягиваем дом вдоль оси X локальных координат (которая будет повернута вдоль забора)
-                    let rect =[
-                        {x: -halfL, y: -halfW}, {x: halfL, y: -halfW},
-                        {x: halfL, y: halfW}, {x: -halfL, y: halfW}
+                    // Формируем квадрат
+                    let half = Math.sqrt(footprintArea) / 2;
+                    let square =[
+                        {x: -half, y: -half}, {x: half, y: -half},
+                        {x: half, y: half}, {x: -half, y: half}
                     ];
 
                     let cosA = Math.cos(angle);
                     let sinA = Math.sin(angle);
-                    let rotatedPoly = rect.map(p => ({
+                    let rotatedPoly = square.map(p => ({
                         x: pt.x + (p.x * cosA - p.y * sinA),
                         y: pt.y + (p.x * sinA + p.y * cosA)
                     }));
