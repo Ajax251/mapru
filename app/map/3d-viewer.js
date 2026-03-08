@@ -200,6 +200,7 @@ const mercatorScale = 1 / Math.cos(mapLatRad);
                     polygons: [localPoly],
                     meta: { isParcel: isTargetParcel, name: titleName, id: '', isSpatial: true, area: areaStr }
                 });
+                });
 
             allLocalFeatures.parcels = processFeatureArray(window.parcelFeaturesData, 'parcel');
             allLocalFeatures.buildings = processFeatureArray(window.buildingFeaturesData, 'building');
