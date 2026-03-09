@@ -596,8 +596,8 @@ function openSchemaDocumentWindow(imageBase64, coordsTable, areaStr, terrZoneNam
     <div class="page" id="documentContent">
     <div class="header-text">
             <b>Утверждена</b><br>
-            <input type="text" id="authLine1" class="auth-line" placeholder="Постановлением..." value="${sAl1}"><br>
-            <input type="text" id="authLine2" class="auth-line" placeholder="... района..." value="${sAl2}"><br>
+            <input type="text" id="authLine1" class="auth-line" placeholder="" value="${sAl1}"><br>
+            <input type="text" id="authLine2" class="auth-line" placeholder="" value="${sAl2}"><br>
             <input type="text" id="authLine3" class="auth-line" value="${sAl3}"><br>
             <span style="font-size: 10pt;">(наименование документа об утверждении, включая наименование<br>
             органов государственной власти или органов местного<br>
