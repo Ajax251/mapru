@@ -17,6 +17,10 @@
     <script src="webfonts/supabase-js@2.js"></script>
         <script src="webfonts/heic2any.min.js"></script>
     <script src="webfonts/full.umd.js"></script>
+    <script src="app/map/3d-viewer.js"></script>
+    <script src="app/map/export-html-map.js"></script>
+    <script src="https://unpkg.com/docx@7.8.2/build/index.js"></script>
+    <script src="app/map/schema-generator.js"></script>
  <style>
     body {
         margin: 0;
@@ -3517,76 +3521,59 @@ const FIXED_CATEGORY_COLORS = {
 };
 
 
+let nspdRequestQueue = Promise.resolve();
+
+const MIN_NSPD_INTERVAL = 500; 
+
 async function fetchNspd(url, options = {}) {
- const delay = Math.floor(Math.random() * 1000) + 1000;
-    await new Promise(resolve => setTimeout(resolve, delay));
-
-    if (!useVercelProxyFeature) {
-        try {
-            return await fetch(url, options);
-        } catch (directError) {
-            console.error("Direct fetch failed:", directError);
-            throw directError;
-        }
-    }
-
-
-    if (isVercelProxyBlocked) {
-        return new Response(JSON.stringify({ error: "Vercel proxy is blocked" }), {
-            status: 403,
-            headers: { 'Content-Type': 'application/json' }
-        });
-    }
-    
-    const urlObject = new URL(url);
-    const targetPath = `${urlObject.pathname}${urlObject.search}`;
-    
-    const refererParam = encodeURIComponent('https://nspd.gov.ru/map');
-    const originParam = encodeURIComponent('https://nspd.gov.ru');
-    const proxyRequestUrl = `${vercelProxyUrl}?target=${encodeURIComponent(targetPath)}&referer=${refererParam}&origin=${originParam}`;
-   
-    const proxyOptions = { ...options };
-   
-    try {
-        const response = await fetch(proxyRequestUrl, proxyOptions); 
-
-        if (!response.ok && response.status === 403) {
-            isVercelProxyBlocked = true;
-            const currentTime = Date.now();
-            if (currentTime - lastVercelBlockTime > 30000) {
-                lastVercelBlockTime = currentTime;
-            }
-        }
-        
-        if (response.ok) {
-            const clonedResponse = response.clone(); 
+    return new Promise((resolve, reject) => {
+     
+        nspdRequestQueue = nspdRequestQueue.then(async () => {
             try {
-                const data = await clonedResponse.json();
-                if (data && data.error) {
-                    throw new Error(data.error); 
-                }
-            } catch (e) {
-              
-            }
-        }
-        
-        return response; 
+            
+                await new Promise(r => setTimeout(r, MIN_NSPD_INTERVAL));
 
-    } catch (error) {
-        console.error("Fetch via Vercel proxy failed:", error);
-        return new Response(JSON.stringify({ error: `Proxy request failed: ${error.message}` }), {
-            status: 502,
-            headers: { 'Content-Type': 'application/json' }
+                if (!useVercelProxyFeature) {
+                    const response = await fetch(url, options);
+                    resolve(response);
+                    return;
+                }
+
+                if (isVercelProxyBlocked) {
+                    resolve(new Response(JSON.stringify({ error: "Vercel proxy is blocked" }), {
+                        status: 403, headers: { 'Content-Type': 'application/json' }
+                    }));
+                    return;
+                }
+                
+                const urlObject = new URL(url);
+                const targetPath = `${urlObject.pathname}${urlObject.search}`;
+                const refererParam = encodeURIComponent('https://nspd.gov.ru/map');
+                const originParam = encodeURIComponent('https://nspd.gov.ru');
+                const proxyRequestUrl = `${vercelProxyUrl}?target=${encodeURIComponent(targetPath)}&referer=${refererParam}&origin=${originParam}`;
+               
+                const response = await fetch(proxyRequestUrl, { ...options }); 
+
+                if (!response.ok && response.status === 403) {
+                    isVercelProxyBlocked = true;
+                    const currentTime = Date.now();
+                    if (currentTime - lastVercelBlockTime > 30000) lastVercelBlockTime = currentTime;
+                }
+                resolve(response);
+
+            } catch (error) {
+                console.error("Fetch failed:", error);
+                resolve(new Response(JSON.stringify({ error: `Request failed: ${error.message}` }), {
+                    status: 502, headers: { 'Content-Type': 'application/json' }
+                }));
+            }
         });
-    }
+    });
 }
 
 function setLoadedObjectOpacity(opacity) {
     loadedObjectOpacity = opacity; // Обновляем глобальное значение
     localStorage.setItem('loadedObjectOpacity', opacity); // Сохраняем в localStorage
-
-    // Базовый уровень непрозрачности, который задают темы (например, 'E6' в hex = 230, ~90%)
-    const baseThemeAlpha = 230; 
 
     // Проходим по всем гео-объектам на карте
     map.geoObjects.each(function(geoObject) {
@@ -3607,29 +3594,16 @@ function setLoadedObjectOpacity(opacity) {
                 // 1. Применяем прозрачность к КОНТУРУ (обводке). Это работает для всех.
                 geoObject.options.set('strokeOpacity', opacity);
 
-                // 2. Применяем прозрачность к ЗАЛИВКЕ (только для полигонов)
+                // 2. Применяем прозрачность к ЗАЛИВКЕ через встроенное свойство Яндекса
+                // Оно корректно умножается на изначальную прозрачность цвета (hex), не искажая базовые оттенки ЗОУИТ
                 if (geoObject instanceof ymaps.Polygon) {
-                    const currentFill = geoObject.options.get('fillColor');
-
-                    // Если у полигона есть цвет заливки (не полностью прозрачный)
-                    if (currentFill && currentFill !== '#00000000') {
-                        // Отделяем RGB часть цвета (первые 7 символов, включая #)
-                        const rgbPart = currentFill.substring(0, 7);
-                        
-                        // Вычисляем новый альфа-канал, умножая базовый на значение слайдера
-                        const newAlphaDecimal = Math.round(baseThemeAlpha * opacity);
-                        
-                        // Преобразуем в двухзначное шестнадцатеричное число (00, 0F, FF и т.д.)
-                        const newAlphaHex = newAlphaDecimal.toString(16).padStart(2, '0');
-                        
-                        // Собираем новый цвет и устанавливаем его
-                        geoObject.options.set('fillColor', `${rgbPart}${newAlphaHex}`);
-                    }
+                    geoObject.options.set('fillOpacity', opacity);
                 }
             }
         }
     });
 }
+
 
 
 function setManualObjectOpacity(opacity) {
@@ -7131,7 +7105,9 @@ numberedPointSize = parseInt(localStorage.getItem('numberedPointSize'), 10) || 1
             <i class="fas fa-list-ol"></i>Связанные ОКС на ЗУ
         </div>
     
-
+<div class="custom-context-menu-item" id="schema-location-menu-item">
+    <i class="fas fa-map" style="color: #e74c3c;"></i>Схема (СРЗУ)
+</div>
     
 
 
@@ -7268,6 +7244,74 @@ numberedPointSize = parseInt(localStorage.getItem('numberedPointSize'), 10) || 1
     </div>
 </div>
 
+
+
+<div class="custom-context-menu-item" id="copy-coords-menu-item">
+    <i class="far fa-copy"></i>Карта
+    <div class="custom-context-submenu">
+
+   <div class="custom-context-menu-item" id="theme-export-item">
+            <i class="fas fa-file-excel"></i>Данные
+        </div>
+           <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
+
+  <div class="custom-context-menu-item" id="open-3d-full-menu-item">
+            <i class="fas fa-cubes" style="color: #8b5cf6;"></i>Карта в 3D 
+        </div>
+
+ <div class="custom-context-menu-item" id="open-3d-clipped-menu-item">
+            <i class="fas fa-cube"></i>Экран в 3D
+        </div>
+    
+      <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
+       
+
+
+
+        <div class="custom-context-menu-item" id="copy-coords-menu-item">
+            <i class="fas fa-map-marker-alt"></i>Точка в WGS84
+        </div>
+            <div class="custom-context-menu-item" id="geo-photo-menu-item">
+            <i class="fas fa-camera"></i>Фото с гео
+        </div>
+                <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
+        
+        <div class="custom-context-menu-item" id="open-mapmini-menu-item">
+            <i class="fas fa-map"></i>Карта Мини
+        </div>
+          <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
+          
+    
+        
+        <div class="custom-context-menu-item" id="copy-all-epsg3857-menu-item">
+            <i class="fas fa-ruler-combined"></i>EPSG:3857
+        </div>
+          <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
+        
+        
+        
+     
+    
+    
+     <div class="custom-context-menu-item" id="arbitrary-response-menu-item">
+            <i class="fas fa-paste"></i>из Response
+        </div>
+            <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
+   <div class="custom-context-menu-item" id="export-map-json-menu-item">
+            <i class="fas fa-file-export"></i>Экспорт
+        </div>
+        <div class="custom-context-menu-item" id="import-map-json-menu-item">
+            <i class="fas fa-file-import"></i>Импорт
+        </div>
+         
+  
+        
+        
+    </div>
+</div>
+
+
+
 <div class="custom-context-menu-item" id="coordinates-menu-item">
     <i class="fas fa-map-marked-alt"></i>МСК
     <div class="custom-context-submenu">
@@ -7304,57 +7348,6 @@ numberedPointSize = parseInt(localStorage.getItem('numberedPointSize'), 10) || 1
         
     </div>
 </div>
-
-<div class="custom-context-menu-item" id="copy-coords-menu-item">
-    <i class="far fa-copy"></i>Карта
-    <div class="custom-context-submenu">
-
-   <div class="custom-context-menu-item" id="theme-export-item">
-            <i class="fas fa-file-excel"></i>Экспорт данных
-        </div>
-       
-        <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
-
-
-        <div class="custom-context-menu-item" id="copy-coords-menu-item">
-            <i class="fas fa-map-marker-alt"></i>Точка в WGS84
-        </div>
-        
-        <div class="custom-context-menu-item" id="open-mapmini-menu-item">
-            <i class="fas fa-map"></i>Карта Мини
-        </div>
-    
-        <div class="custom-context-menu-item" id="geo-photo-menu-item">
-            <i class="fas fa-camera"></i>Фото с геометкой
-        </div>
-        
-        <div class="custom-context-menu-item" id="copy-all-epsg3857-menu-item">
-            <i class="fas fa-ruler-combined"></i>Все в EPSG:3857
-        </div>
-          <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
-        
-        
-        
-     
-    
-    
-     <div class="custom-context-menu-item" id="arbitrary-response-menu-item">
-            <i class="fas fa-paste"></i>Импорт из Response
-        </div>
-            <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
-   <div class="custom-context-menu-item" id="export-map-json-menu-item">
-            <i class="fas fa-file-export"></i>Экспорт Карты
-        </div>
-        <div class="custom-context-menu-item" id="import-map-json-menu-item">
-            <i class="fas fa-file-import"></i>Импорт Карты
-        </div>
-         
-  
-        
-        
-    </div>
-</div>
-
 
 
 <div class="custom-context-menu-item" id="distance-menu-item">
@@ -7435,6 +7428,14 @@ contextMenu.addEventListener('click', async function (event) {
         targetObject = findLineAtPoint(lat, lon);
     }
     
+    
+    
+    
+    
+   
+
+    
+    
     // Если конкретная линия не найдена, ищем все линии на карте
     if (!targetObject) {
         const linearObjects = polygons.filter(obj => 
@@ -7453,6 +7454,95 @@ contextMenu.addEventListener('click', async function (event) {
     }
 }
 
+if (event.target.id === 'open-3d-clipped-menu-item') {
+            contextMenu.style.display = 'none';
+            await openVisibleMapIn3D(true); 
+        }
+        
+        if (event.target.id === 'open-3d-full-menu-item') {
+            contextMenu.style.display = 'none';
+            await openVisibleMapIn3D(false); 
+        }
+  
+  
+  
+  
+        const clickedMenuItem = event.target.closest('.custom-context-menu-item');
+        const targetId = clickedMenuItem ? clickedMenuItem.id : event.target.id;
+
+        if (targetId === 'schema-location-menu-item') {
+            console.log("=== ЗАПУСК ПРОЦЕССА 'СХЕМА' ===");
+            contextMenu.style.display = 'none';
+            const lat = parseFloat(contextMenu.dataset.lat);
+            const lon = parseFloat(contextMenu.dataset.lon);
+            console.log(`Координаты клика: lat=${lat}, lon=${lon}`);
+
+            // 1. Ищем полигоны в точке клика
+            const clickPoint = turf.point([lon, lat]);
+            let candidateObjects = [];
+            const allDrawableObjects = [...polygons, ...areaObjects];
+            console.log(`Всего объектов на карте для проверки: ${allDrawableObjects.length}`);
+
+            for (const obj of allDrawableObjects) {
+                if (obj instanceof ymaps.Polygon) {
+                    try {
+                        const coords = obj.geometry.getCoordinates()[0];
+                        if (coords.length < 3) continue;
+                        const turfPolygon = turf.polygon([coords.map(coord => [coord[1], coord[0]])]);
+                        if (turf.booleanPointInPolygon(clickPoint, turfPolygon)) {
+                            candidateObjects.push(obj);
+                        }
+                    } catch (turfError) {
+                        if (obj.geometry.contains([lat, lon])) {
+                            candidateObjects.push(obj);
+                        }
+                    }
+                } 
+            }
+
+            console.log(`Найдено полигонов ТОЧНО под кликом: ${candidateObjects.length}`);
+
+            // УЛУЧШЕНИЕ: Если под кликом пусто, берем ВСЕ полигоны с карты
+            if (candidateObjects.length === 0) {
+                console.log("В точке клика пусто. Собираем все полигоны с карты...");
+                candidateObjects = allDrawableObjects.filter(obj => obj instanceof ymaps.Polygon);
+                console.log(`Собрано полигонов со всей карты: ${candidateObjects.length}`);
+            }
+
+            // Функция запуска Схемы с проверкой подключения файла
+            const runSchema = (polygon) => {
+                console.log("Попытка вызова функции startSchemaWorkflow из schema-generator.js...");
+                if (typeof startSchemaWorkflow === 'undefined') {
+                    console.error("ОШИБКА: Функция startSchemaWorkflow НЕ НАЙДЕНА!");
+                    showNotification('Ошибка: файл schema-generator.js не подключен в <head>!', 'error', 'exclamation-circle', 5000);
+                } else {
+                    console.log("Функция найдена, передаем объект и запускаем окно настроек.");
+                    startSchemaWorkflow(lat, lon, polygon);
+                }
+            };
+
+            // 2. Обработка результатов
+            if (candidateObjects.length === 0) {
+                console.warn("На карте вообще нет полигонов.");
+                showNotification('На карте нет полигонов для создания схемы', 'warning');
+            } else if (candidateObjects.length === 1) {
+                console.log("Найден 1 полигон, запускаем сразу.");
+                runSchema(candidateObjects[0]);
+            } else {
+                console.log("Найдено несколько полигонов, вызываем окно выбора (showPolygonSelectionModal).");
+                showPolygonSelectionModal(candidateObjects, (selectedObj) => {
+                    if (selectedObj) {
+                        console.log("Полигон выбран пользователем в модальном окне.");
+                        runSchema(selectedObj);
+                    } else {
+                        console.log("Пользователь отменил выбор полигона.");
+                    }
+                }, "Выберите объект для создания Схемы");
+            }
+            
+            return; // Обязательно прерываем выполнение, чтобы другие if-ы не сработали
+        }
+      
 
 if (event.target.id === 'quick-report-menu-item') {
             const lat = parseFloat(contextMenu.dataset.lat);
@@ -7855,20 +7945,32 @@ if (event.target.id === 'find-on-map-menu-item') {
             contextMenu.style.display = 'none';
         }
 
-        if (event.target.id === 'oks-menu-item') {
+    if (event.target.id === 'oks-menu-item') {
             const lat = parseFloat(contextMenu.dataset.lat);
             const lon = parseFloat(contextMenu.dataset.lon);
+
+            console.log(`[Границы -> ОКС] Запрос ОКС по координатам: ${lat}, ${lon}`);
 
             try {
                 const oksData = await queryOKSInfo(lat, lon);
 
                 if (!oksData || !oksData.features || oksData.features.length === 0) {
+                    console.log(`[Границы -> ОКС] API вернул пустой ответ.`);
                     showNotification('Объект капитального строительства не найден', 'error', 'exclamation-circle');
                     contextMenu.style.display = 'none';
                     return;
                 }
 
                 const feature = oksData.features[0];
+                console.log(`[Границы -> ОКС] Получены данные ОКС:`, feature);
+
+                // ИЗВЛЕКАЕМ НОМЕР СРАЗУ
+                let cadastralNumber = 'Не указан';
+                if (feature.properties.options && feature.properties.options.cad_num) {
+                    cadastralNumber = feature.properties.options.cad_num;
+                } else if (feature.properties.descr) {
+                    cadastralNumber = feature.properties.descr;
+                }
 
                 if (feature.geometry && feature.geometry.coordinates) {
                     const coordinates = feature.geometry.coordinates[0].map(coord => {
@@ -7881,8 +7983,15 @@ if (event.target.id === 'find-on-map-menu-item') {
                         coord[1] - mapOffsetX * 0.000008983
                     ]);
 
-                    const polygon = new ymaps.Polygon([offsetCoordinates], {}, {
-                        strokeColor: '#00FF00',
+                    // --- БЕРЕМ ЦВЕТ ИЗ НАСТРОЕК ДЛЯ КОНТУРА ---
+                    const oksColor = polygonStyle.buildingsColor || '#00BFFF';
+
+                    const polygon = new ymaps.Polygon([offsetCoordinates], {
+                        featureData: feature,
+                        cadastralNumber: cadastralNumber,
+                        isBuilding: true 
+                    }, {
+                        strokeColor: oksColor, // <-- ПРИМЕНЯЕМ ЦВЕТ ИЗ НАСТРОЕК К КОНТУРУ
                         strokeWidth: polygonStyle.width,
                         strokeOpacity: 0.8,
                         fillColor: '#00000000',
@@ -7893,6 +8002,7 @@ if (event.target.id === 'find-on-map-menu-item') {
 
                     map.geoObjects.add(polygon);
                     polygons.push(polygon);
+                    console.log(`[Границы -> ОКС] Полигон отрисован и сохранен с КН: ${cadastralNumber}`);
 
                     const bounds = polygon.geometry.getBounds();
                     const centerGeo = [
@@ -7905,35 +8015,31 @@ if (event.target.id === 'find-on-map-menu-item') {
                     });
 
                     const center3857 = proj4("EPSG:4326", "EPSG:3857", [centerGeo[1], centerGeo[0]]);
-
                     lastPolygonCenter = {
-                        geo: {
-                            lat: centerGeo[0],
-                            lon: centerGeo[1]
-                        },
-                        epsg3857: {
-                            x: center3857[0],
-                            y: center3857[1]
-                        },
-                        native: {
-                            x: feature.geometry.coordinates[0][0][0],
-                            y: feature.geometry.coordinates[0][0][1]
-                        }
+                        geo: { lat: centerGeo[0], lon: centerGeo[1] },
+                        epsg3857: { x: center3857[0], y: center3857[1] },
+                        native: { x: feature.geometry.coordinates[0][0][0], y: feature.geometry.coordinates[0][0][1] }
                     };
 
-                    const cadastralNumber = feature.properties.options && feature.properties.options.cad_num
-                        ? feature.properties.options.cad_num
-                        : 'Не указан';
-                    const name = feature.properties.descr || 'Не указано';
-                    const labelContent = `${cadastralNumber} - ${name}`;
+                    // Формируем красивый текст (Номер - Наименование)
+                    const opts = feature.properties.options || {};
+                    let name = opts.building_name || opts.name || opts.params_name || opts.purpose || '';
+                    
+                    let labelContent = cadastralNumber;
+                    if (name && name !== cadastralNumber) {
+                        labelContent += ` - ${name}`;
+                    }
 
+                    // --- СТАНДАРТНЫЙ ЦВЕТ ДЛЯ МЕТКИ (СИНИЙ) ---
                     const oksText = new ymaps.Placemark([
                         centerGeo[0] - mapOffsetY * 0.000008983,
                         centerGeo[1] - mapOffsetX * 0.000008983
                     ], {
-                        iconContent: labelContent
+                        iconContent: labelContent,
+                        cadastralNumber: cadastralNumber,
+                        featureData: feature
                     }, {
-                        preset: 'islands#greenStretchyIcon',
+                        preset: 'islands#blueStretchyIcon', // Используем стандартный пресет Яндекса
                         draggable: true
                     });
 
@@ -7946,11 +8052,12 @@ if (event.target.id === 'find-on-map-menu-item') {
                     });
                 }
             } catch (error) {
-                console.error('Ошибка при получении ОКС:', error);
+                console.error('[Границы -> ОКС] Ошибка при получении ОКС:', error);
                 showNotification('Ошибка подключения, попробуйте позже', 'error', 'exclamation-circle');
             }
             contextMenu.style.display = 'none';
         }
+        
 
         if (event.target.id === 'terr-zone-menu-item') {
             terrZoneMenuItemHandler(contextMenu, map, polygons, polygonStyle, mapOffsetY, mapOffsetX, getAddressByCoords, proj4, ymaps, showNotification);
@@ -10967,28 +11074,139 @@ async function convertAndCopyMskCoords(targetPolygon) {
 
 async function handleEgrnRelatedAction(lat, lon, targetUrl) {
     try {
+        // --- ЭТАП 1: ПРОВЕРКА УЖЕ ЗАГРУЖЕННЫХ ПОЛИГОНОВ НА КАРТЕ ---
+        
+        const candidates = [];
+        
+        // Объединяем все возможные объекты на карте
+        const allObjects = [...polygons, ...areaObjects];
+
+        for (const obj of allObjects) {
+            // Работаем только с полигонами
+            if (!(obj instanceof ymaps.Polygon)) continue;
+
+            // Проверяем, есть ли у полигона данные (КН или структура из API)
+            // Это отсеивает технические полигоны (сетки и т.д.)
+            const hasData = obj.properties.get('cadastralNumber') || obj.properties.get('featureData');
+            if (!hasData) continue;
+
+            // 1. ПРОВЕРКА ПОПАДАНИЯ (Главное исправление)
+            // Используем нативный метод API Яндекс.Карт. Он учитывает визуальную геометрию.
+            if (obj.geometry.contains([lat, lon])) {
+                
+                // 2. РАСЧЕТ ПЛОЩАДИ (Для приоритета)
+                // Нам нужно выбрать самый маленький объект (например, дом внутри участка)
+                let area = Number.MAX_SAFE_INTEGER;
+                
+                try {
+                    // Пытаемся посчитать точную площадь через Turf
+                    const yandexCoords = obj.geometry.getCoordinates();
+                    // Конвертируем [lat, lon] -> [lon, lat] для Turf
+                    const outerRing = yandexCoords[0].map(c => [c[1], c[0]]); 
+                    
+                    // Замыкаем кольцо для корректности GeoJSON
+                    if (outerRing.length > 2) {
+                        const first = outerRing[0];
+                        const last = outerRing[outerRing.length - 1];
+                        if (first[0] !== last[0] || first[1] !== last[1]) {
+                            outerRing.push(first);
+                        }
+                        const turfPoly = turf.polygon([outerRing]);
+                        area = turf.area(turfPoly);
+                    }
+                } catch (calcError) {
+                    // Если Turf не смог посчитать (сложная геометрия), 
+                    // берем площадь ограничивающего прямоугольника (bounds) как приблизительную
+                    const bounds = obj.geometry.getBounds();
+                    if (bounds) {
+                        const width = Math.abs(bounds[1][1] - bounds[0][1]);
+                        const height = Math.abs(bounds[1][0] - bounds[0][0]);
+                        // Очень грубая оценка в "градусах квадратных", но для сортировки "Дом < Участок" пойдет
+                        area = width * height * 10000000000; 
+                    }
+                }
+
+                candidates.push({ polygon: obj, area: area });
+            }
+        }
+
+        // 3. ЕСЛИ НАШЛИ ОБЪЕКТЫ НА КАРТЕ
+        if (candidates.length > 0) {
+            // Сортируем от меньшего к большему (Дом (ОКС) всегда меньше ЗУ, поэтому он будет первым)
+            candidates.sort((a, b) => a.area - b.area);
+
+            const targetObj = candidates[0].polygon;
+            
+            // --- ИЗВЛЕЧЕНИЕ НОМЕРА ---
+            let idToCopy = null;
+
+            // А. Пробуем явное свойство cadastralNumber
+            const propCn = targetObj.properties.get('cadastralNumber');
+            if (propCn && propCn.length > 5 && propCn !== 'Объект') {
+                idToCopy = propCn;
+            }
+
+            // Б. Если нет, копаем в featureData 
+            if (!idToCopy) {
+                const fd = targetObj.properties.get('featureData');
+                if (fd && fd.properties) {
+                    const opts = fd.properties.options || {};
+                    // Приоритет полей для разных типов объектов
+                    idToCopy = opts.cad_num ||           // ОКС (Здания)
+                               opts.reg_numb_border ||   // ЗОУИТ / Терр. зоны
+                               opts.cad_number ||        // Сооружения
+                               fd.properties.descr;      // ЗУ / Общее описание
+                }
+            }
+
+            // В. Если все еще нет, пробуем hintContent (иногда номер там)
+            if (!idToCopy) {
+                const hint = targetObj.properties.get('hintContent');
+                if (hint && typeof hint === 'object' && hint.cadastralNumber) {
+                    idToCopy = hint.cadastralNumber;
+                }
+            }
+
+            // Если номер успешно найден
+            if (idToCopy && idToCopy.trim() !== '' && idToCopy !== 'Объект') {
+                console.log(`[ЕГРН] Использован существующий объект карты (площадь ~${Math.round(candidates[0].area)}): ${idToCopy}`);
+                
+                await navigator.clipboard.writeText(idToCopy);
+                showNotification(`Скопировано (со слоя): ${idToCopy}`, 'success', 'check-circle');
+                
+                window.open(targetUrl, '_blank');
+                return; // УСПЕХ, выходим из функции, не делая запрос к API
+            }
+        }
+
+        // --- ЭТАП 2: ЗАПРОС К API (ТОЛЬКО ЕСЛИ НА КАРТЕ ПУСТО ИЛИ ОБЪЕКТ НЕ ИМЕЕТ НОМЕРА) ---
+        
+        console.log('[ЕГРН] Объект на карте не найден, выполняю поиск ЗУ через API...');
+        showLoader('Поиск участка в ЕГРН...');
+        
         const cadastralData = await queryCadastralInfo(lat, lon);
 
-        if (!cadastralData || !cadastralData.features || !cadastralData.features.length === 0) {
+        if (!cadastralData || !cadastralData.features || cadastralData.features.length === 0) {
             showNotification('Кадастровый номер не найден', 'error', 'exclamation-circle');
-            return; // No further action if CN not found
+            hideLoader();
+            return;
         }
 
         const feature = cadastralData.features[0];
         const cadastralNumber = feature.properties.descr;
 
         if (feature.geometry && feature.geometry.coordinates) {
-            // The drawing logic is optional here if you only want to copy and open
-            // If you want to draw the polygon as well, uncomment and adapt this part:
-           
+            // Отрисовка нового ЗУ (стандартная логика)
             const coordinates = feature.geometry.coordinates[0].map(coord => {
                 const point = proj4('EPSG:3857', 'EPSG:4326', coord);
                 return [point[1], point[0]];
             });
+            
             const offsetCoordinates = coordinates.map(coord => [
                 coord[0] - mapOffsetY * 0.000008983,
                 coord[1] - mapOffsetX * 0.000008983
             ]);
+            
             const polygon = new ymaps.Polygon([offsetCoordinates], {}, {
                 strokeColor: polygonStyle.color,
                 strokeWidth: polygonStyle.width,
@@ -10996,33 +11214,35 @@ async function handleEgrnRelatedAction(lat, lon, targetUrl) {
                 fillColor: '#00000000',
                 hintEnabled: false, hasBalloon: false, interactivityModel: 'default#transparent'
             });
+            
             map.geoObjects.add(polygon);
             polygons.push(polygon);
+            
             const bounds = polygon.geometry.getBounds();
             const centerGeo = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
+            
             getAddressByCoords(centerGeo).then(address => {
                 document.getElementById('city-name-display').innerHTML = address;
             });
-            const center3857 = proj4("EPSG:4326", "EPSG:3857", [centerGeo[1], centerGeo[0]]);
-            lastPolygonCenter = {
-                geo: { lat: centerGeo[0], lon: centerGeo[1] },
-                epsg3857: { x: center3857[0], y: center3857[1] },
-                native: { x: feature.geometry.coordinates[0][0][0], y: feature.geometry.coordinates[0][0][1] }
-            };
+            
             const cadastralText = new ymaps.Placemark([
                 centerGeo[0] - mapOffsetY * 0.000008983,
                 centerGeo[1] - mapOffsetX * 0.000008983
             ], { iconContent: cadastralNumber }, { preset: 'islands#blueStretchyIcon', draggable: true });
+            
             map.geoObjects.add(cadastralText);
             polygons.push(cadastralText);
-           
 
             await navigator.clipboard.writeText(cadastralNumber);
+            showNotification(`Скопировано: ${cadastralNumber}`, 'success', 'check-circle');
             window.open(targetUrl, '_blank');
         }
+
     } catch (error) {
-        showNotification('Ошибка подключения или обработки данных, попробуйте позже', 'error', 'exclamation-circle');
+        showNotification('Ошибка обработки действия ЕГРН', 'error', 'exclamation-circle');
         console.error("Error in handleEgrnRelatedAction:", error);
+    } finally {
+        hideLoader();
     }
 }
 
@@ -11079,12 +11299,20 @@ function showExportOptionsDialog(lat, lon) {
                 box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: transform 0.2s;
             "><i class="fas fa-file-code"></i>HTML Таблица</button>
             
+            
              <button id="btn-export-html-decl" style="
             width: 100%; padding: 12px; margin-bottom: 20px; border: none; border-radius: 8px;
             background: linear-gradient(90deg, #d32f2f, #f44336); color: white; font-weight: bold;
             cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px;
             box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: transform 0.2s;
-        "><i class="fas fa-file-signature"></i>HTML (декл.)</button>
+        "><i class="fas fa-file-signature"></i>HTML (Декларированные ЗУ)</button>
+        
+        <button id="btn-export-html-map" style="
+                width: 100%; padding: 12px; margin-bottom: 20px; border: none; border-radius: 8px;
+                background: linear-gradient(90deg, #0288D1, #03A9F4); color: white; font-weight: bold;
+                cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 10px;
+                box-shadow: 0 4px 6px rgba(0,0,0,0.1); transition: transform 0.2s;
+            "><i class="fas fa-map-marked-alt"></i> Интерактивная HTML-карта</button>
 
             <button id="btn-export-json-current" style="
                 width: 100%; padding: 12px; margin-bottom: 10px; border: none; border-radius: 8px;
@@ -11132,7 +11360,13 @@ function showExportOptionsDialog(lat, lon) {
         handleExportAction();
     };
 
-    // ОБРАБОТЧИК НОВОЙ КНОПКИ
+   document.getElementById('btn-export-html-map').onclick = () => {
+        closeModal();
+   
+        const allObjectsToExport = [...polygons, ...areaObjects];
+        generateStandaloneHtmlMap(allObjectsToExport, map, mapOffsetX, mapOffsetY);
+    };
+    
     document.getElementById('btn-export-html').onclick = () => {
         closeModal();
         handleHtmlExportAction();
@@ -11564,83 +11798,12 @@ async function executeQuickReport(targetObject) {
     showLoader('<div style="text-align:center;"><i class="fas fa-crosshairs fa-spin" style="font-size: 2.2rem; color: #f59e0b; margin-bottom: 10px;"></i><br></div>');
     await new Promise(resolve => setTimeout(resolve, 50));
     
+    console.log("=== ЗАПУСК БЫСТРОГО ОТЧЕТА ===");
+    
     const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
     quickReportTargetObjects = objects;
     
-    // --- Инициализация МСК для точных расчетов ---
-    const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
-    const destSystemObject = (typeof COORDINATE_SYSTEMS !== 'undefined') ? COORDINATE_SYSTEMS.find(s => s.value === destSc) : null;
-    let calcMskOffsetX = 0, calcMskOffsetY = 0;
-    let canCalculateMsk = false;
-
-    if (destSystemObject && destSystemObject.def) {
-        proj4.defs(destSc, destSystemObject.def);
-        canCalculateMsk = true;
-        if (localStorage.getItem('autoLoadMskOffset') !== 'false') {
-            calcMskOffsetX = destSystemObject.offsetX || 0;
-            calcMskOffsetY = destSystemObject.offsetY || 0;
-        } else {
-            calcMskOffsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
-            calcMskOffsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
-        }
-    } else {
-        showNotification("Не удалось определить МСК для расчетов. Проверьте настройки.", "warning");
-    }
-
-    // Хелпер: Конвертация координат в МСК (Turf формат [x, y])
-    const toMskTurfPoint = (lat, lon) => {
-        if (!canCalculateMsk) return [lon, lat];
-        const p = proj4('EPSG:4326', destSc, [lon, lat]);
-        const easting = Math.round((p[0] + calcMskOffsetY) * 100) / 100;  
-        const northing = Math.round((p[1] + calcMskOffsetX) * 100) / 100; 
-        return [easting, northing];
-    };
-
-    // Хелпер: Гарантирует замыкание полигона для Turf.js
-    const ensureClosedRing = (ring) => {
-        if (!ring || ring.length === 0) return ring;
-        const first = ring[0];
-        const last = ring[ring.length - 1];
-        if (first[0] !== last[0] || first[1] !== last[1]) {
-            ring.push([...first]);
-        }
-        return ring;
-    };
-
-    // Подготовка геометрии ЦЕЛЕВОГО объекта в МСК
-    const targetMskPolygons = [];
-    objects.forEach(obj => {
-        const coords = obj.geometry.getCoordinates();
-        
-        if (obj instanceof ymaps.Polygon) {
-            const mskRings = coords.map(ring => {
-                const mappedRing = ring.map(c => {
-                    const trueLat = c[0] + (mapOffsetY * 0.000008983);
-                    const trueLon = c[1] + (mapOffsetX * 0.000008983);
-                    return toMskTurfPoint(trueLat, trueLon);
-                });
-                return ensureClosedRing(mappedRing);
-            });
-            // Turf требует минимум 4 точки (с учетом замыкающей)
-            if (mskRings.length > 0 && mskRings[0].length >= 4) {
-                try { targetMskPolygons.push(turf.polygon(mskRings)); } catch (e) { console.warn("Turf error target poly", e); }
-            }
-        } else if (obj instanceof ymaps.Polyline) {
-            const mappedLine = coords.map(c => {
-                const trueLat = c[0] + (mapOffsetY * 0.000008983);
-                const trueLon = c[1] + (mapOffsetX * 0.000008983);
-                return toMskTurfPoint(trueLat, trueLon);
-            });
-            if (mappedLine.length >= 2) {
-                try {
-                    const line = turf.lineString(mappedLine);
-                    targetMskPolygons.push(turf.buffer(line, 0.1, {units: 'meters'})); 
-                } catch (e) { console.warn("Turf error target line", e); }
-            }
-        }
-    });
-
     const sidebar = document.getElementById('parcel-results-sidebar');
     if (sidebar) sidebar.classList.add('hidden');
     Object.values(quickReportLayers).flat().forEach(obj => {
@@ -11657,28 +11820,54 @@ async function executeQuickReport(targetObject) {
         objName = `Сборный контур (${objects.length} шт.)`;
     }
 
+    // Хелпер: Гарантирует замыкание полигона для Turf.js
+    const ensureClosedRing = (ring) => {
+        if (!ring || ring.length < 3) return ring;
+        const first = ring[0];
+        const last = ring[ring.length - 1];
+        if (Math.abs(first[0] - last[0]) > 1e-9 || Math.abs(first[1] - last[1]) > 1e-9) {
+            ring.push([first[0], first[1]]);
+        }
+        return ring;
+    };
+
+    // Подготовка геометрии ЦЕЛЕВОГО объекта (в "визуальных" координатах [lon, lat], как ожидает checkPreciseIntersection)
+    const targetTurfGeoms = [];
+    objects.forEach(obj => {
+        const coords = obj.geometry.getCoordinates();
+        if (obj instanceof ymaps.Polygon) {
+            const rings = coords.map(ring => ensureClosedRing(ring.map(c => [c[1], c[0]])));
+            try { 
+                targetTurfGeoms.push({ geom: turf.polygon(rings), isLine: false }); 
+            } catch (e) { console.error("Ошибка Turf при создании целевого полигона:", e); }
+        } else if (obj instanceof ymaps.Polyline) {
+            const lineCoords = coords.map(c => [c[1], c[0]]);
+            try { 
+                targetTurfGeoms.push({ geom: turf.lineString(lineCoords), isLine: true }); 
+            } catch (e) { console.error("Ошибка Turf при создании целевой линии:", e); }
+        }
+    });
+
     try {
-        let linkedOksCns =[];
-        for (const obj of objects) {
+         const linkedPromises = objects.map(async obj => {
             const cn = obj.properties.get('cadastralNumber');
             if (cn && cn.includes(':')) {
-                try {
-                    const linked = await fetchLinkedOks(cn);
-                    if (linked && linked.length > 0) {
-                        linkedOksCns.push(...linked);
-                    }
-                } catch(e) {}
+                try { return await fetchLinkedOks(cn); } catch(e) { return []; }
             }
-        }
-        linkedOksCns = [...new Set(linkedOksCns)];
+            return[];
+        });
+        const linkedResults = await Promise.all(linkedPromises);
+        let linkedOksCns = [...new Set(linkedResults.flat())];
 
         const results = { zu: [], oks:[], structure: [], zouit:[] };
 
-        // Хелпер для обработки колец из API
+        // Хелпер для конвертации колец из API 3857 в визуальные координаты [lon, lat] карты
         const processApiRing = (ring3857) => {
             const mappedRing = ring3857.map(c => {
                 const wgs = proj4('EPSG:3857', 'EPSG:4326', c); // [lon, lat]
-                return toMskTurfPoint(wgs[1], wgs[0]);
+                const visLon = wgs[0] - (mapOffsetX * 0.000008983);
+                const visLat = wgs[1] - (mapOffsetY * 0.000008983);
+                return [visLon, visLat];
             });
             return ensureClosedRing(mappedRing);
         };
@@ -11686,60 +11875,72 @@ async function executeQuickReport(targetObject) {
         // ЭТАП 0: Земельные участки
         showLoader(getRadarLoaderHtml(0));
         const rawZu = await searchFeaturesByGeometry(objects, 36368);
+        console.log(`[Анализ ЗУ] Получено от API: ${rawZu.length} участков.`);
         
         if (rawZu.length > 0) {
             for (const feature of rawZu) {
                 if (!feature.geometry || !feature.geometry.coordinates) continue;
                 
-                let featureMskPolys = [];
+                let featureTurfPolys = [];
                 try {
                     if (feature.geometry.type === 'Polygon') {
                         const rings = feature.geometry.coordinates.map(processApiRing);
-                        if (rings[0].length >= 4) featureMskPolys.push(turf.polygon(rings));
+                        if (rings[0].length >= 4) featureTurfPolys.push(turf.polygon(rings));
                     } else if (feature.geometry.type === 'MultiPolygon') {
                         feature.geometry.coordinates.forEach(poly => {
                             const rings = poly.map(processApiRing);
-                            if (rings[0].length >= 4) featureMskPolys.push(turf.polygon(rings));
+                            if (rings[0].length >= 4) featureTurfPolys.push(turf.polygon(rings));
                         });
                     }
                 } catch (e) {
-                    console.warn("Turf parse error for ZU", e);
+                    console.error(`[Анализ ЗУ] Ошибка парсинга геометрии для ${feature.properties.descr}:`, e);
                     continue;
                 }
 
                 let totalIntersectionArea = 0;
                 let featureTotalArea = 0;
 
-                for (const fPoly of featureMskPolys) {
+                for (const fPoly of featureTurfPolys) {
+                    // Используем checkPreciseIntersection для расчета истинной площади участка в МСК
                     const selfResult = checkPreciseIntersection(fPoly, fPoly, false, '[SelfArea]');
                     featureTotalArea += selfResult.area;
 
-                    for (const tPoly of targetMskPolygons) {
-                        const result = checkPreciseIntersection(tPoly, fPoly, false, `[QuickReport ZU ${feature.properties.descr}]`);
+                    // Рассчитываем площадь наложения
+                    for (const target of targetTurfGeoms) {
+                        const result = checkPreciseIntersection(target.geom, fPoly, target.isLine, `[Intersect]`);
                         if (result.isIntersecting) {
                             totalIntersectionArea += result.area;
                         }
                     }
                 }
 
-                if (totalIntersectionArea >= 0.0001) {
+                console.log(`--- ЗУ: ${feature.properties.descr} ---`);
+                console.log(`Полная площадь (МСК): ${featureTotalArea.toFixed(4)} кв.м.`);
+                console.log(`Площадь наложения: ${totalIntersectionArea.toFixed(4)} кв.м.`);
+
+                // Порог наложения 0.001 кв.м. (10 кв. см.)
+                if (totalIntersectionArea >= 0.001) {
                     let percent = 0;
                     if (featureTotalArea > 0) {
-                        if ((featureTotalArea - totalIntersectionArea) < 0.001) { // Допуск 0.001 м²
+                        // Допуск 0.001 м² для 100%
+                        if ((featureTotalArea - totalIntersectionArea) < 0.001) {
                             percent = 100;
                         } else {
                             let rawPercent = (totalIntersectionArea / featureTotalArea) * 100;
                             if (rawPercent < 10) {
-                                percent = Math.ceil(rawPercent);
+                                percent = Math.ceil(rawPercent); // До 10% округляем вверх
                                 if (percent === 0) percent = 1;
                             } else {
-                                percent = Math.floor(rawPercent);
+                                percent = Math.floor(rawPercent); // Свыше 10% округляем вниз
                             }
                         }
                     }
+                    console.log(`Округлённый процент: ${percent}%`);
                     if (!feature.properties) feature.properties = {};
                     feature.properties._intersectionPercent = percent;
                     results.zu.push(feature);
+                } else {
+                    console.log(`Наложение менее 0.001 кв.м., ЗУ отброшен.`);
                 }
             }
         }
@@ -11749,47 +11950,53 @@ async function executeQuickReport(targetObject) {
         // ЭТАП 1: ОКС
         showLoader(getRadarLoaderHtml(1));
         const rawOksFeatures = await searchFeaturesByGeometry(objects, 36369);
+        console.log(`[Анализ ОКС] Получено от API: ${rawOksFeatures.length} объектов.`);
         const spatialOksFeatures = [];
 
         if (rawOksFeatures.length > 0) {
             for (const feature of rawOksFeatures) {
                 if (!feature.geometry || !feature.geometry.coordinates) continue;
 
-                let featureMskPolys = [];
+                let featureTurfPolys = [];
                 try {
                     if (feature.geometry.type === 'Polygon') {
                         const rings = feature.geometry.coordinates.map(processApiRing);
-                        if (rings[0].length >= 4) featureMskPolys.push(turf.polygon(rings));
+                        if (rings[0].length >= 4) featureTurfPolys.push(turf.polygon(rings));
                     } else if (feature.geometry.type === 'MultiPolygon') {
                         feature.geometry.coordinates.forEach(poly => {
                             const rings = poly.map(processApiRing);
-                            if (rings[0].length >= 4) featureMskPolys.push(turf.polygon(rings));
+                            if (rings[0].length >= 4) featureTurfPolys.push(turf.polygon(rings));
                         });
                     }
                 } catch (e) {
-                    console.warn("Turf parse error for OKS", e);
+                    console.error(`[Анализ ОКС] Ошибка парсинга геометрии для ${feature.properties.descr}:`, e);
                     continue;
                 }
 
                 let totalIntersectionArea = 0;
                 let featureTotalArea = 0;
 
-                for (const fPoly of featureMskPolys) {
+                for (const fPoly of featureTurfPolys) {
                     const selfResult = checkPreciseIntersection(fPoly, fPoly, false, '[SelfArea]');
                     featureTotalArea += selfResult.area;
 
-                    for (const tPoly of targetMskPolygons) {
-                        const result = checkPreciseIntersection(tPoly, fPoly, false, `[QuickReport OKS ${feature.properties?.descr}]`);
+                    for (const target of targetTurfGeoms) {
+                        const result = checkPreciseIntersection(target.geom, fPoly, target.isLine, `[Intersect]`);
                         if (result.isIntersecting) {
                             totalIntersectionArea += result.area;
                         }
                     }
                 }
 
-                if (totalIntersectionArea >= 0.0001) {
+                const objId = feature.properties.options?.cad_num || feature.properties.descr;
+                console.log(`--- ОКС: ${objId} ---`);
+                console.log(`Полная площадь (МСК): ${featureTotalArea.toFixed(4)} кв.м.`);
+                console.log(`Площадь наложения: ${totalIntersectionArea.toFixed(4)} кв.м.`);
+
+                if (totalIntersectionArea >= 0.001) {
                     let percent = 0;
                     if (featureTotalArea > 0) {
-                        if ((featureTotalArea - totalIntersectionArea) < 0.001) { // Допуск 0.001 м²
+                        if ((featureTotalArea - totalIntersectionArea) < 0.001) {
                             percent = 100;
                         } else {
                             let rawPercent = (totalIntersectionArea / featureTotalArea) * 100;
@@ -11801,9 +12008,12 @@ async function executeQuickReport(targetObject) {
                             }
                         }
                     }
+                    console.log(`Округлённый процент: ${percent}%`);
                     if (!feature.properties) feature.properties = {};
                     feature.properties._intersectionPercent = percent;
                     spatialOksFeatures.push(feature);
+                } else {
+                    console.log(`Наложение менее 0.001 кв.м., ОКС отброшен.`);
                 }
             }
         }
@@ -11879,7 +12089,21 @@ async function executeQuickReport(targetObject) {
                 }
             }
         });
+        
+            // Делаем данные доступными для внешнего файла 3d-viewer.js
+        window.quickReportTargetObjects = quickReportTargetObjects;
+        window.parcelFeaturesData = parcelFeaturesData;
+        window.buildingFeaturesData = buildingFeaturesData;
+        window.structureFeaturesData = structureFeaturesData;
+        window.zouitFeaturesData = zouitFeaturesData;
+        // Передаем настройки смещения карты
+        window.mapOffsetX = typeof mapOffsetX !== 'undefined' ? mapOffsetX : -4.5;
+        window.mapOffsetY = typeof mapOffsetY !== 'undefined' ? mapOffsetY : -1;
+        // Передаем библиотеку proj4
+        window.proj4 = proj4;
+        // --- КОНЕЦ БЛОКА ---
 
+        console.log("=== БЫСТРЫЙ ОТЧЕТ ЗАВЕРШЕН УСПЕШНО ===");
         renderBottomDashboard(objName, results, targetBounds);
 
     } catch (e) {
@@ -12019,6 +12243,11 @@ function renderBottomDashboard(objName, results, targetBounds) {
                 <button onclick="exportQuickReportToHtml()" class="bd-export-btn bd-btn-html" title="Открыть HTML-отчет" style="width: 45px; height: 45px; padding: 0; flex: none; background: #00427a;">
                     <i class="fas fa-file-code" style="font-size: 1.3rem; margin: 0;"></i>
                 </button>
+                
+             <button onclick="open3DVisualization()" class="bd-export-btn" title="Интерактивная 3D Модель" style="width: 45px; height: 45px; padding: 0; flex: none; background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: white; box-shadow: 0 4px 10px rgba(139, 92, 246, 0.4);">
+                    <i class="fas fa-cube" style="font-size: 1.3rem; margin: 0;"></i>
+                </button>
+                
             </div>
             
         </div>
@@ -12402,7 +12631,7 @@ async function drawAdditionalZonesForReport(features) {
 
 
 async function enrichDashboardLayer(layerType, panelElement) {
-    // Находим все элементы списка выбранного типа
+   
     const items = panelElement.querySelectorAll(`.bd-item[data-type="${layerType}"]`);
     if (items.length === 0) return;
 
@@ -12411,60 +12640,54 @@ async function enrichDashboardLayer(layerType, panelElement) {
     for (const item of items) {
         const cn = item.dataset.cn;
         
-        // Пропускаем, если КН некорректный
+       
         if (!cn || !cn.includes(':')) continue;
 
         const descSpan = item.querySelector('.bd-item-desc');
         const originalText = descSpan.innerHTML;
         
-        // Сохраняем иконки (скрепка/прицел), они обычно в начале HTML
-        // Регулярка ищет все теги <i>...</i> в начале строки
+      
         const iconsMatch = originalText.match(/^(<i[^>]*><\/i>\s*)+/i); 
         const iconsHtml = iconsMatch ? iconsMatch[0] : '';
 
-        // Ставим индикатор загрузки
+       
         descSpan.innerHTML = `${iconsHtml} <span style="color:#f59e0b; font-size: 0.9em;">Загрузка данных...</span>`;
 
         try {
-            // Пауза перед запросом (1.2 сек)
-            await new Promise(r => setTimeout(r, 1200));
-
-            // Запрос данных
+         
             const feature = await fetchCadastralData(cn);
 
             if (feature && feature.properties) {
                 const opts = feature.properties.options || {};
                 
-                // Формируем новую строку описания
+             
                 let newDescParts = [];
                 
-                // Наименование / Назначение
+            
                 const name = opts.name || opts.params_name || opts.building_name || opts.purpose;
                 if (name) newDescParts.push(`<b>${name}</b>`);
                 
-                // Площадь
+              
                 if (opts.build_record_area) {
                     newDescParts.push(`Площадь: ${opts.build_record_area} м²`);
                 } 
-                // Или Протяженность (для сооружений)
+              
                 else if (opts.params_extension) {
                     newDescParts.push(`Протяженность: ${opts.params_extension} м`);
                 }
 
-                // Адрес (опционально, если нужно)
-                // if (opts.readable_address) newDescParts.push(opts.readable_address);
-
+           
                 if (newDescParts.length > 0) {
                     descSpan.innerHTML = iconsHtml + newDescParts.join('<br>');
                     
-                    // Обновляем глобальные данные (чтобы экспорт в Excel подхватил новые данные)
+                
                     const globalArr = (layerType === 'oks') ? buildingFeaturesData : structureFeaturesData;
                     const existingFeatureIndex = globalArr.findIndex(f => 
                         (f.properties?.options?.cad_num === cn) || (f.properties?.descr === cn)
                     );
                     
                     if (existingFeatureIndex !== -1) {
-                        // Мержим новые опции в существующий объект
+                   
                         globalArr[existingFeatureIndex].properties.options = {
                             ...globalArr[existingFeatureIndex].properties.options,
                             ...opts
@@ -12480,7 +12703,7 @@ async function enrichDashboardLayer(layerType, panelElement) {
             }
         } catch (e) {
             console.error(`Ошибка обновления ${cn}:`, e);
-            descSpan.innerHTML = iconsHtml + "Ошибка запроса"; // Возвращаем иконки и пишем ошибку
+            descSpan.innerHTML = iconsHtml + "Ошибка запроса"; 
         }
     }
     
@@ -14547,6 +14770,172 @@ function showAnalysisSelectionModal(polygons, onSelect) {
     });
 }
 
+async function openVisibleMapIn3D(clipToScreen = true) {
+    try {
+        // 1. Получаем границы и центр экрана
+        const bounds = map.getBounds();
+        const center = map.getCenter();
+        
+        if (!bounds || !center) {
+            showNotification('Не удалось определить границы экрана', 'error');
+            return;
+        }
+
+        let screenBbox = null;
+        if (clipToScreen) {
+            // BBox для Turf.js в формате[minLon, minLat, maxLon, maxLat]
+            screenBbox = [
+                Math.min(bounds[0][1], bounds[1][1]), 
+                Math.min(bounds[0][0], bounds[1][0]), 
+                Math.max(bounds[0][1], bounds[1][1]), 
+                Math.max(bounds[0][0], bounds[1][0])
+            ];
+        }
+
+        // Передаем не полигон, а ТОЧКУ в центре экрана
+        const virtualTargetPoint = new ymaps.Placemark(center, {
+            cadastralNumber: 'Центр экрана', // Будет написано на табличке в 3D
+        });
+        window.quickReportTargetObjects = [virtualTargetPoint];
+
+        // 2. Собираем все нарисованные объекты (полигоны и линии)
+        const allDrawableObjects = new Set([...polygons, ...areaObjects]);
+        const objectsToProcess = Array.from(allDrawableObjects).filter(obj => 
+            obj instanceof ymaps.Polygon || obj instanceof ymaps.Polyline
+        );
+
+        if (objectsToProcess.length === 0) {
+            showNotification('На карте нет объектов для 3D', 'warning', 'exclamation-triangle');
+            return;
+        }
+        
+        showLoader(clipToScreen ? `Подготовка 3D сцены (обрезка по экрану)...` : `Подготовка 3D сцены (все объекты)...`);
+
+        const pData =[];
+        const bData = [];
+        const sData = [];
+        const zData =[];
+        let processedCount = 0;
+
+        // 3. Обработка и обрезка
+        for (const targetObject of objectsToProcess) {
+            let turfFeature;
+            const isPolygon = targetObject instanceof ymaps.Polygon;
+
+            // Подготовка геометрии для Turf (визуальные координаты)
+            if (isPolygon) {
+                const rings = targetObject.geometry.getCoordinates();
+                const geoJsonCoords = rings.map(ring => ring.map(c => [c[1], c[0]])); // [lon, lat]
+                turfFeature = turf.polygon(geoJsonCoords);
+            } else { // Polyline
+                const coords = targetObject.geometry.getCoordinates();
+                const geoJsonCoords = coords.map(c => [c[1], c[0]]);
+                turfFeature = turf.lineString(geoJsonCoords);
+            }
+
+            let geometry;
+            if (clipToScreen) {
+                // ОБРЕЗКА (Clipping) по границам экрана
+                const clipped = turf.bboxClip(turfFeature, screenBbox);
+                geometry = clipped.geometry;
+            } else {
+                geometry = turfFeature.geometry;
+            }
+            
+            // Если объект полностью вне экрана или пуст
+            if (!geometry || !geometry.coordinates || geometry.coordinates.length === 0) continue; 
+
+            processedCount++;
+
+            // ВОЗВРАТ КООРДИНАТ К WGS84 И EPSG:3857
+            const restoreCoordsRecursively = (coords) => {
+                if (typeof coords[0] === 'number') {
+                    const trueLat = coords[1] + (mapOffsetY * 0.000008983);
+                    const trueLon = coords[0] + (mapOffsetX * 0.000008983);
+                    return proj4("EPSG:4326", "EPSG:3857",[trueLon, trueLat]);
+                } else {
+                    return coords.map(restoreCoordsRecursively);
+                }
+            };
+
+            const restoredCoordinates = restoreCoordsRecursively(geometry.coordinates);
+
+            const props = targetObject.properties.getAll();
+            const opts = targetObject.options.getAll();
+            const originalFeatureData = props.featureData || {};
+            
+            // Определяем категорию объекта
+            let categoryId = 36368; // ЗУ
+            if (props.isBuilding || props.categoryName === 'Здания') categoryId = 36369;
+            else if (props.isStructure || props.categoryName === 'Сооружения') categoryId = 36383;
+            else if (props.isZouit || (props.categoryName && props.categoryName.includes('Зоны'))) categoryId = 36940;
+
+            let objName = 'Объект';
+            if (typeof props.hintContent === 'string') {
+                objName = props.hintContent.replace(/<[^>]*>?/gm, '').trim();
+            } else if (props.hintContent && props.hintContent.address) {
+                objName = props.hintContent.address;
+            } else if (props.cadastralNumber) {
+                objName = props.cadastralNumber;
+            }
+
+            const feature3D = {
+                type: "Feature",
+                id: props._exportId || Math.random().toString(36),
+                geometry: {
+                    type: geometry.type,
+                    coordinates: restoredCoordinates,
+                    crs: { type: "name", properties: { name: "EPSG:3857" } }
+                },
+                properties: {
+                    ...originalFeatureData.properties,
+                    descr: props.cadastralNumber || objName,
+                    category: categoryId,
+                    options: {
+                        ...(originalFeatureData.properties?.options || {}),
+                        cad_num: props.cadastralNumber,
+                        name: objName
+                    }
+                }
+            };
+
+            if (categoryId === 36369) bData.push(feature3D);
+            else if (categoryId === 36383) sData.push(feature3D);
+            else if (categoryId === 36940) zData.push(feature3D);
+            else pData.push(feature3D);
+        }
+
+        if (processedCount === 0) {
+            showNotification(clipToScreen ? 'В видимой области нет объектов для отображения' : 'Нет корректных объектов', 'warning');
+            return;
+        }
+
+        // 4. Обновляем глобальные переменные для 3D
+        window.parcelFeaturesData = pData;
+        window.buildingFeaturesData = bData;
+        window.structureFeaturesData = sData;
+        window.zouitFeaturesData = zData;
+        window.mapOffsetX = mapOffsetX;
+        window.mapOffsetY = mapOffsetY;
+        window.proj4 = proj4;
+        window.isGlobalMapMode = true; 
+
+        // 5. Запуск
+        if (typeof window.open3DVisualization === 'function') {
+            showNotification(`Подготовлено ${processedCount} объектов. Открытие 3D...`, 'success');
+            window.open3DVisualization();
+        } else {
+            showNotification("Ошибка: Модуль 3D не загружен", "error");
+        }
+
+    } catch (error) {
+        console.error("Ошибка при подготовке 3D карты:", error);
+        showNotification(`Ошибка: ${error.message}`, 'error');
+    } finally {
+        hideLoader();
+    }
+}
+
 async function getParcelsOnObject(lat, lon) {
     let targetObject = selectedLine;
     if (!targetObject) targetObject = findPolygonAtPoint(lat, lon);
@@ -14970,16 +15359,20 @@ async function exportMapToJson() {
             texts: []
         };
 
-        // Собираем уникальные объекты
         const allObjects = new Set([...polygons, ...areaObjects, ...parcelPlacemarks]);
         
+        allObjects.forEach(obj => {
+            if (!obj.properties.get('_exportId')) {
+                obj.properties.set('_exportId', 'id_' + Math.random().toString(36).substr(2, 9));
+            }
+        });
+
         allObjects.forEach(obj => {
             if (!obj.geometry) return;
 
             let geometryType = obj.geometry.getType();
             let coordinates = obj.geometry.getCoordinates();
             
-            // Убираем смещение (нормализация к чистому WGS84)
             let trueCoordinates;
             const revertOffset = (coord) => [
                 coord[0] + (mapOffsetY * 0.000008983),
@@ -14994,14 +15387,12 @@ async function exportMapToJson() {
                 trueCoordinates = coordinates.map(ring => ring.map(revertOffset));
             }
 
-            // Получаем "сырые" данные и очищаем их
             const rawProperties = obj.properties.getAll();
             const rawOptions = obj.options.getAll();
             
             const cleanProperties = getSafeData(rawProperties);
             const cleanOptions = getSafeData(rawOptions);
 
-            // Дополнительная чистка options
             delete cleanOptions.iconLayout; 
             delete cleanOptions.hintLayout;
 
@@ -15010,7 +15401,6 @@ async function exportMapToJson() {
                 const currentLayout = obj.options.get('iconLayout');
                 isCustomLabel = (obj instanceof ymaps.Placemark) && (currentLayout === customPlacemarkLayout);
             } catch (e) {
-                // Игнорируем ошибки доступа
             }
 
             const serializedFeature = {
@@ -15030,8 +15420,9 @@ async function exportMapToJson() {
                     isManuallyDrawn: obj.properties.get('isManuallyDrawn'),
                     isAreaMeasurement: areaObjects.includes(obj),
                     isVertexPoint: obj.properties.get('isVertexPoint'),
-                     relatedPolygonCadastralNumber: obj.properties.get('relatedPolygon') ? 
-                        obj.properties.get('relatedPolygon').properties.get('cadastralNumber') : null,
+                    _exportId: obj.properties.get('_exportId'),
+                    relatedPolygonId: obj.properties.get('relatedPolygon') ? obj.properties.get('relatedPolygon').properties.get('_exportId') : null,
+                    relatedPolygonCadastralNumber: obj.properties.get('relatedPolygon') ? obj.properties.get('relatedPolygon').properties.get('cadastralNumber') : null,
                     isCustomLabel: isCustomLabel 
                 }
             };
@@ -15039,7 +15430,6 @@ async function exportMapToJson() {
             mapData.features.push(serializedFeature);
         });
 
-        // Экспорт Draggable Text
         draggableTexts.forEach(el => {
             const span = el.querySelector('span');
             if (!span) return;
@@ -15064,23 +15454,19 @@ async function exportMapToJson() {
             }
         });
 
-        // --- НАЧАЛО ИЗМЕНЕНИЙ (Архивация) ---
         const jsonString = JSON.stringify(mapData, null, 2);
         
         const zip = new JSZip();
-        // Кладем JSON внутрь архива с фиксированным именем
         zip.file("map_data.json", jsonString);
 
-        // Генерируем с максимальным сжатием
         const blob = await zip.generateAsync({
             type: "blob",
             compression: "DEFLATE",
             compressionOptions: { level: 9 }
         });
-        // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
         const dateStr = new Date().toISOString().slice(0,10);
-        saveAs(blob, `Map_Export_${dateStr}.map`); // Сохраняем как .map, но внутри это zip
+        saveAs(blob, `Map_Export_${dateStr}.map`); 
         
         showNotification(`Экспортировано объектов: ${mapData.features.length + mapData.texts.length}`, 'success', 'file-export');
 
@@ -15094,8 +15480,6 @@ async function exportMapToJson() {
 
 
 
-// --- НОВАЯ ФУНКЦИЯ ДЛЯ ФОРМИРОВАНИЯ XML ПО ТИПАМ ОБЪЕКТОВ ---
-// --- НОВАЯ ФУНКЦИЯ ДЛЯ ФОРМИРОВАНИЯ XML ПО ТИПАМ ОБЪЕКТОВ (ФИНАЛЬНАЯ) ---
 async function generateTypedXmlForAllObjects() {
     try {
         const allDrawableObjects = new Set([...polygons, ...areaObjects]);
@@ -15376,7 +15760,6 @@ async function generateTypedXmlForAllObjects() {
 }
 // --- КОНЕЦ НОВОЙ ФУНКЦИИ ---
 
-// --- ФУНКЦИЯ ИМПОРТА (Обработчик input) ---
 function handleMapJsonImport(event) {
     const file = event.target.files[0];
     if (!file) return;
@@ -15390,7 +15773,6 @@ function handleMapJsonImport(event) {
             const arrayBuffer = e.target.result;
             let jsonContent;
 
-            // --- Распаковка (поддержка ZIP и обычного JSON) ---
             try {
                 const zip = await JSZip.loadAsync(arrayBuffer);
                 let jsonFile = zip.file("map_data.json");
@@ -15414,12 +15796,11 @@ function handleMapJsonImport(event) {
 
             const parsedData = JSON.parse(jsonContent);
 
-            // === ЛОГИКА ДЛЯ STANDARD GeoJSON (NSPD формат) ===
             if (parsedData.type === 'FeatureCollection' || parsedData.type === 'Feature' || (parsedData.data && parsedData.data.features)) {
                 
                 clearMapAndResetTheme();
                 
-                let featuresToImport = [];
+                let featuresToImport =[];
                 if (parsedData.type === 'Feature') {
                     featuresToImport = [parsedData];
                 } else if (parsedData.type === 'FeatureCollection') {
@@ -15432,12 +15813,11 @@ function handleMapJsonImport(event) {
                     throw new Error("JSON файл не содержит объектов (features).");
                 }
 
-                // --- НОВАЯ ЛОГИКА РАСПРЕДЕЛЕНИЯ ПО ТИПАМ ---
                 const parcels = [];
-                const buildings = [];
+                const buildings =[];
                 const structures = [];
                 const zouits = [];
-                const others = [];
+                const others =[];
 
                 featuresToImport.forEach(f => {
                     const props = f.properties || {};
@@ -15445,7 +15825,6 @@ function handleMapJsonImport(event) {
                     const cat = props.category;
                     const catName = props.categoryName;
 
-                    // Определение типа объекта по категории или косвенным признакам
                     const isBuilding = cat === 36369 || catName === 'Здания' || opts.build_record_area || (opts.cad_num && opts.purpose);
                     const isStructure = cat === 36383 || catName === 'Сооружения' || (opts.cad_number && opts.params_extension);
                     const isZouit = cat === 36940 || catName?.includes('Зоны') || opts.content_restrict_encumbrances || (opts.reg_numb_border && !opts.type_zone);
@@ -15459,23 +15838,18 @@ function handleMapJsonImport(event) {
                     } else if (isZouit) {
                         zouits.push(f);
                     } else if (isTerrZone) {
-                        // Терр. зоны отрисовываем как ЗОУИТ (они похожи по структуре)
                         zouits.push(f);
                     } else {
-                        // По умолчанию считаем участком (или если явно участок)
                         parcels.push(f);
                     }
                 });
 
-                // Обновляем глобальные массивы
                 parcelFeaturesData = parcels;
                 buildingFeaturesData = buildings;
                 structureFeaturesData = structures;
                 zouitFeaturesData = zouits;
 
-                // Отрисовываем каждую категорию своей функцией
-                // Используем await, чтобы отрисовка шла последовательно
-                if (parcels.length > 0) {
+                if (parels.length > 0) {
                     await processAndDrawParcels(parcels, 'quarter');
                 }
                 if (buildings.length > 0) {
@@ -15488,7 +15862,6 @@ function handleMapJsonImport(event) {
                     await processAndDrawZouits(zouits);
                 }
 
-                // Обновляем боковую панель (приоритет: участки -> ОКС -> ЗОУИТ)
                 const importDate = new Date().toLocaleDateString('ru-RU');
                 if (parcels.length > 0) {
                     populateSidebarWithParcels(parcels, `Импорт (${importDate})`);
@@ -15498,7 +15871,6 @@ function handleMapJsonImport(event) {
                     await populateSidebarWithFoundObjects(zouits, 'ЗОУИТ (Импорт)');
                 }
 
-                // Центрируем карту на всех объектах
                 let allBounds = null;
                 polygons.forEach(obj => {
                     if (obj instanceof ymaps.Polygon) {
@@ -15521,16 +15893,15 @@ function handleMapJsonImport(event) {
 
                 showNotification(`Импортировано: ЗУ: ${parcels.length}, ОКС: ${buildings.length + structures.length}, Зон: ${zouits.length}`, 'success', 'file-import');
             } 
-            // === ЛОГИКА ДЛЯ MapData (.map формат) ===
             else if (parsedData.type === 'MapData') {
                 const mapData = parsedData;
                 clearMapAndResetTheme();
 
                 let importedCount = 0;
-                const restoredParcelsData = [];
+                const restoredParcelsData =[];
                 const restoredBuildingsData = [];
                 const restoredStructuresData = [];
-                const restoredZouitsData = [];
+                const restoredZouitsData =[];
                 const pendingVertexPoints = [];
 
                 const applyOffset = (coord) => [
@@ -15562,7 +15933,11 @@ function handleMapJsonImport(event) {
                                 else if (props.dotSize) ymapsObj.options.set('iconLayout', redDotLayout);
                                 else if (props.fontSize) ymapsObj.options.set('iconLayout', numberedPointLayout);
                                 
-                                pendingVertexPoints.push({ placemark: ymapsObj, parentCn: flags.relatedPolygonCadastralNumber });
+                                pendingVertexPoints.push({ 
+                                    placemark: ymapsObj, 
+                                    parentCn: flags.relatedPolygonCadastralNumber,
+                                    parentId: flags.relatedPolygonId
+                                });
                             }
                         } else if (type === 'LineString') {
                             ymapsObj = new ymaps.Polyline(visualCoords, props, opts);
@@ -15575,7 +15950,7 @@ function handleMapJsonImport(event) {
 
                         if (ymapsObj) {
                             Object.keys(flags).forEach(key => {
-                                if (key !== 'relatedPolygonCadastralNumber') ymapsObj.properties.set(key, flags[key]);
+                                if (key !== 'relatedPolygonCadastralNumber' && key !== 'relatedPolygonId') ymapsObj.properties.set(key, flags[key]);
                             });
 
                             map.geoObjects.add(ymapsObj);
@@ -15588,10 +15963,8 @@ function handleMapJsonImport(event) {
                                 parcelPlacemarks.push(ymapsObj);
                             }
 
-                            // Восстановление данных для экспорта/сайдбара
                             let featureData = props.featureData;
                             if ((!featureData || !featureData.properties) && (props.cadastralNumber)) {
-                                // Минимальная реконструкция для старых сохранений
                                 featureData = { 
                                     type: "Feature", 
                                     geometry: f.geometry, 
@@ -15612,7 +15985,6 @@ function handleMapJsonImport(event) {
                                 else if (flags.isBuilding) restoredBuildingsData.push(featureData);
                                 else if (flags.isStructure) restoredStructuresData.push(featureData);
                                 else if (flags.isZouit) restoredZouitsData.push(featureData);
-                                // Фолбек по свойствам, если флагов нет
                                 else if (featureData.properties.categoryName === 'Здания') restoredBuildingsData.push(featureData);
                                 else if (featureData.properties.categoryName === 'Сооружения') restoredStructuresData.push(featureData);
                                 else if (featureData.properties.categoryName?.includes('Зоны')) restoredZouitsData.push(featureData);
@@ -15623,13 +15995,21 @@ function handleMapJsonImport(event) {
                     });
 
                     pendingVertexPoints.forEach(item => {
-                        if (item.parentCn) {
-                            const parentPolygon = polygons.find(p => p instanceof ymaps.Polygon && p.properties.get('cadastralNumber') === item.parentCn);
-                            if (parentPolygon) {
-                                item.placemark.properties.set('relatedPolygon', parentPolygon);
-                                if (item.placemark.properties.get('isCoordLabel')) parentPolygon.properties.set('coordsPointsVisible', true);
-                                else parentPolygon.properties.set('numberedPointsVisible', true);
-                            }
+                        let parentPolygon = null;
+                        
+                        if (item.parentId) {
+                            parentPolygon = polygons.find(p => p.properties.get('_exportId') === item.parentId) || 
+                                            areaObjects.find(p => p.properties.get('_exportId') === item.parentId);
+                        } 
+                        
+                        if (!parentPolygon && item.parentCn) {
+                            parentPolygon = polygons.find(p => p instanceof ymaps.Polygon && p.properties.get('cadastralNumber') === item.parentCn);
+                        }
+
+                        if (parentPolygon) {
+                            item.placemark.properties.set('relatedPolygon', parentPolygon);
+                            if (item.placemark.properties.get('isCoordLabel')) parentPolygon.properties.set('coordsPointsVisible', true);
+                            else parentPolygon.properties.set('numberedPointsVisible', true);
                         }
                     });
                 }
@@ -17614,7 +17994,7 @@ async function exportQuickReportToHtml() {
         const mapImage = canvas.toDataURL('image/jpeg', 0.85);
 
         // Вспомогательная функция генерации аккуратных HTML таблиц
-        const generateTable = (features, type) => {
+           const generateTable = (features, type) => {
             if (!features || features.length === 0) return '';
             
             let title = '';
@@ -17634,6 +18014,18 @@ async function exportQuickReportToHtml() {
                 
                 let cn = "Объект";
                 let details = "";
+
+                // --- НОВЫЙ БЛОК: Формируем бейдж с процентом наложения ---
+                   let percentHtml = '';
+                if (p._intersectionPercent !== undefined) {
+                    const isFullCoverage = p._intersectionPercent === 100;
+                    const pColor = isFullCoverage ? '#10b981' : '#f59e0b';
+                    const pText = isFullCoverage ? '100%' : `${p._intersectionPercent}%`;
+                    
+                    // Оборачиваем в <div>, чтобы бейдж 100% переносился на новую строку
+                    percentHtml = `<div style="margin-top: 8px;"><span style="display: inline-block; font-size: 11px; font-weight: bold; color: ${pColor}; background: ${pColor}1A; padding: 4px 8px; border-radius: 4px; border: 1px solid ${pColor}4D;">Вхождение в контур: ${pText}</span></div>`;
+                }
+                // -----------------------------------------------------------
 
                 if (type === 'zu') {
                     cn = p.descr || '-';
@@ -17656,6 +18048,11 @@ async function exportQuickReportToHtml() {
                 } else if (type === 'zouit') {
                     cn = o.reg_numb_border || p.descr || '-';
                     details = `<b>Наименование:</b> ${o.name_by_doc || '-'}`;
+                }
+
+                // Просто добавляем блок, он сам перенесется вниз
+                if (percentHtml) {
+                    details += percentHtml;
                 }
 
                 html += `<tr>
@@ -24378,7 +24775,7 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
         tbodyHtml += '</tr>';
     }
 
-    const scriptCode = `
+   const scriptCode = `
     (function(){
         var table=document.getElementById("dataTable");
         var globalInput=document.getElementById("filterInput");
@@ -24406,12 +24803,29 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
         }
 
         function filterAll(){
-          var gVal=globalInput.value.trim().toLowerCase();
+          var gVal = globalInput.value.trim().toLowerCase();
+          // Разбиваем запрос по пробелам на массив слов
+          var searchTerms = gVal ? gVal.split(/\\s+/).filter(Boolean) : [];
+
           dataRows.forEach(function(row,ri){
             var texts=origTexts[ri];
             var full=texts.join(" ").toLowerCase();
             var vis=true;
-            if(gVal&&full.indexOf(gVal)===-1)vis=false;
+
+            // ПОСЛЕДОВАТЕЛЬНЫЙ ПОИСК
+            if (searchTerms.length > 0) {
+                var currentIndex = 0;
+                for (var i = 0; i < searchTerms.length; i++) {
+                    var termIndex = full.indexOf(searchTerms[i], currentIndex);
+                    if (termIndex === -1) {
+                        vis = false;
+                        break; // Слово не найдено или нарушен порядок
+                    }
+                    // Следующее слово ищем только ПОСЛЕ текущего
+                    currentIndex = termIndex + searchTerms[i].length; 
+                }
+            }
+
             if(vis){
               for(var ci in colFilters){
                 if(!colFilters[ci])continue;
@@ -24425,13 +24839,28 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
         }
 
         function getUnique(ci){
-          var gVal=globalInput.value.trim().toLowerCase();
+          var gVal = globalInput.value.trim().toLowerCase();
+          var searchTerms = gVal ? gVal.split(/\\s+/).filter(Boolean) : [];
           var s=new Set();
+
           dataRows.forEach(function(r,ri){
             var texts=origTexts[ri];
             var full=texts.join(" ").toLowerCase();
             var ok=true;
-            if(gVal&&full.indexOf(gVal)===-1)ok=false;
+
+            // ПОСЛЕДОВАТЕЛЬНЫЙ ПОИСК ДЛЯ ВЫПАДАЮЩИХ СПИСКОВ
+            if (searchTerms.length > 0) {
+                var currentIndex = 0;
+                for (var i = 0; i < searchTerms.length; i++) {
+                    var termIndex = full.indexOf(searchTerms[i], currentIndex);
+                    if (termIndex === -1) {
+                        ok = false;
+                        break;
+                    }
+                    currentIndex = termIndex + searchTerms[i].length;
+                }
+            }
+
             if(ok){for(var c in colFilters){if(parseInt(c)===ci)continue;if(!colFilters[c])continue;var cv=(texts[parseInt(c)]||"").trim();if(!colFilters[c].has(cv)){ok=false;break;}}}
             if(ok)s.add((texts[ci]||"").trim());
           });
@@ -24586,7 +25015,7 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
         });
 
         // Начальная сортировка (если задана)
-        var defSort = ${defaultSortCol !== null ? defaultSortCol : 'null'};
+               var defSort = ${defaultSortCol !== null ? defaultSortCol : 'null'};
         if (defSort !== null) {
             var targetTh = table.querySelector('th[data-col="'+defSort+'"]');
             if (targetTh) doSort(defSort, targetTh);
@@ -26476,16 +26905,13 @@ function createRasterControls() {
 rasterControlsPanel.querySelector('.close-btn').addEventListener('click', (e) => {
     e.stopPropagation();
     
-    // Сбрасываем прозрачность контуров к стандарту (0.8)
-    setManualObjectOpacity(0.8);
-    setLoadedObjectOpacity(0.8);
+
     
     if (rasterOverlay) map.geoObjects.remove(rasterOverlay);
     if (rasterControlsPanel) document.body.removeChild(rasterControlsPanel);
     rasterOverlay = null;
     rasterControlsPanel = null;
     restoreMapInteractivity();
-
 });
     
     rasterControlsPanel.querySelector('#raster-bind-btn').addEventListener('click', (e) => { e.stopPropagation(); startBindingProcess(); });
@@ -26620,6 +27046,9 @@ zIndex: 400
     rasterOverlay = newPolygonOverlay;
     map.geoObjects.add(rasterOverlay);
 }
+
+
+
 
 
 function copyFilteredCadnums() {
