@@ -446,20 +446,16 @@ async function takeMapScreenshotForSchema(quarterText, settlementText) {
     widgets.forEach(w => { if (w) w.style.display = 'none'; });
 
     const mapElement = document.getElementById('map');
-    const renderScale = 4; // Множитель масштаба для высокого качества (~400-600 DPI)
-
+    
+    // Убрали scale: 4, html2canvas сам возьмет devicePixelRatio (четко как на экране)
     const canvas = await html2canvas(mapElement, {
         useCORS: true, allowTaint: true, logging: false,
-        scale: renderScale, // <-- Увеличиваем разрешение холста
         width: mapElement.clientWidth, height: mapElement.clientHeight, scrollX: 0, scrollY: 0,
         ignoreElements: (el) => typeof el.className === 'string' && (el.className.includes('-copyright') || el.className.includes('-gototech'))
     });
 
     if (quarterText || settlementText) {
         const ctx = canvas.getContext('2d');
-        
-        // <-- Масштабируем контекст, чтобы размер текста соответствовал высокому разрешению карты
-        ctx.scale(renderScale, renderScale); 
         
         ctx.textAlign = 'left';
         ctx.textBaseline = 'top';
@@ -476,7 +472,7 @@ async function takeMapScreenshotForSchema(quarterText, settlementText) {
             ctx.shadowOffsetY = 2;
             
             ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
-            ctx.lineWidth = 6;
+            ctx.lineWidth = 5; // Слегка уменьшили толщину обводки под нормальный масштаб
             ctx.lineJoin = 'round';
             ctx.strokeText(text, x, y);
             
@@ -498,10 +494,9 @@ async function takeMapScreenshotForSchema(quarterText, settlementText) {
 
     widgets.forEach(w => { if (w) w.style.display = ''; });
     
-    // <-- Изменено с image/jpeg (сжатие) на image/png (без потерь, максимальное качество)
+    // Формат PNG исключает любые артефакты и искажения картинки (Lossless)
     return canvas.toDataURL('image/png'); 
 }
-
 
 function generateLegendPolygonImage(strokeColor, fillColor, opacity) {
     const canvas = document.createElement('canvas');
