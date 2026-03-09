@@ -225,27 +225,6 @@ const mercatorScale = 1 / Math.cos(mapLatRad);
                 return { x: (mx+Mx)/2, y: (my+My)/2 };
             };
 
-
-   /* ── КОМПАС ── */
-    function createCompass(){
-        const cg=new THREE.Group();
-        cg.add(new THREE.Mesh(new THREE.CylinderGeometry(8,8,0.5,32),new THREE.MeshStandardMaterial({color:0x1e293b,roughness:0.4,metalness:0.3})).translateY(0.25));
-        const aN=new THREE.Mesh(new THREE.ConeGeometry(2,10,4).translate(0,5,0).rotateX(Math.PI/2),new THREE.MeshStandardMaterial({color:0xef4444}));
-        aN.position.y=0.6;aN.rotation.y=Math.PI;cg.add(aN);
-        const aS=new THREE.Mesh(new THREE.ConeGeometry(2,10,4).translate(0,5,0).rotateX(Math.PI/2),new THREE.MeshStandardMaterial({color:0xe2e8f0}));
-        aS.position.y=0.6;cg.add(aS);
-        const addL=(text,rotY,color)=>{
-            const cv=document.createElement('canvas');cv.width=128;cv.height=128;
-            const ctx=cv.getContext('2d');ctx.font='bold 80px sans-serif';ctx.fillStyle=color;ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText(text,64,64);
-            const sp=new THREE.Sprite(new THREE.SpriteMaterial({map:new THREE.CanvasTexture(cv)}));
-            sp.scale.set(6,6,1);sp.position.set(Math.sin(rotY)*11,2.5,Math.cos(rotY)*11);cg.add(sp);
-        };
-        addL('С',Math.PI,'#ef4444');addL('Ю',0,'#1e293b');addL('В',Math.PI/2,'#1e293b');addL('З',-Math.PI/2,'#1e293b');
-        cg.position.set(-60,0,60);return cg;
-    }
-    scene.add(createCompass());
-
-
          // --- ПРОЦЕДУРНАЯ ГЕНЕРАЦИЯ УСЛОВНЫХ ОКС (УМНАЯ РАССТАНОВКА) ---
             // 1. Создаем карту участков для быстрого поиска
             let parcelMap = new Map();
@@ -827,6 +806,64 @@ function createGroundTexture(type, hexColor){
     ground.rotation.x = -Math.PI / 2; 
     ground.receiveShadow = true; 
     scene.add(ground);
+
+    /* ── КОМПАС ── */
+    function createCompass(){
+        const cg = new THREE.Group();
+        
+        // Основание компаса (безопасный сдвиг геометрии)
+        const baseGeo = new THREE.CylinderGeometry(8, 8, 0.5, 32);
+        baseGeo.translate(0, 0.25, 0); 
+        cg.add(new THREE.Mesh(baseGeo, new THREE.MeshStandardMaterial({color: 0x1e293b, roughness: 0.4, metalness: 0.3})));
+        
+        // Стрелка на Север
+        const coneN = new THREE.ConeGeometry(2, 10, 4);
+        coneN.translate(0, 5, 0);
+        coneN.rotateX(Math.PI / 2);
+        const aN = new THREE.Mesh(coneN, new THREE.MeshStandardMaterial({color: 0xef4444}));
+        aN.position.y = 0.6;
+        aN.rotation.y = Math.PI;
+        cg.add(aN);
+        
+        // Стрелка на Юг
+        const coneS = new THREE.ConeGeometry(2, 10, 4);
+        coneS.translate(0, 5, 0);
+        coneS.rotateX(Math.PI / 2);
+        const aS = new THREE.Mesh(coneS, new THREE.MeshStandardMaterial({color: 0xe2e8f0}));
+        aS.position.y = 0.6;
+        cg.add(aS);
+        
+        // Текстовые метки
+        const addL = (text, rotY, color) => {
+            const cv = document.createElement('canvas'); 
+            cv.width = 128; cv.height = 128;
+            const ctx = cv.getContext('2d'); 
+            ctx.font = 'bold 80px sans-serif'; 
+            ctx.fillStyle = color; 
+            ctx.textAlign = 'center'; 
+            ctx.textBaseline = 'middle'; 
+            ctx.fillText(text, 64, 64);
+            
+            const tex = new THREE.CanvasTexture(cv);
+            tex.colorSpace = THREE.SRGBColorSpace;
+            
+            const sp = new THREE.Sprite(new THREE.SpriteMaterial({map: tex}));
+            sp.scale.set(6, 6, 1); 
+            sp.position.set(Math.sin(rotY) * 11, 2.5, Math.cos(rotY) * 11); 
+            cg.add(sp);
+        };
+        
+        addL('С', Math.PI, '#ef4444'); 
+        addL('Ю', 0, '#1e293b'); 
+        addL('В', Math.PI/2, '#1e293b'); 
+        addL('З', -Math.PI/2, '#1e293b');
+        
+        // Позиционируем компас в сцене (поднял на 0.5, чтобы не мерцал с землей)
+        cg.position.set(-60, 0.5, 60); 
+        return cg;
+    }
+    scene.add(createCompass());
+    /* ── КОНЕЦ КОМПАСА ── */
 
     window.updateSceneTheme = function() {
         if(currentTheme === 'dark') {
