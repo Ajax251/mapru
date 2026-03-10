@@ -377,99 +377,59 @@ const mercatorScale = 1 / Math.cos(mapLatRad);
             });
             // --- КОНЕЦ ГЕНЕРАЦИИ ---
 
-       // --- НАЧАЛО ИСПРАВЛЕННОЙ ЛОГИКИ НАЛОЖЕНИЙ В 3D ---
-            if (window.turf && allLocalFeatures.target && allLocalFeatures.target.length > 0) {
-                const createTurfPolys = (featureArray, idPrefix) => {
-                    const result = [];
-                    featureArray.forEach((f, idx) => {
-                        if (f.type === 'Polygon') {
-                            f.polygons.forEach((polyRings) => {
-                                try {
-                                    let turfRings = polyRings.map(ring => ring.map(p => [p.x, p.y]));
-                                    turfRings = turfRings.map(r => {
-                                        if (r.length > 0 && (r[0][0] !== r[r.length-1][0] || r[0][1] !== r[r.length-1][1])) {
-                                            r.push([...r[0]]);
-                                        }
-                                        return r;
-                                    }).filter(r => r.length >= 4);
-                                    
-                                    if (turfRings.length > 0) {
-                                        result.push({ 
-                                            poly: window.turf.polygon(turfRings), 
-                                            id: f.meta.id || (idPrefix + idx),
-                                            name: f.meta.name
-                                        });
-                                    }
-                                } catch (e) {}
-                            });
-                        }
-                    });
-                    return result;
-                };
-
-                const targetTurf = createTurfPolys(allLocalFeatures.target, 'target');
-                const objectsToCheck = [
-                    ...createTurfPolys(allLocalFeatures.parcels, 'ЗУ '),
-                    ...createTurfPolys(allLocalFeatures.buildings.filter(b => !b.meta.isProcedural), 'ОКС ')
-                ];
-
-                targetTurf.forEach(target => {
-                    const targetArea = window.turf.area(target.poly);
-
-                    objectsToCheck.forEach(obj => {
-                        // 1. Исключаем прямое совпадение ID или имен
-                        if (target.id === obj.id || target.name === obj.id || target.name === obj.name) return; 
-
-                        try {
-                            const intersection = window.turf.intersect(window.turf.featureCollection([target.poly, obj.poly]));
-                            if (intersection && intersection.geometry) {
-                                
-                                const intersectionArea = window.turf.area(intersection);
-                                const objArea = window.turf.area(obj.poly);
-                                
-                                // 2. Умная защита: Если площади объекта и пересечения совпадают на 99%,
-                                // значит целевой объект и есть этот участок. Игнорируем самоналожение.
-                                if (Math.abs(intersectionArea - objArea) < 0.5 && Math.abs(intersectionArea - targetArea) < 0.5) {
-                                    return; 
+            if (window.turf && window.parcelFeaturesData && window.parcelFeaturesData.length > 1) {
+                const localPolysForTurf =[];
+                window.parcelFeaturesData.forEach((f) => {
+                    if (f.geometry && (f.geometry.type === 'Polygon' || f.geometry.type === 'MultiPolygon')) {
+                        let ringsList = f.geometry.type === 'Polygon' ? [f.geometry.coordinates] : f.geometry.coordinates;
+                        ringsList.forEach(poly => {
+                            let localRings = poly.map(ring => ring.map(c => {
+                                return [c[0] - originX, c[1] - originY];
+                            }));
+                            localRings = localRings.map(ring => {
+                                if (ring.length > 0 && (ring[0][0] !== ring[ring.length - 1][0] || ring[0][1] !== ring[ring.length - 1][1])) {
+                                    ring.push([...ring[0]]);
                                 }
-
-                                let geoms = [];
-                                if (intersection.geometry.type === 'Polygon') geoms = [intersection.geometry.coordinates];
-                                else if (intersection.geometry.type === 'MultiPolygon') geoms = intersection.geometry.coordinates;
-
-                                geoms.forEach(poly => {
-                                    if (poly[0] && poly[0].length >= 4) {
-                                        // Вычисляем плоскую площадь, чтобы отсечь микро-касания смежных границ
-                                        let planarArea = 0;
-                                        const pts = poly[0];
-                                        for (let i = 0; i < pts.length - 1; i++) {
-                                            planarArea += pts[i][0] * pts[i+1][1] - pts[i+1][0] * pts[i][1];
-                                        }
-                                        planarArea = Math.abs(planarArea) / 2;
-
-                                        // Порог 0.1 кв.м (защита от "шума" на смежных границах)
-                                        if (planarArea > 0.1) { 
-                                            const formattedPoly = poly.map(ring => ring.map(c => ({ x: c[0], y: c[1] })));
-                                            allLocalFeatures.intersections.push({ 
-                                                type: 'Polygon', 
-                                                polygons: [formattedPoly], 
-                                                meta: { 
-                                                    name: 'Наложение на ' + obj.id, 
-                                                    id: 'Наложение ' + (allLocalFeatures.intersections.length + 1), 
-                                                    isSpatial: true,
-                                                    parent1: target.id || target.name,
-                                                    parent2: obj.id
-                                                } 
-                                            });
-                                        }
-                                    }
+                                return ring;
+                            });
+                            if (localRings[0].length >= 4) {
+                                try { 
+                                    localPolysForTurf.push({
+                                        poly: window.turf.polygon(localRings),
+                                        id: f.properties.descr
+                                    }); 
+                                } catch (e) { }
+                            }
+                        });
+                    }
+                });
+                
+                for (let i = 0; i < localPolysForTurf.length; i++) {
+                    for (let j = i + 1; j < localPolysForTurf.length; j++) {
+                        if (localPolysForTurf[i].id === localPolysForTurf[j].id) continue;
+                        try {
+                            const intersection = window.turf.intersect(window.turf.featureCollection([localPolysForTurf[i].poly, localPolysForTurf[j].poly]));
+                            if (intersection && intersection.geometry) {
+                                let iRingsList = intersection.geometry.type === 'Polygon' ?[intersection.geometry.coordinates] : intersection.geometry.coordinates;
+                                iRingsList.forEach(poly => {
+                                    const formattedPoly = poly.map(ring => ring.map(c => ({ x: c[0], y: c[1] })));
+                                    allLocalFeatures.intersections.push({ 
+                                        type: 'Polygon', 
+                                        polygons: [formattedPoly], 
+                                        meta: { 
+                                            name: 'Пересечение границ', 
+                                            id: 'Наложение ' + (allLocalFeatures.intersections.length + 1), 
+                                            isSpatial: true,
+                                            parent1: localPolysForTurf[i].id,
+                                            parent2: localPolysForTurf[j].id
+                                        } 
+                                    });
                                 });
                             }
                         } catch (e) { }
-                    });
-                });
+                    }
+                }
             }
-            // --- КОНЕЦ ИСПРАВЛЕННОЙ ЛОГИКИ ---
 
             const safeDataString = JSON.stringify(allLocalFeatures).replace(/</g, '\\u003c').replace(/>/g, '\\u003e');
 
