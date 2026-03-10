@@ -195,10 +195,11 @@ const mercatorScale = 1 / Math.cos(mapLatRad);
                     areaStr = `Площадь (расчет): ${Math.round(calcArea).toLocaleString('ru-RU')} м²`;
                 }
 
-                allLocalFeatures.target.push({
+           allLocalFeatures.target.push({
                     type: (type === 'Polygon' || type === 'MultiPolygon') ? 'Polygon' : 'Line',
                     polygons: [localPoly],
-                    meta: { isParcel: isTargetParcel, name: titleName, id: '', isSpatial: true, area: areaStr }
+                    // ИСПРАВЛЕНИЕ: Передаем titleName в id, чтобы связи наложений работали корректно
+                    meta: { isParcel: isTargetParcel, name: titleName, id: titleName, isSpatial: true, area: areaStr }
                 });
                 });
 
@@ -1287,8 +1288,9 @@ function createGroundTexture(type, hexColor){
         }
     });
 
-    data.target.forEach(function(t){
-        var color=(t.meta&&t.meta.isParcel)?0x10b981:0xef4444;
+   data.target.forEach(function(t){
+        // ИСПРАВЛЕНИЕ: Используем синий цвет (0x3b82f6) для не-кадастровых целевых контуров
+        var color=(t.meta&&t.meta.isParcel)?0x10b981:0x3b82f6; 
         t.polygons.forEach(function(poly){
             if(!poly||!poly[0])return;
             var tGrp = new THREE.Group();
@@ -1306,13 +1308,16 @@ function createGroundTexture(type, hexColor){
                     var depth=0.8;
                     var mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:depth,bevelEnabled:false}),new THREE.MeshStandardMaterial({color:color,opacity:0.6,transparent:true}));
                     mesh.rotation.x=-Math.PI/2;mesh.position.y=0;
-                    mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color:0x991b1b,linewidth:2})));
+                    // Обводка тоже синяя, но темнее
+                    var edgeColor = (t.meta&&t.meta.isParcel) ? 0x065f46 : 0x1e40af; 
+                    mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color:edgeColor,linewidth:2})));
                     mesh.castShadow=true; tGrp.add(mesh);
                     seedParcelWithFlowers(poly[0], tGrp, depth);
                     attachMeta(tGrp, t.meta, "Целевой объект");
                     sceneGroups.target.add(tGrp);
                     var c = getCentroid(poly[0]); c.y = depth + 2;
-                    addLabel(c, 10, "", "", t.meta, "#ef4444", tGrp);
+                    // Метка над объектом принимает его цвет
+                    addLabel(c, 10, "", "", t.meta, "#" + color.toString(16).padStart(6, '0'), tGrp);
                 }
             }
         });
@@ -1720,7 +1725,7 @@ function createGroundTexture(type, hexColor){
         uiContainer.appendChild(groupContainer);
     };
 
-    addLayerUi("Целевой объект", "#ef4444", sceneGroups.target, data.target);
+ addLayerUi("Целевой объект", "#3b82f6", sceneGroups.target, data.target); 
     addLayerUi("Участки (ЗУ)", "#10b981", sceneGroups.parcels, data.parcels);
     addLayerUi("Наложения", "#dc2626", sceneGroups.intersections, data.intersections);
     addLayerUi("Здания (ОКС)", "#3b82f6", sceneGroups.buildings, data.buildings);
