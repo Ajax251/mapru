@@ -15349,6 +15349,39 @@ async function exportMapToJson() {
     showLoader('Подготовка карты к экспорту...');
     
     try {
+        // --- ИСПРАВЛЕННАЯ ФУНКЦИЯ ОЧИСТКИ ДАННЫХ ---
+        function getSafeData(data) {
+            if (typeof data !== 'object' || data === null) return data;
+            
+            if (Array.isArray(data)) {
+                return data.map(item => getSafeData(item));
+            }
+
+            const safeObj = {};
+            for (const key in data) {
+                if (Object.prototype.hasOwnProperty.call(data, key)) {
+                    const value = data[key];
+                    
+                    // Исключаем системные поля
+                    if (key.startsWith('_') || key === 'map' || key === 'parent' || key === 'events' || key === 'state') continue;
+                    if (typeof value === 'function') continue;
+                    
+                    // ГЛАВНОЕ ИСПРАВЛЕНИЕ: Точная проверка на объекты Яндекс.Карт. 
+                    // Больше не удаляем обычные массивы данных с именем 'options'
+                    if (value && typeof value === 'object') {
+                        if (value.constructor && value.constructor.name && value.constructor.name.startsWith('ymaps')) continue;
+                        if (value.events && typeof value.events.add === 'function') continue;
+                        // Проверяем, что это именно системный options яндекса (имеет метод set), а не наши данные
+                        if (value.options && typeof value.options.set === 'function') continue;
+                    }
+
+                    safeObj[key] = getSafeData(value);
+                }
+            }
+            return safeObj;
+        }
+        // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
+
         const mapData = {
             type: "MapData",
             version: "2.1",
@@ -15400,8 +15433,7 @@ async function exportMapToJson() {
             try {
                 const currentLayout = obj.options.get('iconLayout');
                 isCustomLabel = (obj instanceof ymaps.Placemark) && (currentLayout === customPlacemarkLayout);
-            } catch (e) {
-            }
+            } catch (e) {}
 
             const serializedFeature = {
                 type: "Feature",
@@ -15449,9 +15481,7 @@ async function exportMapToJson() {
                         backgroundVisible: span.dataset.backgroundVisible
                     }
                 });
-            } catch (err) {
-                console.warn("Не удалось экспортировать текстовую метку:", span.textContent);
-            }
+            } catch (err) {}
         });
 
         const jsonString = JSON.stringify(mapData, null, 2);
@@ -15476,6 +15506,310 @@ async function exportMapToJson() {
     } finally {
         hideLoader();
     }
+}
+
+function handleMapJsonImport(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.readAsArrayBuffer(file);
+
+    reader.onload = async (e) => {
+        try {
+            showLoader('Импорт карты...');
+            const arrayBuffer = e.target.result;
+            let jsonContent;
+
+            try {
+                const zip = await JSZip.loadAsync(arrayBuffer);
+                let jsonFile = zip.file("map_data.json");
+                if (!jsonFile) {
+                    const files = Object.keys(zip.files);
+                    const anyJson = files.find(name => name.endsWith('.json'));
+                    if (anyJson) jsonFile = zip.file(anyJson);
+                }
+                if (jsonFile) {
+                    jsonContent = await jsonFile.async("string");
+                } else {
+                    throw new Error("В файле .map не найден JSON с данными");
+                }
+            } catch (zipError) {
+                const decoder = new TextDecoder("utf-8");
+                jsonContent = decoder.decode(arrayBuffer);
+                if (!jsonContent.trim().startsWith('{')) {
+                    throw new Error("Файл поврежден или имеет неверный формат");
+                }
+            }
+
+            const parsedData = JSON.parse(jsonContent);
+
+            if (parsedData.type === 'FeatureCollection' || parsedData.type === 'Feature' || (parsedData.data && parsedData.data.features)) {
+                
+                clearMapAndResetTheme();
+                
+                let featuresToImport =[];
+                if (parsedData.type === 'Feature') {
+                    featuresToImport = [parsedData];
+                } else if (parsedData.type === 'FeatureCollection') {
+                    featuresToImport = parsedData.features;
+                } else if (parsedData.data && Array.isArray(parsedData.data.features)) {
+                    featuresToImport = parsedData.data.features;
+                }
+
+                if (!featuresToImport || featuresToImport.length === 0) {
+                    throw new Error("JSON файл не содержит объектов (features).");
+                }
+
+                const parcels = [];
+                const buildings =[];
+                const structures = [];
+                const zouits = [];
+
+                featuresToImport.forEach(f => {
+                    const props = f.properties || {};
+                    const opts = props.options || {};
+                    const cat = props.category;
+                    const catName = props.categoryName;
+
+                    const isBuilding = cat === 36369 || catName === 'Здания' || opts.build_record_area || (opts.cad_num && opts.purpose);
+                    const isStructure = cat === 36383 || catName === 'Сооружения' || (opts.cad_number && opts.params_extension);
+                    const isZouit = cat === 36940 || catName?.includes('Зоны') || opts.content_restrict_encumbrances || (opts.reg_numb_border && !opts.type_zone);
+                    const isTerrZone = cat === 36315 || catName === 'Территориальные зоны' || opts.type_zone;
+
+                    if (isBuilding) buildings.push(f);
+                    else if (isStructure) structures.push(f);
+                    else if (isZouit || isTerrZone) zouits.push(f);
+                    else parcels.push(f);
+                });
+
+                parcelFeaturesData = parcels;
+                buildingFeaturesData = buildings;
+                structureFeaturesData = structures;
+                zouitFeaturesData = zouits;
+
+                if (parcels.length > 0) await processAndDrawParcels(parcels, 'quarter');
+                if (buildings.length > 0) await processAndDrawBuildings(buildings);
+                if (structures.length > 0) await processAndDrawStructures(structures);
+                if (zouits.length > 0) await processAndDrawZouits(zouits);
+
+                const importDate = new Date().toLocaleDateString('ru-RU');
+                if (parcels.length > 0) populateSidebarWithParcels(parcels, `Импорт (${importDate})`);
+                else if (buildings.length > 0) await populateSidebarWithFoundObjects(buildings, 'Здания (Импорт)');
+                else if (zouits.length > 0) await populateSidebarWithFoundObjects(zouits, 'ЗОУИТ (Импорт)');
+
+                let allBounds = null;
+                polygons.forEach(obj => {
+                    if (obj instanceof ymaps.Polygon) {
+                        const bounds = obj.geometry.getBounds();
+                        if (bounds) {
+                            if (!allBounds) allBounds = bounds;
+                            else {
+                                allBounds = [
+                                    [Math.min(allBounds[0][0], bounds[0][0]), Math.min(allBounds[0][1], bounds[0][1])],
+                                    [Math.max(allBounds[1][0], bounds[1][0]), Math.max(allBounds[1][1], bounds[1][1])]
+                                ];
+                            }
+                        }
+                    }
+                });
+
+                if (allBounds) map.setBounds(allBounds, { checkZoomRange: true, duration: 300 });
+                showNotification(`Импортировано: ЗУ: ${parcels.length}, ОКС: ${buildings.length + structures.length}, Зон: ${zouits.length}`, 'success', 'file-import');
+            } 
+            else if (parsedData.type === 'MapData') {
+                const mapData = parsedData;
+                clearMapAndResetTheme();
+
+                let importedCount = 0;
+                const restoredParcelsData =[];
+                const restoredBuildingsData = [];
+                const restoredStructuresData = [];
+                const restoredZouitsData =[];
+                const pendingVertexPoints = [];
+
+                const applyOffset = (coord) => [
+                    coord[0] - (mapOffsetY * 0.000008983),
+                    coord[1] - (mapOffsetX * 0.000008983)
+                ];
+
+                if (mapData.features) {
+                    mapData.features.forEach(f => {
+                        let ymapsObj;
+                        let coords = f.geometry.coordinates;
+                        let type = f.geometry.type;
+                        let props = f.properties || {};
+                        let opts = f.options || {};
+                        let flags = f.appFlags || {};
+
+                        let visualCoords;
+                        if (type === 'Point') visualCoords = applyOffset(coords);
+                        else if (type === 'LineString') visualCoords = coords.map(applyOffset);
+                        else if (type === 'Polygon') visualCoords = coords.map(ring => ring.map(applyOffset));
+
+                        if (type === 'Point') {
+                            ymapsObj = new ymaps.Placemark(visualCoords, props, opts);
+                            if (flags.isCustomLabel || (props.cadastralNumber && !flags.isVertexPoint)) {
+                                ymapsObj.options.set('iconLayout', customPlacemarkLayout);
+                            }
+                            if (flags.isVertexPoint) {
+                                if (props.isCoordLabel) ymapsObj.options.set('iconLayout', coordinateLabelLayout);
+                                else if (props.dotSize) ymapsObj.options.set('iconLayout', redDotLayout);
+                                else if (props.fontSize) ymapsObj.options.set('iconLayout', numberedPointLayout);
+                                
+                                pendingVertexPoints.push({ 
+                                    placemark: ymapsObj, 
+                                    parentCn: flags.relatedPolygonCadastralNumber,
+                                    parentId: flags.relatedPolygonId
+                                });
+                            }
+                        } else if (type === 'LineString') {
+                            ymapsObj = new ymaps.Polyline(visualCoords, props, opts);
+                        } else if (type === 'Polygon') {
+                            ymapsObj = new ymaps.Polygon(visualCoords, props, opts);
+                            if (props.hintContent && typeof props.hintContent === 'object') {
+                                ymapsObj.options.set('hintLayout', customHintLayout);
+                            }
+                        }
+
+                        if (ymapsObj) {
+                            Object.keys(flags).forEach(key => {
+                                if (key !== 'relatedPolygonCadastralNumber' && key !== 'relatedPolygonId') ymapsObj.properties.set(key, flags[key]);
+                            });
+
+                            map.geoObjects.add(ymapsObj);
+                            if (flags.isAreaMeasurement) areaObjects.push(ymapsObj);
+                            else polygons.push(ymapsObj);
+
+                            if (type === 'Point' && flags.isCustomLabel) {
+                                const parentPoly = polygons.find(p => p instanceof ymaps.Polygon && p.properties.get('cadastralNumber') === props.cadastralNumber);
+                                if (parentPoly) ymapsObj.polygon = parentPoly;
+                                parcelPlacemarks.push(ymapsObj);
+                            }
+
+                            let featureData = props.featureData;
+
+                            // --- ВОССТАНОВЛЕНИЕ ДАННЫХ ОТ СТАРОГО БАГА ЭКСПОРТА ---
+                            // Восстанавливаем данные из hintContent, если они не сохранились в featureData.properties.options
+                            if (props.hintContent && typeof props.hintContent === 'object') {
+                                if (!featureData) featureData = { type: "Feature", properties: { options: {} } };
+                                else if (!featureData.properties) featureData.properties = { options: {} };
+                                else if (!featureData.properties.options) featureData.properties.options = {};
+                                
+                                const hd = props.hintContent;
+                                const fOpts = featureData.properties.options;
+                                
+                                if (!fOpts.cad_num && !fOpts.cad_number && hd.cadastralNumber) fOpts.cad_num = hd.cadastralNumber;
+                                if (!fOpts.readable_address && hd.address) fOpts.readable_address = hd.address;
+                                if (!fOpts.permitted_use_established_by_document && hd.vri) fOpts.permitted_use_established_by_document = hd.vri;
+                                if (!fOpts.cost_value && hd.cost) fOpts.cost_value = hd.cost.replace(/\s/g, '').replace(',', '.');
+                                if (!fOpts.ownership_type && hd.ownershipType) fOpts.ownership_type = hd.ownershipType;
+                                if (!fOpts.right_type && hd.rightType) fOpts.right_type = hd.rightType;
+                                
+                                if (hd.area && !fOpts.specified_area && !fOpts.declared_area) {
+                                    const match = hd.area.match(/([\d\s ]+)\s*м²\s*\((.*?)\)/);
+                                    if (match) {
+                                        const val = match[1].replace(/[\s ]/g, '');
+                                        if (match[2].includes('уточн')) fOpts.specified_area = val;
+                                        else fOpts.declared_area = val;
+                                    }
+                                }
+                                ymapsObj.properties.set('featureData', featureData);
+                            }
+                            // --- КОНЕЦ ВОССТАНОВЛЕНИЯ ---
+
+                            if ((!featureData || !featureData.properties) && (props.cadastralNumber)) {
+                                featureData = { 
+                                    type: "Feature", 
+                                    geometry: f.geometry, 
+                                    properties: { 
+                                        descr: props.cadastralNumber, 
+                                        options: { 
+                                            cad_num: props.cadastralNumber, 
+                                            readable_address: props.address,
+                                            reg_numb_border: props.cadastralNumber
+                                        } 
+                                    } 
+                                };
+                                ymapsObj.properties.set('featureData', featureData);
+                            }
+
+                            if (featureData) {
+                                if (flags.isParcelInQuarter || flags.isFoundInArea) restoredParcelsData.push(featureData);
+                                else if (flags.isBuilding) restoredBuildingsData.push(featureData);
+                                else if (flags.isStructure) restoredStructuresData.push(featureData);
+                                else if (flags.isZouit) restoredZouitsData.push(featureData);
+                                else if (featureData.properties?.categoryName === 'Здания') restoredBuildingsData.push(featureData);
+                                else if (featureData.properties?.categoryName === 'Сооружения') restoredStructuresData.push(featureData);
+                                else if (featureData.properties?.categoryName?.includes('Зоны')) restoredZouitsData.push(featureData);
+                                else restoredParcelsData.push(featureData);
+                            }
+                            importedCount++;
+                        }
+                    });
+
+                    pendingVertexPoints.forEach(item => {
+                        let parentPolygon = null;
+                        if (item.parentId) {
+                            parentPolygon = polygons.find(p => p.properties.get('_exportId') === item.parentId) || 
+                                            areaObjects.find(p => p.properties.get('_exportId') === item.parentId);
+                        } 
+                        if (!parentPolygon && item.parentCn) {
+                            parentPolygon = polygons.find(p => p instanceof ymaps.Polygon && p.properties.get('cadastralNumber') === item.parentCn);
+                        }
+
+                        if (parentPolygon) {
+                            item.placemark.properties.set('relatedPolygon', parentPolygon);
+                            if (item.placemark.properties.get('isCoordLabel')) parentPolygon.properties.set('coordsPointsVisible', true);
+                            else parentPolygon.properties.set('numberedPointsVisible', true);
+                        }
+                    });
+                }
+
+                if (mapData.texts) {
+                    mapData.texts.forEach(t => {
+                        const visualPos = applyOffset(t.position);
+                        const px = map.options.get('projection').toGlobalPixels(visualPos, map.getZoom());
+                        const pagePx = map.converter.globalToPage(px);
+                        createDraggableText(t.content, {x: pagePx[0], y: pagePx[1]});
+                        const newTextEl = draggableTexts[draggableTexts.length - 1];
+                        if (newTextEl) {
+                            newTextEl.dataset.rotation = t.rotation;
+                            newTextEl.style.transform = `rotate(${t.rotation}deg)`;
+                            const span = newTextEl.querySelector('span');
+                            if (span && t.style) {
+                                span.style.color = t.style.color;
+                                span.style.fontSize = t.style.fontSize;
+                                if (t.style.backgroundVisible === 'false') {
+                                    const eyeBtn = newTextEl.querySelector('button i.fa-eye-slash')?.parentNode;
+                                    if (eyeBtn) eyeBtn.click();
+                                }
+                            }
+                        }
+                        importedCount++;
+                    });
+                }
+
+                parcelFeaturesData = restoredParcelsData;
+                buildingFeaturesData = restoredBuildingsData;
+                structureFeaturesData = restoredStructuresData;
+                zouitFeaturesData = restoredZouitsData;
+
+                if (restoredParcelsData.length > 0) populateSidebarWithParcels(parcelFeaturesData, "Импорт MapData");
+                else if (restoredBuildingsData.length > 0) populateSidebarWithFoundObjects(restoredBuildingsData, 'Здания');
+
+                applyCurrentTheme();
+                showNotification(`Карта восстановлена. Объектов: ${importedCount}`, 'success', 'check-circle');
+            }
+
+        } catch (error) {
+            console.error("Ошибка импорта:", error);
+            showNotification("Ошибка: " + error.message, 'error');
+        } finally {
+            hideLoader();
+            event.target.value = '';
+        }
+    };
 }
 
 
@@ -24926,6 +25260,22 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
         #toggleNumsBtn:hover { color: #0078D4; }
         #toggleNumsBtn.active { color: #0078D4; }
         #exportExcelBtn:hover { color: #107c10; background: rgba(16, 124, 16, 0.1); }
+        
+        /* Стили для нового функционала обрезки адреса */
+        #trimAddressBtn:hover { color: #d83b01; background: rgba(216, 59, 1, 0.1); }
+        #trimAddressBtn.active { color: #d83b01; background: rgba(216, 59, 1, 0.15); border: 1px solid rgba(216, 59, 1, 0.3); }
+        .trim-modal-overlay { display:none; position:fixed; top:0; left:0; width:100%; height:100%; background:rgba(0,0,0,0.5); z-index:10000; align-items:center; justify-content:center; backdrop-filter: blur(3px); }
+        .trim-modal { background:#fff; padding:25px; border-radius:8px; width:450px; max-width:90%; box-shadow:0 10px 30px rgba(0,0,0,0.2); display:flex; flex-direction:column; gap:15px; font-family: Arial, sans-serif; }
+        .trim-modal h3 { margin:0; color:#0078D4; font-size:16px; font-weight: 600; }
+        .trim-modal p { margin:0; font-size:13px; color:#555; }
+        .trim-modal input { padding:10px; border:1px solid #ccc; border-radius:4px; font-size:14px; outline:none; transition: border-color 0.2s; }
+        .trim-modal input:focus { border-color:#0078D4; box-shadow: 0 0 0 3px rgba(0,120,212,0.2); }
+        .trim-modal .btns { display:flex; justify-content:flex-end; gap:10px; margin-top: 5px; }
+        .trim-modal button { padding:8px 16px; border:none; border-radius:4px; cursor:pointer; font-size:13px; font-weight: bold; transition:0.2s; }
+        .trim-modal .btn-ok { background:#0078D4; color:#fff; }
+        .trim-modal .btn-ok:hover { background:#005a9e; }
+        .trim-modal .btn-cancel { background:#e1e1e1; color:#333; }
+        .trim-modal .btn-cancel:hover { background:#ccc; }
     `;
 
     let theadHtml = '<tr><th class="num-col">№</th>';
@@ -24978,7 +25328,6 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
 
         function filterAll(){
           var gVal = globalInput.value.trim().toLowerCase();
-          // Разбиваем запрос по пробелам на массив слов
           var searchTerms = gVal ? gVal.split(/\\s+/).filter(Boolean) : [];
 
           dataRows.forEach(function(row,ri){
@@ -24986,16 +25335,14 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
             var full=texts.join(" ").toLowerCase();
             var vis=true;
 
-            // ПОСЛЕДОВАТЕЛЬНЫЙ ПОИСК
             if (searchTerms.length > 0) {
                 var currentIndex = 0;
                 for (var i = 0; i < searchTerms.length; i++) {
                     var termIndex = full.indexOf(searchTerms[i], currentIndex);
                     if (termIndex === -1) {
                         vis = false;
-                        break; // Слово не найдено или нарушен порядок
+                        break;
                     }
-                    // Следующее слово ищем только ПОСЛЕ текущего
                     currentIndex = termIndex + searchTerms[i].length; 
                 }
             }
@@ -25022,15 +25369,11 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
             var full=texts.join(" ").toLowerCase();
             var ok=true;
 
-            // ПОСЛЕДОВАТЕЛЬНЫЙ ПОИСК ДЛЯ ВЫПАДАЮЩИХ СПИСКОВ
             if (searchTerms.length > 0) {
                 var currentIndex = 0;
                 for (var i = 0; i < searchTerms.length; i++) {
                     var termIndex = full.indexOf(searchTerms[i], currentIndex);
-                    if (termIndex === -1) {
-                        ok = false;
-                        break;
-                    }
+                    if (termIndex === -1) { ok = false; break; }
                     currentIndex = termIndex + searchTerms[i].length;
                 }
             }
@@ -25188,8 +25531,122 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
           resizer.addEventListener("click",function(e){e.stopPropagation();});
         });
 
+        // --- ЛОГИКА ОБРЕЗКИ АДРЕСА ---
+        var addrColIdx = -1;
+        var ths = table.querySelectorAll('thead th');
+        for (var i = 0; i < ths.length; i++) {
+            var colText = ths[i].textContent.toLowerCase();
+            if (colText.indexOf('адрес') !== -1 || colText.indexOf('местоположение') !== -1) {
+                addrColIdx = i - 1; // Учитываем скрытую колонку с номерами
+                break;
+            }
+        }
+
+        var isAddressTrimmed = false;
+        var lastTrimString = "";
+        var trimBtn = document.getElementById('trimAddressBtn');
+        var trimOverlay = document.getElementById('trimModalOverlay');
+        var trimInput = document.getElementById('trimInput');
+        var trimOk = document.getElementById('trimOk');
+        var trimCancel = document.getElementById('trimCancel');
+
+        // Авто-определение самого частого 3-го элемента с конца
+        function getAutoTrimString() {
+            if (addrColIdx === -1) return "";
+            var counts = {};
+            dataRows.forEach(function(r, i) {
+                var addr = origTexts[i][addrColIdx] || "";
+                var parts = addr.split(',');
+                if (parts.length >= 3) {
+                    var target = parts[parts.length - 3].trim();
+                    counts[target] = (counts[target] || 0) + 1;
+                }
+            });
+            var maxStr = "";
+            var maxVal = 0;
+            for (var k in counts) {
+                if (counts[k] > maxVal) { maxVal = counts[k]; maxStr = k; }
+            }
+            return maxStr;
+        }
+
+        trimBtn.addEventListener('click', function() {
+            if (addrColIdx === -1) {
+                alert("Колонка 'Адрес' не найдена для обрезки.");
+                return;
+            }
+            
+            // Если уже обрезано - возвращаем исходный текст
+            if (isAddressTrimmed) {
+                dataRows.forEach(function(row, ri) {
+                    var cell = row.cells[addrColIdx + 1]; 
+                    cell.textContent = origTexts[ri][addrColIdx];
+                });
+                isAddressTrimmed = false;
+                trimBtn.classList.remove('active');
+                return;
+            }
+
+            // Открываем модалку: Выделенный текст -> Предыдущий ввод -> Авто-текст
+            var selectedText = window.getSelection().toString().trim();
+            if (selectedText) {
+                trimInput.value = selectedText;
+            } else if (lastTrimString) {
+                trimInput.value = lastTrimString;
+            } else {
+                trimInput.value = getAutoTrimString();
+            }
+            
+            trimOverlay.style.display = 'flex';
+            trimInput.focus();
+            trimInput.select();
+        });
+
+        function applyTrim() {
+            var searchStr = trimInput.value.trim();
+            if (!searchStr) { closeTrimModal(); return; }
+            
+            lastTrimString = searchStr;
+            var lowerSearch = searchStr.toLowerCase();
+
+            dataRows.forEach(function(row, ri) {
+                var origAddr = origTexts[ri][addrColIdx] || "";
+                var lowerAddr = origAddr.toLowerCase();
+                var idx = lowerAddr.indexOf(lowerSearch);
+                
+                var cell = row.cells[addrColIdx + 1];
+                if (idx !== -1) {
+                    var newAddr = origAddr.substring(idx);
+                    // Удаляем знаки препинания и пробелы по краям
+                    newAddr = newAddr.replace(/^[\\s.,;:_\\-]+|[\\s.,;:_\\-]+$/g, '');
+                    cell.textContent = newAddr;
+                } else {
+                    cell.textContent = origAddr; 
+                }
+            });
+
+            isAddressTrimmed = true;
+            trimBtn.classList.add('active');
+            closeTrimModal();
+        }
+
+        function closeTrimModal() {
+            trimOverlay.style.display = 'none';
+        }
+
+        trimCancel.addEventListener('click', closeTrimModal);
+        trimOk.addEventListener('click', applyTrim);
+        trimInput.addEventListener('keydown', function(e) {
+            if (e.key === 'Enter') applyTrim();
+            if (e.key === 'Escape') closeTrimModal();
+        });
+        trimOverlay.addEventListener('click', function(e) {
+            if (e.target === trimOverlay) closeTrimModal();
+        });
+        // --- КОНЕЦ ЛОГИКИ ОБРЕЗКИ ---
+
         // Начальная сортировка (если задана)
-               var defSort = ${defaultSortCol !== null ? defaultSortCol : 'null'};
+        var defSort = ${defaultSortCol !== null ? defaultSortCol : 'null'};
         if (defSort !== null) {
             var targetTh = table.querySelector('th[data-col="'+defSort+'"]');
             if (targetTh) doSort(defSort, targetTh);
@@ -25247,6 +25704,7 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
         '<div class="filter-btn-group">\n' +
         '<button id="exportExcelBtn" class="action-btn" title="Экспорт видимых данных в XLSX"><i class="fas fa-file-excel" style="color: #107C10;"></i></button>\n' +
         '<button id="toggleNumsBtn" class="action-btn active" title="Нумерация строк"><i class="fas fa-list-ol"></i></button>\n' +
+        '<button id="trimAddressBtn" class="action-btn" title="Скрыть начало адреса до указанного текста"><i class="fas fa-cut"></i></button>\n' +
         '</div>\n' +
         '<label for="filterInput">\u{1F50D} Общий фильтр:</label>\n' +
         '<input type="text" id="filterInput" placeholder="Поиск по всей таблице...">\n' +
@@ -25256,6 +25714,17 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
         '<thead>' + theadHtml + '</thead>\n' +
         '<tbody>\n' + tbodyHtml + '\n</tbody>\n' +
         '</table>\n' +
+        '<div id="trimModalOverlay" class="trim-modal-overlay">\n' +
+        '    <div class="trim-modal">\n' +
+        '        <h3>Сократить адрес</h3>\n' +
+        '        <p>Введите текст, с которого должен начинаться адрес в таблице. Все данные до этого текста будут скрыты.</p>\n' +
+        '        <input type="text" id="trimInput" placeholder="Например: с. Гайтанкино">\n' +
+        '        <div class="btns">\n' +
+        '            <button class="btn-cancel" id="trimCancel">Отмена</button>\n' +
+        '            <button class="btn-ok" id="trimOk">Применить</button>\n' +
+        '        </div>\n' +
+        '    </div>\n' +
+        '</div>\n' +
         '<script>\n' + scriptCode + '\n<\/script>\n' +
         '</body></html>';
 
