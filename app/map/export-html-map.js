@@ -170,7 +170,7 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
                     <hr style="margin: 2px 0; border: 0; border-top: 1px solid #ccc; width: 100%;">
                     <label><input type="checkbox" class="layer-cb" value="Labels" checked> Текстовые метки</label>
                 </div>
-                <button class="layers-btn print-btn" id="callouts-toggle"><i class="fas fa-tags"></i> Печатные выноски</button>
+                <button class="layers-btn print-btn" id="callouts-toggle"><i class="fas fa-tags"></i> Выноски</button>
             </div>
         </div>
         
