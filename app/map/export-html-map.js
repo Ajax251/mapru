@@ -440,7 +440,7 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
             var trimInput = document.getElementById('trimTextInput');
             var showAddrCheck = document.getElementById('showAddressCheck');
 
-            // --- НОВОЕ: Функция автоопределения текста для обрезки ---
+       
             function getAutoTrimString() {
                 var counts = {};
                 layerGroups['ZU'].forEach(function(poly) {
@@ -454,6 +454,7 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
                         }
                     }
                 });
+                
                 var maxStr = "";
                 var maxVal = 0;
                 for (var k in counts) {
@@ -462,6 +463,14 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
                         maxStr = k; 
                     }
                 }
+                
+                // Очищаем найденную строку от префиксов типов населенных пунктов
+                if (maxStr) {
+                    // Ищет в начале строки (^) аббревиатуры или полные слова, за которыми может идти точка (\.?) и пробелы (\s+)
+                    var prefixRegex = /^\\s*(с|село|г|город|п|пос|поселок|посёлок|д|деревня|пгт|нп|ст|станица|мкр|рп|сл|слобода|дп|х|хутор)\\.?\\s+/i;
+                    maxStr = maxStr.replace(prefixRegex, '').trim();
+                }
+                
                 return maxStr;
             }
 
