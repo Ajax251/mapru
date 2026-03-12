@@ -73,20 +73,20 @@ window.open3DVisualization = function () {
                 let name = window.isGlobalMapMode ? cleanAddress(rawName) : rawName;
                 const text = (descr + ' ' + name + ' ' + purpose).toLowerCase();
                 
-   let meta = {
-                    id: o.cad_num || o.cad_number || o.reg_numb_border || descr || 'Без номера',
+       let meta = {
+    id: o.cad_num || o.cad_number || o.reg_numb_border || descr || 'Без номера',
+    // Улучшено: приоритет официальному адресу, иначе берем сгенерированное имя
+    name: o.readable_address || o.address_readable_address || name || 'Объект',
+    
+    
+    purposeObj: o.building_name || o.name || o.params_name || o.purpose || '', 
+    
+    rawText: text,
+    hasExtendedData: !!(purpose || name || o.build_record_area || o.year_built || o.floors),
+    isParcel: false,
                     
-                    // ЯВНО извлекаем Наименование/Назначение. `building_name` имеет самый высокий приоритет.
-                    objectName: o.building_name || o.name || o.params_name || o.name_by_doc || o.purpose || '', 
-                    
-                    // ЯВНО извлекаем Адрес.
-                    address: o.readable_address || o.address_readable_address || '', 
-                    
-                    rawText: text,
-                    hasExtendedData: !!(purpose || name || o.build_record_area || o.year_built || o.floors),
-                    isParcel: false,
-                    isSpatial: p._isSpatial !== false,
-                    isProcedural: false, 
+                    // ДОБАВЛЕНО: Явное извлечение Наименования/Назначения
+                    purposeObj: o.name || o.params_name || o.building_name || o.purpose || '', 
                     
                     floors: o.floors || '',
                     year: o.year_built || o.params_year_built || '',
@@ -1186,30 +1186,31 @@ try {
     const tooltip = document.getElementById("hover-tooltip");
     const labelsData =[];
 
-const buildTooltipHTML = function(category, mData) {
-        let extra = "";
-        if (mData.floors) extra += "<div><b>Этажность:</b> " + mData.floors + "</div>";
-        if (mData.year) extra += "<div><b>Год постройки:</b> " + mData.year + "</div>";
-        if (mData.material) extra += "<div><b>Материал:</b> " + mData.material + "</div>";
-        if (mData.extent) extra += "<div><b>Протяженность:</b> " + mData.extent + " м</div>";
-        if (mData.isProcedural) extra += "<div style='color:#8b5cf6; font-size:11px; margin-top:4px;'><b>Объект без координат</b> (условные границы)</div>";
-        if (mData.parent1 && mData.parent2) extra += "<div style='margin-top:4px; font-size:11px; border-top:1px solid rgba(255,255,255,0.2); padding-top:4px;'>Между:<br>• "+mData.parent1+"<br>• "+mData.parent2+"</div>";
-        
-        let contentHtml = "<span class=\\"tt-title\\">" + category + "</span>" +
-               (mData.id ? "<span class=\\"tt-id\\">" + mData.id + "</span>" : "");
-        
-        // Вставляем НАИМЕНОВАНИЕ, если оно есть
-        if (mData.objectName) {
-            contentHtml += "<div style='margin-bottom:6px; line-height:1.2; font-weight:600; color: var(--btn-text);'>" + mData.objectName + "</div>";
-        }
 
-        // Вставляем АДРЕС, если он есть
-        if (mData.address) {
-            contentHtml += "<div style='margin-bottom:6px; line-height:1.2;'>" + cleanAddress(mData.address) + "</div>";
-        }
-        
-        return contentHtml + extra + (mData.area ? "<div class=\\"tt-area\\">" + mData.area + "</div>" : "");
-    };
+
+const buildTooltipHTML = function(category, mData) {
+    let extra = "";
+    
+    // ДОБАВЛЕНО: Вывод Наименования (если оно есть и не дублирует адрес/название)
+    if (mData.purposeObj && mData.purposeObj !== mData.name && mData.purposeObj !== "Объект") {
+        extra += "<div style='margin-bottom: 4px; color: var(--btn-text);'><b>Наименование:</b> " + mData.purposeObj + "</div>";
+    }
+    
+    if (mData.floors) extra += "<div><b>Этажность:</b> " + mData.floors + "</div>";
+    if (mData.year) extra += "<div><b>Год постройки:</b> " + mData.year + "</div>";
+    if (mData.material) extra += "<div><b>Материал:</b> " + mData.material + "</div>";
+    if (mData.extent) extra += "<div><b>Протяженность:</b> " + mData.extent + " м</div>";
+    if (mData.isProcedural) extra += "<div style='color:#8b5cf6; font-size:11px; margin-top:4px;'><b>Объект без координат</b> (условные границы)</div>";
+    if (mData.parent1 && mData.parent2) extra += "<div style='margin-top:4px; font-size:11px; border-top:1px solid rgba(255,255,255,0.2); padding-top:4px;'>Между:<br>• "+mData.parent1+"<br>• "+mData.parent2+"</div>";
+    
+    return "<span class=\\"tt-title\\">" + category + "</span>" +
+           (mData.id ? "<span class=\\"tt-id\\">" + mData.id + "</span>" : "") +
+           (mData.name && mData.name !== "Объект" ? "<div style='margin-bottom:6px; line-height:1.2; font-weight:600;'>" + mData.name + "</div>" : "") +
+           extra +
+           (mData.area ? "<div class=\\"tt-area\\">" + mData.area + "</div>" : "");
+};
+
+
 
     const addLabel = function(pos3D, priority, categoryName, shortId, meta, colorHex, meshRef = null) {
         const el = document.createElement("div");
