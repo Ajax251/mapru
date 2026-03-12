@@ -700,7 +700,7 @@ window.open3DVisualization = function () {
         <div class="cube-face cf-left"></div><div class="cube-face cf-right"></div>
         <div class="cube-face cf-top"></div><div class="cube-face cf-bottom"></div>
     </div>
-    <div class="cube-text">Построение 3D сцены...</div>
+    <div class="cube-text"></div>
 </div>
 
 <!-- HTML Панели высоты -->
