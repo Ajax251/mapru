@@ -217,7 +217,7 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
 
             <div class="form-group" id="trimGroup">
                 <label>Скрыть текст адреса до слов (включительно):</label>
-                <input type="text" id="trimTextInput" placeholder="Например: с. Гайтанкино">
+                <input type="text" id="trimTextInput" placeholder="">
                 <div style="font-size: 11px; color: #888; margin-top: 4px;">
                     Будет показана только часть адреса после этого текста.
                 </div>
