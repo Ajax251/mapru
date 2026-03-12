@@ -1188,11 +1188,11 @@ try {
         if (mData.isProcedural) extra += "<div style='color:#8b5cf6; font-size:11px; margin-top:4px;'><b>Объект без координат</b> (условные границы)</div>";
         if (mData.parent1 && mData.parent2) extra += "<div style='margin-top:4px; font-size:11px; border-top:1px solid rgba(255,255,255,0.2); padding-top:4px;'>Между:<br>• "+mData.parent1+"<br>• "+mData.parent2+"</div>";
         
-    return "<span class=\"tt-title\">" + category + "</span>" +
-               (mData.id ? "<span class=\"tt-id\">" + mData.id + "</span>" : "") +
+ return "<span class=\\"tt-title\\">" + category + "</span>" +
+               (mData.id ? "<span class=\\"tt-id\\">" + mData.id + "</span>" : "") +
                (mData.name && mData.name !== "Объект" && mData.name !== mData.id ? "<div style='margin-bottom:6px; line-height:1.2; font-weight:600;'><span style='color: var(--text-muted); font-size: 11px; display: block; font-weight: normal; margin-bottom: 2px;'>Наименование / Назначение:</span>" + mData.name + "</div>" : "") +
                extra +
-               (mData.area ? "<div class=\"tt-area\">" + mData.area + "</div>" : "");
+               (mData.area ? "<div class=\\"tt-area\\">" + mData.area + "</div>" : "");
     };
 
     const addLabel = function(pos3D, priority, categoryName, shortId, meta, colorHex, meshRef = null) {
