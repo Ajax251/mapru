@@ -794,8 +794,8 @@ try {
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
   scene = new THREE.Scene();
-    // Изменили far plane с 3000 на 1000000 (1000 км), чтобы карта не обрезалась при отдалении
-    const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.5, 1000000);
+    // Изменили near/far для предотвращения потери точности буфера глубины (Z-fighting) при вращении
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 10, 200000);
     camera.position.set(50, 80, 120);
     
     const controls = new OrbitControls(camera, renderer.domElement);
@@ -859,12 +859,12 @@ try {
     
     let currentGroundColor = "${savedGroundColor}";
     let currentGroundTex = "${savedGroundTex}"; 
-    const groundMat = new THREE.MeshStandardMaterial({roughness: 1.0, color: currentGroundColor, polygonOffset: true, polygonOffsetFactor: 2, polygonOffsetUnits: 2});
+    const groundMat = new THREE.MeshStandardMaterial({roughness: 1.0, color: currentGroundColor});
     if (currentGroundTex !== 'solid') {
         groundMat.map = createGroundTexture(currentGroundTex, currentGroundColor);
     }
-    // Увеличили плоскость с 5000 до 500000, чтобы не было видно краев карты
-    ground = new THREE.Mesh(new THREE.PlaneGeometry(500000, 500000), groundMat);
+    
+ ground = new THREE.Mesh(new THREE.PlaneGeometry(500000, 500000), groundMat);
     ground.rotation.x = -Math.PI / 2; 
     ground.receiveShadow = true; 
     scene.add(ground);
@@ -1018,9 +1018,11 @@ try {
     const createBuildingModel=function(shape,height,style,isMini, isProcedural = false){
         isMini = isMini || false;
         var b=new THREE.Group();var pts=shape.getPoints();if(pts.length<3)return b;
-        var baseGeo=new THREE.ExtrudeGeometry(shape,{depth:0.5,bevelEnabled:false});
+      var baseGeo=new THREE.ExtrudeGeometry(shape,{depth:0.5,bevelEnabled:false});
         var base=new THREE.Mesh(baseGeo,new THREE.MeshStandardMaterial({color: isProcedural ? 0x2563eb : style.base, transparent: isProcedural, opacity: isProcedural ? 0.5 : 1}));
-        base.rotation.x=-Math.PI/2;base.position.y=0.2;b.add(base);
+        base.rotation.x=-Math.PI/2;
+        base.position.y = isProcedural ? 0.05 : 0; // Чуть приподнимаем условные ОКС, чтобы их фундамент не мерцал с целевым объектом
+        b.add(base);
         var wallGeo=new THREE.ExtrudeGeometry(shape,{depth:height,bevelEnabled:false});
         
         if (isProcedural) {
@@ -1040,7 +1042,7 @@ try {
             var roofMat=new THREE.MeshStandardMaterial({color:style.roof});
             var wallMat=isMini?new THREE.MeshStandardMaterial({color:style.wall}):getWindowMaterial(style);
             var walls=new THREE.Mesh(wallGeo,[roofMat,wallMat]);
-            walls.rotation.x=-Math.PI/2;walls.position.y=0.7;
+            walls.rotation.x=-Math.PI/2;walls.position.y=0.5;
             if(!isMini){walls.castShadow=true;walls.receiveShadow=true;}
             b.add(walls);
             if(style.hippedRoof){
@@ -1290,13 +1292,12 @@ try {
                 var shape=createShape(poly);
                 if(shape.getPoints().length>2){
                     var depth=0.8;
-                    var mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:depth,bevelEnabled:false}),new THREE.MeshStandardMaterial({color:color,opacity:0.6,transparent:true, depthWrite:false}));
-mesh.renderOrder=1;
-                    mesh.rotation.x=-Math.PI/2;mesh.position.y=0.05;
+                    var mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:depth,bevelEnabled:false}),new THREE.MeshStandardMaterial({color:color,opacity:0.6,transparent:true}));
+                    mesh.rotation.x=-Math.PI/2;mesh.position.y=0;
                     var edgeColor = (t.meta&&t.meta.isParcel) ? 0x065f46 : 0x1e40af; 
                     mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color:edgeColor,linewidth:2})));
                     mesh.castShadow=true; tGrp.add(mesh);
-                    seedParcelWithFlowers(poly[0], tGrp, depth + 0.1);
+                    seedParcelWithFlowers(poly[0], tGrp, depth);
                     attachMeta(tGrp, t.meta, "Целевой объект");
                     sceneGroups.target.add(tGrp);
                     var c = getCentroid(poly[0]); c.y = depth + 2;
@@ -1307,7 +1308,7 @@ mesh.renderOrder=1;
     });
 
     data.parcels.forEach(function(p,index){
-        var yOff=0.1 + index*0.08;var depth=0.15;
+        var yOff=0.1 + (index * 0.05);var depth=0.2; // Увеличен микро-отступ для предотвращения мерцаний участков друг с другом
         var pHex=PARCEL_PALETTE[index%PARCEL_PALETTE.length];
         var pColor=new THREE.Color(pHex);
         var eColor=darken(pHex);
@@ -1315,12 +1316,12 @@ mesh.renderOrder=1;
             var shape=createShape(poly);
             if(shape.getPoints().length>2){
                 var pGrp = new THREE.Group();
-                var mat=new THREE.MeshStandardMaterial({color:pColor,roughness:0.85,metalness:0.05,transparent:true,opacity:0.4, polygonOffset:true, polygonOffsetFactor:1, polygonOffsetUnits:1});
+                var mat=new THREE.MeshStandardMaterial({color:pColor,roughness:0.85,metalness:0.05,transparent:true,opacity:0.4});
                 var mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:depth,bevelEnabled:false}),mat);
                 mesh.rotation.x=-Math.PI/2;mesh.position.y=yOff;
                 mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color:eColor})));
                 mesh.receiveShadow=true; pGrp.add(mesh);
-                seedParcelWithFlowers(poly[0], pGrp, yOff + depth + 0.1);
+                seedParcelWithFlowers(poly[0], pGrp, yOff + depth);
                 attachMeta(pGrp, p.meta, "Земельный участок");
                 sceneGroups.parcels.add(pGrp);
                 var c = getCentroid(poly[0]); c.y = yOff + depth + 1;
@@ -1335,7 +1336,7 @@ mesh.renderOrder=1;
             if(shape.getPoints().length>2){
                 var iGrp = new THREE.Group();
                 var mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:0.5,bevelEnabled:false}),new THREE.MeshBasicMaterial({color:0xdc2626,transparent:true,opacity:0.6,depthWrite:false}));
-                mesh.rotation.x=-Math.PI/2;mesh.position.y=1.5;mesh.renderOrder=10;
+                mesh.rotation.x=-Math.PI/2;mesh.position.y=1.0;
                 mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color:0x991b1b,linewidth:3})));
                 iGrp.add(mesh);
                 attachMeta(iGrp, iObj.meta, "Наложение");
