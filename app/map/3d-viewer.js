@@ -793,15 +793,17 @@ try {
     renderer.shadowMap.enabled = true;
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
-  scene = new THREE.Scene();
-    // Изменили far plane с 3000 на 1000000 (1000 км), чтобы карта не обрезалась при отдалении
-    const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 1, 1000000);
+scene = new THREE.Scene();
+    // Ограничиваем far plane до 15 км для максимальной точности Z-буфера видеокарты
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 2, 15000);
     camera.position.set(50, 80, 120);
     
     const controls = new OrbitControls(camera, renderer.domElement);
     controls.enableDamping = true; controls.dampingFactor = 0.05; controls.maxPolarAngle = Math.PI/2 - 0.02;
-    controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
+  controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
     controls.screenSpacePanning = false; 
+    controls.maxDistance = 10000; // Физически запрещаем отдаляться дальше 10 км
+    controls.maxPolarAngle = Math.PI / 2 - 0.05; // Чуть сильнее ограничиваем опускание под землю
     controls.target.set(0, 0, 0);
 
     const initialCamPos = new THREE.Vector3(50, 80, 120);
@@ -863,8 +865,8 @@ try {
     if (currentGroundTex !== 'solid') {
         groundMat.map = createGroundTexture(currentGroundTex, currentGroundColor);
     }
-    // Увеличили плоскость с 5000 до 500000, чтобы не было видно краев карты
-    ground = new THREE.Mesh(new THREE.PlaneGeometry(500000, 500000), groundMat);
+    
+ ground = new THREE.Mesh(new THREE.PlaneGeometry(500000, 500000), groundMat);
     ground.rotation.x = -Math.PI / 2; 
     ground.receiveShadow = true; 
     scene.add(ground);
@@ -1018,9 +1020,11 @@ try {
     const createBuildingModel=function(shape,height,style,isMini, isProcedural = false){
         isMini = isMini || false;
         var b=new THREE.Group();var pts=shape.getPoints();if(pts.length<3)return b;
-        var baseGeo=new THREE.ExtrudeGeometry(shape,{depth:0.5,bevelEnabled:false});
+      var baseGeo=new THREE.ExtrudeGeometry(shape,{depth:0.5,bevelEnabled:false});
         var base=new THREE.Mesh(baseGeo,new THREE.MeshStandardMaterial({color: isProcedural ? 0x2563eb : style.base, transparent: isProcedural, opacity: isProcedural ? 0.5 : 1}));
-        base.rotation.x=-Math.PI/2;base.position.y=0;b.add(base);
+        base.rotation.x=-Math.PI/2;
+        base.position.y = isProcedural ? 0.05 : 0; // Чуть приподнимаем условные ОКС, чтобы их фундамент не мерцал с целевым объектом
+        b.add(base);
         var wallGeo=new THREE.ExtrudeGeometry(shape,{depth:height,bevelEnabled:false});
         
         if (isProcedural) {
@@ -1289,9 +1293,11 @@ try {
             }else{
                 var shape=createShape(poly);
                 if(shape.getPoints().length>2){
-                    var depth=0.8;
-                    var mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:depth,bevelEnabled:false}),new THREE.MeshStandardMaterial({color:color,opacity:0.6,transparent:true}));
-                    mesh.rotation.x=-Math.PI/2;mesh.position.y=0;
+                  var depth=0.15; // Делаем целевой объект более плоским
+                var mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:depth,bevelEnabled:false}),new THREE.MeshStandardMaterial({
+                    color:color, opacity:0.6, transparent:true, depthWrite:false // depthWrite:false спасает прозрачные пересечения
+                }));
+                mesh.rotation.x=-Math.PI/2;mesh.position.y=0.05; // Кладем его строго над землей
                     var edgeColor = (t.meta&&t.meta.isParcel) ? 0x065f46 : 0x1e40af; 
                     mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color:edgeColor,linewidth:2})));
                     mesh.castShadow=true; tGrp.add(mesh);
@@ -1305,8 +1311,8 @@ try {
         });
     });
 
-    data.parcels.forEach(function(p,index){
-        var yOff=index*0.015;var depth=0.2;
+   data.parcels.forEach(function(p,index){
+        var yOff=0.25 + (index * 0.01);var depth=0.15; 
         var pHex=PARCEL_PALETTE[index%PARCEL_PALETTE.length];
         var pColor=new THREE.Color(pHex);
         var eColor=darken(pHex);
