@@ -3,7 +3,7 @@ window.open3DVisualization = function () {
         try {
             const destSc = 'EPSG:3857';
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
-            const allLocalFeatures = { target: [], parcels: [], buildings: [], structures: [], zouits: [], intersections: [] };
+            const allLocalFeatures = { target:[], parcels:[], buildings: [], structures: [], zouits: [], intersections:[] };
 
             // Чтение сохраненных настроек
             const savedTheme = localStorage.getItem('3d_viewer_theme') || 'light';
@@ -21,10 +21,10 @@ window.open3DVisualization = function () {
             };
 
             const to3857 = (yandexCoord) => {
-                if (!yandexCoord || typeof yandexCoord[0] !== 'number') return [0, 0];
+                if (!yandexCoord || typeof yandexCoord[0] !== 'number') return[0, 0];
                 const trueLat = yandexCoord[0] + (window.mapOffsetY * 0.000008983);
                 const trueLon = yandexCoord[1] + (window.mapOffsetX * 0.000008983);
-                return window.proj4("EPSG:4326", destSc, [trueLon, trueLat]);
+                return window.proj4("EPSG:4326", destSc,[trueLon, trueLat]);
             };
 
             if (!window.quickReportTargetObjects || window.quickReportTargetObjects.length === 0) {
@@ -36,9 +36,9 @@ window.open3DVisualization = function () {
                 if (!obj || !obj.geometry) return;
                 const coords = obj.geometry.getCoordinates();
                 const type = obj.geometry.getType();
-                let rings = [];
+                let rings =[];
                 if (type === 'Point') rings = [[coords]];
-                else if (type === 'LineString') rings = [coords];
+                else if (type === 'LineString') rings =[coords];
                 else if (type === 'Polygon') rings = coords;
                 else if (type === 'MultiPolygon') rings = coords.flat();
                 rings.forEach(ring => {
@@ -55,7 +55,7 @@ window.open3DVisualization = function () {
             if (minX === Infinity) { minX = 0; maxX = 0; minY = 0; maxY = 0; }
             const originX = (minX + maxX) / 2;
             const originY = (minY + maxY) / 2;
-
+            
             const mapLatRad = Math.atan(Math.sinh(originY / 6378137.0));
             const mercatorScale = 1 / Math.cos(mapLatRad);
 
@@ -64,15 +64,15 @@ window.open3DVisualization = function () {
                 const o = p.options || {};
                 const descr = p.descr || '';
                 const purpose = o.purpose || o.params_purpose || '';
-
-                let rawName = o.building_name || o.name_by_doc || o.params_name || o.name || o.type_zone || '';
+                
+               let rawName = o.building_name || o.name_by_doc || o.params_name || o.name || o.type_zone || '';
                 if (!rawName || rawName === 'Сооружение' || rawName === 'Здание') {
                     rawName = purpose || descr;
                 }
                 let name = window.isGlobalMapMode ? cleanAddress(rawName) : rawName;
                 const text = (descr + ' ' + name + ' ' + purpose).toLowerCase();
-
-                let meta = {
+                
+            let meta = {
                     id: o.cad_num || o.cad_number || o.reg_numb_border || descr || 'Без номера',
                     name: name || 'Объект',
                     address: cleanAddress(o.readable_address || o.address_readable_address || ''),
@@ -80,8 +80,8 @@ window.open3DVisualization = function () {
                     hasExtendedData: !!(purpose || name || o.build_record_area || o.year_built || o.floors),
                     isParcel: false,
                     isSpatial: p._isSpatial !== false,
-                    isProcedural: false,
-
+                    isProcedural: false, 
+                    
                     floors: o.floors || '',
                     year: o.year_built || o.params_year_built || '',
                     material: o.materials || '',
@@ -94,9 +94,9 @@ window.open3DVisualization = function () {
                 if (meta.rawArea && !isNaN(meta.rawArea)) {
                     meta.area = meta.rawArea.toLocaleString('ru-RU') + ' м²';
                 } else if (o.content_restrict_encumbrances) {
-                    meta.area = "Ограничение";
+                     meta.area = "Ограничение"; 
                 } else {
-                    meta.area = '';
+                     meta.area = '';
                 }
 
                 if (category === 'building') {
@@ -119,29 +119,29 @@ window.open3DVisualization = function () {
             };
 
             const processFeatureArray = (featuresArray, type) => {
-                const result = [];
-                (featuresArray || []).forEach(f => {
+                const result =[];
+                (featuresArray ||[]).forEach(f => {
                     const meta = analyzeFeature(f, type);
                     if (!meta.isSpatial) {
-                        result.push({ type: 'Point', polygons: [], meta: meta });
+                        result.push({ type: 'Point', polygons:[], meta: meta });
                         return;
                     }
                     if (!f.geometry || !f.geometry.coordinates) return;
-
-                    let ringsList = [];
-                    if (f.geometry.type === 'Polygon') ringsList = [f.geometry.coordinates];
+                    
+                    let ringsList =[];
+                    if (f.geometry.type === 'Polygon') ringsList =[f.geometry.coordinates];
                     else if (f.geometry.type === 'MultiPolygon') ringsList = f.geometry.coordinates;
                     else if (f.geometry.type.includes('Line')) {
                         ringsList = f.geometry.type === 'LineString' ? [[f.geometry.coordinates]] : f.geometry.coordinates.map(c => [c]);
                     } else if (f.geometry.type === 'Point') {
-                        ringsList = [[[f.geometry.coordinates]]];
+                        ringsList = [[[f.geometry.coordinates]]]; 
                     }
 
                     const localPolys = ringsList.map(poly => poly.map(ring => ring.map(c => {
                         if (!c || typeof c[0] !== 'number') return { x: 0, y: 0 };
                         return { x: c[0] - originX, y: c[1] - originY };
                     })));
-
+                    
                     let geomType = f.geometry.type.includes('Line') ? 'Line' : 'Polygon';
                     if (f.geometry.type === 'Point') geomType = 'Point';
 
@@ -154,7 +154,7 @@ window.open3DVisualization = function () {
                 const coords = obj.geometry.getCoordinates();
                 const type = obj.geometry.getType();
                 const isTargetParcel = obj.properties.get('isParcelInQuarter') || obj.properties.get('isFoundInArea') || (obj.properties.get('featureData') && obj.properties.get('featureData').properties.category === 36368);
-                let rings = [];
+                let rings =[];
                 if (type === 'Point') rings = [[coords]];
                 else if (type === 'LineString') rings = [coords];
                 else if (type === 'Polygon') rings = coords;
@@ -163,7 +163,7 @@ window.open3DVisualization = function () {
                     const pt = to3857(c); return { x: pt[0] - originX, y: pt[1] - originY };
                 }));
                 let titleName = obj.properties.get('cadastralNumber') || 'Целевой объект';
-
+                
                 let egrnArea = '';
                 let fData = obj.properties.get('featureData');
                 if (fData && fData.properties && fData.properties.options) {
@@ -174,14 +174,14 @@ window.open3DVisualization = function () {
                         if (!isNaN(parsed)) egrnArea = parsed.toLocaleString('ru-RU');
                     }
                 }
-
+                
                 let calcArea = 0;
                 try {
                     if (typeof calculatePreciseGeometry === 'function' && (type === 'Polygon' || type === 'MultiPolygon')) {
                         calcArea = calculatePreciseGeometry(obj).area;
                     }
-                } catch (e) {
-                    console.error("Ошибка расчета площади в МСК для 3D:", e);
+                } catch (e) { 
+                    console.error("Ошибка расчета площади в МСК для 3D:", e); 
                 }
 
                 let areaStr = '';
@@ -204,7 +204,7 @@ window.open3DVisualization = function () {
             allLocalFeatures.structures = processFeatureArray(window.structureFeaturesData, 'structure');
             allLocalFeatures.zouits = processFeatureArray(window.zouitFeaturesData, 'zouit');
 
-            const isPointInPolyEditor = function (pt, poly) {
+            const isPointInPolyEditor = function(pt, poly) {
                 let inside = false;
                 for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
                     let xi = poly[i].x, yi = poly[i].y;
@@ -215,10 +215,10 @@ window.open3DVisualization = function () {
                 return inside;
             };
 
-            const getBBoxCenter = function (pts) {
+            const getBBoxCenter = function(pts) {
                 let mx = Infinity, my = Infinity, Mx = -Infinity, My = -Infinity;
-                pts.forEach(p => { mx = Math.min(mx, p.x); Mx = Math.max(Mx, p.x); my = Math.min(my, p.y); My = Math.max(My, p.y); });
-                return { x: (mx + Mx) / 2, y: (my + My) / 2 };
+                pts.forEach(p => { mx=Math.min(mx,p.x); Mx=Math.max(Mx,p.x); my=Math.min(my,p.y); My=Math.max(My,p.y); });
+                return { x: (mx+Mx)/2, y: (my+My)/2 };
             };
 
             let parcelMap = new Map();
@@ -231,7 +231,7 @@ window.open3DVisualization = function () {
             allLocalFeatures.buildings.forEach(b => {
                 if ((b.type === 'Point' || !b.meta.isSpatial) && b.meta.rawArea) {
                     let footprintArea = b.meta.rawArea / (b.meta.floorsNumeric || 1);
-                    if (isNaN(footprintArea) || footprintArea <= 5) return;
+                    if (isNaN(footprintArea) || footprintArea <= 5) return; 
 
                     let pt = (b.type === 'Point' && b.polygons[0]?.[0]?.[0]) ? b.polygons[0][0][0] : null;
                     let parentCn = null;
@@ -274,9 +274,9 @@ window.open3DVisualization = function () {
                     }
 
                     if (parentPoly) {
-                        b._parentPoly = parentPoly;
-                        b._footprintArea = footprintArea;
-                        if (!proceduralByParcel.has(parentCn)) proceduralByParcel.set(parentCn, []);
+                        b._parentPoly = parentPoly; 
+                        b._footprintArea = footprintArea; 
+                        if (!proceduralByParcel.has(parentCn)) proceduralByParcel.set(parentCn,[]);
                         proceduralByParcel.get(parentCn).push(b);
                     }
                 }
@@ -286,11 +286,11 @@ window.open3DVisualization = function () {
                 let parentPoly = buildingsGroup[0]._parentPoly;
                 let angle = 0;
                 let maxLenSq = 0;
-                for (let i = 0; i < parentPoly.length - 1; i++) {
-                    let dx = parentPoly[i + 1].x - parentPoly[i].x;
-                    let dy = parentPoly[i + 1].y - parentPoly[i].y;
-                    let lenSq = dx * dx + dy * dy;
-                    if (lenSq > maxLenSq) { maxLenSq = lenSq; angle = Math.atan2(dy, dx); }
+                for(let i = 0; i < parentPoly.length - 1; i++) {
+                    let dx = parentPoly[i+1].x - parentPoly[i].x;
+                    let dy = parentPoly[i+1].y - parentPoly[i].y;
+                    let lenSq = dx*dx + dy*dy;
+                    if(lenSq > maxLenSq) { maxLenSq = lenSq; angle = Math.atan2(dy, dx); }
                 }
 
                 let dirX = Math.cos(angle);
@@ -298,10 +298,10 @@ window.open3DVisualization = function () {
                 let center = getBBoxCenter(parentPoly);
 
                 let totalLength = 0;
-                const gap = 3 * mercatorScale;
+                const gap = 3 * mercatorScale; 
 
                 buildingsGroup.forEach(b => {
-                    let ratio = 1.2;
+                    let ratio = 1.2; 
                     if (b.meta.rawText.includes('многоквартир') || b.meta.rawText.includes('мкд') || b.meta.rawText.includes('школ')) ratio = 2.5;
                     else if (b.meta.rawText.includes('гараж') || b.meta.rawText.includes('склад') || b.meta.rawText.includes('цех')) ratio = 2.0;
 
@@ -324,9 +324,9 @@ window.open3DVisualization = function () {
                     let halfW = b._scaledW / 2;
                     let halfL = b._scaledL / 2;
 
-                    let rect = [
-                        { x: -halfL, y: -halfW }, { x: halfL, y: -halfW },
-                        { x: halfL, y: halfW }, { x: -halfL, y: halfW }
+                    let rect =[
+                        {x: -halfL, y: -halfW}, {x: halfL, y: -halfW},
+                        {x: halfL, y: halfW}, {x: -halfL, y: halfW}
                     ];
 
                     let rotatedPoly = rect.map(p => ({
@@ -350,7 +350,6 @@ window.open3DVisualization = function () {
                 });
             });
 
-            // --- ЛОГИКА НАЛОЖЕНИЙ (БЕЗ ИЗМЕНЕНИЙ, ТОЛЬКО ДОБАВЛЕН rewind ДЛЯ ВАЛИДНОСТИ) ---
             if (window.turf && allLocalFeatures.target && allLocalFeatures.target.length > 0) {
                 const createTurfPolys = (featureArray, idPrefix) => {
                     const result = [];
@@ -360,21 +359,21 @@ window.open3DVisualization = function () {
                                 try {
                                     let turfRings = polyRings.map(ring => ring.map(p => [p.x, p.y]));
                                     turfRings = turfRings.map(r => {
-                                        if (r.length > 0 && (r[0][0] !== r[r.length - 1][0] || r[0][1] !== r[r.length - 1][1])) {
+                                        if (r.length > 0 && (r[0][0] !== r[r.length-1][0] || r[0][1] !== r[r.length-1][1])) {
                                             r.push([...r[0]]);
                                         }
                                         return r;
                                     }).filter(r => r.length >= 4);
-
+                                    
                                     if (turfRings.length > 0) {
-                                        const poly = window.turf.rewind(window.turf.polygon(turfRings), { reverse: false });
-                                        result.push({
-                                            poly: poly,
+                                        const poly = window.turf.rewind(window.turf.polygon(turfRings), {reverse: false});
+                                        result.push({ 
+                                            poly: poly, 
                                             id: f.meta.id || (idPrefix + idx),
                                             name: f.meta.name
                                         });
                                     }
-                                } catch (e) { }
+                                } catch (e) {}
                             });
                         }
                     });
@@ -390,19 +389,20 @@ window.open3DVisualization = function () {
                     const targetArea = window.turf.area(target.poly);
 
                     objectsToCheck.forEach(obj => {
-                        if (target.id === obj.id || target.name === obj.id || target.name === obj.name) return;
+                        if (target.id === obj.id || target.name === obj.id || target.name === obj.name) return; 
 
                         try {
                             const intersection = window.turf.intersect(window.turf.featureCollection([target.poly, obj.poly]));
                             if (intersection && intersection.geometry) {
+                                
                                 const intersectionArea = window.turf.area(intersection);
                                 const objArea = window.turf.area(obj.poly);
-
+                                
                                 if (Math.abs(intersectionArea - objArea) < 0.5 && Math.abs(intersectionArea - targetArea) < 0.5) {
-                                    return;
+                                    return; 
                                 }
 
-                                const fixedIntersection = window.turf.rewind(intersection, { reverse: false });
+                                const fixedIntersection = window.turf.rewind(intersection, {reverse: false});
 
                                 let geoms = [];
                                 if (fixedIntersection.geometry.type === 'Polygon') geoms = [fixedIntersection.geometry.coordinates];
@@ -413,22 +413,22 @@ window.open3DVisualization = function () {
                                         let planarArea = 0;
                                         const pts = poly[0];
                                         for (let i = 0; i < pts.length - 1; i++) {
-                                            planarArea += pts[i][0] * pts[i + 1][1] - pts[i + 1][0] * pts[i][1];
+                                            planarArea += pts[i][0] * pts[i+1][1] - pts[i+1][0] * pts[i][1];
                                         }
                                         planarArea = Math.abs(planarArea) / 2;
 
-                                        if (planarArea > 0.1) {
+                                        if (planarArea > 0.1) { 
                                             const formattedPoly = poly.map(ring => ring.map(c => ({ x: c[0], y: c[1] })));
-                                            allLocalFeatures.intersections.push({
-                                                type: 'Polygon',
-                                                polygons: [formattedPoly],
-                                                meta: {
-                                                    name: 'Наложение на ' + obj.id,
-                                                    id: 'Наложение ' + (allLocalFeatures.intersections.length + 1),
+                                            allLocalFeatures.intersections.push({ 
+                                                type: 'Polygon', 
+                                                polygons: [formattedPoly], 
+                                                meta: { 
+                                                    name: 'Наложение на ' + obj.id, 
+                                                    id: 'Наложение ' + (allLocalFeatures.intersections.length + 1), 
                                                     isSpatial: true,
                                                     parent1: target.id || target.name,
                                                     parent2: obj.id
-                                                }
+                                                } 
                                             });
                                         }
                                     }
@@ -459,7 +459,7 @@ window.open3DVisualization = function () {
             header.className = 'modal-header';
             const headerBg = savedTheme === 'dark' ? 'rgba(15, 23, 42, 0.95)' : 'rgba(255, 255, 255, 0.95)';
             const headerColor = savedTheme === 'dark' ? '#f8fafc' : '#1e293b';
-
+            
             Object.assign(header.style, {
                 padding: '12px 20px', background: headerBg, backdropFilter: 'blur(10px)',
                 color: headerColor, display: 'flex', justifyContent: 'space-between', alignItems: 'center',
@@ -481,7 +481,7 @@ window.open3DVisualization = function () {
                 });
                 btn.onmouseenter = () => { btn.style.background = hoverColor; btn.style.color = '#fff'; };
                 btn.onmouseleave = () => { btn.style.background = 'rgba(128,128,128,0.1)'; btn.style.color = 'inherit'; };
-                if (action) btn.onclick = action;
+                if(action) btn.onclick = action;
                 return btn;
             };
 
@@ -492,7 +492,7 @@ window.open3DVisualization = function () {
                 const newTheme = modal.dataset.theme === 'dark' ? 'light' : 'dark';
                 modal.dataset.theme = newTheme;
                 localStorage.setItem('3d_viewer_theme', newTheme);
-
+                
                 modal.style.backgroundColor = newTheme === 'dark' ? '#0f172a' : '#ffffff';
                 header.style.background = newTheme === 'dark' ? 'rgba(15, 23, 42, 0.95)' : 'rgba(255, 255, 255, 0.95)';
                 header.style.color = newTheme === 'dark' ? '#f8fafc' : '#1e293b';
@@ -523,9 +523,6 @@ window.open3DVisualization = function () {
             btnContainer.appendChild(closeBtn);
             header.appendChild(btnContainer); modal.appendChild(header);
 
-            // ==================================================================================
-            // ИСПРАВЛЕННЫЙ SRCDOC С УСТРАНЕНИЕМ МЕРЦАНИЙ (Z-FIGHTING, POLYGON OFFSET, RENDER ORDER)
-            // ==================================================================================
             const srcDocContent = `<!DOCTYPE html>
 <html lang="ru">
 <head>
@@ -644,7 +641,6 @@ window.open3DVisualization = function () {
         .info-text { display: none; }
     }
 
-    /* --- CSS ДЛЯ 3D ЛОАДЕРА --- */
     #cube-loader-wrapper {
         position: fixed; top: 0; left: 0; width: 100%; height: 100%;
         background: var(--bg-color); z-index: 99999;
@@ -677,7 +673,6 @@ window.open3DVisualization = function () {
     }
     @keyframes pulseText { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; text-shadow: 0 0 10px rgba(59, 130, 246, 0.5); } }
 
-    /* --- CSS ДЛЯ ПАНЕЛИ ВЫСОТЫ --- */
     #camera-alt-display {
         position: absolute; top: 20px; left: 20px; z-index: 50;
         background: var(--panel-bg); backdrop-filter: blur(10px);
@@ -692,17 +687,15 @@ window.open3DVisualization = function () {
 <script type="importmap">{"imports":{"three":"https://unpkg.com/three@0.160.0/build/three.module.js","three/addons/":"https://unpkg.com/three@0.160.0/examples/jsm/"}}</script>
 </head>
 <body data-theme="${savedTheme}">
-<!-- HTML Лоадера -->
 <div id="cube-loader-wrapper">
     <div class="cube-spinner">
         <div class="cube-face cf-front"></div><div class="cube-face cf-back"></div>
         <div class="cube-face cf-left"></div><div class="cube-face cf-right"></div>
         <div class="cube-face cf-top"></div><div class="cube-face cf-bottom"></div>
     </div>
-    <div class="cube-text">Загрузка 3D...</div>
+    <div class="cube-text"></div>
 </div>
 
-<!-- HTML Панели высоты -->
 <div id="camera-alt-display">
     <i class="fas fa-space-shuttle" style="color: var(--btn-text);"></i>
     <span id="alt-value">0 м</span>
@@ -755,8 +748,7 @@ const syncVisibility =[];
 
 try {
     const data = ${safeDataString};
-    const animateables =[];
-    ["target","parcels","intersections","buildings","structures","zouits"].forEach(function(key) {
+    const animateables =[];["target","parcels","intersections","buildings","structures","zouits"].forEach(function(key) {
         if (data[key]) data[key].forEach(function(item, idx) { item.uid = key + "_" + idx; });
     });
 
@@ -785,18 +777,8 @@ try {
 
     const canvas = document.createElement("canvas");
     document.body.appendChild(canvas);
-    
-    // ==================================================================================
-    // ИСПРАВЛЕНИЕ 1: Отключаем logarithmicDepthBuffer (мерцание на плоских сценах)
-    // ИСПРАВЛЕНИЕ 2: Увеличиваем near/far для лучшей точности Z-буфера
-    // ==================================================================================
-    const renderer = new THREE.WebGLRenderer({ 
-        canvas: canvas, 
-        antialias: true, 
-        alpha: false, 
-        logarithmicDepthBuffer: false,
-        powerPreference: "high-performance"
-    });
+    // Отключен logarithmicDepthBuffer для предотвращения аппаратного мерцания
+    const renderer = new THREE.WebGLRenderer({ canvas: canvas, antialias: true, alpha: false, logarithmicDepthBuffer: false });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
     renderer.toneMapping = THREE.ACESFilmicToneMapping;
@@ -805,46 +787,34 @@ try {
     renderer.shadowMap.type = THREE.PCFSoftShadowMap;
 
     scene = new THREE.Scene();
-    
-    // Увеличили near (было 2), уменьшили far (было 15000) для стабильности глубины
-    const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 10, 10000);
+    // Идеальная камера: от 5м до 20 км предотвращает ошибки глубины
+    const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 5, 20000);
     camera.position.set(50, 80, 120);
     
     const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true; 
-    controls.dampingFactor = 0.05; 
-    controls.maxPolarAngle = Math.PI/2 - 0.02;
+    controls.enableDamping = true; controls.dampingFactor = 0.05; 
+    controls.maxPolarAngle = Math.PI/2 - 0.05; // чуть выше горизонта
+    controls.maxDistance = 8000; // Ограничение отдаления, убивает Z-fighting вдалеке
     controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
     controls.screenSpacePanning = false; 
-    controls.maxDistance = 8000; // Чуть ближе, чтобы избежать потери точности
     controls.target.set(0, 0, 0);
 
     const initialCamPos = new THREE.Vector3(50, 80, 120);
     const initialTarget = new THREE.Vector3(0, 0, 0);
-    document.getElementById("home-btn").onclick = function() { 
-        camera.position.copy(initialCamPos); 
-        controls.target.copy(initialTarget); 
-        controls.update(); 
-    };
+    document.getElementById("home-btn").onclick = function() { camera.position.copy(initialCamPos); controls.target.copy(initialTarget); controls.update(); };
 
     ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
     scene.add(ambientLight);
     
     dirLight = new THREE.DirectionalLight(0xffffff, 2.0);
-    dirLight.position.set(150, 250, 100); 
-    dirLight.castShadow = true;
-    dirLight.shadow.mapSize.width = 2048; 
-    dirLight.shadow.mapSize.height = 2048;
-    dirLight.shadow.camera.left = -250; 
-    dirLight.shadow.camera.right = 250;
-    dirLight.shadow.camera.top = 250; 
-    dirLight.shadow.camera.bottom = -250;
-    
-    // Усиленные настройки теней для предотвращения мерцания
-    dirLight.shadow.bias = -0.0005; 
-    dirLight.shadow.normalBias = 0.08; 
-    dirLight.shadow.radius = 4;
-    
+    dirLight.position.set(200, 300, 200); dirLight.castShadow = true;
+    dirLight.shadow.mapSize.width = 2048; dirLight.shadow.mapSize.height = 2048;
+    // Охват тени увеличен, чтобы не мерцала на краях
+    dirLight.shadow.camera.left = -500; dirLight.shadow.camera.right = 500;
+    dirLight.shadow.camera.top = 500; dirLight.shadow.camera.bottom = -500;
+    // ЖЕСТКИЕ НАСТРОЙКИ ТЕНИ: Убивают переливы (Shadow Acne) в бездействии
+    dirLight.shadow.bias = -0.001; 
+    dirLight.shadow.normalBias = 0.05; 
     scene.add(dirLight);
 
     function createGroundTexture(type, hexColor){
@@ -874,14 +844,15 @@ try {
             ctx.fillRect(0, 0, half, half);
             ctx.fillRect(half, half, half, half);
         }
-      var t = new THREE.CanvasTexture(cv);
+        var t = new THREE.CanvasTexture(cv);
         t.colorSpace = THREE.SRGBColorSpace;
         t.wrapS = THREE.RepeatWrapping;
         t.wrapT = THREE.RepeatWrapping;
-        t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+        // Включаем мипмаппинг - убивает рябь (Moiré) текстуры земли вдалеке
         t.minFilter = THREE.LinearMipmapLinearFilter;
         t.generateMipmaps = true;
-        var repeat = type === 'grid' ? 10000 : 15000;
+        t.anisotropy = renderer.capabilities.getMaxAnisotropy();
+        var repeat = type === 'grid' ? 1500 : 2500; 
         t.repeat.set(repeat, repeat);
         return t;
     }
@@ -892,16 +863,10 @@ try {
     if (currentGroundTex !== 'solid') {
         groundMat.map = createGroundTexture(currentGroundTex, currentGroundColor);
     }
-    
-    // ==================================================================================
-    // ИСПРАВЛЕНИЕ 3: PolygonOffset для земли (отодвигаем назад, чтобы объекты были чёткими)
-    // ==================================================================================
-    groundMat.polygonOffset = true;
-    groundMat.polygonOffsetFactor = -8; // Сильно назад
-    groundMat.polygonOffsetUnits = -8;
-    
-    ground = new THREE.Mesh(new THREE.PlaneGeometry(500000, 500000), groundMat);
+    // Земля уменьшена до 50 км для стабильности текстур. 
+    ground = new THREE.Mesh(new THREE.PlaneGeometry(50000, 50000), groundMat);
     ground.rotation.x = -Math.PI / 2; 
+    ground.position.y = -0.5; // Смещаем землю вниз
     ground.receiveShadow = true; 
     scene.add(ground);
 
@@ -1031,7 +996,7 @@ try {
         return BUILDING_DICT.def;
     }
 
-    var windowMaterialCache = {};
+   var windowMaterialCache = {};
     function getWindowMaterial(style) {
         if (style.winType==="none"||!style.win) return new THREE.MeshStandardMaterial({color:style.wall,roughness:0.9});
         var ck=style.wall+"_"+style.winType;
@@ -1057,60 +1022,41 @@ try {
         var baseGeo=new THREE.ExtrudeGeometry(shape,{depth:0.5,bevelEnabled:false});
         var base=new THREE.Mesh(baseGeo,new THREE.MeshStandardMaterial({color: isProcedural ? 0x2563eb : style.base, transparent: isProcedural, opacity: isProcedural ? 0.5 : 1}));
         base.rotation.x=-Math.PI/2;
-        base.position.y = isProcedural ? 0.05 : 0; 
+        // Строгая физическая высота фундамента: 1.0 (чтобы не было наложений с землей)
+        base.position.y= 1.0; 
         b.add(base);
+        
         var wallGeo=new THREE.ExtrudeGeometry(shape,{depth:height,bevelEnabled:false});
         
         if (isProcedural) {
             var procMat = new THREE.MeshStandardMaterial({
-                color: 0x60a5fa,
-                transparent: true,
-                opacity: 0.6,
-                roughness: 0.2,
-                metalness: 0.5,
-                depthWrite: false, // ИСПРАВЛЕНИЕ: прозрачные ОКС не пишут в Z-буфер (избегаем конфликтов)
+                color: 0x60a5fa, transparent: true, opacity: 0.6, roughness: 0.2, metalness: 0.5,
+                polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1
             });
-            procMat.polygonOffset = true;
-            procMat.polygonOffsetFactor = 1;
-            procMat.polygonOffsetUnits = 1;
-            
             var walls = new THREE.Mesh(wallGeo, procMat);
-            walls.rotation.x = -Math.PI/2; walls.position.y = 0.5;
-            walls.renderOrder = 1; // ИСПРАВЛЕНИЕ: рендерим после непрозрачных
-            var edges = new THREE.LineSegments(new THREE.EdgesGeometry(wallGeo), new THREE.LineBasicMaterial({color: 0x2563eb, opacity: 0.8, transparent: true, depthWrite: false}));
-            edges.renderOrder = 1;
+            walls.rotation.x = -Math.PI/2; walls.position.y = 1.5;
+            var edges = new THREE.LineSegments(new THREE.EdgesGeometry(wallGeo), new THREE.LineBasicMaterial({color: 0x2563eb, opacity: 0.8, transparent: true}));
             walls.add(edges);
             b.add(walls);
         } else {
             var roofMat=new THREE.MeshStandardMaterial({color:style.roof});
             var wallMat=isMini?new THREE.MeshStandardMaterial({color:style.wall}):getWindowMaterial(style);
-            
-            // ==================================================================================
-            // ИСПРАВЛЕНИЕ 4: PolygonOffset для зданий (вперёд, чтобы не мерцать с землёй)
-            // ==================================================================================
-            wallMat.polygonOffset = true;
-            wallMat.polygonOffsetFactor = 1;
-            wallMat.polygonOffsetUnits = 1;
-            roofMat.polygonOffset = true;
-            roofMat.polygonOffsetFactor = 1;
-            roofMat.polygonOffsetUnits = 1;
-            
             var walls=new THREE.Mesh(wallGeo,[roofMat,wallMat]);
-            walls.rotation.x=-Math.PI/2;walls.position.y=0.5;
+            walls.rotation.x=-Math.PI/2; walls.position.y= 1.5;
             if(!isMini){walls.castShadow=true;walls.receiveShadow=true;}
             b.add(walls);
             if(style.hippedRoof){
                 var rGeo=new THREE.ExtrudeGeometry(shape,{depth:1.2,bevelEnabled:false});
                 var roof=new THREE.Mesh(rGeo,new THREE.MeshStandardMaterial({color:style.roof}));
-                roof.rotation.x=-Math.PI/2;roof.position.y=0.5+height;
+                roof.rotation.x=-Math.PI/2;roof.position.y=1.5+height;
                 if(!isMini)roof.castShadow=true;b.add(roof);
             }else{
                 if(style.parapet){
                     var par=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:0.8,bevelEnabled:true,bevelSize:0.2,bevelThickness:0.2}),new THREE.MeshStandardMaterial({color:style.roof}));
-                    par.rotation.x=-Math.PI/2;par.position.y=0.5+height;b.add(par);
+                    par.rotation.x=-Math.PI/2;par.position.y=1.5+height;b.add(par);
                 }
                 var fr=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:0.1,bevelEnabled:false}),new THREE.MeshStandardMaterial({color:0x334155}));
-                fr.rotation.x=-Math.PI/2;fr.position.y=0.5+height+(style.parapet?0.8:0);b.add(fr);
+                fr.rotation.x=-Math.PI/2;fr.position.y=1.5+height+(style.parapet?0.8:0);b.add(fr);
             }
         }
         return b;
@@ -1236,7 +1182,7 @@ try {
     const tooltip = document.getElementById("hover-tooltip");
     const labelsData =[];
 
-    const buildTooltipHTML = function(category, mData) {
+ const buildTooltipHTML = function(category, mData) {
         let extra = "";
         if (mData.address) extra += "<div style='margin-bottom:6px; line-height:1.2; font-size:12px;'><span style='color:var(--text-muted); font-size:11px; display:block; font-weight:normal; margin-bottom:2px;'>Адрес:</span>" + mData.address + "</div>";
         if (mData.floors) extra += "<div><b>Этажность:</b> " + mData.floors + "</div>";
@@ -1246,7 +1192,7 @@ try {
         if (mData.isProcedural) extra += "<div style='color:#8b5cf6; font-size:11px; margin-top:4px;'><b>Объект без координат</b> (условные границы)</div>";
         if (mData.parent1 && mData.parent2) extra += "<div style='margin-top:4px; font-size:11px; border-top:1px solid rgba(255,255,255,0.2); padding-top:4px;'>Между:<br>• "+mData.parent1+"<br>• "+mData.parent2+"</div>";
         
-        return "<span class=\\"tt-title\\">" + category + "</span>" +
+ return "<span class=\\"tt-title\\">" + category + "</span>" +
                (mData.id ? "<span class=\\"tt-id\\">" + mData.id + "</span>" : "") +
                (mData.name && mData.name !== "Объект" && mData.name !== mData.id ? "<div style='margin-bottom:6px; line-height:1.2; font-weight:600;'><span style='color: var(--text-muted); font-size: 11px; display: block; font-weight: normal; margin-bottom: 2px;'>Наименование / Назначение:</span>" + mData.name + "</div>" : "") +
                extra +
@@ -1321,8 +1267,7 @@ try {
     };
     const getCentroid=function(pts){if(!pts||!pts.length)return{x:0,y:0,z:0};var cx=0,cy=0;pts.forEach(function(p){cx+=p.x;cy+=p.y;});return new THREE.Vector3(cx/pts.length,0,-cy/pts.length);};
 
-    const spatialIds = new Set();
-    ["target", "parcels", "buildings", "structures", "zouits"].forEach(key => {
+    const spatialIds = new Set();["target", "parcels", "buildings", "structures", "zouits"].forEach(key => {
         if (data[key]) {
             data[key].forEach(item => {
                 if(item.meta && item.meta.isSpatial && !item.meta.isProcedural && item.meta.id) spatialIds.add(item.meta.id);
@@ -1330,10 +1275,7 @@ try {
         }
     });
 
-    // ==================================================================================
-    // ИСПРАВЛЕНИЕ 5: Целевые объекты — чуть приподняты (0.05), polygonOffset, прозрачность
-    // ==================================================================================
-    data.target.forEach(function(t){
+   data.target.forEach(function(t){
         var color=(t.meta&&t.meta.isParcel)?0x10b981:0x3b82f6; 
         t.polygons.forEach(function(poly){
             if(!poly||!poly[0])return;
@@ -1349,33 +1291,19 @@ try {
             }else{
                 var shape=createShape(poly);
                 if(shape.getPoints().length>2){
-                    var depth=0.15; 
-                    var mesh=new THREE.Mesh(
-                        new THREE.ExtrudeGeometry(shape,{depth:depth,bevelEnabled:false}), 
-                        new THREE.MeshStandardMaterial({
-                            color:color, 
-                            opacity:0.6, 
-                            transparent:true, 
-                            depthWrite: false, // прозрачный, не пишет глубину
-                            polygonOffset: true, // отодвигаем
-                            polygonOffsetFactor: 1,
-                            polygonOffsetUnits: 1
-                        })
-                    );
-                    mesh.rotation.x=-Math.PI/2;
-                    mesh.position.y=0.05; // чуть над землёй
-                    mesh.renderOrder = 0; // первый слой прозрачности
-                    
+                    var depth=0.1; // Целевой плоский
+                    var mat = new THREE.MeshStandardMaterial({
+                        color:color, opacity:0.6, transparent:true, 
+                        depthWrite: false, // Отключаем запись глубины, чтобы убрать мерцание 
+                        polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 // Смещаем от краев
+                    });
+                    var mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:depth,bevelEnabled:false}),mat);
+                    mesh.rotation.x=-Math.PI/2; 
+                    mesh.position.y= 0.1; // Целевой объект на высоте 0.1
                     var edgeColor = (t.meta&&t.meta.isParcel) ? 0x065f46 : 0x1e40af; 
-                    var edges = new THREE.LineSegments(
-                        new THREE.EdgesGeometry(mesh.geometry),
-                        new THREE.LineBasicMaterial({color:edgeColor, transparent:true, opacity:0.8, depthWrite:false})
-                    );
-                    edges.renderOrder = 0;
-                    mesh.add(edges);
-                    mesh.castShadow=true; 
+                    mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color:edgeColor,linewidth:2})));
                     tGrp.add(mesh);
-                    seedParcelWithFlowers(poly[0], tGrp, depth);
+                    seedParcelWithFlowers(poly[0], tGrp, 0.2);
                     attachMeta(tGrp, t.meta, "Целевой объект");
                     sceneGroups.target.add(tGrp);
                     var c = getCentroid(poly[0]); c.y = depth + 2;
@@ -1385,34 +1313,24 @@ try {
         });
     });
 
-    // ==================================================================================
-    // ИСПРАВЛЕНИЕ 6: Парцелы — polygonOffset (вперёд), чтобы не мерцать с землёй
-    // ==================================================================================
     data.parcels.forEach(function(p,index){
-        var yOff=0.25 + (index * 0.01);
-        var depth=0.15; 
+        // Участки ЗУ строго выше целевого (0.3+)
+        var yOff= 0.3 + (index * 0.01); var depth=0.1;
         var pHex=PARCEL_PALETTE[index%PARCEL_PALETTE.length];
         var pColor=new THREE.Color(pHex);
         var eColor=darken(pHex);
-        
         p.polygons.forEach(function(poly){
             var shape=createShape(poly);
             if(shape.getPoints().length>2){
                 var pGrp = new THREE.Group();
                 var mat=new THREE.MeshStandardMaterial({
-                    color:pColor,
-                    roughness:0.85,
-                    metalness:0.05,
-                    transparent:true,
-                    opacity:0.4,
-                    polygonOffset: true, // ключевое
-                    polygonOffsetFactor: 2, // сильнее вперёд
-                    polygonOffsetUnits: 2
+                    color:pColor, roughness:0.85, metalness:0.05, transparent:true, opacity:0.4, 
+                    depthWrite: false, // Отключаем мерцание с целевым объектом
+                    polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 // Смещаем от граней
                 });
                 var mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:depth,bevelEnabled:false}),mat);
-                mesh.rotation.x=-Math.PI/2;mesh.position.y=yOff;
+                mesh.rotation.x=-Math.PI/2; mesh.position.y=yOff;
                 mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color:eColor})));
-                mesh.receiveShadow=true; 
                 pGrp.add(mesh);
                 seedParcelWithFlowers(poly[0], pGrp, yOff + depth);
                 attachMeta(pGrp, p.meta, "Земельный участок");
@@ -1423,27 +1341,18 @@ try {
         });
     });
 
-    // ==================================================================================
-    // ИСПРАВЛЕНИЕ 7: Наложения — renderOrder (последними), depthWrite false
-    // ==================================================================================
     data.intersections.forEach(function(iObj){
         iObj.polygons.forEach(function(poly){
             var shape=createShape(poly);
             if(shape.getPoints().length>2){
                 var iGrp = new THREE.Group();
-                var mat = new THREE.MeshBasicMaterial({
-                    color:0xdc2626,
-                    transparent:true,
-                    opacity:0.6,
-                    depthWrite:false,
-                    polygonOffset:true,
-                    polygonOffsetFactor:1,
-                    polygonOffsetUnits:1
-                });
-                var mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:0.5,bevelEnabled:false}), mat);
-                mesh.rotation.x=-Math.PI/2;mesh.position.y=1.0;
-                mesh.renderOrder = 2; // ВСЕГДА поверх других прозрачных
-                mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color:0x991b1b,linewidth:3, transparent:true, opacity:0.8, depthWrite:false})));
+                // Наложения еще выше (0.8)
+                var mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:0.2,bevelEnabled:false}),new THREE.MeshBasicMaterial({
+                    color:0xdc2626,transparent:true,opacity:0.6,depthWrite:false,
+                    polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1
+                }));
+                mesh.rotation.x=-Math.PI/2; mesh.position.y= 0.8; 
+                mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color:0x991b1b,linewidth:3})));
                 iGrp.add(mesh);
                 attachMeta(iGrp, iObj.meta, "Наложение");
                 sceneGroups.intersections.add(iGrp);
@@ -1454,9 +1363,6 @@ try {
         });
     });
 
-    // ==================================================================================
-    // ИСПРАВЛЕНИЕ 8: Здания (включая условные) — polygonOffset и корректная сортировка
-    // ==================================================================================
     var linkedCount=0;
     data.buildings.forEach(function(b){
         var style=getBuildingStyle(b.meta.rawText);
@@ -1465,16 +1371,6 @@ try {
                 var shape=createShape(poly);
                 if(shape.getPoints().length>2){
                     var bModel = createBuildingModel(shape,b.meta.height,style,false,b.meta.isProcedural);
-                    // Для обычных зданий добавляем offset, если ещё не установлен в createBuildingModel
-                    if (!b.meta.isProcedural) {
-                        bModel.traverse(child => {
-                            if (child.isMesh) {
-                                child.material.polygonOffset = true;
-                                child.material.polygonOffsetFactor = 1;
-                                child.material.polygonOffsetUnits = 1;
-                            }
-                        });
-                    }
                     attachMeta(bModel, b.meta, b.meta.isProcedural ? "ОКС (Условный)" : "ОКС (Здание)");
                     sceneGroups.buildings.add(bModel);
                     var c = getCentroid(poly[0]); c.y = b.meta.height + 4;
@@ -1490,7 +1386,7 @@ try {
                 var ds=new THREE.Shape();ds.moveTo(-5,-5);ds.lineTo(5,-5);ds.lineTo(5,5);ds.lineTo(-5,5);
                 var mm=createBuildingModel(ds,b.meta.height,style,true,false);
                 mm.scale.set(0.4,0.4,0.4);
-                var laser=new THREE.Mesh(new THREE.CylinderGeometry(0.1,0.1,15),new THREE.MeshBasicMaterial({color:0x3b82f6,transparent:true,opacity:0.3, depthWrite:false}));
+                var laser=new THREE.Mesh(new THREE.CylinderGeometry(0.1,0.1,15),new THREE.MeshBasicMaterial({color:0x3b82f6,transparent:true,opacity:0.3}));
                 laser.position.y=-7.5; mm.add(laser);
                 mm.position.set(posX,15,posZ); mm.userData={baseY:15,offset:linkedCount};
                 animateables.push(mm); 
@@ -1507,32 +1403,332 @@ try {
         }
     });
 
-    // ... (остальной код для structures, zouits, UI, raycaster, animate — БЕЗ ИЗМЕНЕНИЙ, 
-    //      кроме добавления renderOrder для прозрачных инфраструктур, если нужно) ...
-    
-    // Для краткости: structures и zouits используют те же материалы, что и раньше, 
-    // но если они прозрачные (transmission/opacity), добавьте:
-    //   material.depthWrite = false;
-    //   material.renderOrder = 1;
-    //   material.polygonOffset = true; material.polygonOffsetFactor = 1; material.polygonOffsetUnits = 1;
-    
-    // ==================================================================================
-    // ОСТАЛЬНОЙ КОД ФУНКЦИИ (UI, addLayerUi, raycaster, animate) — БЕЗ ИЗМЕНЕНИЙ
-    // ==================================================================================
-    // [Вставьте сюда оставшуюся часть кода из оригинала: addLayerUi, syncVisibility, 
-    //  raycaster, animate, resize, export и т.д. — она работает корректно и не вызывает мерцания]
-    
-    // Ниже — сокращённая завершающая часть для примера (в вашем проекте оставьте полную оригинальную логику):
+    data.structures.forEach(function(s){
+        var infraColor=getInfraColor(s.meta);
+        var infraHex=getInfraHex(s.meta);
+        var infraName=getInfraName(s.meta);
+        s.polygons.forEach(function(poly){
+            if(!poly||!poly[0]||poly[0].length<2)return;
+            var sGrp = new THREE.Group();
+            var midPt=null; var drawH=5;
+            
+            if(s.type==="Line"){
+                if((s.meta.isGas||s.meta.isHeat)&&!s.meta.isUnderground){
+                    drawH=3;
+                    var pts=poly[0].map(function(pt){return new THREE.Vector3(pt.x,drawH,-pt.y);});
+                    var pipe=new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts),64,s.meta.diameter,8,false),new THREE.MeshStandardMaterial({color:infraColor,roughness:0.4,metalness:0.5}));
+                    pipe.castShadow=true; sGrp.add(pipe); 
+                    pts.forEach(function(pt,i){
+                        if(i%2===0){
+                            var pole=new THREE.Mesh(new THREE.CylinderGeometry(0.15,0.15,drawH),new THREE.MeshStandardMaterial({color:0x94a3b8}));
+                            pole.position.set(pt.x,drawH/2,pt.z);pole.castShadow=true; sGrp.add(pole);
+                        }
+                    });
+                    midPt=pts[Math.floor(pts.length/2)];
+                } else if(s.meta.isElectric){
+                    drawH=5; 
+                    var pts2=poly[0].map(function(pt){return new THREE.Vector3(pt.x,drawH,-pt.y);});
+                    pts2.forEach(function(pt,idx){
+                        var pole=new THREE.Mesh(new THREE.CylinderGeometry(0.2,0.3,drawH),new THREE.MeshStandardMaterial({color:0x5c4033}));
+                        pole.position.set(pt.x, drawH/2, pt.z);pole.castShadow=true; sGrp.add(pole);
+                        var cross=new THREE.Mesh(new THREE.BoxGeometry(3,0.2,0.2),new THREE.MeshStandardMaterial({color:0x5c4033}));
+                        cross.position.set(pt.x, drawH-0.5, pt.z);
+                        if(idx<pts2.length-1)cross.rotation.y=Math.atan2(pts2[idx+1].x-pt.x,pts2[idx+1].z-pt.z);
+                        else if(idx>0)cross.rotation.y=Math.atan2(pt.x-pts2[idx-1].x,pt.z-pts2[idx-1].z);
+                        sGrp.add(cross);
+                    });
+                    var wireMat=new THREE.LineBasicMaterial({color:0x8b5cf6});
+                    for(var wi=0;wi<pts2.length-1;wi++){
+                        var p1=pts2[wi].clone();p1.y-=0.5;var p2=pts2[wi+1].clone();p2.y-=0.5;
+                        var mid=new THREE.Vector3().addVectors(p1,p2).multiplyScalar(0.5);mid.y-=1.5;
+                        sGrp.add(new THREE.Line(new THREE.BufferGeometry().setFromPoints(new THREE.QuadraticBezierCurve3(p1,mid,p2).getPoints(20)),wireMat));
+                    }
+                    midPt=pts2[Math.floor(pts2.length/2)];
+                } else {
+                    var yPos=s.meta.isUnderground?-1:1;
+                    drawH=s.meta.isUnderground?3:5;
+                    var pts3=poly[0].map(function(pt){return new THREE.Vector3(pt.x,yPos,-pt.y);});
+                    if(pts3.length>1){
+                        var uPipe = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts3,false,"chordal"),50,s.meta.diameter,12,false),new THREE.MeshStandardMaterial({color:infraColor,roughness:0.5,metalness:0.1}));
+                        sGrp.add(uPipe);
+                        midPt=pts3[Math.floor(pts3.length/2)];
+                    }
+                }
+            } else {
+                var shape=createShape(poly);
+                if(shape.getPoints().length>2){
+                    var mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:1,bevelEnabled:false}),new THREE.MeshStandardMaterial({color:infraColor,roughness:0.7}));
+                    mesh.rotation.x=-Math.PI/2; mesh.position.y= 0.9; mesh.castShadow=true; sGrp.add(mesh);
+                    var c=getCentroid(poly[0]);
+                    midPt={x:c.x,y:5,z:c.z};
+                }
+            }
+            if(sGrp.children.length > 0) {
+                attachMeta(sGrp, s.meta, infraName);
+                sceneGroups.structures.add(sGrp);
+                if(midPt) addLabel(midPt, 3, getNetShort(s.meta), getShortCad(s.meta.id), s.meta, infraHex, sGrp);
+            }
+        });
+    });
+
+    data.zouits.forEach(function(z){
+        var textForColor = z.meta.rawText;
+        var color = getZouitColorHex(textForColor);
+        var labelHex = "#" + new THREE.Color(color).getHexString();
+        var zFightingOffset = Math.random() * 0.5; 
+        
+        z.polygons.forEach(function(poly){
+            if(!poly||!poly[0]||poly[0].length<2)return;
+            var zGrp = new THREE.Group();
+            var midPt=null, h=5;
+            
+            if(z.type==="Line"){
+                h = z.meta.isElectric ? 5 : (z.meta.isGas ? 6 : 8); 
+                h += zFightingOffset;
+                
+                var pts=poly[0].map(function(p){return new THREE.Vector3(p.x,h/2,-p.y);});
+                var zone=new THREE.Mesh(
+                    new THREE.TubeGeometry(new THREE.CatmullRomCurve3(pts),64,z.meta.isElectric?6:4,16,false),
+                    new THREE.MeshPhysicalMaterial({color:color, transmission: 0.5, transparent:true, opacity:0.6, depthWrite:false, side: THREE.DoubleSide})
+                );
+                zGrp.add(zone);
+                midPt=pts[Math.floor(pts.length/2)];
+            } else {
+                var shape=createShape(poly);
+                if(shape.getPoints().length>2){
+                    h = z.meta.isElectric ? 5 : (z.meta.isGas ? 6 : (z.meta.isHeat ? 8 : 10)); 
+                    h += zFightingOffset;
+                    
+                    var mesh=new THREE.Mesh(
+                        new THREE.ExtrudeGeometry(shape,{depth:h,bevelEnabled:false}),
+                        new THREE.MeshPhysicalMaterial({color:color, transmission: 0.5, transparent:true, opacity:0.4, depthWrite:false, side: THREE.DoubleSide})
+                    );
+                    mesh.rotation.x=-Math.PI/2;
+                    mesh.position.y = 1.0 + (zFightingOffset * 0.1); 
+                    
+                    zGrp.add(mesh);
+                    mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color:color, linewidth: 2, transparent:true, opacity:0.9})));
+                    var c=getCentroid(poly[0]);
+                    midPt={x:c.x,y:h+5,z:c.z};
+                }
+            }
+            if(zGrp.children.length > 0) {
+                attachMeta(zGrp, z.meta, getZouitShort(z.meta));
+                sceneGroups.zouit.add(zGrp);
+                if(midPt) addLabel(midPt, 2, getZouitShort(z.meta), getShortCad(z.meta.id), z.meta, labelHex, zGrp);
+            }
+        });
+    });
+
     var uiContainer = document.getElementById("layers-container");
-    var addLayerUi = function(name, color, groupRef, dataArray) { /* ... оригинальная функция ... */ };
+    
+    var addLayerUi = function(name, color, groupRef, dataArray) {
+        if (!dataArray || dataArray.length === 0) return;
+
+        var isDefaultVisible = (name !== "Наложения");
+        groupRef.visible = isDefaultVisible;
+        groupRef.children.forEach(function(child) { child.visible = isDefaultVisible; });
+
+        if (!isDefaultVisible) {
+             labelsData.forEach(function(l) {
+                if (l.groupData && dataArray.some(d => d.meta.id === l.groupData.id && d.meta.rawText === l.groupData.rawText)) {
+                    l.el.style.display = "none";
+                }
+            });
+        }
+
+        var groupContainer = document.createElement("div");
+        groupContainer.style.marginBottom = "8px";
+
+        var header = document.createElement("div"); 
+        header.className = "layer-control";
+        
+        var cbAll = document.createElement("input");
+        cbAll.type = "checkbox";
+        cbAll.checked = isDefaultVisible; 
+        
+        var colorBox = document.createElement("div");
+        colorBox.className = "color-box";
+        colorBox.style.background = color;
+
+        var label = document.createElement("label");
+        label.textContent = name + " (" + dataArray.length + ")";
+        label.style.flexGrow = "1";
+
+        var expandBtn = document.createElement("button");
+        expandBtn.innerHTML = "▼";
+        expandBtn.style.cssText = "background:none; border:none; color:var(--text-muted); cursor:pointer; font-size:12px; padding:4px 8px; border-radius:4px;";
+        expandBtn.onmouseover = function(){ this.style.background = "var(--border-color)"; };
+        expandBtn.onmouseout = function(){ this.style.background = "none"; };
+        
+        header.appendChild(cbAll);
+        header.appendChild(colorBox);
+        header.appendChild(label);
+        
+        if (name === "Здания (ОКС)") {
+            var toggleProcBtn = document.createElement("button");
+            toggleProcBtn.innerHTML = '<i class="fas fa-magic"></i>';
+            toggleProcBtn.title = "Скрыть/Показать условные (сгенерированные) ОКС";
+            toggleProcBtn.style.cssText = "background:none; border:none; color:#8b5cf6; cursor:pointer; font-size:13px; padding:2px 6px; border-radius:4px; margin-left: auto;";
+            let procVisible = true;
+            
+            toggleProcBtn.onmouseover = function(){ this.style.background = "var(--border-color)"; };
+            toggleProcBtn.onmouseout = function(){ this.style.background = "none"; };
+
+            toggleProcBtn.onclick = function(e) {
+                e.stopPropagation();
+                procVisible = !procVisible;
+                toggleProcBtn.style.opacity = procVisible ? "1" : "0.3";
+                groupRef.children.forEach(function(child) {
+                    if (child.userData && child.userData.meta && child.userData.meta.isProcedural) {
+                        child.visible = procVisible && cbAll.checked;
+                    }
+                });
+                labelsData.forEach(function(l) {
+                    if (l.groupData && l.groupData.isProcedural) {
+                        l.el.style.display = (procVisible && cbAll.checked) ? "" : "none";
+                    }
+                });
+            };
+            header.appendChild(toggleProcBtn);
+        }
+        
+        var hasUniqueItems = false;
+        var uniqueItems = {};
+        
+        dataArray.forEach(function(item) {
+            var id = item.meta.id || "Без номера";
+            if (!uniqueItems[id]) uniqueItems[id] = [];
+            uniqueItems[id].push(item);
+        });
+        if (Object.keys(uniqueItems).length > 0) {
+            hasUniqueItems = true;
+            header.appendChild(expandBtn);
+        }
+        
+        groupContainer.appendChild(header);
+
+        var subList = document.createElement("div");
+        subList.style.cssText = "margin-left: 28px; display: none; flex-direction: column; gap: 6px; margin-top: 8px; margin-bottom: 12px; max-height: 200px; overflow-y: auto; padding-right: 4px;";
+        
+        var itemCheckboxes =[];
+
+        if (hasUniqueItems) {
+            Object.keys(uniqueItems).forEach(function(id) {
+                var subItem = document.createElement("div");
+                subItem.style.cssText = "display: flex; align-items: flex-start; font-size: 12px; color: var(--text-color); gap: 8px;";
+                
+                var cb = document.createElement("input");
+                cb.type = "checkbox"; 
+                cb.checked = isDefaultVisible; 
+                cb.dataset.id = id;
+                cb.style.margin = "2px 0 0 0"; cb.style.width = "14px"; cb.style.height = "14px";
+                itemCheckboxes.push(cb);
+
+                var subLabel = document.createElement("span");
+                
+                let iconHtml = "";
+                let itemMeta = uniqueItems[id][0].meta;
+                if (itemMeta.isProcedural) {
+                    iconHtml = '<i class="fas fa-magic" title="Сгенерировано (условные границы)" style="color:#8b5cf6; font-size:11px; margin-right:5px;"></i>';
+                } else if (itemMeta.isSpatial && name !== "Участки (ЗУ)" && name !== "Наложения" && name !== "Целевой объект") {
+                    iconHtml = '<i class="fas fa-crosshairs" title="Реальные координаты" style="color:#10b981; font-size:11px; margin-right:5px;"></i>';
+                }
+                
+                subLabel.innerHTML = iconHtml + id;
+                subLabel.style.cursor = "pointer";
+                subLabel.style.wordBreak = "break-all";
+                subLabel.title = itemMeta.name;
+
+                subLabel.onmouseover = function(){ this.style.color = "var(--btn-text)"; };
+                subLabel.onmouseout = function(){ this.style.color = "var(--text-color)"; };
+
+                subItem.appendChild(cb);
+                subItem.appendChild(subLabel);
+                subList.appendChild(subItem);
+
+                cb.addEventListener("change", function(e) {
+                    var isVisible = e.target.checked;
+                    groupRef.children.forEach(function(child) {
+                        if (child.userData && child.userData.meta && child.userData.meta.id === id) {
+                            child.visible = isVisible;
+                        }
+                    });
+                    labelsData.forEach(function(l) {
+                        if (l.groupData && l.groupData.id === id) {
+                            l.el.style.display = isVisible ? "" : "none";
+                        }
+                    });
+                    var allChecked = itemCheckboxes.every(c => c.checked);
+                    var someChecked = itemCheckboxes.some(c => c.checked);
+                    cbAll.checked = allChecked;
+                    cbAll.indeterminate = someChecked && !allChecked;
+                    groupRef.visible = someChecked;
+                });
+                
+                subLabel.addEventListener("click", function() {
+                    var targetMesh = groupRef.children.find(c => c.userData && c.userData.meta && c.userData.meta.id === id);
+                    if (targetMesh) {
+                        if (name === "Наложения") enterIsolationMode(targetMesh);
+                        else flyToMesh(targetMesh);
+                    }
+                });
+            });
+
+            expandBtn.addEventListener("click", function() {
+                var isOpen = subList.style.display === "flex";
+                subList.style.display = isOpen ? "none" : "flex";
+                expandBtn.innerHTML = isOpen ? "▼" : "▲";
+            });
+            groupContainer.appendChild(subList);
+        }
+
+        syncVisibility.push(() => {
+            var isVisibleAll = cbAll.checked;
+            if (hasUniqueItems) {
+                itemCheckboxes.forEach(cb => {
+                    var isVis = cb.checked;
+                    var id = cb.dataset.id;
+                    groupRef.children.forEach(child => {
+                        if (child.userData && child.userData.meta && child.userData.meta.id === id) child.visible = isVis;
+                    });
+                    labelsData.forEach(l => {
+                        if (l.groupData && l.groupData.id === id) l.el.style.display = isVis ? "" : "none";
+                    });
+                });
+                groupRef.visible = itemCheckboxes.some(c => c.checked);
+            } else {
+                groupRef.visible = isVisibleAll;
+                groupRef.children.forEach(child => child.visible = isVisibleAll);
+                labelsData.forEach(l => {
+                    if (l.groupData && dataArray.some(d => d.meta.id === l.groupData.id)) l.el.style.display = isVisibleAll ? "" : "none";
+                });
+            }
+        });
+
+        cbAll.addEventListener("change", function(e) {
+            var isVisible = e.target.checked;
+            itemCheckboxes.forEach(function(cb) { cb.checked = isVisible; });
+            groupRef.visible = isVisible; 
+            groupRef.children.forEach(function(child) { child.visible = isVisible; });
+
+            labelsData.forEach(function(l) {
+                if (l.groupData && dataArray.some(d => d.meta.id === l.groupData.id && d.meta.rawText === l.groupData.rawText)) {
+                    l.el.style.display = isVisible ? "" : "none";
+                }
+            });
+        });
+
+        uiContainer.appendChild(groupContainer);
+    };
+
     addLayerUi("Целевой объект", "#3b82f6", sceneGroups.target, data.target); 
     addLayerUi("Участки (ЗУ)", "#10b981", sceneGroups.parcels, data.parcels);
     addLayerUi("Наложения", "#dc2626", sceneGroups.intersections, data.intersections);
     addLayerUi("Здания (ОКС)", "#3b82f6", sceneGroups.buildings, data.buildings);
     addLayerUi("Инфраструктура", "#f59e0b", sceneGroups.structures, data.structures);
     addLayerUi("ЗОУИТ", "#8b5cf6", sceneGroups.zouit, data.zouits);
-
-    // Ground settings UI
+    
     var groundControl = document.createElement("div"); 
     groundControl.style.cssText = "margin-top: 15px; border-top: 1px solid var(--border-color); padding-top: 15px; display: flex; align-items: center; gap: 10px;";
     groundControl.innerHTML = \`
@@ -1546,7 +1742,7 @@ try {
     \`;
     uiContainer.appendChild(groundControl);
 
-    const applyGroundSettings = () => {
+   const applyGroundSettings = () => {
         const newColor = document.getElementById("ground-color-picker").value;
         const newTex = document.getElementById("ground-texture-picker").value;
         window.parent.postMessage({ type: 'saveGroundSettings', color: newColor, tex: newTex }, '*');
@@ -1555,26 +1751,147 @@ try {
         else ground.material.map = createGroundTexture(newTex, newColor);
         ground.material.needsUpdate = true;
     };
+
     document.getElementById("ground-color-picker").addEventListener("input", applyGroundSettings);
     document.getElementById("ground-texture-picker").addEventListener("change", applyGroundSettings);
 
-    // Raycaster, hover, animate — оригинальная логика (без изменений, она не влияет на мерцание)
     const raycaster = new THREE.Raycaster();
     const mouse = new THREE.Vector2();
     let hoveredMesh = null;
-    const setHighlight = (obj, isHover) => { /* ... оригинальная функция ... */ };
-    window.addEventListener("mousemove", function(e) { /* ... оригинальная обработка ... */ });
-    window.addEventListener("dblclick", function() { if (hoveredMesh) flyToMesh(hoveredMesh); });
+
+    const setHighlight = (obj, isHover) => {
+        obj.traverse(function(child) {
+            if (child.userData.origEmissive !== undefined) {
+                const highlightColor = 0x333333; 
+                const applyEmission = (mat, origVal) => {
+                    if (mat && mat.emissive) mat.emissive.setHex(isHover ? highlightColor : origVal);
+                };
+                if (Array.isArray(child.material)) {
+                    child.material.forEach((m, i) => { applyEmission(m, child.userData.origEmissive[i]); });
+                } else {
+                    applyEmission(child.material, child.userData.origEmissive);
+                }
+            }
+        });
+    };
+    
+   window.addEventListener("mousemove", function(e) {
+        mouse.x = (e.clientX / window.innerWidth) * 2 - 1;
+        mouse.y = -(e.clientY / window.innerHeight) * 2 + 1;
+        raycaster.setFromCamera(mouse, camera);
+        
+        const hits = raycaster.intersectObjects(interactables, false);
+        let validHit = null;
+        for (let i = 0; i < hits.length; i++) {
+            let obj = hits[i].object;
+            let isVisible = true;
+            while (obj) {
+                if (obj.visible === false) { isVisible = false; break; }
+                obj = obj.parent;
+            }
+            if (isVisible) { validHit = hits[i]; break; }
+        }
+        
+        if (validHit) {
+            let hitMesh = validHit.object;
+            let parentObj = hitMesh.userData.parentMetaObj || hitMesh;
+            
+            if (hoveredMesh !== parentObj) {
+                if (hoveredMesh) setHighlight(hoveredMesh, false);
+                hoveredMesh = parentObj;
+                setHighlight(hoveredMesh, true);
+                
+                document.body.style.cursor = "pointer";
+                let mData = hoveredMesh.userData.meta;
+                tooltip.innerHTML = buildTooltipHTML(hoveredMesh.userData.category, mData);
+                tooltip.style.opacity = "1";
+            }
+            tooltip.style.left = (e.clientX + 15) + "px";
+            tooltip.style.top = (e.clientY + 15) + "px";
+        } else {
+            if (hoveredMesh) {
+                setHighlight(hoveredMesh, false);
+                hoveredMesh = null; 
+                document.body.style.cursor = "default"; 
+                tooltip.style.opacity = "0";
+            }
+        }
+    });
+
+    window.addEventListener("dblclick", function() {
+        if (hoveredMesh) flyToMesh(hoveredMesh);
+    });
+
+    var exportBtn = document.getElementById("export-html-btn");
+    if(exportBtn){
+        exportBtn.onclick = function(){ window.parent.postMessage({ type: 'export3DHtml' }, '*'); };
+    }
+
+    window.addEventListener("resize", function() { camera.aspect = window.innerWidth / window.innerHeight; camera.updateProjectionMatrix(); renderer.setSize(window.innerWidth, window.innerHeight); });
+
+    const tempVec = new THREE.Vector3();
+    function updateLabels() {
+        let hw = window.innerWidth / 2, hh = window.innerHeight / 2;
+        let visibleLabels =[];
+        
+        for (let i=0; i<labelsData.length; i++) {
+            let l = labelsData[i];
+            if (!l.el.parentElement || l.el.style.display === "none") continue;
+            
+            let dist = camera.position.distanceTo(l.pos);
+            if (dist > 800 && l.priority < 8) { l.el.style.opacity = "0"; l.el.style.pointerEvents = "none"; continue; }
+            
+            tempVec.copy(l.pos).project(camera);
+            if (tempVec.z > 1) { l.el.style.opacity = "0"; l.el.style.pointerEvents = "none"; continue; }
+            
+            let x = (tempVec.x * hw) + hw; let y = -(tempVec.y * hh) + hh;
+            l.el.style.transform = "translate(-50%, -50%) translate3d(" + x + "px, " + y + "px, 0)";
+            if (!l.el.style.zIndex || l.el.style.zIndex !== "9999") l.el.style.zIndex = Math.round(1000 - dist);
+            
+            if (dist < 200 || l.priority > 7) l.el.classList.add("show-text"); else l.el.classList.remove("show-text");
+            
+            l.box2D = { left: x - 15, right: x + (l.el.classList.contains("show-text") ? 100 : 15), top: y - 15, bottom: y + 15 };
+            visibleLabels.push(l);
+        }
+        
+        visibleLabels.sort(function(a, b) { return b.priority - a.priority; });
+        let activeBoxes =[];
+        
+        for (let i = 0; i < visibleLabels.length; i++) {
+            let current = visibleLabels[i];
+            let isOverlapping = false;
+            
+            for (let j = 0; j < activeBoxes.length; j++) {
+                let accepted = activeBoxes[j];
+                if (current.box2D.left < accepted.right && current.box2D.right > accepted.left && current.box2D.top < accepted.bottom && current.box2D.bottom > accepted.top) {
+                    isOverlapping = true; break;
+                }
+            }
+            
+            if (isOverlapping && current.priority < 10) {
+                current.el.style.opacity = "0";
+                current.el.style.pointerEvents = "none";
+            } else {
+                current.el.style.opacity = "1";
+                current.el.style.pointerEvents = "auto";
+                activeBoxes.push(current.box2D);
+            }
+        }
+    }
+
+const altValueEl = document.getElementById("alt-value");
     
     function animate(){
         requestAnimationFrame(animate);
         controls.update();
         
-        // Обновление высоты камеры
-        const altValueEl = document.getElementById("alt-value");
         if (altValueEl) {
             let alt = camera.position.y;
-            altValueEl.textContent = (alt < 1000) ? Math.round(alt) + " м" : (alt/1000).toFixed(2) + " км";
+            if (alt < 1000) {
+                altValueEl.textContent = "Высота: " + Math.round(alt) + " м";
+            } else {
+                altValueEl.textContent = "Высота: " + (alt / 1000).toFixed(2) + " км";
+            }
         }
 
         var time=performance.now()*0.002;
@@ -1592,6 +1909,7 @@ try {
         loaderWrapper.style.opacity = '0';
         setTimeout(() => { loaderWrapper.style.visibility = 'hidden'; }, 500);
     }
+
     animate();
 
 } catch(err) {
@@ -1625,6 +1943,9 @@ try {
                     const latestTex = localStorage.getItem('3d_ground_texture') || 'grid';
                     
                     let exportStr = srcDocContent;
+                    
+                    exportStr = exportStr.replace(/<div class="export-block"[^>]*>[\s\S]*?<\/div>/, '');
+                    
                     exportStr = exportStr.replace(`let currentTheme = "${savedTheme}";`, `let currentTheme = "${latestTheme}";`);
                     exportStr = exportStr.replace(`let currentGroundColor = "${savedGroundColor}";`, `let currentGroundColor = "${latestColor}";`);
                     exportStr = exportStr.replace(`let currentGroundTex = "${savedGroundTex}";`, `let currentGroundTex = "${latestTex}";`);
