@@ -14652,8 +14652,7 @@ function updateLoaderWithRadiusButtons(lat, lon) {
     const loadingText = document.querySelector('.loading-text');
     
     if (loadingText) {
-        const radiusDisplay = currentSearchRadius === 'obj' ? 'вокруг объекта (5м)' : `${currentSearchRadius}м`;
-        loadingText.innerHTML = `Поиск участков <b>${radiusDisplay}</b>...`;
+        loadingText.innerHTML = `Поиск участков в радиусе <b>${currentSearchRadius}м</b>...`;
     }
 
     let buttonsContainer = loaderContainer.querySelector('.loader-radius-buttons');
@@ -14665,13 +14664,12 @@ function updateLoaderWithRadiusButtons(lat, lon) {
     }
     
     buttonsContainer.innerHTML = '';
-    // Добавлен новый вариант 'obj' (Вокруг объекта)
-    const radii = [50, 100, 200, 300, 500, 'obj'];
+    const radii = [50, 100, 200, 300,500];
 
     radii.forEach(r => {
         const btn = document.createElement('button');
         btn.className = 'radius-btn';
-        btn.textContent = r === 'obj' ? 'Вокруг объекта' : `${r}м`;
+        btn.textContent = `${r}м`;
         
         if (r === currentSearchRadius) {
             btn.classList.add('active');
@@ -14683,141 +14681,11 @@ function updateLoaderWithRadiusButtons(lat, lon) {
             if (r === currentSearchRadius) return;
 
             currentSearchRadius = r;
-            // При клике на новую кнопку перезапускаем процесс поиска 
-            // (он снова запустит таймер на 2 секунды и отменит предыдущий)
             getParcelsNearby(lat, lon); 
         };
 
         buttonsContainer.appendChild(btn);
     });
-}
-
-async function getParcelsNearby(lat, lon) {
-    const thisSessionId = Date.now();
-    nearbySearchSessionId = thisSessionId;
-
-    showLoader(); 
-    updateLoaderWithRadiusButtons(lat, lon); 
-
-    // 1) Делаем паузу 2 секунды перед выполнением запроса
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
-    // Если за время паузы пользователь нажал на другую кнопку радиуса, 
-    // сессия изменилась, прерываем текущее выполнение
-    if (thisSessionId !== nearbySearchSessionId) {
-        return; 
-    }
-
-    try {
-        let searchPolygonCoordsEPSG3857;
-
-        // 2) Логика для режима "Вокруг объекта"
-        if (currentSearchRadius === 'obj') {
-            const targetPolygon = findPolygonAtPoint(lat, lon);
-            
-            if (!targetPolygon) {
-                showNotification('В месте клика не найден полигон для построения буфера. Используется квадрат 50м.', 'warning');
-                currentSearchRadius = 50; // Фолбэк на 50м, если промахнулись
-            } else {
-                // Извлекаем координаты кликнутого полигона
-                const coords = targetPolygon.geometry.getCoordinates()[0]; 
-                
-                // Переводим из визуальных координат в [lon, lat] для Turf
-                const turfCoords = coords.map(c => [c[1] + (mapOffsetX * 0.000008983), c[0] + (mapOffsetY * 0.000008983)]);
-                
-                // Замыкаем контур для Turf, если нужно
-                const first = turfCoords[0];
-                const last = turfCoords[turfCoords.length - 1];
-                if (Math.abs(first[0] - last[0]) > 1e-9 || Math.abs(first[1] - last[1]) > 1e-9) {
-                    turfCoords.push([...first]);
-                }
-
-                // Строим буфер 5 метров
-                const turfPoly = turf.polygon([turfCoords]);
-                const bufferedPoly = turf.buffer(turfPoly, 5, { units: 'meters' });
-                
-                // Переводим результат буфера в EPSG:3857 для запроса
-                let bufferedCoords = [];
-                if (bufferedPoly.geometry.type === 'Polygon') {
-                    bufferedCoords = bufferedPoly.geometry.coordinates[0];
-                } else if (bufferedPoly.geometry.type === 'MultiPolygon') {
-                    bufferedCoords = bufferedPoly.geometry.coordinates[0][0];
-                }
-
-                searchPolygonCoordsEPSG3857 = bufferedCoords.map(coord => proj4("EPSG:4326", "EPSG:3857", coord));
-            }
-        }
-
-        // 3) Стандартная логика для квадрата (радиус в метрах), если не "Вокруг объекта" (или если фолбэк)
-        if (currentSearchRadius !== 'obj') {
-            const centerPoint = toEPSG3857(lat, lon);
-            const centerX = centerPoint.x;
-            const centerY = centerPoint.y;
-            const halfSize = currentSearchRadius; 
-
-            searchPolygonCoordsEPSG3857 = [
-                [centerX - halfSize, centerY - halfSize],
-                [centerX + halfSize, centerY - halfSize],
-                [centerX + halfSize, centerY + halfSize],
-                [centerX - halfSize, centerY + halfSize],
-                [centerX - halfSize, centerY - halfSize]
-            ];
-        }
-
-        document.querySelector('.loading-text').textContent = 'Выполнение запроса в НСПД...';
-        const foundFeatures = await searchParcelsByArea(searchPolygonCoordsEPSG3857);
-
-        if (thisSessionId !== nearbySearchSessionId) return;
-
-        if (!foundFeatures || foundFeatures.length === 0) {
-            const radTxt = currentSearchRadius === 'obj' ? 'буфере 5м вокруг объекта' : `радиусе ${currentSearchRadius}м`;
-            showNotification(`Земельные участки в ${radTxt} не найдены`, 'warning');
-            cleanUpLoaderButtons();
-            hideLoader();
-            return;
-        }
-
-        await drawFoundParcels(foundFeatures, true);
-
-        if (thisSessionId !== nearbySearchSessionId) return;
-
-        const sidebarTitle = currentSearchRadius === 'obj' ? 'ЗУ (вокруг объекта)' : `ЗУ (рядом ${currentSearchRadius}м)`;
-        await populateSidebarWithFoundObjects(foundFeatures, sidebarTitle);
-        
-        // 4) Отрисовываем область поиска (работает и для квадрата, и для буфера-полигона)
-        const currentMapType = map.getType();
-        const strokeColor = (currentMapType === 'yandex#satellite' || currentMapType === 'yandex#hybrid') ? '#FFFFFF' : '#FF0000';
-
-        const visualSearchCoords = searchPolygonCoordsEPSG3857.map(coord => {
-            const wgs = proj4("EPSG:3857", "EPSG:4326", coord); // [lon, lat]
-            return [wgs[1] - mapOffsetY * 0.000008983, wgs[0] - mapOffsetX * 0.000008983];
-        });
-
-        const searchShape = new ymaps.Polygon([visualSearchCoords], {}, {
-            strokeColor: strokeColor,
-            strokeWidth: 1,
-            strokeOpacity: 0.5,
-            fillOpacity: 0,
-            strokeStyle: 'dash'
-        });
-        
-        map.geoObjects.add(searchShape);
-        setTimeout(() => map.geoObjects.remove(searchShape), 10000);
-
-        const resultRadiusTxt = currentSearchRadius === 'obj' ? 'Буфер=5м' : `R=${currentSearchRadius}м`;
-        showNotification(`Найдено участков: ${foundFeatures.length} (${resultRadiusTxt})`, 'success');
-
-    } catch (error) {
-        if (thisSessionId === nearbySearchSessionId) {
-            console.error('Ошибка при поиске участков рядом:', error);
-            showNotification(`Ошибка поиска: ${error.message}`, 'error');
-        }
-    } finally {
-        if (thisSessionId === nearbySearchSessionId) {
-            cleanUpLoaderButtons();
-            hideLoader();
-        }
-    }
 }
 
 
