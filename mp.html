@@ -1068,6 +1068,24 @@
     </div>
     
     
+    <!-- Модалка схемы образуемого ЗУ -->
+<div id="newParcelSchemaModal" class="modal-overlay">
+    <div class="oks-schema-modal-content">
+        <div class="oks-schema-modal-header">
+            <h2><i class="fas fa-map-marked-alt"></i> Схема расположения образуемого ЗУ</h2>
+            <div class="oks-schema-legend">
+                <div class="legend-item"><div class="legend-color" style="background:rgba(37, 99, 235, 0.1); border: 2px dashed #2563eb;"></div><span>Исходный ЗУ (ЕГРН)</span></div>
+                <div class="legend-item"><div class="legend-color" style="background:#10b981;"></div><span>Образуемый ЗУ (Корректный)</span></div>
+                <div class="legend-item"><div class="legend-color" style="background:#ef4444;"></div><span>Выход за границы</span></div>
+            </div>
+            <span class="ai-modal-close-button" id="newParcelSchemaModalClose">×</span>
+        </div>
+        <div class="oks-schema-modal-body">
+            <canvas id="newParcelCanvas"></canvas>
+        </div>
+    </div>
+</div>
+    
     <!-- Модалка проверки смежного ЗУ -->
 <div id="relatedParcelModal" class="modal-overlay">
     <div class="related-parcel-modal-content">
@@ -1113,6 +1131,7 @@ let currentMskSystem = null;
 let currentTpOksContours = null;
 let currentTpZuData = null;
 let relatedParcelCheckData = null;
+let newParcelChecksData = {};
 
 document.addEventListener('DOMContentLoaded', () => {
     const landCategories = { '003001000000': 'Земли сельскохозяйственного назначения', '003002000000': 'Земли населенных пунктов', '003003000000': 'Земли промышленности, энергетики, транспорта и иного специального назначения', '003004000000': 'Земли особо охраняемых территорий и объектов', '003005000000': 'Земли лесного фонда', '003006000000': 'Земли водного фонда', '003007000000': 'Земли запаса', '003008000000': 'Категория не установлена' };
@@ -2825,6 +2844,94 @@ function closeOksSchemaModal() {
     }
 }
 
+function drawNewParcelSchemaCanvas(data) {
+    const canvas = document.getElementById('newParcelCanvas');
+    const ctx = canvas.getContext('2d');
+    const container = canvas.parentElement;
+
+    if (!data) return;
+    const { egrnContours, newContours, isOutside } = data;
+
+    // Собираем все точки для масштабирования
+    const allPoints = [];
+    if (egrnContours) egrnContours.forEach(c => c.forEach(p => allPoints.push(p)));
+    if (newContours) newContours.forEach(c => c.forEach(p => allPoints.push(p)));
+
+    if (allPoints.length === 0) return;
+
+    // Вычисляем размеры контейнера
+    const containerRect = container.getBoundingClientRect();
+    const padding = 20;
+    const availableWidth = containerRect.width - padding * 2;
+    const availableHeight = containerRect.height - padding * 2;
+    
+    const displayWidth = Math.max(Math.min(availableWidth, 1400), 200);
+    const displayHeight = Math.max(Math.min(availableHeight, 900), 150);
+    
+    const dpr = window.devicePixelRatio || 1;
+    canvas.width = displayWidth * dpr;
+    canvas.height = displayHeight * dpr;
+    canvas.style.width = displayWidth + 'px';
+    canvas.style.height = displayHeight + 'px';
+    ctx.scale(dpr, dpr);
+    ctx.clearRect(0, 0, displayWidth, displayHeight);
+
+    // Высчитываем Scale и смещения (Offset)
+    let minGeoX = Infinity, maxGeoX = -Infinity, minGeoY = Infinity, maxGeoY = -Infinity;
+    allPoints.forEach(p => {
+        minGeoX = Math.min(minGeoX, p.x);
+        maxGeoX = Math.max(maxGeoX, p.x);
+        minGeoY = Math.min(minGeoY, p.y);
+        maxGeoY = Math.max(maxGeoY, p.y);
+    });
+
+    const dataGeoWidth = (maxGeoY - minGeoY) || 1;
+    const dataGeoHeight = (maxGeoX - minGeoX) || 1;
+    const scale = Math.min(displayWidth / dataGeoWidth, displayHeight / dataGeoHeight) * 0.9;
+    
+    const offsetX_canvas = padding + (displayWidth - dataGeoWidth * scale) / 2;
+    const offsetY_canvas = padding + (displayHeight - dataGeoHeight * scale) / 2;
+
+    const toCanvas = (point) => ({
+        x: offsetX_canvas + (point.y - minGeoY) * scale,
+        y: offsetY_canvas + (maxGeoX - point.x) * scale
+    });
+
+    const baseLineWidth = Math.max(1, Math.min(3, displayWidth / 400));
+
+    // Вспомогательная функция для отрисовки массива контуров
+    const drawMultiContour = (contoursArray, strokeColor, fillColor, lineDash = []) => {
+        ctx.strokeStyle = strokeColor;
+        ctx.fillStyle = fillColor;
+        ctx.lineWidth = baseLineWidth;
+        ctx.setLineDash(lineDash);
+        
+        ctx.beginPath();
+        contoursArray.forEach(contour => {
+            if (contour.length < 2) return;
+            const canvasPoints = contour.map(toCanvas);
+            canvasPoints.forEach((cp, i) => (i === 0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y)));
+            ctx.closePath();
+        });
+        ctx.fill('evenodd');
+        ctx.stroke();
+        ctx.setLineDash([]);
+    };
+
+    // 1. Отрисовка исходного ЗУ (ЕГРН) — синий пунктир
+    if (egrnContours && egrnContours.length > 0) {
+        drawMultiContour(egrnContours, '#2563eb', 'rgba(37, 99, 235, 0.1)', [6, 4]);
+    }
+
+    // 2. Отрисовка образуемого ЗУ (XML)
+    // Если выходит за границы - красный, если все ок - зеленый
+    if (newContours && newContours.length > 0) {
+        const strokeColor = isOutside ? '#ef4444' : '#10b981';
+        const fillColor = isOutside ? 'rgba(239, 68, 68, 0.3)' : 'rgba(16, 185, 129, 0.3)';
+        drawMultiContour(newContours, strokeColor, fillColor);
+    }
+}
+
 function drawOksSchemaCanvas() {
     const canvas = document.getElementById('oksSchemaCanvas');
     const ctx = canvas.getContext('2d');
@@ -3621,6 +3728,187 @@ function closeRelatedParcelModal() {
 }
 
 
+// --- МАТЕМАТИКА: Вычисление расстояния от точки до отрезка ---
+function getDistanceToSegment(p, v, w) {
+    const l2 = (w.x - v.x) ** 2 + (w.y - v.y) ** 2;
+    // Если отрезок это точка
+    if (l2 === 0) return Math.sqrt((p.x - v.x) ** 2 + (p.y - v.y) ** 2);
+    let t = ((p.x - v.x) * (w.x - v.x) + (p.y - v.y) * (w.y - v.y)) / l2;
+    t = Math.max(0, Math.min(1, t)); // Ограничиваем t от 0 до 1 (проекция на отрезок)
+    const projX = v.x + t * (w.x - v.x);
+    const projY = v.y + t * (w.y - v.y);
+    return Math.sqrt((p.x - projX) ** 2 + (p.y - projY) ** 2);
+}
+
+// --- ЛОГИКА: Проверка образуемого участка на вхождение и обеспечение доступа ---
+async function checkNewParcelBoundaries(prevCadNumber, parcelIndex, button) {
+    if (!prevCadNumber) return;
+    
+    const container = button.closest('.section');
+    const statusDiv = container.querySelector('.new-parcel-bounds-status');
+    const originalButtonHtml = button.innerHTML;
+
+    button.disabled = true;
+    button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Загрузка ЕГРН...</span>';
+    statusDiv.innerHTML = '';
+
+    try {
+        // 1. Добываем координаты образуемого участка из XML
+        const newParcels = lastXmlDoc.querySelectorAll('NewParcel');
+        const targetParcel = newParcels[parcelIndex];
+        if (!targetParcel) throw new Error("Участок не найден в XML.");
+
+        const spatialElements = targetParcel.querySelectorAll('EntitySpatial > SpatialElement, Contours > Contour > EntitySpatial > SpatialElement');
+        const newContours = [];
+        
+        spatialElements.forEach(spEl => {
+            const contourPoints = [];
+            const ordinates = spEl.querySelectorAll('Ordinate, NewOrdinate');
+            ordinates.forEach(ord => {
+                const x = parseFloat(ord.getAttribute('X'));
+                const y = parseFloat(ord.getAttribute('Y'));
+                if (!isNaN(x) && !isNaN(y)) contourPoints.push({ x, y });
+            });
+            if (contourPoints.length > 2) newContours.push(contourPoints);
+        });
+
+        if (newContours.length === 0) throw new Error("Не найдены координаты образуемого участка.");
+
+        // 2. Проверяем обеспечение доступа в XML
+        const accessNodes = targetParcel.querySelectorAll('ProvidingPassCadastralNumbers > CadastralNumber, ProvidingPassCadastralNumbers > Other');
+        const accessTexts = Array.from(accessNodes).map(n => n.textContent.trim().toLowerCase());
+        const prevCadLower = prevCadNumber.toLowerCase();
+        // Смотрим, упоминается ли исходный номер в доступе
+        const hasAccessThroughPrev = accessTexts.some(text => text.includes(prevCadLower));
+
+        // 3. Скачиваем исходный участок из ЕГРН
+        currentMskSystem = detectMskSystem(prevCadNumber);
+        if (!currentMskSystem) throw new Error("Не удалось определить МСК для исходного участка.");
+
+        const egrnContours = await fetchEgrnCoordinates(prevCadNumber);
+        if (!egrnContours || egrnContours.length === 0) throw new Error(`Исходный участок ${prevCadNumber} не найден в ЕГРН (или нет геометрии).`);
+
+        button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Анализ...</span>';
+        await new Promise(resolve => setTimeout(resolve, 300)); // небольшая пауза для рендера
+
+        // 4. Математика: проверяем выходы за границы и минимальное расстояние до границы ЕГРН
+        let isOutside = false;
+        let minDistanceToEgrnBorder = Infinity;
+
+        for (const newContour of newContours) {
+            for (const pt of newContour) {
+                let pointIsInsideAnyEgrnRing = false;
+                
+                for (const egrnRing of egrnContours) {
+                    // Проверка внутри полигона (ray casting)
+                    if (isPointInPolygon(pt, egrnRing)) {
+                        pointIsInsideAnyEgrnRing = true;
+                    }
+                    
+                    // Вычисляем кратчайшее расстояние до отрезков этого контура ЕГРН
+                    for (let i = 0; i < egrnRing.length - 1; i++) {
+                        const dist = getDistanceToSegment(pt, egrnRing[i], egrnRing[i+1]);
+                        if (dist < minDistanceToEgrnBorder) {
+                            minDistanceToEgrnBorder = dist;
+                        }
+                    }
+                }
+
+                // Допуск 5 см: если точка не внутри и расстояние до границы больше 5 см — участок вылезает
+                if (!pointIsInsideAnyEgrnRing && minDistanceToEgrnBorder > 0.05) {
+                    isOutside = true;
+                }
+            }
+        }
+
+        // 5. Вывод результатов логики
+        let resultHtml = '';
+
+        if (isOutside) {
+            resultHtml += `
+            <div class="validation-message validation-error" style="align-items:flex-start;">
+                ${sectionIcons.errorIcon}
+                <div>
+                    <strong>ВНИМАНИЕ: Образуемый участок выходит за границы исходного!</strong><br>
+                    <span style="font-size:0.9em;">Точки образуемого ЗУ находятся за пределами ${prevCadNumber} (макс. отклонение от границы > 5 см).</span>
+                </div>
+            </div>`;
+        } else {
+            resultHtml += `
+            <div class="validation-message validation-success" style="margin-bottom:8px;">
+                ${sectionIcons.successIcon}
+                <strong>Геометрия корректна:</strong> Образуемый участок находится внутри исходного ЗУ.
+            </div>`;
+            
+            // Логика доступа: если > 10 см от границы, доступ должен быть через исходный
+            if (minDistanceToEgrnBorder > 0.10) {
+                if (hasAccessThroughPrev) {
+                    resultHtml += `
+                    <div class="validation-message validation-success">
+                        <i class="fas fa-check-circle" style="color:var(--success-color); font-size:1.2rem;"></i>
+                        <div>
+                            <strong>Доступ обеспечен верно:</strong> Участок образуется "внутри" (в ${minDistanceToEgrnBorder.toFixed(2)} м. от границы исходного ЗУ), и доступ прописан через ${prevCadNumber}.
+                        </div>
+                    </div>`;
+                } else {
+                    resultHtml += `
+                    <div class="validation-message validation-error" style="align-items:flex-start;">
+                        ${sectionIcons.errorIcon}
+                        <div>
+                            <strong>Ошибка обеспечения доступа!</strong><br>
+                            <span style="font-size:0.9em;">Участок образуется "в глубине" (в ${minDistanceToEgrnBorder.toFixed(2)} м. от внешних границ). Доступ ОБЯЗАТЕЛЬНО должен быть обеспечен через исходный ЗУ <b>${prevCadNumber}</b>, но он не указан в XML.</span>
+                        </div>
+                    </div>`;
+                }
+            } else {
+                resultHtml += `
+                <div class="validation-message" style="background:#f0f9ff; border:1px solid #bae6fd; color:#0369a1;">
+                    <i class="fas fa-info-circle" style="font-size:1.2rem;"></i>
+                    <div>
+                        <strong>Участок прилегает к границе.</strong><br>
+                        <span style="font-size:0.9em;">(Отступ от границы ЕГРН: ${(minDistanceToEgrnBorder * 100).toFixed(1)} см). В таком случае доступ не обязательно должен осуществляться через исходный участок.</span>
+                    </div>
+                </div>`;
+            }
+        }
+        
+        
+        
+        // --- СОХРАНЯЕМ ДАННЫЕ ДЛЯ СХЕМЫ ---
+        newParcelChecksData[parcelIndex] = {
+            prevCadNumber,
+            egrnContours,
+            newContours,
+            isOutside
+        };
+
+        // --- ДОБАВЛЯЕМ КНОПКУ "ПОКАЗАТЬ НА СХЕМЕ" ---
+        resultHtml += `
+        <div style="margin-top:12px;">
+            <button class="print-btn open-new-parcel-schema-btn" data-index="${parcelIndex}" style="padding:6px 14px; font-size:0.9rem;">
+                <i class="fas fa-map-marked-alt"></i> Показать на схеме
+            </button>
+        </div>`;
+
+        
+
+        statusDiv.innerHTML = resultHtml;
+
+    } catch (error) {
+        console.error("Ошибка проверки образуемого участка:", error);
+        statusDiv.innerHTML = `
+        <div class="validation-message validation-warning">
+            ${sectionIcons.warningIcon}
+            <span><strong>Не удалось выполнить проверку:</strong> ${error.message}</span>
+        </div>`;
+    } finally {
+        button.disabled = false;
+        button.innerHTML = originalButtonHtml;
+    }
+}
+
+
+
     function setupEventListeners() {
         dropArea.addEventListener('click', () => fileInput.click());
         fileInput.addEventListener('change', (event) => {
@@ -3703,6 +3991,15 @@ window.addEventListener('resize', () => {
             const aiCopyBtn = event.target.closest('#aiCopyBtn');
             const checkOksEgrnBtn = event.target.closest('.check-oks-egrn-btn');
             
+            const checkNewBoundsBtn = event.target.closest('.check-new-bounds-btn');
+            if (checkNewBoundsBtn) {
+                event.preventDefault();
+                const prevCad = checkNewBoundsBtn.dataset.prevCad;
+                const index = parseInt(checkNewBoundsBtn.dataset.index, 10);
+                checkNewParcelBoundaries(prevCad, index, checkNewBoundsBtn);
+                return;
+            }
+            
 const checkRelatedBtn = event.target.closest('.check-related-btn');
 if (checkRelatedBtn) {
     event.preventDefault();
@@ -3742,6 +4039,25 @@ document.getElementById('relatedParcelModalClose').addEventListener('click', clo
 document.getElementById('relatedParcelModal').addEventListener('click', (e) => {
     if (e.target.id === 'relatedParcelModal') closeRelatedParcelModal();
 });
+
+
+     const openNewParcelSchemaBtn = event.target.closest('.open-new-parcel-schema-btn');
+            if (openNewParcelSchemaBtn) {
+                event.preventDefault();
+                const idx = openNewParcelSchemaBtn.dataset.index;
+                const data = newParcelChecksData[idx];
+                if (data) {
+                    document.getElementById('newParcelSchemaModal').style.display = 'flex';
+                    // Небольшая задержка, чтобы модалка успела отрендериться и получить размеры
+                    setTimeout(() => drawNewParcelSchemaCanvas(data), 50);
+                }
+                return;
+            }
+
+            // Закрытие схемы образуемого участка
+            if (event.target.id === 'newParcelSchemaModalClose' || event.target.id === 'newParcelSchemaModal') {
+                document.getElementById('newParcelSchemaModal').style.display = 'none';
+            }
 
 
 if (checkZuBtn) {
@@ -4551,8 +4867,10 @@ function runTechPlanValidation(xmlDoc, xmlText) {
     }
 
     // 4. Образуемые участки (NewParcel)
-    const newParcels = All(xmlDoc, 'NewParcel');
-    for (const newParcel of newParcels) {
+           const newParcels = All(xmlDoc, 'NewParcel');
+    // Используем обычный цикл for с индексом, чтобы привязывать кнопку к конкретному участку
+    for (let index = 0; index < newParcels.length; index++) {
+        const newParcel = newParcels[index];
         sectionsFound++;
         const categoryCode = A(E(newParcel, 'Category'), 'Category');
         const categoryName = landCategories[categoryCode] || 'Категория не определена';
@@ -4567,7 +4885,18 @@ function runTechPlanValidation(xmlDoc, xmlText) {
             areaInacc = T(newParcel, 'Area > Inaccuracy');
         }
 
-        let sectionContent = `<div class="info-grid">
+        // Извлекаем сведения об исходном земельном участке
+        const prevNodes = All(newParcel, 'PrevCadastralNumbers > CadastralNumber');
+        const prevNumbers = Array.from(prevNodes).map(n => n.textContent.trim()).join(', ');
+        const prevHtml = prevNumbers ? `<div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Исходный земельный участок</div><div class="info-value"><code>${prevNumbers}</code></div></div>` : '';
+
+        // --- ИЗМЕНЕНИЕ: Добавляем div для статуса проверки границ В САМОЕ НАЧАЛО sectionContent ---
+        // Теперь результат будет появляться сразу под серой шапкой с кнопкой
+        let sectionContent = `<div class="new-parcel-bounds-status"></div>`;
+
+        // Добавляем основную сетку с данными
+        sectionContent += `<div class="info-grid" style="margin-top: 16px;">
+            ${prevHtml}
             <div class="info-card"><div class="info-label">Кадастровый квартал</div><div class="info-value">${T(newParcel, 'CadastralBlock')}</div></div>
             <div class="info-card"><div class="info-label">Площадь, кв.м.</div><div class="info-value">${areaVal} (±${areaInacc})</div></div>
             <div class="info-card"><div class="info-label">Категория земель</div><div class="info-value">${categoryName} <code>${categoryCode}</code></div></div>
@@ -4600,7 +4929,7 @@ function runTechPlanValidation(xmlDoc, xmlText) {
         }
 
         // ОКС на участке
-        const oksNodesNewParcel = All(newParcel, 'ObjectsRealty CadastralNumber');
+        const oksNodesNewParcel = All(newParcel, 'ObjectsRealty CadastralNumber, ObjectsRealty > ObjectRealty > InnerCadastralNumbers > CadastralNumber');
         const oksNumbersNewParcel = Array.from(oksNodesNewParcel).map(node => node.textContent.trim());
         sectionContent += `
         <div class="subsection">
@@ -4626,8 +4955,53 @@ function runTechPlanValidation(xmlDoc, xmlText) {
             sectionContent += createSpatialDataHtml(entitySpatial);
         }
 
-        mainHtml += `<div class="section"><div class="section-header">${sectionIcons.newParcel}<h3 class="section-title">Сведения об образуемом участке (${A(newParcel, 'Definition')})</h3>${entitySpatial ? `<button class="header-button copy-coords-btn" title="Скопировать координаты">${sectionIcons.copyXY}</button>` : ''}</div><div class="section-content" style="padding:16px">${sectionContent}</div></div>`;
+        let actionButtons = '';
+        if (prevNumbers && entitySpatial) {
+            // Берем только первый исходный участок, если их несколько
+            const firstPrev = prevNumbers.split(',')[0].trim();
+            actionButtons += `
+                <button class="check-new-bounds-btn print-btn docs-btn" data-prev-cad="${firstPrev}" data-index="${index}" style="padding:4px 10px; font-size:0.85rem; margin-right:8px;">
+                    <i class="fas fa-search-location"></i>
+                    <span class="btn-text">Проверить границы и доступ</span>
+                </button>`;
+        }
+        if (entitySpatial) {
+            actionButtons += `<button class="header-button copy-coords-btn" title="Скопировать координаты">${sectionIcons.copyXY}</button>`;
+        }
+
+        mainHtml += `<div class="section"><div class="section-header">${sectionIcons.newParcel}<h3 class="section-title">Сведения об образуемом участке (${A(newParcel, 'Definition')})</h3><div style="margin-left:auto; display:flex;">${actionButtons}</div></div><div class="section-content" style="padding:16px">${sectionContent}</div></div>`;
     }
+
+    // --- ИЗМЕНЕНИЕ: 4.5. Измененные земельные участки (ChangeParcel) ---
+    // Считывается при виде кадастровых работ "Раздел с измененным земельным участком"
+    const changeParcels = All(xmlDoc, 'FormParcels > ChangeParcel, ChangeParcel');
+    for (const changeParcel of changeParcels) {
+        sectionsFound++;
+        const cadNum = A(changeParcel, 'CadastralNumber');
+        
+        let sectionContent = `<div class="info-grid">
+            <div class="info-card"><div class="info-label">Кадастровый номер измененного ЗУ</div><div class="info-value"><code>${cadNum}</code></div></div>
+            <div class="info-card"><div class="info-label">Кадастровый квартал</div><div class="info-value">${T(changeParcel, 'CadastralBlock')}</div></div>
+            <div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Обеспечение доступа</div><div class="info-value">${T(changeParcel, 'ProvidingPassCadastralNumbers > Other, ProvidingPassCadastralNumbers > CadastralNumber')}</div></div>
+        </div>`;
+
+        // ОКС сохраняемые на измененном ЗУ
+        const innerOksNodes = All(changeParcel, 'InnerCadastralNumbers > CadastralNumber');
+        if (innerOksNodes.length > 0) {
+            const oksList = Array.from(innerOksNodes).map(node => `<div class="info-card"><div class="info-value">${node.textContent.trim()}</div></div>`).join('');
+            sectionContent += `<div class="subsection"><div class="subsection-title">Сохраняемые ОКС в границах измененного ЗУ</div><div class="info-grid">${oksList}</div></div>`;
+        }
+
+        // Если есть удаляемые контуры многоконтурного участка
+        const delBorders = All(changeParcel, 'DeleteAllBorder');
+        if(delBorders.length > 0) {
+            const delList = Array.from(delBorders).map(db => A(db, 'NumberRecord') || A(db, 'Definition') || 'б/н').join(', ');
+            sectionContent += `<div class="subsection"><div class="subsection-title">Исключаемые контуры</div><div class="conclusion-text">Учетные номера: ${delList}</div></div>`;
+        }
+
+        mainHtml += `<div class="section"><div class="section-header">${sectionIcons.newParcel}<h3 class="section-title">Сведения об измененном земельном участке</h3></div><div class="section-content" style="padding:16px">${sectionContent}</div></div>`;
+    }
+
 
     // 5.1 Уточняемые участки (ExistParcel)
     const specifiedParcels = All(xmlDoc, 'SpecifyParcel > ExistParcel');
