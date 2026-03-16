@@ -3391,6 +3391,7 @@ const sevenDigitsRegions = [
 
         let isMobile = window.innerWidth <= 768;
         let isSearching = false
+        const MAX_SEARCH_AREA_SQM = 5000000; 
         let isEzProcessingAborted = false;
         let currentCity = '';
         let map;
@@ -4575,6 +4576,38 @@ function updateMapOffset() {
             "+no_defs " +
             "+axis=enu"
         );
+
+
+function isAreaLimitExceeded(targetObject) {
+    if (!targetObject) return false;
+    
+    const objects = Array.isArray(targetObject) ? targetObject : [targetObject];
+    let totalArea = 0;
+
+    for (const obj of objects) {
+        if (obj instanceof ymaps.Polygon) {
+            const stats = calculatePreciseGeometry(obj);
+            totalArea += stats.area;
+        } else if (obj instanceof ymaps.Polyline) {
+            const coords = obj.geometry.getCoordinates();
+            // Для Turf нужны координаты [долгота, широта]
+            const turfLine = turf.lineString(coords.map(c => [c[1], c[0]]));
+            // Строим буфер 100 метров (как в generateLinearObjectReport)
+            const bufferedLine = turf.buffer(turfLine, 100, { units: 'meters' });
+            totalArea += turf.area(bufferedLine);
+        }
+    }
+
+    if (totalArea > MAX_SEARCH_AREA_SQM) {
+        const msg = `Площадь области поиска (~${Math.round(totalArea).toLocaleString('ru-RU')} м²) превышает допустимый лимит в ${MAX_SEARCH_AREA_SQM.toLocaleString('ru-RU')} м². Операция отменена .`;
+        
+        // Показываем предупреждение (7 секунд)
+        showNotification(msg, 'warning', 'exclamation-triangle', 7000);
+        return true;
+    }
+
+    return false;
+}
 
 
 function parseCoordinates(text) {
@@ -10291,6 +10324,7 @@ function showLineSelectionModal(lines) {
 
 
 async function generateLinearObjectReport(targetObject) {
+       if (isAreaLimitExceeded(targetObject)) return; 
     const delay = ms => new Promise(res => setTimeout(res, ms));
     showLoader("Формирование отчета по линии...");
 
@@ -11759,6 +11793,7 @@ function getRadarLoaderHtml(activeStep) {
 }
 
 async function executeQuickReport(targetObject) {
+  if (isAreaLimitExceeded(targetObject)) return;     
 
     showLoader('<div style="text-align:center;"><i class="fas fa-crosshairs fa-spin" style="font-size: 2.2rem; color: #f59e0b; margin-bottom: 10px;"></i><br></div>');
     await new Promise(resolve => setTimeout(resolve, 50));
@@ -14992,6 +15027,7 @@ async function getParcelsOnObject(lat, lon) {
 
 // Вспомогательная функция для выполнения запроса (вынесена отдельно)
 async function executeParcelsOnObjectSearch(targetObject) {
+     if (isAreaLimitExceeded(targetObject)) return;
     const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
     const objType = isMulti ? 'выбранных объектах' : ((objects[0] instanceof ymaps.Polyline) ? 'линейном объекте' : 'контуре объекта');
@@ -15176,6 +15212,22 @@ async function getParcelsNearby(lat, lon) {
             ];
         }
 
+
+
+   if (searchPolygonCoordsEPSG3857 && searchPolygonCoordsEPSG3857.length > 0) {
+            // Переводим EPSG:3857 в WGS84 [lon, lat] для Turf
+            const wgsPolyCoords = searchPolygonCoordsEPSG3857.map(coord => proj4("EPSG:3857", "EPSG:4326", coord));
+            const area = turf.area(turf.polygon([wgsPolyCoords]));
+            
+            if (area > MAX_SEARCH_AREA_SQM) {
+                 showNotification(`Площадь области поиска (~${Math.round(area).toLocaleString('ru-RU')} м²) превышает допустимый лимит. Операция отменена.`, 'warning', 'exclamation-triangle', 7000);
+                 cleanUpLoaderButtons();
+                 hideLoader();
+                 return;
+            }
+        }
+        
+        
   
         if (loadingText) {
             loadingText.innerHTML = `
@@ -18082,6 +18134,7 @@ async function getAllZouitsInObject(lat, lon) {
 }
 
 async function executeZouitsOnObjectSearch(targetObject) {
+      if (isAreaLimitExceeded(targetObject)) return; 
     // Поддержка массива объектов
     const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
@@ -18191,6 +18244,7 @@ async function getAllOksInObject(lat, lon) {
 }
 
 async function executeOksOnObjectSearch(targetObject) {
+     if (isAreaLimitExceeded(targetObject)) return;
     const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
     const objType = isMulti ? 'выбранных объектах' : ((objects[0] instanceof ymaps.Polyline) ? 'линейном объекте' : 'контуре объекта');
@@ -18258,6 +18312,7 @@ if (candidateObjects.length === 0) {
 }
 
 async function executeStructuresOnObjectSearch(targetObject) {
+     if (isAreaLimitExceeded(targetObject)) return;
     const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
     const objType = isMulti ? 'выбранных объектах' : ((objects[0] instanceof ymaps.Polyline) ? 'линейном объекте' : 'контуре объекта');
@@ -19560,6 +19615,7 @@ function isBboxInsidePolygon(bbox, polygonFeature) {
 }
 
 async function generateConsolidatedReport(targetObject) {
+    if (isAreaLimitExceeded(targetObject)) return;
     const delay = ms => new Promise(res => setTimeout(res, ms));
     showLoader("Подготовка данных...");
 
@@ -22036,6 +22092,16 @@ async function findOnMap(coordinatesText) {
         if (searchShapes.length === 0) {
              showNotification('Не удалось отрисовать объект поиска', 'error', 'exclamation-circle');
              document.getElementById('loaderContainer').style.display = 'none';
+             return;
+        }
+        
+          if (isAreaLimitExceeded(searchShapes)) {
+             document.getElementById('loaderContainer').style.display = 'none';
+             // Удаляем отрисованные фигуры, так как поиск отменен
+             searchShapes.forEach(shape => {
+                 map.geoObjects.remove(shape);
+                 polygons = polygons.filter(p => p !== shape);
+             });
              return;
         }
 
