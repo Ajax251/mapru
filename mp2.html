@@ -1132,8 +1132,6 @@ let currentTpOksContours = null;
 let currentTpZuData = null;
 let relatedParcelCheckData = null;
 let newParcelChecksData = {};
-let parsedSchemaParcels = null;
-let isSchemaZipFound = false;
 
 document.addEventListener('DOMContentLoaded', () => {
     const landCategories = { '003001000000': 'Земли сельскохозяйственного назначения', '003002000000': 'Земли населенных пунктов', '003003000000': 'Земли промышленности, энергетики, транспорта и иного специального назначения', '003004000000': 'Земли особо охраняемых территорий и объектов', '003005000000': 'Земли лесного фонда', '003006000000': 'Земли водного фонда', '003007000000': 'Земли запаса', '003008000000': 'Категория не установлена' };
@@ -1224,7 +1222,7 @@ document.addEventListener('DOMContentLoaded', () => {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
 
-function clearResults() {
+    function clearResults() {
         resultsContainer.classList.add('hidden');
         printButtonContainer.classList.add('hidden');
         mainColumn.innerHTML = '';
@@ -1234,11 +1232,8 @@ function clearResults() {
         currentOksData = null;
         currentNspdOksData = null;
         currentMskSystem = null;
-        // Добавляем очистку схемы
-        parsedSchemaParcels = null;
-        isSchemaZipFound = false;
     }
-    
+
     function showStatus(message, isLoading = false) {
         clearResults();
         messageArea.innerHTML = `<div class="status-text">${message}</div>`;
@@ -4206,142 +4201,13 @@ if (checkZuBtn) {
         reader.readAsText(file, 'UTF-8');
     }
 
-async function handleZipFile(file) {
-        try {
-            console.log("=== НАЧАЛО ОБРАБОТКИ ZIP АРХИВА ===");
-            console.log("Имя файла:", file.name);
-            const zip = await JSZip.loadAsync(file);
-            const fileNames = Object.keys(zip.files);
-            console.log("Файлы в корневом архиве:", fileNames);
-            
-            // Ищем вложенный Schema*.zip
-            isSchemaZipFound = false;
-            parsedSchemaParcels = null;
-            
-            const schemaZipName = fileNames.find(name => 
-                !zip.files[name].dir && 
-                name.toLowerCase().includes('schema') && 
-                name.toLowerCase().endsWith('.zip')
-            );
-            
-            if (schemaZipName) {
-                console.log("✅ Найден вложенный архив схемы:", schemaZipName);
-                isSchemaZipFound = true;
-                const schemaZipData = await zip.files[schemaZipName].async('blob');
-                const schemaZip = await JSZip.loadAsync(schemaZipData);
-                
-                const schemaFiles = Object.keys(schemaZip.files);
-                console.log("Файлы внутри архива схемы:", schemaFiles);
-                
-                // Ищем XML внутри схемы
-                const schemaXmlName = schemaFiles.find(name => !schemaZip.files[name].dir && name.toLowerCase().endsWith('.xml'));
-                
-                if (schemaXmlName) {
-                    console.log("✅ Найден XML схемы:", schemaXmlName);
-                    const schemaXmlString = await schemaZip.files[schemaXmlName].async('string');
-                    parsedSchemaParcels = parseSchemaXml(schemaXmlString);
-                    console.log("Извлеченные контуры из схемы:", parsedSchemaParcels);
-                } else {
-                    console.warn("⚠️ Внутри архива схемы не найден XML файл!");
-                }
-            } else {
-                console.log("ℹ️ Вложенный архив схемы (Schema*.zip) не найден в корневом ZIP.");
-            }
-
-            // Ищем основной XML межевого/технического плана
-            const xmlFileName = fileNames.find(name => !zip.files[name].dir && name.toLowerCase().endsWith('.xml'));
-            if (!xmlFileName) throw new Error('Главный XML файл не найден в архиве.');
-            
-            console.log("✅ Найден основной XML файл:", xmlFileName);
-            const mainXmlString = await zip.files[xmlFileName].async('string');
-            parseXmlContent(mainXmlString); // Запускаем стандартную обработку
-            
-        } catch (err) {
-            console.error("Ошибка при распаковке ZIP:", err);
-            showError('Ошибка при обработке ZIP архива: ' + err.message);
-        }
+    function handleZipFile(file) {
+        JSZip.loadAsync(file).then(zip => {
+            const xmlFileName = Object.keys(zip.files).find(name => !zip.files[name].dir && name.toLowerCase().endsWith('.xml'));
+            if (!xmlFileName) throw new Error('XML файл не найден в архиве.');
+            return zip.files[xmlFileName].async('string');
+        }).then(parseXmlContent).catch(err => showError('Ошибка при обработке ZIP архива: ' + err.message));
     }
-    
-function parseSchemaXml(xmlString) {
-        console.log("--- Начат парсинг XML схемы (Schema*.zip) ---");
-        const parser = new DOMParser();
-        const xmlDoc = parser.parseFromString(xmlString, "application/xml");
-        const parcels = [];
-        
-        const parcelNodes = xmlDoc.querySelectorAll('Parcel, NewParcel');
-        console.log(`Найдено узлов участков в схеме: ${parcelNodes.length}`);
-
-        parcelNodes.forEach((parcel, idx) => {
-            const spatialElements = parcel.querySelectorAll('Spatial_Element, SpatialElement');
-            const contours = [];
-            
-            spatialElements.forEach(spEl => {
-                const points = [];
-                const ordinates = spEl.querySelectorAll('NewOrdinate, Ordinate');
-                ordinates.forEach(ord => {
-                    const x = parseFloat(ord.getAttribute('X'));
-                    const y = parseFloat(ord.getAttribute('Y'));
-                    if (!isNaN(x) && !isNaN(y)) points.push({x, y});
-                });
-                if (points.length > 0) contours.push(points);
-            });
-            
-            if (contours.length > 0) {
-                parcels.push(contours);
-            } else {
-                console.warn(`В участке схемы №${idx + 1} не найдены координаты.`);
-            }
-        });
-        
-        console.log("Извлеченные контуры из схемы:", parcels);
-        return parcels;
-    }
-
-    // Извлечение координат контуров из обычного XML (МП)
-    function extractContoursFromNode(node) {
-        const contours = [];
-        const spatialElements = node.querySelectorAll('EntitySpatial > SpatialElement, Contours > Contour > EntitySpatial > SpatialElement');
-        spatialElements.forEach(spEl => {
-            const points = [];
-            const ordinates = spEl.querySelectorAll('Ordinate, NewOrdinate');
-            ordinates.forEach(ord => {
-                const x = parseFloat(ord.getAttribute('X'));
-                const y = parseFloat(ord.getAttribute('Y'));
-                if (!isNaN(x) && !isNaN(y)) points.push({x, y});
-            });
-            if (points.length > 0) contours.push(points);
-        });
-        return contours;
-    }
-
-    // Сравнение двух массивов контуров (допуск 1 см)
-  function doContoursMatch(contoursA, contoursB) {
-        if (contoursA.length !== contoursB.length) return false;
-        
-        const pointExistsInContour = (p, contour) => {
-            return contour.some(cp => Math.abs(cp.x - p.x) <= 0.01 && Math.abs(cp.y - p.y) <= 0.01);
-        };
-
-        const contourMatches = (cA, cB) => {
-            // Проверяем, что все точки из cA есть в cB
-            for (let p of cA) {
-                if (!pointExistsInContour(p, cB)) return false;
-            }
-            // Проверяем, что все точки из cB есть в cA
-            for (let p of cB) {
-                if (!pointExistsInContour(p, cA)) return false;
-            }
-            return true;
-        };
-
-        // Для каждого контура из А ищем совпадение в B
-        for (let cA of contoursA) {
-            const matchIdx = contoursB.findIndex(cB => contourMatches(cA, cB));
-            if (matchIdx === -1) return false;
-        }
-        return true;
-    }
-    
 
     function parseXmlContent(xmlString) {
         try {
@@ -4800,85 +4666,6 @@ function runTechPlanValidation(xmlDoc, xmlText) {
     numberListHtml += '</ul>';
     messages.push(`<div class="subsection" style="margin-top:0"><div class="subsection-title">Все кадастровые номера в документе</div>${numberListHtml}</div>`);
     
-    
-    
-    // --- ПРОВЕРКА СОВПАДЕНИЯ СО СХЕМОЙ (Schema*.zip) ---
-               console.log("=== ЗАПУСК ПРОВЕРКИ СХЕМЫ ===");
-        const newParcelsNodes = Array.from(xmlDoc.querySelectorAll('NewParcel'));
-        console.log(`Образуемых участков (NewParcel) в основном XML: ${newParcelsNodes.length}`);
-        console.log(`Статус загрузки схемы (isSchemaZipFound): ${isSchemaZipFound}`);
-        
-        if (newParcelsNodes.length > 0) {
-            if (!isSchemaZipFound) {
-                console.log("Предупреждение: Архив схемы не найден, но есть образуемые участки.");
-                messages.push(`
-                    <div class="validation-message validation-warning" style="align-items:flex-start;">
-                        ${sectionIcons.warningIcon}
-                        <div>
-                            <strong>Схема расположения:</strong> В загруженном архиве не найден файл <code>Schema*.zip</code>.<br>
-                            <span style="font-size:0.9em;">Для образуемых участков рекомендуется прикладывать электронную XML-схему расположения.</span>
-                        </div>
-                    </div>`);
-            } else if (!parsedSchemaParcels || parsedSchemaParcels.length === 0) {
-                console.log("Ошибка: Архив схемы найден, но распарсить участки из него не удалось.");
-                messages.push(`
-                    <div class="validation-message validation-error" style="align-items:flex-start;">
-                        ${sectionIcons.errorIcon}
-                        <div>
-                            <strong>Ошибка Схемы расположения:</strong> Файл <code>Schema*.zip</code> найден, но внутри него не удалось прочитать XML или не найдены координаты участков.
-                        </div>
-                    </div>`);
-            } else {
-                let allMatch = true;
-                let errorDetails = [];
-
-                console.log("Начинаем сравнение координат основного XML и Схемы...");
-                newParcelsNodes.forEach((node, index) => {
-                    const def = node.getAttribute('Definition') || node.querySelector('CadastralBlock')?.textContent || `ЗУ${index + 1}`;
-                    const mainContours = extractContoursFromNode(node);
-                    console.log(`Контуры ЗУ '${def}' в XML:`, mainContours);
-                    
-                    const matchFound = parsedSchemaParcels.some((schemaParcelContours, schemaIdx) => {
-                        const isMatch = doContoursMatch(mainContours, schemaParcelContours);
-                        if (isMatch) console.log(`✅ Найдено совпадение для ЗУ '${def}' с участком №${schemaIdx + 1} в схеме.`);
-                        return isMatch;
-                    });
-
-                    if (!matchFound) {
-                        allMatch = false;
-                        errorDetails.push(`Координаты участка <b>${def}</b> не совпадают с координатами в Схеме расположения.`);
-                        console.warn(`❌ Несовпадение координат для ЗУ '${def}'!`);
-                    }
-                });
-
-                if (allMatch) {
-                     messages.push(`
-                        <div class="validation-message validation-success">
-                            ${sectionIcons.successIcon} 
-                            <strong>Схема расположения:</strong> Координаты всех образуемых участков совпадают с данными в XML схеме (Schema*.zip).
-                        </div>`);
-                } else {
-                     messages.push(`
-                        <div class="validation-message validation-error" style="align-items:flex-start;">
-                            ${sectionIcons.errorIcon}
-                            <div>
-                                <strong>Критическая ошибка Схемы расположения!</strong><br>
-                                <span style="font-size:0.9em;">${errorDetails.join('<br>')}</span>
-                            </div>
-                        </div>`);
-                }
-            }
-        } else if (isSchemaZipFound) {
-            console.log("Инфо: Архив схемы загружен, но образуемых участков в XML нет.");
-            messages.push(`
-                <div class="validation-message" style="background:#f0f9ff; border:1px solid #bae6fd; color:#0369a1; align-items:flex-start;">
-                    <i class="fas fa-info-circle"></i>
-                    <div>
-                        <strong>Схема расположения обнаружена:</strong> Файл <code>Schema*.zip</code> загружен, однако в основном документе нет образуемых участков (<code>NewParcel</code>). Проверка контуров пропущена.
-                    </div>
-                </div>`);
-        }
-         
     // Проверка на несоответствия (AI)
     const contradictionHtml = `
         <div class="subsection">
@@ -5446,90 +5233,7 @@ function runTechPlanValidation(xmlDoc, xmlText) {
 
 
     function runValidation(xmlDoc, xmlText) {
-        console.log("=== НАЧАЛО RUNVALIDATION ===");
         let messages = [];
-        
-        // --- 1. ПРОВЕРКА СОВПАДЕНИЯ СО СХЕМОЙ (Schema*.zip) ---
-        console.log("=== ЗАПУСК ПРОВЕРКИ СХЕМЫ ===");
-        const newParcelsNodes = Array.from(xmlDoc.querySelectorAll('NewParcel'));
-        console.log(`Образуемых участков (NewParcel) в основном XML: ${newParcelsNodes.length}`);
-        console.log(`Статус загрузки схемы (isSchemaZipFound): ${isSchemaZipFound}`);
-        
-        if (newParcelsNodes.length > 0) {
-            if (!isSchemaZipFound) {
-                console.log("Предупреждение: Архив схемы не найден, но есть образуемые участки.");
-                messages.push(`
-                    <div class="validation-message validation-warning" style="align-items:flex-start;">
-                        ${sectionIcons.warningIcon}
-                        <div>
-                            <strong>Схема расположения:</strong> В загруженном архиве не найден файл <code>Schema*.zip</code>.<br>
-                            <span style="font-size:0.9em;">Для образуемых участков рекомендуется прикладывать электронную XML-схему расположения.</span>
-                        </div>
-                    </div>`);
-            } else if (!parsedSchemaParcels || parsedSchemaParcels.length === 0) {
-                console.log("Ошибка: Архив схемы найден, но распарсить участки из него не удалось.");
-                messages.push(`
-                    <div class="validation-message validation-error" style="align-items:flex-start;">
-                        ${sectionIcons.errorIcon}
-                        <div>
-                            <strong>Ошибка Схемы расположения:</strong> Файл <code>Schema*.zip</code> найден, но внутри него не удалось прочитать XML или не найдены координаты участков.
-                        </div>
-                    </div>`);
-            } else {
-                let allMatch = true;
-                let errorDetails = [];
-
-                console.log("Начинаем сравнение координат основного XML и Схемы...");
-                newParcelsNodes.forEach((node, index) => {
-                    const defNode = node.querySelector('Definition');
-                    const blockNode = node.querySelector('CadastralBlock');
-                    const def = node.getAttribute('Definition') || (defNode ? defNode.textContent : null) || (blockNode ? blockNode.textContent : `ЗУ${index + 1}`);
-                    
-                    const mainContours = extractContoursFromNode(node);
-                    console.log(`Контуры ЗУ '${def}' в XML:`, mainContours);
-                    
-                    const matchFound = parsedSchemaParcels.some((schemaParcelContours, schemaIdx) => {
-                        const isMatch = doContoursMatch(mainContours, schemaParcelContours);
-                        if (isMatch) console.log(`✅ Найдено совпадение для ЗУ '${def}' с участком №${schemaIdx + 1} в схеме.`);
-                        return isMatch;
-                    });
-
-                    if (!matchFound) {
-                        allMatch = false;
-                        errorDetails.push(`Координаты участка <b>${def}</b> не совпадают с координатами в Схеме расположения.`);
-                        console.warn(`❌ Несовпадение координат для ЗУ '${def}'!`);
-                    }
-                });
-
-                if (allMatch) {
-                     messages.push(`
-                        <div class="validation-message validation-success">
-                            ${sectionIcons.successIcon} 
-                            <strong>Схема расположения:</strong> Координаты всех образуемых участков строго совпадают с данными в XML схеме (Schema*.zip).
-                        </div>`);
-                } else {
-                     messages.push(`
-                        <div class="validation-message validation-error" style="align-items:flex-start;">
-                            ${sectionIcons.errorIcon}
-                            <div>
-                                <strong>Критическая ошибка Схемы расположения!</strong><br>
-                                <span style="font-size:0.9em;">${errorDetails.join('<br>')}</span>
-                            </div>
-                        </div>`);
-                }
-            }
-        } else if (isSchemaZipFound) {
-            console.log("Инфо: Архив схемы загружен, но образуемых участков в XML нет.");
-            messages.push(`
-                <div class="validation-message" style="background:#f0f9ff; border:1px solid #bae6fd; color:#0369a1; align-items:flex-start;">
-                    <i class="fas fa-info-circle"></i>
-                    <div>
-                        <strong>Схема расположения обнаружена:</strong> Файл <code>Schema*.zip</code> загружен, однако в основном документе нет образуемых участков (<code>NewParcel</code>). Проверка контуров пропущена.
-                    </div>
-                </div>`);
-        }
-
-        // --- 2. ОСТАЛЬНЫЕ ПРОВЕРКИ МЕЖЕВОГО ПЛАНА ---
         const requiredDocsList = (localStorage.getItem(DOCS_LIST_KEY) || '').trim();
         if (requiredDocsList) {
             const requiredDocs = requiredDocsList.split('\n').map(d => d.trim().toLowerCase()).filter(Boolean);
@@ -5547,7 +5251,6 @@ function runTechPlanValidation(xmlDoc, xmlText) {
             });
             docCheckHtml += `</ul></div>`; messages.push(docCheckHtml);
         }
-        
         const today = new Date(); const currentDateString = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
         const generalWorksEl = E(xmlDoc, 'GeneralCadastralWorks');
         if (generalWorksEl) { const cadWorkDate = A(generalWorksEl, 'DateCadastral'); if (cadWorkDate && cadWorkDate !== currentDateString) { messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>Предупреждение:</strong> Дата кадастровых работ (${cadWorkDate}) не является текущей датой.</div>`); } }
@@ -5557,7 +5260,6 @@ function runTechPlanValidation(xmlDoc, xmlText) {
         let geoDateMismatch = false;
         for (const point of geoBasePoints) { const pointDate = A(point, 'AsOfDate'); if (pointDate && pointDate !== currentDateString) { geoDateMismatch = true; break; } }
         if (geoDateMismatch) { messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>Предупреждение:</strong> Одна или несколько дат состояния пунктов геодезической основы не являются текущей датой.</div>`); }
-        
         let usedAnalytical = false;
         let usedSatellite = false;
         const allOrdinates = All(xmlDoc, 'Ordinate');
@@ -5580,7 +5282,6 @@ function runTechPlanValidation(xmlDoc, xmlText) {
         if (usedAnalytical && !usedSatellite && hasGeoBaseDates) {
              messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>Предупреждение:</strong> Использован только "Аналитический метод", но заполнены даты состояния пунктов геодезической основы. При аналитическом методе пункты ГГС обычно не обследуются.</div>`);
         }
-        
         const inputDocuments = All(xmlDoc, 'InputData Documents Document');
         inputDocuments.forEach(doc => {
             const docName = T(doc, 'Name');
@@ -5634,7 +5335,6 @@ function runTechPlanValidation(xmlDoc, xmlText) {
                 }
             }
         });
-        
         const dateWarnings = []; const foundDates = new Set(); const dateRegex = /(?:\b(\d{2})\.(\d{2})\.(\d{4})\b)|(?:\b(\d{4})-(\d{2})-(\d{2})\b)/g; const minDate = new Date(1990, 0, 1); const currentDate = new Date(); currentDate.setHours(23, 59, 59, 999); let match;
         while ((match = dateRegex.exec(xmlText)) !== null) {
             const fullMatch = match[0]; if (foundDates.has(fullMatch)) continue; foundDates.add(fullMatch);
@@ -5644,14 +5344,11 @@ function runTechPlanValidation(xmlDoc, xmlText) {
             if (parsedDate < minDate) dateWarnings.push(`"${fullMatch}"`); else if (parsedDate > currentDate) dateWarnings.push(`"${fullMatch}" (будущая дата)`);
         }
         if (dateWarnings.length > 0) { messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>Предупреждение о датах:</strong> Найдены даты за пределами допустимого диапазона (01.01.1990 - сегодня): ${dateWarnings.join(', ')}.</div>`); }
-        
         const knRegex = /\d{2}:\d{2}:\d{6,7}:\d+/g; const blockRegex = /\d{2}:\d{2}:\d{6,7}/; let allNumbers = new Set((xmlText.match(knRegex) || [])); All(xmlDoc, 'CadastralBlock').forEach(b => allNumbers.add(b.textContent.trim())); const quarters = new Map();
         allNumbers.forEach(num => { const match = num.match(blockRegex); if (match) { const quarter = match[0]; if (!quarters.has(quarter)) quarters.set(quarter, []); quarters.get(quarter).push(num); } });
         const colors = ['#1d4ed8', '#b91c1c', '#c2410c', '#15803d', '#86198f']; let colorIndex = 0; const quarterColors = new Map(); for (const q of quarters.keys()) { quarterColors.set(q, colors[colorIndex % colors.length]); colorIndex++; }
         if (quarters.size > 1) { messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>Предупреждение:</strong> Найдены объекты из разных кадастровых кварталов.</div>`); }
-        
         let numberListHtml = '<ul id="cadastralNumbersList">'; quarters.forEach((numbers, quarter) => { const color = quarterColors.get(quarter); numbers.sort().forEach(num => { numberListHtml += `<li style="border-color:${color}; color:${color};">${num}</li>`; }); }); numberListHtml += '</ul>'; messages.push(`<div class="subsection" style="margin-top:0"><div class="subsection-title">Все кадастровые номера в документе</div>${numberListHtml}</div>`);
-        
         const mainParcel = E(xmlDoc, 'NewParcel') || E(xmlDoc, 'ExistParcel');
         if (mainParcel) {
             const categoryCode = A(E(mainParcel, 'Category'), 'Category'); 
@@ -5698,11 +5395,8 @@ function runTechPlanValidation(xmlDoc, xmlText) {
             </div>
         `;
         messages.push(contradictionHtml);
-        
-        console.log("=== ЗАВЕРШЕНИЕ RUNVALIDATION ===");
         return messages.length > 0 ? messages.join('') : '';
     }
-    
 
     function openAiModal() { aiCheckModal.style.display = 'flex'; }
     function closeAiModal() { aiCheckModal.style.display = 'none'; aiCheckResultDisplay.innerHTML = ''; }
