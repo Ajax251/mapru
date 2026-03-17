@@ -1688,6 +1688,35 @@ input:checked + .slider:before {
     background: rgba(255, 149, 0, 0.1);
 }
 
+.ai-image-preview-container {
+    display: none;
+    position: relative;
+    margin-top: 10px;
+    max-width: max-content;
+}
+.ai-image-preview {
+    max-height: 100px;
+    border-radius: 8px;
+    border: 1px solid var(--border-color);
+}
+.ai-remove-image {
+    position: absolute;
+    top: -8px;
+    right: -8px;
+    background: var(--danger-color);
+    color: white;
+    border: none;
+    border-radius: 50%;
+    width: 22px;
+    height: 22px;
+    cursor: pointer;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    font-size: 12px;
+    box-shadow: var(--shadow-sm);
+}
+
 /* Ландшафтная ориентация на мобильных */
 @media (max-height: 500px) and (orientation: landscape) {
     .ribbon {
@@ -2060,6 +2089,22 @@ input:checked + .slider:before {
         </div>
     </div>
     
+    
+    <div class="dialog" id="crop-dialog" style="display: none; z-index: 1601;">
+        <div class="dialog-header">✂️ Обрезать изображение</div>
+        <div class="dialog-body" style="text-align:center;">
+            <p style="font-size: 12px; color: var(--text-secondary); margin-bottom: 10px;">Выделите область для обрезки или нажмите "Использовать всё"</p>
+            <div id="crop-container" style="position: relative; display: inline-block; border: 1px dashed var(--border-color); user-select: none; touch-action: none; cursor: crosshair; margin: 0 auto; max-width: 100%; max-height: 50vh; overflow: hidden;">
+                <img id="crop-image" src="" style="display: block; max-width: 100%; max-height: 50vh; object-fit: contain; pointer-events: none;">
+                <div id="crop-selection" style="position: absolute; border: 2px solid var(--accent-blue); background-color: rgba(0, 122, 255, 0.15); display: none; pointer-events: none;"></div>
+            </div>
+        </div>
+        <div class="dialog-footer">
+            <button class="dialog-btn dialog-btn-secondary" id="crop-use-all">Использовать всё</button>
+            <button class="dialog-btn dialog-btn-primary" id="crop-confirm">✓ Применить</button>
+        </div>
+    </div>
+    
     <div class="resize-line" id="resize-line"></div>
     
     <div class="context-menu" id="context-menu"></div>
@@ -2109,9 +2154,21 @@ input:checked + .slider:before {
                 <span>Обработка...</span>
             </div>
             
-            <div class="ai-response-area" id="ai-response"></div>
+           <div class="ai-response-area" id="ai-response"></div>
             
+            <!-- НОВОЕ: Контейнер для превью и скрытый input -->
+            <input type="file" id="ai-image-input" accept="image/jpeg, image/png, image/webp" style="display: none;">
+            <div class="ai-image-preview-container" id="ai-image-preview-container">
+                <img id="ai-image-preview" class="ai-image-preview" src="">
+                <button id="ai-remove-image" class="ai-remove-image"><i class="fas fa-times"></i></button>
+            </div>
+
             <div class="ai-actions">
+                <!-- НОВОЕ: Кнопка прикрепления картинки -->
+                <button class="ai-btn ai-btn-secondary" id="ai-attach-btn" title="Прикрепить изображение" style="flex: 0 0 auto; padding: 12px;">
+                    <i class="fas fa-image"></i>
+                </button>
+                
                 <button class="ai-btn ai-btn-secondary" id="ai-cancel" style="display:none;">Отмена</button>
                 <button class="ai-btn ai-btn-primary" id="ai-send">
                     <i class="fas fa-paper-plane"></i> Отправить
@@ -2143,6 +2200,15 @@ input:checked + .slider:before {
         var loaderDetails = document.getElementById('loader-details');
         var hiddenColumnsIndicator = document.getElementById('hidden-columns-indicator');
         var hiddenColumnsCount = document.getElementById('hidden-columns-count');
+        
+        var aiImageInput = document.getElementById('ai-image-input');
+        var aiAttachBtn = document.getElementById('ai-attach-btn');
+        var aiImagePreviewContainer = document.getElementById('ai-image-preview-container');
+        var aiImagePreview = document.getElementById('ai-image-preview');
+        var aiRemoveImage = document.getElementById('ai-remove-image');
+        
+        var attachedImageBase64 = null;
+        var attachedImageMimeType = null;
 
         var allData = [];
         var filteredIndices = [];
@@ -2169,6 +2235,13 @@ input:checked + .slider:before {
         var visibleStartIndex = 0;
         var visibleEndIndex = 0;
         var contextTarget = { type: null, index: null, rowIndex: null, colIndex: null };
+        
+           var COMPRESS_THRESHOLD_BYTES = 1 * 1024 * 1024; // 1 MB
+        var CROP_DIMENSION_THRESHOLD = 800;
+        var cropResolve = null;
+        var cropSelection = { startX: 0, startY: 0, endX: 0, endY: 0, isDrawing: false };
+        var imageNaturalSize = { width: 0, height: 0 };
+        var imageDisplaySize = { width: 0, height: 0 };
 
                 var savedAutoSize = localStorage.getItem('autoSizeEnabled');
         if (savedAutoSize !== null) {
@@ -2361,6 +2434,234 @@ input:checked + .slider:before {
             };
             return descriptions[action] || action;
         }
+        
+        
+        
+                function toBase64(file) {
+            return new Promise(function(resolve, reject) {
+                var r = new FileReader();
+                r.onload = function() { resolve(r.result); };
+                r.onerror = reject;
+                r.readAsDataURL(file);
+            });
+        }
+
+        function compressImage(base64Data, quality, scale) {
+            return new Promise(function(resolve, reject) {
+                var img = new Image();
+                img.onload = function() {
+                    var canvas = document.createElement('canvas');
+                    var newWidth = Math.round(img.width * scale);
+                    var newHeight = Math.round(img.height * scale);
+                    canvas.width = newWidth;
+                    canvas.height = newHeight;
+                    var ctx = canvas.getContext('2d');
+                    ctx.imageSmoothingEnabled = true;
+                    ctx.imageSmoothingQuality = 'high';
+                    ctx.drawImage(img, 0, 0, newWidth, newHeight);
+                    resolve(canvas.toDataURL('image/jpeg', quality));
+                };
+                img.onerror = reject;
+                img.src = base64Data;
+            });
+        }
+
+        async function compressToTargetSize(base64Data, targetBytes) {
+            var currentData = base64Data;
+            var attempt = 0;
+            while (attempt < 5) {
+                var base64Content = currentData.split(',')[1] || currentData;
+                var sizeBytes = Math.round((base64Content.length * 3) / 4);
+                if (sizeBytes < targetBytes) return currentData;
+                attempt++;
+                currentData = await compressImage(currentData, 0.8, 0.5);
+            }
+            return currentData;
+        }
+
+        function openCropDialog(file) {
+            return new Promise(function(resolve) {
+                cropResolve = resolve;
+                var imgEl = document.getElementById('crop-image');
+                var container = document.getElementById('crop-container');
+                var selection = document.getElementById('crop-selection');
+
+                selection.style.display = 'none';
+                cropSelection = { startX: 0, startY: 0, endX: 0, endY: 0, isDrawing: false };
+
+                var reader = new FileReader();
+                reader.onload = function(e) {
+                    imgEl.src = e.target.result;
+                    
+                    // Показываем поверх AI-панели
+                    var overlay = document.getElementById('dialog-overlay');
+                    overlay.style.zIndex = '1600';
+                    overlay.style.display = 'block';
+                    document.getElementById('crop-dialog').style.display = 'flex';
+
+                    imgEl.onload = function() {
+                        imageNaturalSize = { width: imgEl.naturalWidth, height: imgEl.naturalHeight };
+                        requestAnimationFrame(function() {
+                            imageDisplaySize = { width: imgEl.offsetWidth, height: imgEl.offsetHeight };
+                        });
+                    };
+                };
+                reader.readAsDataURL(file);
+
+                function getPos(e) {
+                    var rect = container.getBoundingClientRect();
+                    var clientX = e.touches ? e.touches[0].clientX : e.clientX;
+                    var clientY = e.touches ? e.touches[0].clientY : e.clientY;
+                    return {
+                        x: Math.max(0, Math.min(clientX - rect.left, imageDisplaySize.width)),
+                        y: Math.max(0, Math.min(clientY - rect.top, imageDisplaySize.height))
+                    };
+                }
+
+                function updateRect() {
+                    var x = Math.min(cropSelection.startX, cropSelection.endX);
+                    var y = Math.min(cropSelection.startY, cropSelection.endY);
+                    var w = Math.abs(cropSelection.endX - cropSelection.startX);
+                    var h = Math.abs(cropSelection.endY - cropSelection.startY);
+                    selection.style.left = x + 'px';
+                    selection.style.top = y + 'px';
+                    selection.style.width = w + 'px';
+                    selection.style.height = h + 'px';
+                }
+
+                var onStart = function(e) {
+                    e.preventDefault();
+                    cropSelection.isDrawing = true;
+                    var pos = getPos(e);
+                    cropSelection.startX = cropSelection.endX = pos.x;
+                    cropSelection.startY = cropSelection.endY = pos.y;
+                    selection.style.display = 'block';
+                    selection.style.width = '0';
+                    selection.style.height = '0';
+                };
+
+                var onMove = function(e) {
+                    if (!cropSelection.isDrawing) return;
+                    e.preventDefault();
+                    var pos = getPos(e);
+                    cropSelection.endX = pos.x;
+                    cropSelection.endY = pos.y;
+                    updateRect();
+                };
+
+                var onEnd = function() {
+                    cropSelection.isDrawing = false;
+                    var w = Math.abs(cropSelection.endX - cropSelection.startX);
+                    var h = Math.abs(cropSelection.endY - cropSelection.startY);
+                    if (w < 10 || h < 10) selection.style.display = 'none';
+                };
+
+                container.onmousedown = onStart;
+                container.ontouchstart = onStart;
+                container.onmousemove = onMove;
+                container.ontouchmove = onMove;
+                window.addEventListener('mouseup', onEnd);
+                window.addEventListener('touchend', onEnd);
+
+                function cleanup() {
+                    document.getElementById('crop-dialog').style.display = 'none';
+                    document.getElementById('dialog-overlay').style.zIndex = '1000';
+                    document.getElementById('dialog-overlay').style.display = 'none';
+
+                    container.onmousedown = null;
+                    container.ontouchstart = null;
+                    container.onmousemove = null;
+                    container.ontouchmove = null;
+                    window.removeEventListener('mouseup', onEnd);
+                    window.removeEventListener('touchend', onEnd);
+                    cropResolve = null;
+                }
+
+                document.getElementById('crop-confirm').onclick = function() {
+                    var w = Math.abs(cropSelection.endX - cropSelection.startX);
+                    var h = Math.abs(cropSelection.endY - cropSelection.startY);
+
+                    if (w < 10 || h < 10 || selection.style.display === 'none') {
+                        toBase64(file).then(function(data) {
+                            cleanup();
+                            resolve(data);
+                        });
+                        return;
+                    }
+
+                    var canvas = document.createElement('canvas');
+                    var ctx = canvas.getContext('2d');
+                    var scaleX = imageNaturalSize.width / imageDisplaySize.width;
+                    var scaleY = imageNaturalSize.height / imageDisplaySize.height;
+
+                    var sx = Math.min(cropSelection.startX, cropSelection.endX) * scaleX;
+                    var sy = Math.min(cropSelection.startY, cropSelection.endY) * scaleY;
+                    var sw = w * scaleX;
+                    var sh = h * scaleY;
+
+                    canvas.width = sw;
+                    canvas.height = sh;
+                    ctx.drawImage(imgEl, sx, sy, sw, sh, 0, 0, sw, sh);
+
+                    var resultData = canvas.toDataURL(file.type === 'image/png' ? 'image/png' : 'image/jpeg', 0.9);
+                    cleanup();
+                    resolve(resultData);
+                };
+
+                document.getElementById('crop-use-all').onclick = function() {
+                    toBase64(file).then(function(data) {
+                        cleanup();
+                        resolve(data);
+                    });
+                };
+            });
+        }
+
+        async function handleImageAdding(file) {
+            aiLoading.classList.add('active'); // Показываем прелоадер
+            try {
+                var objectUrl = URL.createObjectURL(file);
+                var tempImg = new Image();
+                await new Promise(function(resolve, reject) {
+                    tempImg.onload = resolve;
+                    tempImg.onerror = reject;
+                    tempImg.src = objectUrl;
+                });
+                URL.revokeObjectURL(objectUrl);
+
+                var finalDataUrl;
+                // Обрезка, если превышены габариты
+                if (tempImg.width > CROP_DIMENSION_THRESHOLD || tempImg.height > CROP_DIMENSION_THRESHOLD) {
+                    aiLoading.classList.remove('active'); 
+                    finalDataUrl = await openCropDialog(file);
+                    aiLoading.classList.add('active'); 
+                } else {
+                    finalDataUrl = await toBase64(file);
+                }
+
+                // Сжатие, если вес слишком большой
+                var targetType = finalDataUrl.startsWith('data:image/png') ? 'image/png' : 'image/jpeg';
+                var sizeBytes = Math.round((finalDataUrl.split(',')[1].length * 3) / 4);
+
+                if (sizeBytes > COMPRESS_THRESHOLD_BYTES) {
+                    finalDataUrl = await compressToTargetSize(finalDataUrl, COMPRESS_THRESHOLD_BYTES);
+                }
+
+                attachedImageBase64 = finalDataUrl.split(',')[1];
+                attachedImageMimeType = targetType;
+                aiImagePreview.src = finalDataUrl;
+                aiImagePreviewContainer.style.display = 'block';
+
+            } catch (err) {
+                console.error('Ошибка обработки изображения:', err);
+                alert('Не удалось обработать изображение');
+            } finally {
+                aiLoading.classList.remove('active');
+            }
+        }
+        
+        
+        
         
         function updateUndoRedoButtons() {
             var undoBtn = document.getElementById('undo-btn');
@@ -4326,6 +4627,10 @@ function fallbackCopyAndOpen(text) {
             closeFilterDropdown();
         });
         
+        
+      
+        
+        
         document.addEventListener('keydown', function(e) {
             if (e.ctrlKey && e.key === 'o') {
                 e.preventDefault();
@@ -4557,15 +4862,36 @@ function sendAIRequest() {
             var modelType = selectedModel ? selectedModel.type : 'gemini';
             
             var url, body;
-            var fetchHeaders = { 'Content-Type': 'application/json' };
-            var messages = [{ role: 'user', content: prompt }];
+      var fetchHeaders = { 'Content-Type': 'application/json' };
+            
+            // Формируем контент в зависимости от наличия картинки (формат OpenAI/Proxy)
+            var userContent = prompt;
+            if (attachedImageBase64) {
+                userContent = [
+                    { type: "text", text: prompt },
+                    { type: "image_url", image_url: { url: "data:" + attachedImageMimeType + ";base64," + attachedImageBase64 } }
+                ];
+            }
+            var messages = [{ role: 'user', content: userContent }];
             
             if (aiMode === 'proxy') {
                 url = PROXY_URL + '/ai/api/v1/chat/completions';
                 body = { model: aiModel, messages: messages, max_tokens: 8192 };
             } else if (aiMode === 'direct_gemini') {
                 url = 'https://generativelanguage.googleapis.com/v1beta/models/' + aiModel + ':generateContent?key=' + aiKey;
-                body = { contents: [{ role: 'user', parts: [{ text: prompt }] }] };
+                
+                // Формат для Gemini
+                var geminiParts = [{ text: prompt }];
+                if (attachedImageBase64) {
+                    geminiParts.push({
+                        inlineData: {
+                            mimeType: attachedImageMimeType,
+                            data: attachedImageBase64
+                        }
+                    });
+                }
+                body = { contents: [{ role: 'user', parts: geminiParts }] };
+                
             } else if (aiMode === 'direct_mistral') {
                 url = 'https://api.mistral.ai/v1/chat/completions';
                 fetchHeaders['Authorization'] = 'Bearer ' + aiKey;
@@ -4804,8 +5130,53 @@ function sendAIRequest() {
         }
         
         aiIncludeData.addEventListener('change', updateAIDataInfo);
+        
+        
+        aiIncludeData.addEventListener('change', updateAIDataInfo);
+
+        // ==========================================
+        // Обработчики для картинки AI (ПЕРЕНЕСЕННЫЕ)
+        // ==========================================
+        aiAttachBtn.addEventListener('click', function() {
+            aiImageInput.click();
+        });
+
+        aiImageInput.addEventListener('change', function(e) {
+            var file = e.target.files[0];
+            if (!file) return;
+            handleImageAdding(file);
+            aiImageInput.value = ''; 
+        });
+
+        aiRemoveImage.addEventListener('click', function() {
+            attachedImageBase64 = null;
+            attachedImageMimeType = null;
+            aiImageInput.value = '';
+            aiImagePreviewContainer.style.display = 'none';
+        });
+
+        aiQuery.addEventListener('paste', function(e) {
+            var items = e.clipboardData && e.clipboardData.items;
+            if (!items) return;
+
+            for (var i = 0; i < items.length; i++) {
+                if (items[i].type.indexOf('image/') === 0) {
+                    var blob = items[i].getAsFile();
+                    if (blob) {
+                        var file = new File([blob], 'pasted-image.png', { type: blob.type });
+                        handleImageAdding(file);
+                        break; 
+                    }
+                }
+            }
+        });
+
+   
 
     });
+    
+    
+    
     
      var createConfirmBtn = document.getElementById('create-confirm');
         if (createConfirmBtn) {
