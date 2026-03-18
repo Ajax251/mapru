@@ -4,16 +4,11 @@
 // и просмотра градостроительных регламентов.
 // ==========================================
 
-console.log("[PZZ Module] Модуль успешно загружен");
-
 // --- 1. Работа с базой данных (Supabase) ---
 
+// Получение ВСЕХ данных по номеру напрямую из таблицы
 async function getPzzDataByRegNumber(regNumber) {
-    if (!supabaseClient || !regNumber) {
-        console.warn("[PZZ DB] Пропуск запроса данных: нет клиента Supabase или номера", regNumber);
-        return null;
-    }
-    console.log(`[PZZ DB] Запрашиваем полные данные для ${regNumber}...`);
+    if (!supabaseClient || !regNumber) return null;
     try {
         const { data, error } = await supabaseClient
             .from('municipal_pzz')
@@ -22,44 +17,41 @@ async function getPzzDataByRegNumber(regNumber) {
             .single();
             
         if (error && error.code !== 'PGRST116') throw error;
-        console.log(`[PZZ DB] Ответ от базы для ${regNumber}:`, data ? "Данные найдены" : "Данные отсутствуют");
         return data || null;
     } catch (err) {
-        console.error("[PZZ DB] Ошибка получения данных ПЗЗ:", err);
+        console.error("Ошибка получения данных ПЗЗ:", err);
         return null;
     }
 }
 
+// Поиск геометрии и номера по точке (через RPC)
 async function findPzzByPointSupabase(pointX, pointY) {
     if (!supabaseClient) return null;
-    console.log(`[PZZ DB] Поиск в БД по точке X=${pointX}, Y=${pointY}...`);
     try {
         const { data, error } = await supabaseClient.rpc('get_pzz_by_point', {
             point_x: pointX,
             point_y: pointY
         });
         if (error) throw error;
-        console.log(`[PZZ DB] Найдено объектов по точке: ${data ? data.length : 0}`);
         return data || [];
     } catch (err) {
-        console.error("[PZZ DB] Ошибка поиска ПЗЗ по точке:", err);
+        console.error("Ошибка поиска ПЗЗ по точке:", err);
         return null;
     }
 }
 
+// Сохранение всех данных
 async function savePzzToSupabaseFull(payload) {
     if (!supabaseClient) return false;
-    console.log("[PZZ DB] Отправка данных на сохранение:", { ...payload, regulations_json: payload.regulations_json ? "(JSON Data)" : "null" });
     try {
         const { error } = await supabaseClient
             .from('municipal_pzz')
             .upsert(payload, { onConflict: 'reg_number' });
         
         if (error) throw error;
-        console.log("[PZZ DB] Сохранение успешно завершено");
         return true;
     } catch (err) {
-        console.error("[PZZ DB] Ошибка сохранения ПЗЗ:", err);
+        console.error("Ошибка сохранения ПЗЗ:", err);
         return false;
     }
 }
@@ -67,7 +59,6 @@ async function savePzzToSupabaseFull(payload) {
 // --- 2. Обработка клика по карте ---
 
 async function handlePzzAction(lat, lon) {
-    console.log(`[PZZ Action] Запуск поиска ПЗЗ по координатам: lat=${lat}, lon=${lon}`);
     if (typeof showLoader === 'function') showLoader("Поиск ПЗЗ...");
     
     let targetRegNumber = null;
@@ -80,7 +71,7 @@ async function handlePzzAction(lat, lon) {
         const clickPt = turf.point([lon, lat]);
         let mapCandidates = [];
 
-        console.log("[PZZ Action] Этап 1: Поиск среди уже отрисованных объектов на карте...");
+        // 1. Ищем объект уже нарисованный на карте
         if (typeof polygons !== 'undefined') {
             polygons.forEach(obj => {
                 if (obj instanceof ymaps.Polygon) {
@@ -106,8 +97,8 @@ async function handlePzzAction(lat, lon) {
             });
         }
 
+        // Если нашли на карте
         if (mapCandidates.length > 0) {
-            console.log(`[PZZ Action] Найдено ${mapCandidates.length} объектов под курсором на карте.`);
             mapCandidates.sort((a, b) => a.area - b.area);
             const bestObj = mapCandidates[0].obj;
             const fd = bestObj.properties.get('featureData');
@@ -116,14 +107,14 @@ async function handlePzzAction(lat, lon) {
             targetName = fd?.properties?.descr || "Без названия";
             targetGeometry = fd?.geometry;
             isAlreadyOnMap = true;
-        } else {
-            console.log("[PZZ Action] На карте объектов нет. Этап 2: Поиск в базе данных Supabase...");
+        } 
+        // 2. Ищем в БД по точке
+        else {
             const centerPoint = typeof toEPSG3857 === 'function' ? toEPSG3857(lat, lon) : null;
             if (centerPoint) {
                 const dbDataList = await findPzzByPointSupabase(centerPoint.x, centerPoint.y);
                 
                 if (dbDataList && dbDataList.length > 0) {
-                    console.log(`[PZZ Action] Объект найден в БД: ${dbDataList[0].reg_number}`);
                     let bestDbItem = dbDataList[0];
                     let minArea = Infinity;
                     dbDataList.forEach(item => {
@@ -141,51 +132,45 @@ async function handlePzzAction(lat, lon) {
                 }
             }
 
-            if (!targetRegNumber) {
-                console.log("[PZZ Action] В БД пусто. Этап 3: Запрос к API NSPD (Муниципальные образования)...");
-                if (typeof queryMunicipalInfo === 'function') {
-                    const apiData = await queryMunicipalInfo(lat, lon);
-                    if (apiData && apiData.features && apiData.features.length > 0) {
-                        console.log(`[PZZ Action] Объект найден в API: ${apiData.features[0].properties.label}`);
-                        let bestApiItem = apiData.features[0];
-                        let minArea = Infinity;
-                        apiData.features.forEach(item => {
-                            try {
-                                const tGeom = item.geometry.type === 'Polygon' ? turf.polygon(item.geometry.coordinates) : turf.multiPolygon(item.geometry.coordinates);
-                                const a = turf.area(tGeom);
-                                if (a < minArea) { minArea = a; bestApiItem = item; }
-                            } catch(e){}
-                        });
-                        
-                        targetRegNumber = bestApiItem.properties.label || "Без номера";
-                        targetName = bestApiItem.properties.descr || "Без названия";
-                        targetGeometry = bestApiItem.geometry;
-                    }
+            // 3. Ищем в Росреестре (API NSPD)
+            if (!targetRegNumber && typeof queryMunicipalInfo === 'function') {
+                const apiData = await queryMunicipalInfo(lat, lon);
+                if (apiData && apiData.features && apiData.features.length > 0) {
+                    let bestApiItem = apiData.features[0];
+                    let minArea = Infinity;
+                    apiData.features.forEach(item => {
+                        try {
+                            const tGeom = item.geometry.type === 'Polygon' ? turf.polygon(item.geometry.coordinates) : turf.multiPolygon(item.geometry.coordinates);
+                            const a = turf.area(tGeom);
+                            if (a < minArea) { minArea = a; bestApiItem = item; }
+                        } catch(e){}
+                    });
+                    
+                    targetRegNumber = bestApiItem.properties.label || "Без номера";
+                    targetName = bestApiItem.properties.descr || "Без названия";
+                    targetGeometry = bestApiItem.geometry;
                 }
             }
         }
 
         if (!targetRegNumber || !targetGeometry) {
-            console.warn("[PZZ Action] Поиск завершился неудачно: объект не найден нигде.");
             if (typeof showNotification === 'function') showNotification('Муниципальное образование не найдено', 'warning');
             return;
         }
 
-        console.log(`[PZZ Action] Итоговый объект определен: ${targetRegNumber} - ${targetName}. Запрос дополнительных данных...`);
+        // Запрашиваем актуальные данные из БД 
         const pzzData = await getPzzDataByRegNumber(targetRegNumber);
 
+        // Если полигона еще нет на карте — рисуем
         if (!isAlreadyOnMap) {
-            console.log("[PZZ Action] Отрисовка контура на карте...");
             drawPzzPolygon(targetGeometry, targetRegNumber, targetName, isFromDb);
-        } else {
-            console.log("[PZZ Action] Объект уже на карте, пропуск отрисовки.");
         }
 
-        console.log("[PZZ Action] Вызов модального окна ПЗЗ...");
+        // Вызываем окно
         showPzzModal(targetRegNumber, targetName, pzzData, targetGeometry);
 
     } catch (error) {
-        console.error("[PZZ Action] КРИТИЧЕСКАЯ ОШИБКА:", error);
+        console.error(error);
         if (typeof showNotification === 'function') showNotification("Ошибка обработки ПЗЗ", "error");
     } finally {
         if (typeof hideLoader === 'function') hideLoader();
@@ -194,11 +179,7 @@ async function handlePzzAction(lat, lon) {
 
 // Отрисовка на карте
 function drawPzzPolygon(geometryGeoJSON, regNumber, moName, isFromDatabase) {
-    console.log("[PZZ Draw] Старт отрисовки полигона");
-    if (typeof map === 'undefined' || !map || !geometryGeoJSON || !geometryGeoJSON.coordinates) {
-        console.error("[PZZ Draw] Отмена: нет карты или геометрии");
-        return;
-    }
+    if (typeof map === 'undefined' || !map || !geometryGeoJSON || !geometryGeoJSON.coordinates) return;
 
     let combinedBounds = null;
     const labelContent = `${regNumber} - ${moName}`;
@@ -232,6 +213,7 @@ function drawPzzPolygon(geometryGeoJSON, regNumber, moName, isFromDatabase) {
                     coord[1] - (typeof mapOffsetX !== 'undefined' ? mapOffsetX : -4.5) * 0.000008983
                 ]);
 
+                // Проверка, что после смещения нет NaN
                 const isValid = offsetCoords.every(c => isFinite(c[0]) && isFinite(c[1]));
                 if (!isValid) continue;
 
@@ -292,18 +274,13 @@ function drawPzzPolygon(geometryGeoJSON, regNumber, moName, isFromDatabase) {
             });
         }
     }
-    console.log("[PZZ Draw] Отрисовка завершена");
 }
 
 // --- 3. Модальное окно ПЗЗ ---
 
 function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
-    console.log(`[PZZ Modal] Инициализация окна для ${regNumber}`);
     const existingModal = document.getElementById('pzz-modal');
-    if (existingModal) {
-        console.log("[PZZ Modal] Удаление старого окна");
-        existingModal.remove();
-    }
+    if (existingModal) existingModal.remove();
 
     pzzData = pzzData || {};
     const currentLink = pzzData.pzz_link || '';
@@ -322,13 +299,10 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
                 
             if (Array.isArray(existingJsonData) && existingJsonData.length > 0) {
                 hasJson = true;
-                console.log("[PZZ Modal] JSON регламентов успешно загружен и распарсен");
             }
         } catch(e) {
-            console.error("[PZZ Modal] Ошибка парсинга сохраненного JSON:", e);
+            console.error("Ошибка парсинга сохраненного JSON:", e);
         }
-    } else {
-        console.log("[PZZ Modal] JSON регламентов отсутствует в БД");
     }
 
     const modal = document.createElement('div');
@@ -337,8 +311,6 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
     modal.style.width = '450px';
     modal.style.maxWidth = '95vw';
     modal.style.zIndex = '20000';
-    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: ДЕЛАЕМ ОКНО ВИДИМЫМ!
-    modal.style.display = 'block'; 
 
     modal.innerHTML = `
         <div class="color-modal-content" style="padding: 20px; display: flex; flex-direction: column; gap: 15px; overflow-y: auto; max-height: 85vh;">
@@ -400,9 +372,8 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
     `;
 
     document.body.appendChild(modal);
-    console.log("[PZZ Modal] Модальное окно добавлено в DOM");
 
-    // Блокируем всплытие событий (защита от глобального Paste/Keydown карты)
+    // Блокируем всплытие событий, чтобы не реагировали слушатели карты
     const stopProp = (e) => e.stopPropagation();
     modal.addEventListener('paste', stopProp);
     modal.addEventListener('keydown', stopProp);
@@ -472,12 +443,11 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
                     parsedJsonData = data;
                     jsonStatus.textContent = '✓ Файл корректен и готов к сохранению';
                     jsonStatus.style.color = '#10b981';
-                    console.log("[PZZ Modal] JSON загружен успешно. Зон найдено:", data.length);
                 } else {
                     throw new Error('Несоответствие формату JSON (нужны id, name, uses)');
                 }
             } catch (err) {
-                console.error("[PZZ Modal] Ошибка валидации JSON файла:", err);
+                console.error(err);
                 parsedJsonData = null;
                 fileInput.value = '';
                 jsonStatus.textContent = '✗ Ошибка: Неверный формат JSON файла';
@@ -488,7 +458,6 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
     });
 
     saveBtn.addEventListener('click', async () => {
-        console.log("[PZZ Modal] Нажата кнопка 'Сохранить'");
         const urlToSave = linkInput.value.trim();
         saveBtn.disabled = true;
         saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Сохранение...';
@@ -508,10 +477,10 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
         const success = await savePzzToSupabaseFull(payload);
 
         if (success) {
-            if (typeof window.showNotification === 'function') window.showNotification('Данные ПЗЗ успешно сохранены', 'success');
+            if (typeof showNotification === 'function') showNotification('Данные ПЗЗ успешно сохранены', 'success');
             modal.remove();
         } else {
-            if (typeof window.showNotification === 'function') window.showNotification('Ошибка при сохранении', 'error');
+            if (typeof showNotification === 'function') showNotification('Ошибка при сохранении', 'error');
             saveBtn.disabled = false;
             saveBtn.innerHTML = '<i class="fas fa-save"></i> Сохранить';
         }
@@ -519,16 +488,12 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
 
     if (viewerBtn) {
         viewerBtn.addEventListener('click', () => {
-            console.log("[PZZ Modal] Нажата кнопка открытия просмотрщика регламентов");
             openPzzViewer(pzzData);
             modal.style.display = 'none'; 
         });
     }
 
-    const closeModal = () => {
-        console.log("[PZZ Modal] Окно закрыто");
-        modal.remove();
-    };
+    const closeModal = () => modal.remove();
     cancelBtn.addEventListener('click', closeModal);
     modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
 }
@@ -540,7 +505,7 @@ function openPzzViewer(pzzData) {
     if (existingViewer) existingViewer.remove();
 
     if (!pzzData || !pzzData.regulations_json) {
-        if(typeof window.showNotification === 'function') window.showNotification('Нет данных JSON для отображения', 'warning');
+        if(typeof showNotification === 'function') showNotification('Нет данных JSON для отображения', 'warning');
         return;
     }
 
