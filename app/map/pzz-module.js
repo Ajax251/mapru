@@ -582,7 +582,7 @@ function openPzzViewer(pzzData) {
                 <div class="viewer-search">
                     <div class="search-box">
                         <label>Зона:</label>
-                        <input type="text" id="viewer-zone-search" placeholder="Напр: Ж 1">
+                        <input type="text" id="viewer-zone-search" placeholder="Напр: Ж1">
                     </div>
                     <div class="search-box">
                         <label>Вид разрешенного использования:</label>
