@@ -1133,29 +1133,16 @@ function drawContour(coords1, coords2) {
     }
 
     // 3. Контур проверки или черновик
-       if (verificationContour) {
+    if (verificationContour) {
+        ctx.beginPath();
+        verificationContour.forEach(([x, y], index) => {
+            const [canvasX, canvasY] = transformCoords(x, y);
+            if (index === 0) ctx.moveTo(canvasX, canvasY);
+            else ctx.lineTo(canvasX, canvasY);
+        });
         ctx.strokeStyle = 'orange';
         ctx.lineWidth = 3;
-        // Проверяем, это массив контуров (новый формат) или плоский массив
-        if (verificationContour.length > 0 && Array.isArray(verificationContour[0][0])) {
-            verificationContour.forEach(contour => {
-                ctx.beginPath();
-                contour.forEach(([x, y], index) => {
-                    const [canvasX, canvasY] = transformCoords(x, y);
-                    if (index === 0) ctx.moveTo(canvasX, canvasY);
-                    else ctx.lineTo(canvasX, canvasY);
-                });
-                ctx.stroke();
-            });
-        } else {
-            ctx.beginPath();
-            verificationContour.forEach(([x, y], index) => {
-                const [canvasX, canvasY] = transformCoords(x, y);
-                if (index === 0) ctx.moveTo(canvasX, canvasY);
-                else ctx.lineTo(canvasX, canvasY);
-            });
-            ctx.stroke();
-        }
+        ctx.stroke();
         ctx.lineWidth = 1;
     } else if (selectedPoints && selectedPoints.length > 0) {
         ctx.beginPath();
@@ -1364,7 +1351,7 @@ function runVerification() {
     const logContainer = document.getElementById('verificationResultContent');
     logContainer.innerHTML = '<strong>Начало проверки...</strong><br>';
     
-    document.getElementById('distanceLog').innerHTML = '';
+    document.getElementById('distanceLog').innerHTML = ''; // Очищаем старый блок на всякий случай
 
     const initialCoordsText = document.getElementById('coordsInput2').value.trim();
     const changesText = document.getElementById('clickedCoords').value.trim();
@@ -1374,24 +1361,16 @@ function runVerification() {
         return;
     }
 
-    // 1. Исходные точки (сразу разбиваем на контуры)
-    const initialContoursRaw = parseMultiContourUniversal(initialCoordsText);
-    if (initialContoursRaw.length === 0) return;
-
-    let globalIdx = 0;
-    // Удаляем замыкающие точки у каждого контура для корректного поиска пути (кольцевой список)
-    const initialContours = initialContoursRaw.map(contour => {
-        let checkContour = [...contour];
-        if (checkContour.length > 1) {
-            const first = checkContour[0];
-            const last = checkContour[checkContour.length - 1];
-            if (Math.abs(first.x - last.x) < 0.001 && Math.abs(first.y - last.y) < 0.001) {
-                checkContour.pop();
-            }
-        }
-        // Сохраняем исходный порядковый номер для вывода ошибок
-        return checkContour.map(p => ({ x: p.x, y: p.y, idx: globalIdx++ }));
-    });
+    
+    // 1. Исходные точки
+    let initialPoints = initialCoordsText.split('\n').map((line, idx) => {
+        const parts = line.split('\t');
+        if (parts.length < 2) return null; // Защита от пустых строк
+        
+        const x = parseFloat(parts[0] ? parts[0].replace(',', '.') : '');
+        const y = parseFloat(parts[1] ? parts[1].replace(',', '.') : '');
+        return (!isNaN(x) && !isNaN(y)) ? { x, y, idx } : null;
+    }).filter(Boolean);
 
     // 2. Сбор данных о новых и удаленных точках
     const newSegmentPoints = [];
@@ -1399,18 +1378,22 @@ function runVerification() {
 
     changesText.split('\n').forEach(line => {
         const parts = line.split('\t');
-        if (parts.length < 5) return;
+        if (parts.length < 5) return; // Пропускаем некорректные строки
 
         const oldXPart = parts[parts.length - 4];
         const oldYPart = parts[parts.length - 3];
         const newXPart = parts[parts.length - 2];
         const newYPart = parts[parts.length - 1];
 
+        // Безопасное чтение старых координат
         const oldX = oldXPart ? parseFloat(oldXPart.replace(',', '.')) : NaN;
         const oldY = oldYPart ? parseFloat(oldYPart.replace(',', '.')) : NaN;
+        
+        // Безопасное чтение новых (вдруг там "л" или пустота)
         const newXStr = newXPart ? newXPart.trim().toLowerCase() : '';
         const newYStr = newYPart ? newYPart.trim().toLowerCase() : '';
 
+        // Если точка удалена
         if (newXStr === 'л' || newYStr === 'л') {
             if (!isNaN(oldX) && !isNaN(oldY)) deletedPoints.push({ x: oldX, y: oldY });
             return;
@@ -1419,6 +1402,7 @@ function runVerification() {
         let x, y;
         const newX = newXPart ? parseFloat(newXPart.replace(',', '.')) : NaN;
         const newY = newYPart ? parseFloat(newYPart.replace(',', '.')) : NaN;
+        
         if (!isNaN(newX) && !isNaN(newY)) { x = newX; y = newY; } 
         else if (!isNaN(oldX) && !isNaN(oldY)) { x = oldX; y = oldY; }
         
@@ -1430,33 +1414,17 @@ function runVerification() {
         return;
     }
 
-    // 3. Ищем, в каком конкретно контуре мы меняем границу
-    let targetContourIndex = -1;
-    let startIdx = -1;
-    let endIdx = -1;
+    // 3. Индексы стыковки
+    const findIndex = (p) => initialPoints.findIndex(item => Math.abs(item.x - p.x) < 0.01 && Math.abs(item.y - p.y) < 0.01);
+    const startIdx = findIndex(newSegmentPoints[0]);
+    const endIdx = findIndex(newSegmentPoints[newSegmentPoints.length - 1]);
 
-    for (let c = 0; c < initialContours.length; c++) {
-        const contour = initialContours[c];
-        const sIdx = contour.findIndex(item => Math.abs(item.x - newSegmentPoints[0].x) < 0.01 && Math.abs(item.y - newSegmentPoints[0].y) < 0.01);
-        const eIdx = contour.findIndex(item => Math.abs(item.x - newSegmentPoints[newSegmentPoints.length - 1].x) < 0.01 && Math.abs(item.y - newSegmentPoints[newSegmentPoints.length - 1].y) < 0.01);
-
-        // Если и первая и последняя точки стыковки найдены в ЭТОМ контуре
-        if (sIdx !== -1 && eIdx !== -1) {
-            targetContourIndex = c;
-            startIdx = sIdx;
-            endIdx = eIdx;
-            break;
-        }
-    }
-
-    if (targetContourIndex === -1) {
-        logContainer.innerHTML = `<span style="color:red">Ошибка: Точки стыковки не найдены в пределах одного исходного контура. Возможно, вы пытаетесь соединить разные обособленные контуры.</span>`;
+    if (startIdx === -1 || endIdx === -1) {
+        logContainer.innerHTML = `<span style="color:red">Ошибка: Точки стыковки (первая или последняя из списка изменений) не найдены в исходном контуре.</span>`;
         return;
     }
 
-    let targetInitialPoints = initialContours[targetContourIndex];
-
-    // 4. ОПРЕДЕЛЕНИЕ ПУТИ (только внутри целевого контура!)
+    // 4. ОПРЕДЕЛЕНИЕ ПУТИ
     const getPathIndices = (from, to, len) => {
         let indices = [];
         let curr = (from + 1) % len;
@@ -1467,105 +1435,116 @@ function runVerification() {
         return indices;
     };
 
-    const pathA_Indices = getPathIndices(startIdx, endIdx, targetInitialPoints.length);
-    const pathB_Indices = getPathIndices(endIdx, startIdx, targetInitialPoints.length);
+    const pathA_Indices = getPathIndices(startIdx, endIdx, initialPoints.length);
+    const pathB_Indices = getPathIndices(endIdx, startIdx, initialPoints.length);
 
     const isDeleted = (p) => deletedPoints.some(d => Math.abs(d.x - p.x) < 0.01 && Math.abs(d.y - p.y) < 0.01);
 
-    let deletedCountA = pathA_Indices.filter(i => isDeleted(targetInitialPoints[i])).length;
-    let deletedCountB = pathB_Indices.filter(i => isDeleted(targetInitialPoints[i])).length;
-    let validPointsA = pathA_Indices.filter(i => !isDeleted(targetInitialPoints[i])).length;
-    let validPointsB = pathB_Indices.filter(i => !isDeleted(targetInitialPoints[i])).length;
+    let deletedCountA = pathA_Indices.filter(i => isDeleted(initialPoints[i])).length;
+    let deletedCountB = pathB_Indices.filter(i => isDeleted(initialPoints[i])).length;
+    
+    let validPointsA = pathA_Indices.filter(i => !isDeleted(initialPoints[i])).length;
+    let validPointsB = pathB_Indices.filter(i => !isDeleted(initialPoints[i])).length;
 
     let indicesToRemove = [];
     let indicesToKeep = [];
     let needReverse = false;
 
     if (deletedCountA > 0 && deletedCountB === 0) {
-        indicesToRemove = pathA_Indices; indicesToKeep = pathB_Indices; needReverse = false;
+        indicesToRemove = pathA_Indices;
+        indicesToKeep = pathB_Indices;
+        needReverse = false;
     } else if (deletedCountB > 0 && deletedCountA === 0) {
-        indicesToRemove = pathB_Indices; indicesToKeep = pathA_Indices; needReverse = true; 
+        indicesToRemove = pathB_Indices;
+        indicesToKeep = pathA_Indices;
+        needReverse = true; 
     } else {
         if (validPointsA > validPointsB) {
-            indicesToRemove = pathB_Indices; indicesToKeep = pathA_Indices; needReverse = true;
+            indicesToRemove = pathB_Indices;
+            indicesToKeep = pathA_Indices;
+            needReverse = true;
         } else {
-            indicesToRemove = pathA_Indices; indicesToKeep = pathB_Indices; needReverse = false;
+            indicesToRemove = pathA_Indices;
+            indicesToKeep = pathB_Indices;
+            needReverse = false;
         }
     }
 
     // 5. ЖЕСТКАЯ ПРОВЕРКА НА ЗАБЫТЫЕ ТОЧКИ
     for (let idx of indicesToRemove) {
-        if (!isDeleted(targetInitialPoints[idx])) {
-            problematicPoint = targetInitialPoints[idx];
-            logContainer.innerHTML = `<span style="color:red; font-size:15px; font-weight:bold;">❌ ОШИБКА: Точка №${targetInitialPoints[idx].idx + 1} (${targetInitialPoints[idx].x.toFixed(2)}, ${targetInitialPoints[idx].y.toFixed(2)})<br>находится внутри изменяемого участка, но НЕ помечена как удаленная (л)!</span>`;
-            drawContour(document.getElementById('coordsInput1').value.split('\n'), document.getElementById('coordsInput2').value.split('\n'));
+        if (!isDeleted(initialPoints[idx])) {
+            problematicPoint = initialPoints[idx];
+            logContainer.innerHTML = `<span style="color:red; font-size:15px; font-weight:bold;">❌ ОШИБКА: Точка №${initialPoints[idx].idx + 1} (${initialPoints[idx].x.toFixed(2)}, ${initialPoints[idx].y.toFixed(2)})<br>находится внутри изменяемого участка, но НЕ помечена как удаленная (л)!</span><br><br>Добавьте эту точку в список как удаляемую или включите её в новый контур.`;
+            drawContour(
+                document.getElementById('coordsInput1').value.split('\n'), 
+                document.getElementById('coordsInput2').value.split('\n')
+            );
             return; 
         }
     }
 
-    // 6. Сборка модифицированного контура
-    let restoredPoints = indicesToKeep.map(i => targetInitialPoints[i]);
-    if (needReverse) restoredPoints.reverse();
-    let modifiedContour = [...newSegmentPoints, ...restoredPoints];
+    // 6. Сборка (если ошибок нет)
+    let restoredPoints = indicesToKeep.map(i => initialPoints[i]);
+    if (needReverse) {
+        restoredPoints.reverse();
+    }
+    let finalContour = [...newSegmentPoints, ...restoredPoints];
 
-    // 7. Сборка финального массива всех контуров (измененный + нетронутые)
-    let finalContoursList = [];
-    for (let c = 0; c < initialContours.length; c++) {
-        let currentContour = (c === targetContourIndex) ? modifiedContour : [...initialContours[c]];
-        // Замыкаем контур обратно
-        if (currentContour.length > 0) {
-            const first = currentContour[0];
-            const last = currentContour[currentContour.length - 1];
-            if (Math.abs(first.x - last.x) > 0.001 || Math.abs(first.y - last.y) > 0.001) {
-                 currentContour.push({ x: first.x, y: first.y });
-            }
+    // Замыкание
+    if (finalContour.length > 0) {
+        const first = finalContour[0];
+        const last = finalContour[finalContour.length - 1];
+        if (Math.abs(first.x - last.x) > 0.001 || Math.abs(first.y - last.y) > 0.001) {
+             finalContour.push({ x: first.x, y: first.y });
         }
-        finalContoursList.push(currentContour);
     }
 
     const input1Text = document.getElementById('coordsInput1').value.trim();
     const contours1 = parseMultiContourUniversal(input1Text);
 
-    // 8. ПРОВЕРКА: НЕ ПОПАЛ ЛИ УТОЧНЯЕМЫЙ ЗУ ВНУТРЬ СМЕЖНОГО ЗУ
+    // 7. ПРОВЕРКА: НЕ ПОПАЛ ЛИ УТОЧНЯЕМЫЙ ЗУ ВНУТРЬ СМЕЖНОГО ЗУ
     let isInsideError = false;
-    if (contours1.length > 0) {
+    if (contours1.length > 0 && finalContour.length > 2) {
         for (let contour of contours1) {
             if (contour.length < 3) continue;
             let centroid = getPolygonCentroid(contour);
-            // Проверяем по всем контурам (внешним и внутренним)
-            for (let fc of finalContoursList) {
-                if (fc.length > 2 && isPointInPolygon(centroid, fc)) {
-                    isInsideError = true;
-                    break;
-                }
+            if (isPointInPolygon(centroid, finalContour)) {
+                isInsideError = true;
+                break;
             }
-            if (isInsideError) break;
         }
     }
 
     if (isInsideError) {
-        logContainer.innerHTML = `<span style="color:red; font-size:15px; font-weight:bold;">❌ ОШИБКА: Уточняемый участок (красный) оказался ВНУТРИ смежного (синего) после сборки!</span><br><br>Вероятно, вырезана не та часть контура. Попробуйте развернуть порядок точек.`;
-        verificationContour = finalContoursList.map(c => c.map(p => [p.x, p.y]));
-        drawContour(document.getElementById('coordsInput1').value.split('\n'), document.getElementById('coordsInput2').value.split('\n'));
+        logContainer.innerHTML = `<span style="color:red; font-size:15px; font-weight:bold;">❌ ОШИБКА: Уточняемый участок (красный) оказался ВНУТРИ смежного (синего) после сборки!</span><br><br>Вероятно, вырезана не та часть контура. Попробуйте развернуть порядок точек (кнопка ⇄) или проверьте правильность указания удаляемых точек.`;
+        verificationContour = finalContour.map(p => [p.x, p.y]);
+        drawContour(
+            document.getElementById('coordsInput1').value.split('\n'), 
+            document.getElementById('coordsInput2').value.split('\n')
+        );
         return;
     }
 
-    // 9. ПРОВЕРКА НА ПЕРЕСЕЧЕНИЕ ГРАНИЦ КРЕСТ-НАКРЕСТ
+    // 8. ПРОВЕРКА НА ПЕРЕСЕЧЕНИЕ ГРАНИЦ КРЕСТ-НАКРЕСТ (НОВОЕ)
     let isIntersectingError = false;
-    if (contours1.length > 0) {
+    if (contours1.length > 0 && finalContour.length > 2) {
         for (let contour of contours1) {
             if (contour.length < 2) continue;
+            
+            // Перебираем все отрезки красного контура
             for (let i = 0; i < contour.length - 1; i++) {
-                let p1 = contour[i], q1 = contour[i + 1];
-                for (let fc of finalContoursList) {
-                    for (let j = 0; j < fc.length - 1; j++) {
-                        let p2 = fc[j], q2 = fc[j + 1];
-                        if (doIntersectStrict(p1, q1, p2, q2)) {
-                            isIntersectingError = true;
-                            break;
-                        }
+                let p1 = contour[i];
+                let q1 = contour[i + 1];
+
+                // Перебираем все отрезки собранного контура
+                for (let j = 0; j < finalContour.length - 1; j++) {
+                    let p2 = finalContour[j];
+                    let q2 = finalContour[j + 1];
+
+                    if (doIntersectStrict(p1, q1, p2, q2)) {
+                        isIntersectingError = true;
+                        break;
                     }
-                    if (isIntersectingError) break;
                 }
                 if (isIntersectingError) break;
             }
@@ -1574,24 +1553,33 @@ function runVerification() {
     }
 
     if (isIntersectingError) {
-        logContainer.innerHTML = `<span style="color:red; font-size:15px; font-weight:bold;">❌ ОШИБКА: Образованная граница смежного участка ПЕРЕСЕКАЕТ границу уточняемого!</span>`;
-        verificationContour = finalContoursList.map(c => c.map(p => [p.x, p.y]));
-        drawContour(document.getElementById('coordsInput1').value.split('\n'), document.getElementById('coordsInput2').value.split('\n'));
+        logContainer.innerHTML = `<span style="color:red; font-size:15px; font-weight:bold;">❌ ОШИБКА: Образованная граница смежного участка ПЕРЕСЕКАЕТ границу уточняемого!</span><br><br>Полигоны накладываются друг на друга. Проверьте правильность стыковочных точек и порядка обхода.`;
+        verificationContour = finalContour.map(p => [p.x, p.y]);
+        drawContour(
+            document.getElementById('coordsInput1').value.split('\n'), 
+            document.getElementById('coordsInput2').value.split('\n')
+        );
         return;
     }
 
-    // Вывод в лог
-    let coordsLog = '<span style="color:green; font-weight:bold; font-size:16px;">✅ Проверка выполнена успешно!</span><br><br><strong>Координаты измененного контура:</strong><div class="coords-list">';
-    finalContoursList[targetContourIndex].forEach((p, idx) => {
-        if (idx > 0 && idx === finalContoursList[targetContourIndex].length - 1) return;
+    // Вывод в лог успешного результата
+    let coordsLog = '<span style="color:green; font-weight:bold; font-size:16px;">✅ Проверка выполнена успешно!</span><br><br><strong>Координаты нового контура смежного ЗУ:</strong><div class="coords-list">';
+    finalContour.forEach((p, idx) => {
+        // Не выводим дублирующую замыкающую точку в лог номеров, если не хотим сбивать нумерацию
+        if (idx === finalContour.length - 1 && idx > 0 && 
+            Math.abs(p.x - finalContour[0].x) < 0.001 && Math.abs(p.y - finalContour[0].y) < 0.001) {
+            return;
+        }
         coordsLog += `${idx + 1}:\t${p.x.toFixed(2)}\t${p.y.toFixed(2)}<br>`;
     });
     coordsLog += '</div>';
     logContainer.innerHTML = coordsLog;
 
-    // Передаем массив массивов для отрисовки без соединительных линий
-    verificationContour = finalContoursList.map(c => c.map(p => [p.x, p.y]));
-    drawContour(document.getElementById('coordsInput1').value.split('\n'), document.getElementById('coordsInput2').value.split('\n'));
+    verificationContour = finalContour.map(p => [p.x, p.y]);
+    drawContour(
+        document.getElementById('coordsInput1').value.split('\n'), 
+        document.getElementById('coordsInput2').value.split('\n')
+    );
 }
 
 function startDragging(e) {
