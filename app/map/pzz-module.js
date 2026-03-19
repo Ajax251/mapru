@@ -563,7 +563,7 @@ function openPzzViewer(pzzData, regNumber, moName) {
                 <div class="meta-details">
                     ${dNum ? `<span>№ ${dNum}</span>` : ''}
                     ${dDate ? `<span>от ${dDate}</span>` : ''}
-                    ${dLink ? `<a href="${dLink}" target="_blank" class="meta-link"><i class="fas fa-external-link-alt"></i> Документ ПЗЗ</a>` : ''}
+                    ${dLink ? `<a href="${dLink}" target="_blank" class="meta-link"><i class="fas fa-external-link-alt"></i> Документ ПЗЗ/Проверить актуальность..</a>` : ''}
                 </div>
             </div>
         </div>
