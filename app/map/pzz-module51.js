@@ -522,12 +522,14 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
         }
     });
 
-if (viewerBtn) {
+ if (viewerBtn) {
         viewerBtn.addEventListener('click', () => {
             console.log("[PZZ Modal] Нажата кнопка открытия просмотрщика регламентов");
-            openPzzViewer(pzzData, regNumber, moName);
+            openPzzViewer(pzzData);
+           
         });
     }
+
     const closeModal = () => {
         console.log("[PZZ Modal] Окно закрыто");
         modal.remove();
@@ -538,7 +540,7 @@ if (viewerBtn) {
 
 // --- 4. ПОЛНОЭКРАННЫЙ ПРОСМОТРЩИК JSON ---
 
-function openPzzViewer(pzzData, regNumber, moName) {
+function openPzzViewer(pzzData) {
     if (!pzzData || !pzzData.regulations_json) {
         if(typeof window.showNotification === 'function') window.showNotification('Нет данных JSON для отображения', 'warning');
         return;
@@ -546,28 +548,27 @@ function openPzzViewer(pzzData, regNumber, moName) {
 
     const zonesData = typeof pzzData.regulations_json === 'string' ? JSON.parse(pzzData.regulations_json) : pzzData.regulations_json;
     
+    let docMetaHtml = '';
     const dName = pzzData.doc_name;
     const dNum = pzzData.doc_number;
     const dDate = pzzData.doc_date;
     const dLink = pzzData.pzz_link;
 
-    // Теперь блок meta-информации формируется всегда, так как regNumber и moName есть всегда
-    const docMetaHtml = `
-        <div class="viewer-doc-meta">
-            <i class="fas fa-landmark meta-icon"></i>
-            <div class="meta-content">
-                <div class="meta-title" style="font-size: 1.15rem; color: #0f172a; margin-bottom: 6px;">
-                    ${regNumber || 'Без номера'} — ${moName || 'Без названия'}
-                </div>
-                ${dName ? `<div style="font-size: 0.9rem; font-weight: 600; color: #475569; margin-bottom: 6px;">${dName}</div>` : ''}
-                <div class="meta-details">
-                    ${dNum ? `<span>№ ${dNum}</span>` : ''}
-                    ${dDate ? `<span>от ${dDate}</span>` : ''}
-                    ${dLink ? `<a href="${dLink}" target="_blank" class="meta-link"><i class="fas fa-external-link-alt"></i> Документ ПЗЗ</a>` : ''}
+    if (dName || dNum || dDate || dLink) {
+        docMetaHtml = `
+            <div class="viewer-doc-meta">
+                <i class="fas fa-file-contract meta-icon"></i>
+                <div class="meta-content">
+                    ${dName ? `<div class="meta-title">${dName}</div>` : ''}
+                    <div class="meta-details">
+                        ${dNum ? `<span>№ ${dNum}</span>` : ''}
+                        ${dDate ? `<span>от ${dDate}</span>` : ''}
+                        ${dLink ? `<a href="${dLink}" target="_blank" class="meta-link"><i class="fas fa-external-link-alt"></i> Документ</a>` : ''}
+                    </div>
                 </div>
             </div>
-        </div>
-    `;
+        `;
+    }
 
     // Открываем новую пустую вкладку
     const newWin = window.open('', '_blank');
@@ -582,7 +583,7 @@ function openPzzViewer(pzzData, regNumber, moName) {
         <html lang="ru">
         <head>
             <meta charset="UTF-8">
-           <title>${regNumber} — Градостроительные регламенты</title>
+            <title>Градостроительные регламенты ${dNum ? `№ ${dNum}` : ''}</title>
             <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
             <style>
                 body { margin: 0; padding: 0; font-family: sans-serif; background: #f1f5f9; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
