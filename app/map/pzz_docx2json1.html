@@ -4,6 +4,7 @@
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <title>Парсер ПЗЗ (Из Word/PDF в JSON)</title>
+    <!-- Подключаем библиотеку для чтения .docx файлов прямо в браузере -->
     <script src="https://cdnjs.cloudflare.com/ajax/libs/mammoth/1.6.0/mammoth.browser.min.js"></script>
     <style>
         body { font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif; margin: 0; padding: 20px; background-color: #f4f7f6; color: #333; }
@@ -57,61 +58,78 @@
     </div>
 
     <script>
+        // --- ЧТЕНИЕ DOCX ФАЙЛА ---
         function handleFile(event) {
             const file = event.target.files[0];
             if (!file) return;
+
             const reader = new FileReader();
             reader.onload = function(loadEvent) {
-                mammoth.extractRawText({arrayBuffer: loadEvent.target.result})
+                const arrayBuffer = loadEvent.target.result;
+                mammoth.extractRawText({arrayBuffer: arrayBuffer})
                     .then(function(result) {
                         document.getElementById('inputText').value = result.value;
                         parseDocument(result.value);
-                    }).catch(err => alert("Ошибка при чтении файла: " + err.message));
+                    })
+                    .catch(err => alert("Ошибка при чтении файла: " + err.message));
             };
             reader.readAsArrayBuffer(file);
         }
 
+        // --- ЗАПУСК ПАРСИНГА ИЗ TEXTAREA ---
         function parseFromTextarea() {
             const text = document.getElementById('inputText').value;
             if (!text.trim()) { alert("Пожалуйста, вставьте текст."); return; }
             parseDocument(text);
         }
 
+        // --- ОСНОВНОЙ АЛГОРИТМ ПАРСИНГА ---
         function parseDocument(text) {
             let zones = [];
+            
+            // Нормализуем переносы строк
             text = text.replace(/\r\n/g, '\n');
 
-            const zoneRegex = /(?:Градостроительный регламент\s+(.*?)\s+\(([А-ЯЁA-Z0-9\-]+)\))|(?:^|\n)\s*([А-ЯЁA-Z]{1,3}\d{1,2}[А-ЯЁA-Z\d]?)(?:\.\s+|\s+)([^\n]{3,150})|(?:^|\n)\s*\d+\.\s+([^\n(]+)\s+\(([А-ЯЁA-Z0-9\-]+)\)\d*/gi;
+            // Ищем заголовки зон
+            const zoneRegex = /(?:Градостроительный регламент\s+(.*?)\s+\(([А-ЯЁA-Z0-9]+)\))|(?:^|\n)([А-ЯЁA-Z]{1,3}\d+[А-ЯЁA-Z\d]?)\.\s+([^\n]+)/gi;
             
             let match;
             const zoneMatches = [];
 
             while ((match = zoneRegex.exec(text)) !== null) {
-                let name = match[1] || match[4] || match[5];
-                let id = match[2] || match[3] || match[6];
+                let name = match[1] || match[4];
+                let id = match[2] || match[3];
                 name = name.trim().replace(/\.$/, '');
                 zoneMatches.push({ name: name, id: id, startIndex: match.index });
             }
 
             if (zoneMatches.length === 0) {
-                alert("Не удалось найти зоны. Убедитесь, что текст содержит заголовки.");
+                alert("Не удалось найти зоны. Убедитесь, что текст содержит заголовки вида 'Ж1. Зона...' или 'Градостроительный регламент... (Ж1)'");
                 return;
             }
 
+            // Обрабатываем каждую найденную зону
             for (let i = 0; i < zoneMatches.length; i++) {
                 const currentZone = zoneMatches[i];
                 const nextZone = zoneMatches[i + 1];
                 let endIndex = nextZone ? nextZone.startIndex : text.length;
+                
                 let zoneText = text.substring(currentZone.startIndex, endIndex);
 
+                // ЗАЩИТА ОТ "ХВОСТА" В ПОСЛЕДНЕЙ ЗОНЕ:
+                // Ищем начало новых буллитов/глав (например, "Глава 12", "Статья 36"), 
+                // которые не относятся к зоне, и отрезаем текст по ним.
+                // Индекс > 50 нужен, чтобы случайно не отрезать сам заголовок зоны, если в нем есть слово "Статья".
                 const stopMatch = /(?:^|\n)\s*(?:Глава|Статья|Часть)\s+[IVX\d]+/i.exec(zoneText);
-                if (stopMatch && stopMatch.index > 50) zoneText = zoneText.substring(0, stopMatch.index);
+                if (stopMatch && stopMatch.index > 50) {
+                    zoneText = zoneText.substring(0, stopMatch.index);
+                }
 
                 const uses = [];
                 const headers = [
-                    { type: "Основные", regex: /(?:Основные\s+виды|ОСНОВНЫЕ\s*(?:\n|$))/i },
-                    { type: "Вспомогательные", regex: /(?:Вспомогательные\s+виды|ВСПОМОГАТЕЛЬНЫЕ\s*(?:\n|$))/i },
-                    { type: "Условно разрешенные", regex: /(?:Условно\s+разрешенные\s+виды|УСЛОВНО РАЗРЕШЕННЫЕ\s*(?:\n|$))/i }
+                    { type: "Основные", regex: /Основные\s+виды/i },
+                    { type: "Вспомогательные", regex: /Вспомогательные\s+виды/i },
+                    { type: "Условно разрешенные", regex: /Условно\s+разрешенные\s+виды/i }
                 ];
 
                 let foundHeaders = [];
@@ -125,145 +143,138 @@
                 for (let j = 0; j < foundHeaders.length; j++) {
                     const currentHeader = foundHeaders[j];
                     const nextHeader = foundHeaders[j + 1];
+                    
                     const startExtract = currentHeader.index; 
                     const endExtract = nextHeader ? nextHeader.index : zoneText.length;
                     
                     let blockText = zoneText.substring(startExtract, endExtract);
                     blockText = blockText.replace(/^.*?(?:\:|\n)/, '');
+
                     uses.push(...parseRows(blockText, currentHeader.type));
                 }
 
                 let finalName = currentZone.name;
                 if (finalName.toLowerCase().startsWith("зон ")) finalName = "Зона " + finalName.substring(4);
                 finalName = finalName.charAt(0).toUpperCase() + finalName.slice(1);
+                
                 if (!finalName.includes(currentZone.id)) finalName = finalName + " (" + currentZone.id + ")";
 
-                zones.push({ id: currentZone.id, name: finalName, uses: uses });
+                zones.push({
+                    id: currentZone.id,
+                    name: finalName,
+                    uses: uses
+                });
             }
 
             zones = zones.filter(zone => zone.uses && zone.uses.length > 0);
             document.getElementById('outputJson').textContent = JSON.stringify(zones, null, 2);
         }
 
+        // --- ГИБКИЙ РАЗБОР СТРОК ---
         function parseRows(textBlock, typeName) {
             const rows = [];
             const hasCodes = /(?:^|\s)\d+(?:\.\d+)+\s+[А-ЯЁA-Z]/i.test(textBlock);
 
             if (!hasCodes) {
-                const parts = textBlock.split(/(?:\n|^)\s*(?:-|–|—|\*)\s*/g);
+                // Разбиваем текст по дефисам (маркированный список)
+                const parts = textBlock.split(/(?:\n|^)\s*(?:-|–|—)\s+/g);
+                
                 parts.forEach(part => {
                     let name = part.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
                     name = name.replace(/[;.]+$/, '').trim();
+                    
+                    // ЗАЩИТА: Игнорируем огромные абзацы (законы/СНИПы), пустые строки и заголовки
                     if (!name || name.length < 3 || name.length > 800 || name.toLowerCase().includes("виды разрешенного")) return;
-                    rows.push({ type: typeName, code: "н.у.", name: name, area: "н.у.", width: "н.у.", height: "н.у.", percent: "н.у.", setback: "н.у." });
+
+                    rows.push({
+                        type: typeName,
+                        code: "н.у.",
+                        name: name,
+                        area: "н.у.",
+                        height: "н.у.",
+                        percent: "н.у.",
+                        setback: "н.у."
+                    });
                 });
+                
                 return rows;
             }
 
-            let flatText = textBlock.replace(/\r?\n/g, ' ');
-            flatText = " " + flatText.replace(/ {2,}/g, ' ').trim();
-            const parts = flatText.split(/(?=\s\d+(?:\.\d+)+\s*[А-ЯЁA-Z])/g);
+            let flatText = " " + textBlock.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+            const parts = flatText.split(/(?=\s\d+(?:\.\d+)+\s+[А-ЯЁA-Z])/g);
 
             parts.forEach(part => {
                 part = part.trim();
                 if (!part) return;
 
-                const codeMatch = part.match(/^(\d+(?:\.\d+)*)(?:\s|\t)+/);
+                const codeMatch = part.match(/^(\d+(?:\.\d+)*)\s+/);
                 if (!codeMatch) return;
                 
                 const code = codeMatch[1];
                 let remainder = part.substring(codeMatch[0].length).trim();
 
-                // --- ФИЛЬТР СНОСОК ---
-                // Отсекаем юридические сноски, которые прилипают к последней строке таблицы
-                const footnoteRegex = /(?:\s|^)(?:(?:\d[.)]?\s+)(?:Максимальная|Минимальная|В том числе)|(?:\d[.)]?\s*)?(?:Ограничения использования|Класс опасности|С учетом требований))/i;
-                const footnoteMatch = remainder.match(footnoteRegex);
-                if (footnoteMatch) {
-                    remainder = remainder.substring(0, footnoteMatch.index).trim();
+                const setbackMatch = remainder.match(/\s+(н\.у\.|[0-9]+(?:[.,][0-9]+)?\/[0-9а-я.\-]+|н\.у\.\/[0-9а-я.\-]+)$/i);
+                let setback = "н.у.";
+                if (setbackMatch) { setback = setbackMatch[1].trim(); remainder = remainder.substring(0, setbackMatch.index).trim(); }
+
+                const percentMatch = remainder.match(/\s+(\d+\s*%|н\.у\.)$/i);
+                let percent = "н.у.";
+                if (percentMatch) { percent = percentMatch[1].replace(/\s/g, ''); remainder = remainder.substring(0, percentMatch.index).trim(); }
+
+                let height = "н.у.";
+                const heightMatch = remainder.match(/\s+(н\.у\.|[0-9]+\s*этаж.*|н\.у\.\/.*|0)$/i);
+                if (heightMatch) { height = heightMatch[1].trim(); remainder = remainder.substring(0, heightMatch.index).trim(); }
+
+                let area = "н.у.";
+                const areaMatch = remainder.match(/\s+(н\.у\.|мин\..*)$/i);
+                if (areaMatch) {
+                    area = areaMatch[1].replace(/([0-9])(макс)/gi, '$1 $2').trim(); 
+                    remainder = remainder.substring(0, areaMatch.index).trim();
                 }
 
                 let name = remainder;
-                let area = "н.у.", width = "н.у.", percent = "н.у.", floors = "н.у.", height = "н.у.", setback = "н.у.";
 
-                const paramRegex = /^(.*?)\s+((?:(?:н\.?у\.?|[\d.,/]+|-)\s+){4,}.*)$/i;
-                const match3 = remainder.match(paramRegex);
-
-                if (remainder.includes('\t')) {
-                    let cols = remainder.split('\t').map(s => s.trim());
-                    name = cols[0] || name; 
-                    area = cols[1] || area; 
-                    width = cols[2] || width;
-                    percent = cols[3] || percent; 
-                    floors = cols[4] || floors; 
-                    height = cols[5] || height; 
-                    setback = cols.slice(6).join(' ') || setback;
-                } else if (match3) {
-                    name = match3[1].trim();
-                    let tokens = match3[2].trim().split(/\s+/);
-                    
-                    if (tokens.length >= 6) {
-                        area = tokens[0];
-                        width = tokens[1];
-                        percent = tokens[2];
-                        floors = tokens[3];
-                        height = tokens[4];
-                        setback = tokens.slice(5).join(' ');
-                    } else if (tokens.length === 5) {
-                        area = tokens[0];
-                        width = "н.у.";
-                        percent = tokens[1];
-                        floors = tokens[2];
-                        height = tokens[3];
-                        setback = tokens.slice(4).join(' ');
-                    }
-                } else {
-                    const setbackMatch = remainder.match(/\s+(н\.у\.|[0-9]+(?:[.,][0-9]+)?\/[0-9а-я.\-]+|н\.у\.\/[0-9а-я.\-]+)$/i);
-                    if (setbackMatch) { setback = setbackMatch[1].trim(); remainder = remainder.substring(0, setbackMatch.index).trim(); }
-                    const percentMatch = remainder.match(/\s+(\d+\s*%|н\.у\.)$/i);
-                    if (percentMatch) { percent = percentMatch[1].replace(/\s/g, ''); remainder = remainder.substring(0, percentMatch.index).trim(); }
-                    const heightMatch = remainder.match(/\s+(н\.у\.|[0-9]+\s*этаж.*|н\.у\.\/.*|0)$/i);
-                    if (heightMatch) { height = heightMatch[1].trim(); remainder = remainder.substring(0, heightMatch.index).trim(); }
-                    const areaMatch = remainder.match(/\s+(н\.у\.|мин\..*)$/i);
-                    if (areaMatch) { area = areaMatch[1].replace(/([0-9])(макс)/gi, '$1 $2').trim(); remainder = remainder.substring(0, areaMatch.index).trim(); }
-                    name = remainder;
-                }
-
-                let finalHeight = height;
-                if (floors !== "н.у." && floors !== "н.у" && floors && floors !== "-") {
-                    finalHeight = floors + " эт. / " + height;
-                }
-
-                const norm = (val) => (val === "н.у" || val === "н.у." || val === "-" || !val) ? "н.у." : val;
-                
-                // Дополнительная защита: если после отсечения сносок имя оказалось пустым (это был мусор)
-                if (!name || name.length > 800) return;
+                // Защита от огромных строк для старого формата
+                if (name.length > 800) return;
 
                 rows.push({
                     type: typeName,
                     code: code,
                     name: name,
-                    area: norm(area),
-                    width: norm(width),
-                    height: norm(finalHeight),
-                    percent: norm(percent),
-                    setback: norm(setback)
+                    area: area,
+                    height: height,
+                    percent: percent,
+                    setback: setback
                 });
             });
+
             return rows;
         }
 
+        // --- ФУНКЦИИ КОПИРОВАНИЯ И СОХРАНЕНИЯ ---
         function copyJSON() {
             const output = document.getElementById('outputJson').textContent;
-            navigator.clipboard.writeText(output).then(() => alert("✅ JSON успешно скопирован!"));
+            if(!output || output.includes("Здесь появится")) return;
+            navigator.clipboard.writeText(output).then(() => {
+                alert("✅ JSON успешно скопирован в буфер обмена!");
+            }).catch(err => alert("Ошибка копирования: " + err));
         }
 
         function saveJSON() {
             const output = document.getElementById('outputJson').textContent;
+            if(!output || output.includes("Здесь появится")) {
+                alert("Сначала сгенерируйте JSON!");
+                return;
+            }
             const blob = new Blob([output], { type: "application/json" });
             const url = URL.createObjectURL(blob);
             const a = document.createElement('a');
-            a.href = url; a.download = "PZZ_Zones.json";
-            document.body.appendChild(a); a.click(); document.body.removeChild(a);
+            a.href = url;
+            a.download = "PZZ_Zones.json";
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
         }
     </script>
 </body>

@@ -1,67 +1,78 @@
 // ==========================================
 // МОДУЛЬ ПЗЗ (Правила землепользования и застройки)
-// Содержит логику запросов к БД, отрисовку, модальное окно 
-// и полноэкранный просмотрщик JSON-регламентов.
+// Инкапсулирует логику поиска, сохранения, отрисовки 
+// и просмотра градостроительных регламентов.
 // ==========================================
+
+console.log("[PZZ Module] Модуль успешно загружен");
 
 // --- 1. Работа с базой данных (Supabase) ---
 
 async function getPzzDataByRegNumber(regNumber) {
-    if (!supabaseClient) return null;
+    if (!supabaseClient || !regNumber) {
+        console.warn("[PZZ DB] Пропуск запроса данных: нет клиента Supabase или номера", regNumber);
+        return null;
+    }
+    console.log(`[PZZ DB] Запрашиваем полные данные для ${regNumber}...`);
     try {
-        // Забираем все нужные поля
         const { data, error } = await supabaseClient
             .from('municipal_pzz')
             .select('pzz_link, doc_date, doc_number, doc_name, regulations_json')
             .eq('reg_number', regNumber)
             .single();
+            
         if (error && error.code !== 'PGRST116') throw error;
+        console.log(`[PZZ DB] Ответ от базы для ${regNumber}:`, data ? "Данные найдены" : "Данные отсутствуют");
         return data || null;
     } catch (err) {
-        console.error("Ошибка получения данных ПЗЗ:", err);
+        console.error("[PZZ DB] Ошибка получения данных ПЗЗ:", err);
         return null;
     }
 }
 
 async function findPzzByPointSupabase(pointX, pointY) {
     if (!supabaseClient) return null;
+    console.log(`[PZZ DB] Поиск в БД по точке X=${pointX}, Y=${pointY}...`);
     try {
         const { data, error } = await supabaseClient.rpc('get_pzz_by_point', {
             point_x: pointX,
             point_y: pointY
         });
         if (error) throw error;
+        console.log(`[PZZ DB] Найдено объектов по точке: ${data ? data.length : 0}`);
         return data || [];
     } catch (err) {
-        console.error("Ошибка поиска ПЗЗ по точке:", err);
+        console.error("[PZZ DB] Ошибка поиска ПЗЗ по точке:", err);
         return null;
     }
 }
 
 async function savePzzToSupabaseFull(payload) {
     if (!supabaseClient) return false;
+    console.log("[PZZ DB] Отправка данных на сохранение:", { ...payload, regulations_json: payload.regulations_json ? "(JSON Data)" : "null" });
     try {
         const { error } = await supabaseClient
             .from('municipal_pzz')
             .upsert(payload, { onConflict: 'reg_number' });
         
         if (error) throw error;
+        console.log("[PZZ DB] Сохранение успешно завершено");
         return true;
     } catch (err) {
-        console.error("Ошибка сохранения ПЗЗ:", err);
+        console.error("[PZZ DB] Ошибка сохранения ПЗЗ:", err);
         return false;
     }
 }
 
-// --- 2. Обработка действия (Клик по карте) ---
+// --- 2. Обработка клика по карте ---
 
 async function handlePzzAction(lat, lon) {
-    if (typeof showLoader === 'function') showLoader("Поиск...");
+    console.log(`[PZZ Action] Запуск поиска ПЗЗ по координатам: lat=${lat}, lon=${lon}`);
+    if (typeof showLoader === 'function') showLoader("Поиск ПЗЗ...");
     
     let targetRegNumber = null;
     let targetName = null;
     let targetGeometry = null;
-    let pzzData = null; // Будет хранить весь объект из БД
     let isFromDb = false;
     let isAlreadyOnMap = false;
 
@@ -69,113 +80,128 @@ async function handlePzzAction(lat, lon) {
         const clickPt = turf.point([lon, lat]);
         let mapCandidates = [];
 
-        // Ищем полигон на карте
-        polygons.forEach(obj => {
-            if (obj instanceof ymaps.Polygon) {
-                const props = obj.properties.get('featureData')?.properties || {};
-                const catId = props.category;
-                const catName = (props.categoryName || '').toLowerCase();
-                const strokeColor = obj.options.get('strokeColor');
-                
-                if (catId === 36278 || catName.includes('муниципальные образования') || strokeColor === '#FFA500' || strokeColor === '#FF1493') {
-                    try {
-                        const coords = obj.geometry.getCoordinates()[0];
-                        const turfPoly = turf.polygon([coords.map(c => [c[1], c[0]])]);
-                        if (turf.booleanPointInPolygon(clickPt, turfPoly)) {
-                            mapCandidates.push({ obj, area: turf.area(turfPoly) });
-                        }
-                    } catch (e) {
-                        if (obj.geometry.contains([lat, lon])) {
-                            mapCandidates.push({ obj, area: Infinity }); 
+        console.log("[PZZ Action] Этап 1: Поиск среди уже отрисованных объектов на карте...");
+        if (typeof polygons !== 'undefined') {
+            polygons.forEach(obj => {
+                if (obj instanceof ymaps.Polygon) {
+                    const props = obj.properties.get('featureData')?.properties || {};
+                    const catId = props.category;
+                    const catName = (props.categoryName || '').toLowerCase();
+                    const strokeColor = obj.options.get('strokeColor');
+                    
+                    if (catId === 36278 || catName.includes('муниципальные образования') || strokeColor === '#FFA500' || strokeColor === '#FF1493') {
+                        try {
+                            const coords = obj.geometry.getCoordinates()[0];
+                            const turfPoly = turf.polygon([coords.map(c => [c[1], c[0]])]);
+                            if (turf.booleanPointInPolygon(clickPt, turfPoly)) {
+                                mapCandidates.push({ obj, area: turf.area(turfPoly) });
+                            }
+                        } catch (e) {
+                            if (obj.geometry.contains([lat, lon])) {
+                                mapCandidates.push({ obj, area: Infinity }); 
+                            }
                         }
                     }
                 }
-            }
-        });
+            });
+        }
 
         if (mapCandidates.length > 0) {
+            console.log(`[PZZ Action] Найдено ${mapCandidates.length} объектов под курсором на карте.`);
             mapCandidates.sort((a, b) => a.area - b.area);
             const bestObj = mapCandidates[0].obj;
             const fd = bestObj.properties.get('featureData');
+            
             targetRegNumber = fd?.properties?.label || bestObj.properties.get('cadastralNumber') || "Без номера";
             targetName = fd?.properties?.descr || "Без названия";
             targetGeometry = fd?.geometry;
-            pzzData = await getPzzDataByRegNumber(targetRegNumber);
             isAlreadyOnMap = true;
         } else {
-            // Ищем в БД
-            const centerPoint = toEPSG3857(lat, lon);
-            const dbDataList = await findPzzByPointSupabase(centerPoint.x, centerPoint.y);
-            
-            if (dbDataList && dbDataList.length > 0) {
-                let bestDbItem = dbDataList[0];
-                let minArea = Infinity;
-                dbDataList.forEach(item => {
-                    try {
-                        const tGeom = item.geometry.type === 'Polygon' ? turf.polygon(item.geometry.coordinates) : turf.multiPolygon(item.geometry.coordinates);
-                        const a = turf.area(tGeom);
-                        if (a < minArea) { minArea = a; bestDbItem = item; }
-                    } catch(e) {}
-                });
-
-                targetRegNumber = bestDbItem.reg_number;
-                targetName = bestDbItem.name;
-                targetGeometry = bestDbItem.geometry;
-                pzzData = {
-                    pzz_link: bestDbItem.pzz_link || '',
-                    doc_date: bestDbItem.doc_date || '',
-                    doc_number: bestDbItem.doc_number || '',
-                    doc_name: bestDbItem.doc_name || '',
-                    regulations_json: bestDbItem.regulations_json || null
-                };
-                isFromDb = true;
-            } else {
-                // Ищем в NSPD API
-                const apiData = await queryMunicipalInfo(lat, lon);
-                if (apiData && apiData.features && apiData.features.length > 0) {
-                    let bestApiItem = apiData.features[0];
+            console.log("[PZZ Action] На карте объектов нет. Этап 2: Поиск в базе данных Supabase...");
+            const centerPoint = typeof toEPSG3857 === 'function' ? toEPSG3857(lat, lon) : null;
+            if (centerPoint) {
+                const dbDataList = await findPzzByPointSupabase(centerPoint.x, centerPoint.y);
+                
+                if (dbDataList && dbDataList.length > 0) {
+                    console.log(`[PZZ Action] Объект найден в БД: ${dbDataList[0].reg_number}`);
+                    let bestDbItem = dbDataList[0];
                     let minArea = Infinity;
-                    apiData.features.forEach(item => {
+                    dbDataList.forEach(item => {
                         try {
                             const tGeom = item.geometry.type === 'Polygon' ? turf.polygon(item.geometry.coordinates) : turf.multiPolygon(item.geometry.coordinates);
                             const a = turf.area(tGeom);
-                            if (a < minArea) { minArea = a; bestApiItem = item; }
-                        } catch(e){}
+                            if (a < minArea) { minArea = a; bestDbItem = item; }
+                        } catch(e) {}
                     });
-                    
-                    targetRegNumber = bestApiItem.properties.label || "Без номера";
-                    targetName = bestApiItem.properties.descr || "Без названия";
-                    targetGeometry = bestApiItem.geometry;
-                    pzzData = await getPzzDataByRegNumber(targetRegNumber);
+
+                    targetRegNumber = bestDbItem.reg_number;
+                    targetName = bestDbItem.name;
+                    targetGeometry = bestDbItem.geometry;
+                    isFromDb = true;
+                }
+            }
+
+            if (!targetRegNumber) {
+                console.log("[PZZ Action] В БД пусто. Этап 3: Запрос к API NSPD (Муниципальные образования)...");
+                if (typeof queryMunicipalInfo === 'function') {
+                    const apiData = await queryMunicipalInfo(lat, lon);
+                    if (apiData && apiData.features && apiData.features.length > 0) {
+                        console.log(`[PZZ Action] Объект найден в API: ${apiData.features[0].properties.label}`);
+                        let bestApiItem = apiData.features[0];
+                        let minArea = Infinity;
+                        apiData.features.forEach(item => {
+                            try {
+                                const tGeom = item.geometry.type === 'Polygon' ? turf.polygon(item.geometry.coordinates) : turf.multiPolygon(item.geometry.coordinates);
+                                const a = turf.area(tGeom);
+                                if (a < minArea) { minArea = a; bestApiItem = item; }
+                            } catch(e){}
+                        });
+                        
+                        targetRegNumber = bestApiItem.properties.label || "Без номера";
+                        targetName = bestApiItem.properties.descr || "Без названия";
+                        targetGeometry = bestApiItem.geometry;
+                    }
                 }
             }
         }
 
         if (!targetRegNumber || !targetGeometry) {
-            showNotification('Муниципальное образование не найдено', 'warning');
+            console.warn("[PZZ Action] Поиск завершился неудачно: объект не найден нигде.");
+            if (typeof showNotification === 'function') showNotification('Муниципальное образование не найдено', 'warning');
             return;
         }
 
+        console.log(`[PZZ Action] Итоговый объект определен: ${targetRegNumber} - ${targetName}. Запрос дополнительных данных...`);
+        const pzzData = await getPzzDataByRegNumber(targetRegNumber);
+
         if (!isAlreadyOnMap) {
+            console.log("[PZZ Action] Отрисовка контура на карте...");
             drawPzzPolygon(targetGeometry, targetRegNumber, targetName, isFromDb);
+        } else {
+            console.log("[PZZ Action] Объект уже на карте, пропуск отрисовки.");
         }
 
+        console.log("[PZZ Action] Вызов модального окна ПЗЗ...");
         showPzzModal(targetRegNumber, targetName, pzzData, targetGeometry);
 
     } catch (error) {
-        showNotification("Ошибка", "error");
+        console.error("[PZZ Action] КРИТИЧЕСКАЯ ОШИБКА:", error);
+        if (typeof showNotification === 'function') showNotification("Ошибка обработки ПЗЗ", "error");
     } finally {
         if (typeof hideLoader === 'function') hideLoader();
     }
 }
 
-// Отрисовка
+// Отрисовка на карте
 function drawPzzPolygon(geometryGeoJSON, regNumber, moName, isFromDatabase) {
-    if (!map || !geometryGeoJSON || !geometryGeoJSON.coordinates) return;
+    console.log("[PZZ Draw] Старт отрисовки полигона");
+    if (typeof map === 'undefined' || !map || !geometryGeoJSON || !geometryGeoJSON.coordinates) {
+        console.error("[PZZ Draw] Отмена: нет карты или геометрии");
+        return;
+    }
 
     let combinedBounds = null;
     const labelContent = `${regNumber} - ${moName}`;
-    
     const strokeColor = isFromDatabase ? '#FF1493' : '#FFA500';
     const strokeStyle = isFromDatabase ? 'dash' : 'solid';
     const presetStyle = isFromDatabase ? 'islands#pinkStretchyIcon' : 'islands#orangeStretchyIcon';
@@ -200,13 +226,15 @@ function drawPzzPolygon(geometryGeoJSON, regNumber, moName, isFromDatabase) {
                 } catch (e) {}
             }
 
-            if (coords.length > 0) {
+            if (coords.length >= 3) { 
                 const offsetCoords = coords.map(coord => [
-                    coord[0] - (window.mapOffsetY || -1) * 0.000008983,
-                    coord[1] - (window.mapOffsetX || -4.5) * 0.000008983
+                    coord[0] - (typeof mapOffsetY !== 'undefined' ? mapOffsetY : -1) * 0.000008983,
+                    coord[1] - (typeof mapOffsetX !== 'undefined' ? mapOffsetX : -4.5) * 0.000008983
                 ]);
 
-                // Проверяем наличие глобальной переменной polygonStyle
+                const isValid = offsetCoords.every(c => isFinite(c[0]) && isFinite(c[1]));
+                if (!isValid) continue;
+
                 const pWidth = typeof polygonStyle !== 'undefined' ? polygonStyle.width + 1 : 4;
 
                 const polygonObj = new ymaps.Polygon([offsetCoords], {
@@ -226,15 +254,17 @@ function drawPzzPolygon(geometryGeoJSON, regNumber, moName, isFromDatabase) {
                 });
 
                 map.geoObjects.add(polygonObj);
-                polygons.push(polygonObj);
+                if (typeof polygons !== 'undefined') polygons.push(polygonObj);
 
                 const bounds = polygonObj.geometry.getBounds();
-                if (!combinedBounds) combinedBounds = bounds;
-                else {
-                    combinedBounds[0][0] = Math.min(combinedBounds[0][0], bounds[0][0]);
-                    combinedBounds[0][1] = Math.min(combinedBounds[0][1], bounds[0][1]);
-                    combinedBounds[1][0] = Math.max(combinedBounds[1][0], bounds[1][0]);
-                    combinedBounds[1][1] = Math.max(combinedBounds[1][1], bounds[1][1]);
+                if (bounds) {
+                    if (!combinedBounds) combinedBounds = bounds;
+                    else {
+                        combinedBounds[0][0] = Math.min(combinedBounds[0][0], bounds[0][0]);
+                        combinedBounds[0][1] = Math.min(combinedBounds[0][1], bounds[0][1]);
+                        combinedBounds[1][0] = Math.max(combinedBounds[1][0], bounds[1][0]);
+                        combinedBounds[1][1] = Math.max(combinedBounds[1][1], bounds[1][1]);
+                    }
                 }
             }
         }
@@ -253,29 +283,53 @@ function drawPzzPolygon(geometryGeoJSON, regNumber, moName, isFromDatabase) {
         });
 
         map.geoObjects.add(moTextPlacemark);
-        polygons.push(moTextPlacemark);
+        if (typeof polygons !== 'undefined') polygons.push(moTextPlacemark);
         
         if (typeof getAddressByCoords === 'function') {
             getAddressByCoords(centerGeo).then(address => {
-                document.getElementById('city-name-display').innerHTML = address;
+                const cityDisp = document.getElementById('city-name-display');
+                if(cityDisp) cityDisp.innerHTML = address;
             });
         }
     }
+    console.log("[PZZ Draw] Отрисовка завершена");
 }
 
-// --- 3. Модальное окно (Обновленное) ---
+// --- 3. Модальное окно ПЗЗ ---
 
 function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
+    console.log(`[PZZ Modal] Инициализация окна для ${regNumber}`);
     const existingModal = document.getElementById('pzz-modal');
-    if (existingModal) existingModal.remove();
+    if (existingModal) {
+        console.log("[PZZ Modal] Удаление старого окна");
+        existingModal.remove();
+    }
 
-    // Разбираем данные, если они есть
     pzzData = pzzData || {};
     const currentLink = pzzData.pzz_link || '';
     const docDate = pzzData.doc_date || '';
     const docNumber = pzzData.doc_number || '';
     const docName = pzzData.doc_name || '';
-    const hasJson = !!pzzData.regulations_json;
+    
+    let hasJson = false;
+    let existingJsonData = null;
+    
+    if (pzzData.regulations_json) {
+        try {
+            existingJsonData = typeof pzzData.regulations_json === 'string' 
+                ? JSON.parse(pzzData.regulations_json) 
+                : pzzData.regulations_json;
+                
+            if (Array.isArray(existingJsonData) && existingJsonData.length > 0) {
+                hasJson = true;
+                console.log("[PZZ Modal] JSON регламентов успешно загружен и распарсен");
+            }
+        } catch(e) {
+            console.error("[PZZ Modal] Ошибка парсинга сохраненного JSON:", e);
+        }
+    } else {
+        console.log("[PZZ Modal] JSON регламентов отсутствует в БД");
+    }
 
     const modal = document.createElement('div');
     modal.id = 'pzz-modal';
@@ -283,6 +337,8 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
     modal.style.width = '450px';
     modal.style.maxWidth = '95vw';
     modal.style.zIndex = '20000';
+    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: ДЕЛАЕМ ОКНО ВИДИМЫМ!
+    modal.style.display = 'block'; 
 
     modal.innerHTML = `
         <div class="color-modal-content" style="padding: 20px; display: flex; flex-direction: column; gap: 15px; overflow-y: auto; max-height: 85vh;">
@@ -293,7 +349,6 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
                 <p style="margin: 5px 0 0 0; color: #475569; font-size: 0.95rem; font-weight: 500;">${moName}</p>
             </div>
 
-            <!-- Если есть JSON в базе, показываем кнопку просмотра регламентов -->
             ${hasJson ? `
                 <button id="btn-pzz-viewer" style="width: 100%; padding: 12px; border: none; border-radius: 8px; background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: white; cursor: pointer; font-weight: bold; font-size: 1rem; box-shadow: 0 4px 10px rgba(139, 92, 246, 0.3); transition: transform 0.2s;">
                     <i class="fas fa-table" style="margin-right: 5px;"></i> Просмотр градостроительных регламентов
@@ -306,31 +361,30 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
                        style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid #cbd5e1; outline: none; font-size: 0.95rem; box-sizing: border-box;">
             </div>
 
-            <!-- Кнопка разворачивания дополнительных полей -->
             <button id="btn-pzz-expand" style="background: transparent; border: 1px dashed #cbd5e1; color: #3b82f6; padding: 8px; border-radius: 8px; cursor: pointer; font-size: 0.85rem; font-weight: 600; display: flex; align-items: center; justify-content: center; gap: 5px;">
                 <span>Реквизиты и данные JSON</span> <i class="fas fa-chevron-down"></i>
             </button>
 
-            <!-- Скрытый блок дополнительных реквизитов -->
             <div id="pzz-extra-fields" style="display: none; flex-direction: column; gap: 10px; background: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid #e2e8f0;">
-                
                 <div>
                     <label style="font-size: 0.8rem; color: #64748b; font-weight: 600;">Дата утверждения:</label>
                     <input type="text" id="pzz-date-input" value="${docDate}" placeholder="ДД.ММ.ГГГГ" style="width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #cbd5e1; box-sizing: border-box; font-size: 0.9rem;">
                 </div>
-                
                 <div>
                     <label style="font-size: 0.8rem; color: #64748b; font-weight: 600;">Номер документа:</label>
-                    <input type="text" id="pzz-num-input" value="${docNumber}" placeholder="Например: 1299/о" style="width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #cbd5e1; box-sizing: border-box; font-size: 0.9rem;">
+                    <input type="text" id="pzz-num-input" value="${docNumber}" placeholder="Введите номер" style="width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #cbd5e1; box-sizing: border-box; font-size: 0.9rem;">
                 </div>
-
                 <div>
                     <label style="font-size: 0.8rem; color: #64748b; font-weight: 600;">Наименование документа:</label>
-                    <textarea id="pzz-name-input" placeholder="Например: Приказ Министерства..." style="width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #cbd5e1; box-sizing: border-box; font-size: 0.9rem; resize: vertical; min-height: 60px;">${docName}</textarea>
+                    <textarea id="pzz-name-input" placeholder="Введите наименование" style="width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #cbd5e1; box-sizing: border-box; font-size: 0.9rem; resize: vertical; min-height: 60px;">${docName}</textarea>
                 </div>
-
-                <div>
-                    <label style="font-size: 0.8rem; color: #64748b; font-weight: 600; display: block; margin-bottom: 5px;">База регламентов (JSON файл):</label>
+              <div>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
+                        <label style="font-size: 0.8rem; color: #64748b; font-weight: 600;">База регламентов (JSON файл):</label>
+                        <button type="button" onclick="window.open('app/map/pzz_docx2json.html', '_blank')" style="background: #8b5cf6; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; transition: 0.2s; box-shadow: 0 2px 4px rgba(139, 92, 246, 0.2);">
+                            <i class="fas fa-file-word"></i> JSON из DOCX
+                        </button>
+                    </div>
                     <input type="file" id="pzz-json-input" accept=".json" style="font-size: 0.85rem; width: 100%;">
                     <div id="json-status" style="font-size: 0.75rem; color: ${hasJson ? '#10b981' : '#e74c3c'}; margin-top: 5px; font-weight: bold;">
                         ${hasJson ? '✓ В базе сохранен JSON с регламентами' : 'JSON файл не прикреплен'}
@@ -338,7 +392,6 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
                 </div>
             </div>
 
-            <!-- Основные кнопки действий -->
             <div style="display: flex; gap: 10px; margin-top: 10px;">
                 <button id="btn-pzz-go" style="flex: 1; padding: 10px; border: none; border-radius: 8px; background: ${currentLink ? '#10b981' : '#94a3b8'}; color: white; cursor: ${currentLink ? 'pointer' : 'not-allowed'}; font-weight: bold; transition: 0.2s; display: flex; align-items: center; justify-content: center; gap: 5px;">
                     <i class="fas fa-external-link-alt"></i> Перейти
@@ -347,15 +400,26 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
                     <i class="fas fa-save"></i> Сохранить
                 </button>
             </div>
-            
             <button id="btn-pzz-cancel" style="width: 100%; background: transparent; border: 1px solid #cbd5e1; color: #64748b; padding: 8px; border-radius: 8px; cursor: pointer; font-size: 0.9rem; margin-top: -5px;">Закрыть</button>
         </div>
     `;
 
     document.body.appendChild(modal);
-    modal.style.display = 'block';
+    console.log("[PZZ Modal] Модальное окно добавлено в DOM");
 
-    // Элементы
+    // Блокируем всплытие событий (защита от глобального Paste/Keydown карты)
+    const stopProp = (e) => e.stopPropagation();
+    modal.addEventListener('paste', stopProp);
+    modal.addEventListener('keydown', stopProp);
+    modal.addEventListener('keyup', stopProp);
+    modal.addEventListener('keypress', stopProp);
+
+    const inputs = modal.querySelectorAll('input, textarea');
+    inputs.forEach(input => {
+        input.addEventListener('paste', stopProp);
+        input.addEventListener('keydown', stopProp);
+    });
+
     const linkInput = document.getElementById('pzz-link-input');
     const expandBtn = document.getElementById('btn-pzz-expand');
     const extraFields = document.getElementById('pzz-extra-fields');
@@ -366,9 +430,8 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
     const cancelBtn = document.getElementById('btn-pzz-cancel');
     const viewerBtn = document.getElementById('btn-pzz-viewer');
 
-    let parsedJsonData = pzzData.regulations_json || null; // Храним JSON для отправки
+    let parsedJsonData = existingJsonData; 
 
-    // Раскрытие доп полей
     expandBtn.addEventListener('click', () => {
         if (extraFields.style.display === 'none') {
             extraFields.style.display = 'flex';
@@ -379,7 +442,6 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
         }
     });
 
-    // Валидация ссылки для кнопки "Перейти"
     linkInput.addEventListener('input', () => {
         const val = linkInput.value.trim();
         if (val.startsWith('http://') || val.startsWith('https://')) {
@@ -391,7 +453,6 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
         }
     });
 
-    // Переход по ссылке
     goBtn.addEventListener('click', () => {
         const url = linkInput.value.trim();
         if (url.startsWith('http://') || url.startsWith('https://')) {
@@ -399,11 +460,12 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
         }
     });
 
-    // Чтение и валидация файла JSON
     fileInput.addEventListener('change', (e) => {
         const file = e.target.files[0];
         if (!file) {
-            parsedJsonData = pzzData.regulations_json || null; // Откат
+            parsedJsonData = existingJsonData; 
+            jsonStatus.textContent = existingJsonData ? '✓ Используется ранее сохраненный JSON' : 'JSON файл не прикреплен';
+            jsonStatus.style.color = existingJsonData ? '#10b981' : '#e74c3c';
             return;
         }
 
@@ -411,16 +473,16 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
         reader.onload = (event) => {
             try {
                 const data = JSON.parse(event.target.result);
-                // Базовая проверка: массив, где есть объекты со свойствами id, name, uses
                 if (Array.isArray(data) && data.length > 0 && data[0].id !== undefined && Array.isArray(data[0].uses)) {
                     parsedJsonData = data;
                     jsonStatus.textContent = '✓ Файл корректен и готов к сохранению';
                     jsonStatus.style.color = '#10b981';
+                    console.log("[PZZ Modal] JSON загружен успешно. Зон найдено:", data.length);
                 } else {
-                    throw new Error('Несоответствие формату (ожидается структура зон с id, name, uses)');
+                    throw new Error('Несоответствие формату JSON (нужны id, name, uses)');
                 }
             } catch (err) {
-                console.error(err);
+                console.error("[PZZ Modal] Ошибка валидации JSON файла:", err);
                 parsedJsonData = null;
                 fileInput.value = '';
                 jsonStatus.textContent = '✗ Ошибка: Неверный формат JSON файла';
@@ -430,10 +492,9 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
         reader.readAsText(file);
     });
 
-    // Сохранение
     saveBtn.addEventListener('click', async () => {
+        console.log("[PZZ Modal] Нажата кнопка 'Сохранить'");
         const urlToSave = linkInput.value.trim();
-        
         saveBtn.disabled = true;
         saveBtn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Сохранение...';
 
@@ -445,75 +506,126 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
             doc_date: document.getElementById('pzz-date-input').value.trim(),
             doc_number: document.getElementById('pzz-num-input').value.trim(),
             doc_name: document.getElementById('pzz-name-input').value.trim(),
-            regulations_json: parsedJsonData, // Передаем как объект JSONB
+            regulations_json: parsedJsonData, 
             updated_at: new Date().toISOString()
         };
 
         const success = await savePzzToSupabaseFull(payload);
 
         if (success) {
-            if (typeof showNotification === 'function') showNotification('Данные ПЗЗ успешно сохранены', 'success');
+            if (typeof window.showNotification === 'function') window.showNotification('Данные ПЗЗ успешно сохранены', 'success');
             modal.remove();
         } else {
-            if (typeof showNotification === 'function') showNotification('Ошибка при сохранении', 'error');
+            if (typeof window.showNotification === 'function') window.showNotification('Ошибка при сохранении', 'error');
             saveBtn.disabled = false;
             saveBtn.innerHTML = '<i class="fas fa-save"></i> Сохранить';
         }
     });
 
-    // Открытие просмотрщика
-    if (viewerBtn) {
+if (viewerBtn) {
         viewerBtn.addEventListener('click', () => {
-            // Передаем все данные ПЗЗ в просмотрщик
-            openPzzViewer(pzzData);
-            modal.style.display = 'none'; // Временно скрываем модалку ПЗЗ
+            console.log("[PZZ Modal] Нажата кнопка открытия просмотрщика регламентов");
+            openPzzViewer(pzzData, regNumber, moName);
         });
     }
-
-    const closeModal = () => modal.remove();
+    const closeModal = () => {
+        console.log("[PZZ Modal] Окно закрыто");
+        modal.remove();
+    };
     cancelBtn.addEventListener('click', closeModal);
     modal.addEventListener('click', (e) => { if (e.target === modal) closeModal(); });
 }
 
+// --- 4. ПОЛНОЭКРАННЫЙ ПРОСМОТРЩИК JSON ---
 
-// --- 4. ПОЛНОЭКРАННЫЙ ПРОСМОТРЩИК JSON (ИНТЕГРАЦИЯ) ---
-
-function openPzzViewer(pzzData) {
-    const existingViewer = document.getElementById('pzz-viewer-overlay');
-    if (existingViewer) existingViewer.remove();
-
+function openPzzViewer(pzzData, regNumber, moName) {
     if (!pzzData || !pzzData.regulations_json) {
-        if(typeof showNotification === 'function') showNotification('Нет данных JSON для отображения', 'warning');
+        if(typeof window.showNotification === 'function') window.showNotification('Нет данных JSON для отображения', 'warning');
         return;
     }
 
-    const zonesData = pzzData.regulations_json;
+    const zonesData = typeof pzzData.regulations_json === 'string' ? JSON.parse(pzzData.regulations_json) : pzzData.regulations_json;
     
-    // Формируем блок реквизитов документа
-    let docMetaHtml = '';
     const dName = pzzData.doc_name;
     const dNum = pzzData.doc_number;
     const dDate = pzzData.doc_date;
     const dLink = pzzData.pzz_link;
 
-    if (dName || dNum || dDate || dLink) {
-        docMetaHtml = `
-            <div class="viewer-doc-meta">
-                <i class="fas fa-file-contract meta-icon"></i>
-                <div class="meta-content">
-                    ${dName ? `<div class="meta-title">${dName}</div>` : ''}
-                    <div class="meta-details">
-                        ${dNum ? `<span>№ ${dNum}</span>` : ''}
-                        ${dDate ? `<span>от ${dDate}</span>` : ''}
-                        ${dLink ? `<a href="${dLink}" target="_blank" class="meta-link"><i class="fas fa-external-link-alt"></i> Открыть документ</a>` : ''}
-                    </div>
+    // Теперь блок meta-информации формируется всегда, так как regNumber и moName есть всегда
+    const docMetaHtml = `
+        <div class="viewer-doc-meta">
+            <i class="fas fa-landmark meta-icon"></i>
+            <div class="meta-content">
+                <div class="meta-title" style="font-size: 1.15rem; color: #0f172a; margin-bottom: 6px;">
+                    ${regNumber || 'Без номера'} — ${moName || 'Без названия'}
+                </div>
+                ${dName ? `<div style="font-size: 0.9rem; font-weight: 600; color: #475569; margin-bottom: 6px;">${dName}</div>` : ''}
+                <div class="meta-details">
+                    ${dNum ? `<span>№ ${dNum}</span>` : ''}
+                    ${dDate ? `<span>от ${dDate}</span>` : ''}
+                    ${dLink ? `<a href="${dLink}" target="_blank" class="meta-link"><i class="fas fa-external-link-alt"></i> Документ ПЗЗ/Проверить актуальность..</a>` : ''}
                 </div>
             </div>
-        `;
+        </div>
+    `;
+
+    // Открываем новую пустую вкладку
+    const newWin = window.open('', '_blank');
+    if (!newWin) {
+        alert("Пожалуйста, разрешите всплывающие окна в браузере для просмотра регламентов.");
+        return;
     }
 
+    // Записываем HTML и стили прямо в новую вкладку
     const viewerHtml = `
-        <div id="pzz-viewer-overlay" class="pzz-viewer-overlay">
+        <!DOCTYPE html>
+        <html lang="ru">
+        <head>
+            <meta charset="UTF-8">
+           <title>${regNumber} — Градостроительные регламенты</title>
+            <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.0.0/css/all.min.css">
+            <style>
+                body { margin: 0; padding: 0; font-family: sans-serif; background: #f1f5f9; display: flex; flex-direction: column; height: 100vh; overflow: hidden; }
+                .viewer-header { background: #ffffff; padding: 15px 25px; box-shadow: 0 1px 3px rgba(0,0,0,0.1); display: flex; justify-content: space-between; align-items: center; z-index: 10; }
+                .viewer-title { font-size: 1.2rem; font-weight: bold; color: #2563eb; display: flex; align-items: center; gap: 10px; }
+                .viewer-search { display: flex; gap: 20px; flex: 1; justify-content: center; }
+                .search-box { display: flex; flex-direction: column; gap: 5px; width: 100%; max-width: 300px; }
+                .search-box label { font-size: 0.75rem; font-weight: 600; color: #64748b; text-transform: uppercase; }
+                .search-box input { padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.9rem; outline: none; }
+                .search-box input:focus { border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,0.2); }
+                
+                .viewer-doc-meta { background: #e0f2fe; border-bottom: 1px solid #bae6fd; padding: 10px 25px; display: flex; align-items: center; gap: 15px; }
+                .meta-icon { font-size: 1.5rem; color: #0284c7; }
+                .meta-content { display: flex; flex-direction: column; }
+                .meta-title { font-weight: 600; color: #0f172a; font-size: 0.9rem; margin-bottom: 2px;}
+                .meta-details { display: flex; gap: 15px; font-size: 0.8rem; color: #334155; align-items: center; }
+                .meta-link { color: #0284c7; text-decoration: none; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; background: #fff; border-radius: 4px; border: 1px solid #bae6fd; transition: 0.2s;}
+                .meta-link:hover { background: #0284c7; color: white; }
+
+                .viewer-body { display: flex; flex: 1; overflow: hidden; }
+                .viewer-sidebar { width: 320px; background: #ffffff; border-right: 1px solid #e2e8f0; overflow-y: auto; }
+                .viewer-item { padding: 15px 20px; border-bottom: 1px solid #f1f5f9; cursor: pointer; transition: 0.2s; }
+                .viewer-item:hover { background: #eff6ff; }
+                .viewer-item.active { background: #dbeafe; border-left: 4px solid #2563eb; }
+                .viewer-item-id { font-weight: bold; font-size: 1.1rem; color: #2563eb; margin-bottom: 4px; }
+                .viewer-item-name { font-size: 0.85rem; color: #475569; }
+                
+                .viewer-main { flex: 1; padding: 25px; overflow-y: auto; background: #f8fafc; }
+                .viewer-empty { text-align: center; color: #64748b; margin-top: 15%; font-size: 1.1rem; }
+                .viewer-table-container { background: #fff; border-radius: 8px; padding: 25px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; }
+                .viewer-badge { display: inline-block; background: #e2e8f0; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; color: #475569; margin-bottom: 10px; }
+                #viewer-zone-title { margin-top: 0; color: #1e293b; font-size: 1.4rem; margin-bottom: 20px; }
+                
+                .viewer-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+                .viewer-table th, .viewer-table td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #e2e8f0; }
+                .viewer-table th { background: #f1f5f9; font-weight: 600; color: #334155; position: sticky; top: 0; z-index: 5;}
+                .viewer-table tr:hover { background: #f8fafc; }
+                .type-header { background: #eff6ff !important; font-weight: bold; color: #2563eb; text-align: center !important; font-size: 0.95rem; }
+                
+                .viewer-mark { background-color: #fef08a; color: #000; padding: 0 2px; border-radius: 2px; box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
+            </style>
+        </head>
+        <body>
             <div class="viewer-header">
                 <div class="viewer-title">
                     <i class="fas fa-table"></i> Градостроительные регламенты
@@ -521,14 +633,13 @@ function openPzzViewer(pzzData) {
                 <div class="viewer-search">
                     <div class="search-box">
                         <label>Зона:</label>
-                        <input type="text" id="viewer-zone-search" placeholder="Напр: Ж 1">
+                        <input type="text" id="viewer-zone-search" placeholder="Напр: Ж1">
                     </div>
                     <div class="search-box">
                         <label>Вид разрешенного использования:</label>
                         <input type="text" id="viewer-use-search" placeholder="Напр: магазин">
                     </div>
                 </div>
-                <button id="viewer-close-btn" class="viewer-close-btn" title="Закрыть">&times;</button>
             </div>
             
             ${docMetaHtml}
@@ -556,78 +667,26 @@ function openPzzViewer(pzzData) {
                     </div>
                 </div>
             </div>
-        </div>
+        </body>
+        </html>
     `;
 
-    document.body.insertAdjacentHTML('beforeend', viewerHtml);
+    newWin.document.open();
+    newWin.document.write(viewerHtml);
+    newWin.document.close();
 
-    // Добавляем стили (инжектим один раз)
-    if (!document.getElementById('pzz-viewer-styles')) {
-        const style = document.createElement('style');
-        style.id = 'pzz-viewer-styles';
-        style.innerHTML = `
-            .pzz-viewer-overlay {
-                position: fixed; top: 0; left: 0; width: 100vw; height: 100vh;
-                background: #f1f5f9; z-index: 30000;
-                display: flex; flex-direction: column; font-family: sans-serif;
-            }
-            .viewer-header {
-                background: #ffffff; padding: 15px 25px; box-shadow: 0 1px 3px rgba(0,0,0,0.1);
-                display: flex; justify-content: space-between; align-items: center; z-index: 10;
-            }
-            .viewer-title { font-size: 1.2rem; font-weight: bold; color: #2563eb; display: flex; align-items: center; gap: 10px; }
-            .viewer-search { display: flex; gap: 20px; flex: 1; justify-content: center; }
-            .search-box { display: flex; flex-direction: column; gap: 5px; width: 100%; max-width: 300px; }
-            .search-box label { font-size: 0.75rem; font-weight: 600; color: #64748b; text-transform: uppercase; }
-            .search-box input { padding: 8px 12px; border: 1px solid #e2e8f0; border-radius: 6px; font-size: 0.9rem; outline: none; }
-            .search-box input:focus { border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37,99,235,0.2); }
-            .viewer-close-btn { background: transparent; border: none; font-size: 2rem; color: #94a3b8; cursor: pointer; transition: 0.2s; }
-            .viewer-close-btn:hover { color: #ef4444; }
-            
-            .viewer-doc-meta { background: #e0f2fe; border-bottom: 1px solid #bae6fd; padding: 10px 25px; display: flex; align-items: center; gap: 15px; }
-            .meta-icon { font-size: 1.5rem; color: #0284c7; }
-            .meta-content { display: flex; flex-direction: column; }
-            .meta-title { font-weight: 600; color: #0f172a; font-size: 0.9rem; margin-bottom: 2px;}
-            .meta-details { display: flex; gap: 15px; font-size: 0.8rem; color: #334155; align-items: center; }
-            .meta-link { color: #0284c7; text-decoration: none; font-weight: 600; display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; background: #fff; border-radius: 4px; border: 1px solid #bae6fd; transition: 0.2s;}
-            .meta-link:hover { background: #0284c7; color: white; }
-
-            .viewer-body { display: flex; flex: 1; overflow: hidden; }
-            .viewer-sidebar { width: 320px; background: #ffffff; border-right: 1px solid #e2e8f0; overflow-y: auto; }
-            .viewer-item { padding: 15px 20px; border-bottom: 1px solid #f1f5f9; cursor: pointer; transition: 0.2s; }
-            .viewer-item:hover { background: #eff6ff; }
-            .viewer-item.active { background: #dbeafe; border-left: 4px solid #2563eb; }
-            .viewer-item-id { font-weight: bold; font-size: 1.1rem; color: #2563eb; margin-bottom: 4px; }
-            .viewer-item-name { font-size: 0.85rem; color: #475569; }
-            
-            .viewer-main { flex: 1; padding: 25px; overflow-y: auto; background: #f8fafc; }
-            .viewer-empty { text-align: center; color: #64748b; margin-top: 15%; font-size: 1.1rem; }
-            .viewer-table-container { background: #fff; border-radius: 8px; padding: 25px; box-shadow: 0 4px 6px rgba(0,0,0,0.05); border: 1px solid #e2e8f0; }
-            .viewer-badge { display: inline-block; background: #e2e8f0; padding: 4px 8px; border-radius: 4px; font-size: 0.8rem; font-weight: bold; color: #475569; margin-bottom: 10px; }
-            #viewer-zone-title { margin-top: 0; color: #1e293b; font-size: 1.4rem; margin-bottom: 20px; }
-            
-            .viewer-table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
-            .viewer-table th, .viewer-table td { padding: 10px 12px; text-align: left; border-bottom: 1px solid #e2e8f0; }
-            .viewer-table th { background: #f1f5f9; font-weight: 600; color: #334155; position: sticky; top: 0; z-index: 5;}
-            .viewer-table tr:hover { background: #f8fafc; }
-            .type-header { background: #eff6ff !important; font-weight: bold; color: #2563eb; text-align: center !important; font-size: 0.95rem; }
-            
-            .viewer-mark { background-color: #fef08a; color: #000; padding: 0 2px; border-radius: 2px; box-shadow: 0 1px 2px rgba(0,0,0,0.1); }
-        `;
-        document.head.appendChild(style);
-    }
-
-    // --- ЛОГИКА ПРОСМОТРЩИКА ---
+    // Привязываем логику к DOM новой вкладки
+    const doc = newWin.document;
     let currentZoneId = null;
     let zoneTerms = [];
     let useTerms = [];
 
-    const sidebarEl = document.getElementById('viewer-sidebar');
-    const tableContainer = document.getElementById('viewer-table-container');
-    const emptyMsg = document.getElementById('viewer-empty-msg');
-    const tableBody = document.getElementById('viewer-table-body');
-    const zoneTitle = document.getElementById('viewer-zone-title');
-    const badge = document.getElementById('viewer-badge');
+    const sidebarEl = doc.getElementById('viewer-sidebar');
+    const tableContainer = doc.getElementById('viewer-table-container');
+    const emptyMsg = doc.getElementById('viewer-empty-msg');
+    const tableBody = doc.getElementById('viewer-table-body');
+    const zoneTitle = doc.getElementById('viewer-zone-title');
+    const badge = doc.getElementById('viewer-badge');
 
     const highlightText = (text) => {
         if (!text) return '';
@@ -659,12 +718,12 @@ function openPzzViewer(pzzData) {
         });
 
         for (const [type, uses] of Object.entries(grouped)) {
-            const trHead = document.createElement('tr');
+            const trHead = doc.createElement('tr');
             trHead.innerHTML = `<td colspan="6" class="type-header">${highlightText(type)}</td>`;
             tableBody.appendChild(trHead);
 
             uses.forEach(use => {
-                const tr = document.createElement('tr');
+                const tr = doc.createElement('tr');
                 tr.innerHTML = `
                     <td><strong>${highlightText(use.code)}</strong></td>
                     <td>${highlightText(use.name)}</td>
@@ -686,7 +745,7 @@ function openPzzViewer(pzzData) {
         }
 
         data.forEach(zone => {
-            const div = document.createElement('div');
+            const div = doc.createElement('div');
             div.className = `viewer-item ${zone.id === currentZoneId ? 'active' : ''}`;
             div.innerHTML = `
                 <div class="viewer-item-id">${highlightText(zone.id)}</div>
@@ -694,7 +753,7 @@ function openPzzViewer(pzzData) {
             `;
             div.onclick = () => {
                 currentZoneId = zone.id;
-                document.querySelectorAll('.viewer-item').forEach(el => el.classList.remove('active'));
+                doc.querySelectorAll('.viewer-item').forEach(el => el.classList.remove('active'));
                 div.classList.add('active');
                 renderTable(zone);
             };
@@ -728,25 +787,18 @@ function openPzzViewer(pzzData) {
         }
     };
 
-    // Слушатели поиска
-    document.getElementById('viewer-zone-search').addEventListener('input', e => {
+    const zoneSearchInput = doc.getElementById('viewer-zone-search');
+    const useSearchInput = doc.getElementById('viewer-use-search');
+
+    zoneSearchInput.addEventListener('input', e => {
         zoneTerms = e.target.value.toLowerCase().split(/\s+/).filter(t => t.length > 0);
         updateView();
     });
 
-    document.getElementById('viewer-use-search').addEventListener('input', e => {
+    useSearchInput.addEventListener('input', e => {
         useTerms = e.target.value.toLowerCase().split(/\s+/).filter(t => t.length > 0);
         updateView();
     });
 
-    // Закрытие просмотрщика
-    document.getElementById('viewer-close-btn').addEventListener('click', () => {
-        document.getElementById('pzz-viewer-overlay').remove();
-        // Возвращаем модалку ПЗЗ, если нужно
-        const pzzModal = document.getElementById('pzz-modal');
-        if (pzzModal) pzzModal.style.display = 'block';
-    });
-
-    // Первичный рендер
     renderSidebar(zonesData);
 }

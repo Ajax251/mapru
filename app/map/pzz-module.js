@@ -551,7 +551,6 @@ function openPzzViewer(pzzData, regNumber, moName) {
     const dDate = pzzData.doc_date;
     const dLink = pzzData.pzz_link;
 
-    // Теперь блок meta-информации формируется всегда, так как regNumber и moName есть всегда
     const docMetaHtml = `
         <div class="viewer-doc-meta">
             <i class="fas fa-landmark meta-icon"></i>
@@ -569,14 +568,12 @@ function openPzzViewer(pzzData, regNumber, moName) {
         </div>
     `;
 
-    // Открываем новую пустую вкладку
     const newWin = window.open('', '_blank');
     if (!newWin) {
         alert("Пожалуйста, разрешите всплывающие окна в браузере для просмотра регламентов.");
         return;
     }
 
-    // Записываем HTML и стили прямо в новую вкладку
     const viewerHtml = `
         <!DOCTYPE html>
         <html lang="ru">
@@ -654,12 +651,13 @@ function openPzzViewer(pzzData, regNumber, moName) {
                         <table class="viewer-table">
                             <thead>
                                 <tr>
-                                    <th>Код</th>
-                                    <th>Наименование вида использования</th>
-                                    <th>Площадь уч-ка (кв.м)</th>
-                                    <th>Этажи / Высота</th>
-                                    <th>% заст-ки</th>
-                                    <th>Отступы (м)</th>
+                                    <th width="8%">Код</th>
+                                    <th width="28%">Наименование вида использования</th>
+                                    <th width="12%">Площадь уч-ка (кв.м)</th>
+                                    <th width="10%">Ширина уч-ка (м)</th> <!-- ДОБАВЛЕНО -->
+                                    <th width="12%">Этажи / Высота</th>
+                                    <th width="10%">% заст-ки</th>
+                                    <th width="20%">Отступы (м)</th>
                                 </tr>
                             </thead>
                             <tbody id="viewer-table-body"></tbody>
@@ -675,7 +673,6 @@ function openPzzViewer(pzzData, regNumber, moName) {
     newWin.document.write(viewerHtml);
     newWin.document.close();
 
-    // Привязываем логику к DOM новой вкладки
     const doc = newWin.document;
     let currentZoneId = null;
     let zoneTerms = [];
@@ -719,7 +716,8 @@ function openPzzViewer(pzzData, regNumber, moName) {
 
         for (const [type, uses] of Object.entries(grouped)) {
             const trHead = doc.createElement('tr');
-            trHead.innerHTML = `<td colspan="6" class="type-header">${highlightText(type)}</td>`;
+            // ИЗМЕНЕНО: colspan = 7 (т.к. добавилась колонка ширины)
+            trHead.innerHTML = `<td colspan="7" class="type-header">${highlightText(type)}</td>`;
             tableBody.appendChild(trHead);
 
             uses.forEach(use => {
@@ -728,6 +726,7 @@ function openPzzViewer(pzzData, regNumber, moName) {
                     <td><strong>${highlightText(use.code)}</strong></td>
                     <td>${highlightText(use.name)}</td>
                     <td>${highlightText(use.area || 'н.у.')}</td>
+                    <td>${highlightText(use.width || 'н.у.')}</td> <!-- ДОБАВЛЕНО -->
                     <td>${highlightText(use.height || 'н.у.')}</td>
                     <td>${highlightText(use.percent || 'н.у.')}</td>
                     <td>${highlightText(use.setback || 'н.у.')}</td>
