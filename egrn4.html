@@ -1684,11 +1684,8 @@ body {
         <!-- НАЧАЛО ИЗМЕНЕНИЙ: Добавлен селектор типа объектов -->
         <div style="margin-bottom: 20px;">
             <label for="searchTypeSelector" style="display: block; margin-bottom: 5px; font-weight: 500; color: #333;">Тип объектов в списке:</label>
-                 <select id="searchTypeSelector" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border-color); font-size: 15px; background-color: #fdfdfd;">
-                <option value="1" selected>Запросить по каждому номеру</option>
-                <option value="kpt_zu">Запросить ЗУ из КПТ</option>
-                <option value="kpt_oks">Запросить ОКС из КПТ</option>
-                <option value="kpt_soor">Запросить Сооружения из КПТ</option>
+            <select id="searchTypeSelector" style="width: 100%; padding: 10px; border-radius: 8px; border: 1px solid var(--border-color); font-size: 15px; background-color: #fdfdfd;">
+                <option value="1" selected>Кадастровый номер (объекты)</option>
                 <option value="5">ЗОУИТ</option>
                 <option value="7">Территориальные зоны</option>
             </select>
@@ -3239,183 +3236,6 @@ function extractDataForCsv(options, properties, linkedCadNumbers = null) { // Д
     return baseData;
 }
 
-document.addEventListener('DOMContentLoaded', () => {
-    const selector = document.getElementById('searchTypeSelector');
-    if (selector) {
-        selector.addEventListener('change', function(e) {
-            const val = e.target.value;
-            const isCadastral = val === '1' || val.startsWith('kpt_');
-            document.getElementById('linkOksCheckbox').disabled = !isCadastral;
-        });
-    }
-});
-
-async function fetchKptDataFromNspd(quarter, categoryId) {
-    await sleep(700); 
-    const qUrl = `/api/geoportal/v2/search/geoportal?thematicSearchId=2&query=${encodeURIComponent(quarter)}`;
-    const qRes = await fetchWithFallback(qUrl);
-    if (qRes.status === 204) return null;
-    if (!qRes.ok) throw new Error(`HTTP ${qRes.status} при запросе квартала`);
-    
-    const qData = await qRes.json();
-    const qFeature = qData?.data?.features?.[0];
-    if (!qFeature?.geometry) return null;
-
-    await sleep(700); 
-    const requestBody = {
-        "geom": { "type": "FeatureCollection", "features": [{ "type": "Feature", "geometry": qFeature.geometry, "properties": {} }] },
-        "categories": [{ "id": categoryId }]
-    };
-    
-    const intRes = await fetchWithFallback('/api/geoportal/v1/intersects?typeIntersect=fullObject', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(requestBody)
-    });
-    
-    if (!intRes.ok) throw new Error(`HTTP ${intRes.status} при запросе пересечений`);
-    const intData = await intRes.json();
-    return intData.features || [];
-}
-
-async function processBatchNumbersCore(numbersList, searchType, shouldFetchLinks, progressCallback) {
-    const allResults = [];
-    let zouitSuccessCount = 0;
-    let terZoneSuccessCount = 0;
-    const isCadastralType = searchType === '1' || searchType.startsWith('kpt_');
-
-  
-    if (!isCadastralType) {
-        for (let i = 0; i < numbersList.length; i++) {
-            const num = numbersList[i].trim();
-            try {
-                await sleep(700); 
-                let processResult;
-                if (isAmbiguousZoneNumber(num)) {
-                    processResult = await fetchZoneDataWithFallback(num, searchType);
-                } else {
-                    const simpleFetchers = { '5': fetchSingleZoneData, '7': fetchSingleTerritorialZoneData };
-                    const data = await simpleFetchers[searchType](num);
-                    processResult = { result: data, type: searchType };
-                }
-                if (processResult.type === '5' && processResult.result.Статус !== 'Не найдена') zouitSuccessCount++;
-                if (processResult.type === '7' && processResult.result.Статус !== 'Не найдена') terZoneSuccessCount++;
-                allResults.push(processResult.result);
-            } catch (error) {
-                allResults.push({ 'Номер': num, 'Статус': `Ошибка: ${error.message}` });
-            }
-            progressCallback(i + 1, numbersList.length);
-        }
-        return { allResults, zouitSuccessCount, terZoneSuccessCount };
-    }
-
-   
-    let individualList = [];
-    const quartersMap = {};
-
-  
-    if (searchType.startsWith('kpt_')) {
-        numbersList.forEach(num => {
-            const trimmed = num.trim();
-            const parts = trimmed.split(':');
-            if (parts.length >= 4) {
-                const quarter = parts.slice(0, 3).join(':');
-             
-                if (quarter.endsWith('0000000') || quarter.endsWith('000000') || quarter.endsWith('00000')) {
-                    individualList.push(trimmed);
-                } else {
-                    if (!quartersMap[quarter]) quartersMap[quarter] = [];
-                    quartersMap[quarter].push(trimmed);
-                }
-            } else {
-                individualList.push(trimmed); // Неполный номер -> поштучно
-            }
-        });
-
-      
-        for (const [quarter, nums] of Object.entries(quartersMap)) {
-            if (nums.length < 5) {
-                individualList.push(...nums);
-                delete quartersMap[quarter];
-            }
-        }
-    } else {
-        individualList = [...numbersList]; // Режим "1" (По каждому номеру) -> всё поштучно
-    }
-
-    let processedCount = 0;
-    const totalCount = numbersList.length;
-
-   
-    if (searchType.startsWith('kpt_')) {
-        
-        const categoryMap = {
-            'kpt_zu': 36368,
-            'kpt_oks': 36369,
-            'kpt_soor': 36383
-        };
-        const targetCategoryId = categoryMap[searchType];
-
-        for (const [quarter, nums] of Object.entries(quartersMap)) {
-            try {
-            
-                const features = await fetchKptDataFromNspd(quarter, targetCategoryId);
-                
-                if (!features || features.length === 0) {
-                    individualList.push(...nums); // Ничего не нашли в квартале -> ищем поштучно
-                    continue;
-                }
-
-                for (const num of nums) {
-                    // Ищем наш номер среди полученного массива объектов квартала
-                    const feature = features.find(f => {
-                        const props = f.properties || {};
-                        const opts = props.options || {};
-                        return props.descr === num || opts.cad_num === num || opts.cad_number === num;
-                    });
-
-                    if (feature) {
-                        const properties = feature.properties;
-                        const options = properties.options || {};
-                        let linkedCadNumbers = null;
-                        
-                        if (shouldFetchLinks) {
-                            await sleep(700); // Пауза перед запросом связанных объектов
-                            linkedCadNumbers = await fetchLinkedObjects(feature);
-                        }
-                        
-                        const data = extractDataForCsv(options, properties, linkedCadNumbers);
-                        allResults.push(data);
-                    } else {
-                        // Нет в КПТ (возможно, номер с ошибкой или граница квартала сместилась) -> ищем поштучно
-                        individualList.push(num);
-                    }
-                    processedCount++;
-                    progressCallback(processedCount, totalCount);
-                }
-            } catch (err) {
-                console.error(`Ошибка при загрузке КПТ из НСПД для ${quarter}:`, err);
-                individualList.push(...nums); // При ошибке -> ищем поштучно
-            }
-        }
-    }
-
-    // 2.2 Поштучный опрос остатков (одиночный поиск)
-    for (const num of individualList) {
-        try {
-            await sleep(700); // Обязательная пауза 700мс перед каждым одиночным запросом
-            const data = await fetchSingleCadastralData(num, shouldFetchLinks);
-            allResults.push(data);
-        } catch (error) {
-            allResults.push({ 'Номер': num, 'Статус': `Ошибка: ${error.message}` });
-        }
-        processedCount++;
-        progressCallback(processedCount, totalCount);
-    }
-
-    return { allResults, zouitSuccessCount, terZoneSuccessCount };
-}
-
 async function exportToCsv() {
     const textarea = document.getElementById('cadastralListInput');
     const exportButton = document.getElementById('exportCsvButton');
@@ -3424,13 +3244,13 @@ async function exportToCsv() {
     const progressBarContainer = document.getElementById('progressBarContainer');
     const searchType = document.getElementById('searchTypeSelector').value;
     const MAX_NUMBERS = 100;
+    const DELAY_MS = 0;
 
     const numbersList = getFormattedCadList(textarea.value);
     textarea.value = numbersList.join('\n');
 
-    const isCadastralType = searchType === '1' || searchType.startsWith('kpt_');
     const shouldFetchLinks = document.getElementById('linkOksCheckbox').checked;
-    document.getElementById('linkOksCheckbox').disabled = !isCadastralType;
+    document.getElementById('linkOksCheckbox').disabled = (searchType !== '1');
 
     if (numbersList.length === 0) {
         showNotification('Список номеров пуст', 'warning');
@@ -3441,17 +3261,19 @@ async function exportToCsv() {
         return;
     }
 
-    if (isCadastralType) {
+    // --- ОБНОВЛЕННЫЙ БЛОК ВАЛИДАЦИИ ---
+    if (searchType === '1') {
         if (!validateCadastralList(numbersList)) {
-            showNotification('Список содержит некорректные кадастровые номера.', 'error');
+            showNotification('Список содержит некорректные кадастровые номера. Проверьте, что все номера содержат только цифры и двоеточия.', 'error');
             return;
         }
     } else if (searchType === '5' || searchType === '7') {
         if (!validateZoneList(numbersList)) {
-            showNotification('Список содержит некорректные номера зон.', 'error');
+            showNotification('Список содержит некорректные номера зон. Допускаются только цифры, двоеточия и тире.', 'error');
             return;
         }
     }
+    // --- КОНЕЦ ОБНОВЛЕННОГО БЛОКА ВАЛИДАЦИИ ---
 
     exportButton.disabled = true;
     spinnerIcon.style.display = 'inline-block';
@@ -3460,18 +3282,51 @@ async function exportToCsv() {
     
     showNotification(`Начата обработка ${numbersList.length} номеров`, 'info');
 
+    const allResults = [];
+    let zouitSuccessCount = 0;
+    let terZoneSuccessCount = 0;
+    const totalCount = numbersList.length;
     const progressBarFill = document.getElementById('progressBarFill');
     const progressBarText = document.getElementById('progressBarText');
 
-    try {
-        const { allResults, zouitSuccessCount, terZoneSuccessCount } = await processBatchNumbersCore(
-            numbersList, searchType, shouldFetchLinks, 
-            (current, total) => {
-                const progressPercent = Math.round((current / total) * 100);
-                progressBarFill.style.width = progressPercent + '%';
-                progressBarText.textContent = progressPercent + '%';
+   try {
+        for (const [index, num] of numbersList.entries()) {
+            try { // <-- ГЛАВНОЕ ИЗМЕНЕНИЕ: Блок try для каждого номера
+                const trimmedNum = num.trim();
+                let processResult;
+
+                if (searchType === '1') {
+                    const data = await fetchSingleCadastralData(trimmedNum, shouldFetchLinks);
+                    processResult = { result: data, type: 'cadastral' };
+                } else if ((searchType === '5' || searchType === '7') && isAmbiguousZoneNumber(trimmedNum)) {
+                    processResult = await fetchZoneDataWithFallback(trimmedNum, searchType);
+                } else {
+                    const simpleFetchers = { '5': fetchSingleZoneData, '7': fetchSingleTerritorialZoneData };
+                    const data = await simpleFetchers[searchType](trimmedNum);
+                    processResult = { result: data, type: searchType };
+                }
+                
+                if (processResult.type === '5' && processResult.result.Статус !== 'Не найдена') zouitSuccessCount++;
+                if (processResult.type === '7' && processResult.result.Статус !== 'Не найдена') terZoneSuccessCount++;
+                
+                allResults.push(processResult.result);
+
+            } catch (error) { // <-- ГЛАВНОЕ ИЗМЕНЕНИЕ: Блок catch для каждого номера
+                console.error(`Ошибка при обработке номера ${num}:`, error);
+                // Добавляем в результаты информацию об ошибке
+                const errorResult = {
+                    'Номер': num,
+                    'Статус': `Ошибка: ${error.message}`
+                };
+                allResults.push(errorResult);
             }
-        );
+
+            // Обновление прогресс-бара и задержка теперь вне внутреннего try...catch
+            const progressPercent = Math.round(((index + 1) / totalCount) * 100);
+            progressBarFill.style.width = progressPercent + '%';
+            progressBarText.textContent = progressPercent + '%';
+            await sleep(DELAY_MS);
+        }
 
         if (zouitSuccessCount > 0 || terZoneSuccessCount > 0) {
             showNotification(`Обработано зон: ${zouitSuccessCount} ЗОУИТ, ${terZoneSuccessCount} тер. зон.`, 'info');
@@ -3533,7 +3388,8 @@ async function exportToCsv() {
     }
 }
 
-// --- ЗАМЕНИТЬ ФУНКЦИЮ exportToExcel ---
+
+// --- ЗАМЕНИТЕ СТАРУЮ ФУНКЦИЮ exportToExcel НА ЭТУ ПОЛНУЮ ВЕРСИЮ ---
 async function exportToExcel() {
     const textarea = document.getElementById('cadastralListInput');
     const exportButton = document.getElementById('exportExcelButton');
@@ -3542,13 +3398,13 @@ async function exportToExcel() {
     const progressBarContainer = document.getElementById('progressBarContainer');
     const searchType = document.getElementById('searchTypeSelector').value;
     const MAX_NUMBERS = 100;
+    const DELAY_MS = 0;
 
     const numbersList = getFormattedCadList(textarea.value);
     textarea.value = numbersList.join('\n');
     
-    const isCadastralType = searchType === '1' || searchType.startsWith('kpt_');
     const shouldFetchLinks = document.getElementById('linkOksCheckbox').checked;
-    document.getElementById('linkOksCheckbox').disabled = !isCadastralType;
+    document.getElementById('linkOksCheckbox').disabled = (searchType !== '1');
     
     if (numbersList.length === 0) {
         showNotification('Список номеров пуст', 'warning');
@@ -3559,17 +3415,19 @@ async function exportToExcel() {
         return;
     }
     
-    if (isCadastralType) {
+    // --- ОБНОВЛЕННЫЙ БЛОК ВАЛИДАЦИИ ---
+    if (searchType === '1') {
         if (!validateCadastralList(numbersList)) {
-            showNotification('Список содержит некорректные кадастровые номера.', 'error');
+            showNotification('Список содержит некорректные кадастровые номера. Проверьте, что все номера содержат только цифры и двоеточия.', 'error');
             return;
         }
     } else if (searchType === '5' || searchType === '7') {
         if (!validateZoneList(numbersList)) {
-            showNotification('Список содержит некорректные номера зон.', 'error');
+            showNotification('Список содержит некорректные номера зон. Допускаются только цифры, двоеточия и тире.', 'error');
             return;
         }
     }
+    // --- КОНЕЦ ОБНОВЛЕННОГО БЛОКА ВАЛИДАЦИИ ---
 
     exportButton.disabled = true;
     spinnerIcon.style.display = 'inline-block';
@@ -3578,24 +3436,59 @@ async function exportToExcel() {
 
     showNotification(`Начата обработка ${numbersList.length} номеров для экспорта в XLSX`, 'info');
     
+    const allResults = [];
+    let zouitSuccessCount = 0;
+    let terZoneSuccessCount = 0;
+    const totalCount = numbersList.length;
     const progressBarFill = document.getElementById('progressBarFill');
     const progressBarText = document.getElementById('progressBarText');
 
-    try {
-        const { allResults, zouitSuccessCount, terZoneSuccessCount } = await processBatchNumbersCore(
-            numbersList, searchType, shouldFetchLinks, 
-            (current, total) => {
-                const progressPercent = Math.round((current / total) * 100);
-                progressBarFill.style.width = progressPercent + '%';
-                progressBarText.textContent = progressPercent + '%';
+   try {
+        for (const [index, num] of numbersList.entries()) {
+            try { // <-- ГЛАВНОЕ ИЗМЕНЕНИЕ: Блок try для каждого номера
+                const trimmedNum = num.trim();
+                let processResult;
+
+                if (searchType === '1') {
+                    const data = await fetchSingleCadastralData(trimmedNum, shouldFetchLinks);
+                    processResult = { result: data, type: 'cadastral' };
+                } else if ((searchType === '5' || searchType === '7') && isAmbiguousZoneNumber(trimmedNum)) {
+                    processResult = await fetchZoneDataWithFallback(trimmedNum, searchType);
+                } else {
+                    const simpleFetchers = { '5': fetchSingleZoneData, '7': fetchSingleTerritorialZoneData };
+                    const data = await simpleFetchers[searchType](trimmedNum);
+                    processResult = { result: data, type: searchType };
+                }
+                
+                if (processResult.type === '5' && processResult.result.Статус !== 'Не найдена') zouitSuccessCount++;
+                if (processResult.type === '7' && processResult.result.Статус !== 'Не найдена') terZoneSuccessCount++;
+
+                allResults.push(processResult.result);
+
+            } catch (error) { // <-- ГЛАВНОЕ ИЗМЕНЕНИЕ: Блок catch для каждого номера
+                console.error(`Ошибка при обработке номера ${num}:`, error);
+                // Добавляем в результаты информацию об ошибке
+                const errorResult = {
+                    'Номер': num,
+                    'Статус': `Ошибка: ${error.message}`
+                };
+                allResults.push(errorResult);
             }
-        );
+            
+            // Обновление прогресс-бара и задержка теперь вне внутреннего try...catch
+            const progressPercent = Math.round(((index + 1) / totalCount) * 100);
+            progressBarFill.style.width = progressPercent + '%';
+            progressBarText.textContent = progressPercent + '%';
+            await sleep(DELAY_MS);
+        }
 
         if (zouitSuccessCount > 0 || terZoneSuccessCount > 0) {
             showNotification(`Обработано зон: ${zouitSuccessCount} ЗОУИТ, ${terZoneSuccessCount} тер. зон.`, 'info');
         }
 
         if (allResults.length > 0) {
+            console.log("Generating XLSX file...");
+            
             const preferredOrder = [
                 'Кадастровый номер', 'Номер зоны', 'Тип объекта', 'Статус', 'Адрес', 'Площадь',
                 'Кадастровая стоимость', 'Дата определения стоимости', 'Тип права', 'Форма собственности',
@@ -3645,7 +3538,8 @@ async function exportToExcel() {
     }
 }
 
-// --- ЗАМЕНИТЬ ФУНКЦИЮ exportToHtml ---
+
+
 async function exportToHtml() {
     const textarea = document.getElementById('cadastralListInput');
     const exportButton = document.getElementById('exportHtmlButton');
@@ -3654,13 +3548,13 @@ async function exportToHtml() {
     const progressBarContainer = document.getElementById('progressBarContainer');
     const searchType = document.getElementById('searchTypeSelector').value;
     const MAX_NUMBERS = 100;
+    const DELAY_MS = 0;
 
     const numbersList = getFormattedCadList(textarea.value);
     textarea.value = numbersList.join('\n');
     
-    const isCadastralType = searchType === '1' || searchType.startsWith('kpt_');
     const shouldFetchLinks = document.getElementById('linkOksCheckbox').checked;
-    document.getElementById('linkOksCheckbox').disabled = !isCadastralType;
+    document.getElementById('linkOksCheckbox').disabled = (searchType !== '1');
     
     if (numbersList.length === 0) {
         showNotification('Список номеров пуст', 'warning');
@@ -3671,7 +3565,7 @@ async function exportToHtml() {
         return;
     }
     
-    if (isCadastralType) {
+    if (searchType === '1') {
         if (!validateCadastralList(numbersList)) {
             showNotification('Список содержит некорректные кадастровые номера.', 'error');
             return;
@@ -3690,20 +3584,42 @@ async function exportToHtml() {
 
     showNotification(`Начата обработка ${numbersList.length} номеров для экспорта в HTML`, 'info');
     
+    const allResults = [];
+    const totalCount = numbersList.length;
     const progressBarFill = document.getElementById('progressBarFill');
     const progressBarText = document.getElementById('progressBarText');
 
-    try {
-        const { allResults } = await processBatchNumbersCore(
-            numbersList, searchType, shouldFetchLinks, 
-            (current, total) => {
-                const progressPercent = Math.round((current / total) * 100);
-                progressBarFill.style.width = progressPercent + '%';
-                progressBarText.textContent = progressPercent + '%';
+   try {
+        for (const [index, num] of numbersList.entries()) {
+            try {
+                const trimmedNum = num.trim();
+                let processResult;
+
+                if (searchType === '1') {
+                    const data = await fetchSingleCadastralData(trimmedNum, shouldFetchLinks);
+                    processResult = { result: data, type: 'cadastral' };
+                } else if ((searchType === '5' || searchType === '7') && isAmbiguousZoneNumber(trimmedNum)) {
+                    processResult = await fetchZoneDataWithFallback(trimmedNum, searchType);
+                } else {
+                    const simpleFetchers = { '5': fetchSingleZoneData, '7': fetchSingleTerritorialZoneData };
+                    const data = await simpleFetchers[searchType](trimmedNum);
+                    processResult = { result: data, type: searchType };
+                }
+                allResults.push(processResult.result);
+            } catch (error) {
+                console.error(`Ошибка при обработке номера ${num}:`, error);
+                allResults.push({ 'Номер': num, 'Статус': `Ошибка: ${error.message}` });
             }
-        );
+            
+            const progressPercent = Math.round(((index + 1) / totalCount) * 100);
+            progressBarFill.style.width = progressPercent + '%';
+            progressBarText.textContent = progressPercent + '%';
+            await sleep(DELAY_MS);
+        }
 
         if (allResults.length > 0) {
+            console.log("Generating HTML file...");
+            
             const preferredOrder = [
                 'Кадастровый номер', 'Номер зоны', 'Тип объекта', 'Статус', 'Адрес', 'Площадь',
                 'Кадастровая стоимость', 'Дата определения стоимости', 'Тип права', 'Форма собственности',
@@ -3720,6 +3636,7 @@ async function exportToHtml() {
             allResults.forEach(item => Object.keys(item).forEach(key => allKeys.add(key)));
             const finalHeaders = [...preferredOrder.filter(key => allKeys.has(key)), ...[...allKeys].filter(key => !preferredOrder.includes(key)).sort()];
             
+            // Подготовка двумерного массива для генератора HTML
             const dataForSheet = [];
             dataForSheet.push(finalHeaders);
             
@@ -3749,6 +3666,8 @@ async function exportToHtml() {
     }
 }
 
+// --- НОВАЯ ФУНКЦИЯ: Генератор интерактивной HTML таблицы ---
+// --- НОВАЯ ФУНКЦИЯ: Генератор интерактивной HTML таблицы ---
 function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = null) {
     if (!data || data.length <= 1) return;
 
