@@ -2097,20 +2097,49 @@ function extractParcelContoursFromXml() {
     }
 
 
-    async function searchIntersectingObjects(parcelContours, categoryId, mskSystem) {
+   async function searchIntersectingObjects(parcelContours, categoryId, mskSystem) {
         if (!parcelContours || parcelContours.length === 0 || !mskSystem) return [];
         try {
-            const outerRing = parcelContours[0];
-            if (outerRing.length < 3) return [];
-            const transformedRing = outerRing.map(point => {
-                return convertMskTo3857(point, mskSystem);
-            }).filter(c => c !== null);
-            if (transformedRing.length < 3) return [];
-            const geometryForApi = {
-                "crs": { "type": "name", "properties": { "name": "EPSG:3857" } },
-                "type": "Polygon",
-                "coordinates": [transformedRing]
-            };
+            const multiPolygonCoords = [];
+            
+            // Перебираем ВСЕ контуры участка
+            parcelContours.forEach(ring => {
+                if (ring.length < 3) return;
+                
+                const transformedRing = ring.map(point => {
+                    return convertMskTo3857(point, mskSystem);
+                }).filter(c => c !== null);
+                
+                if (transformedRing.length >= 3) {
+                    // Замыкаем кольцо для корректного GeoJSON (требование API)
+                    const first = transformedRing[0];
+                    const last = transformedRing[transformedRing.length - 1];
+                    if (Math.abs(first[0] - last[0]) > 0.001 || Math.abs(first[1] - last[1]) > 0.001) {
+                        transformedRing.push([...first]);
+                    }
+                    // Добавляем контур как отдельный полигон
+                    multiPolygonCoords.push([transformedRing]);
+                }
+            });
+
+            if (multiPolygonCoords.length === 0) return [];
+
+            let geometryForApi;
+            // Если контур один - отправляем Polygon, если несколько (ЕЗ/МКЗУ) - MultiPolygon
+            if (multiPolygonCoords.length === 1) {
+                geometryForApi = {
+                    "crs": { "type": "name", "properties": { "name": "EPSG:3857" } },
+                    "type": "Polygon",
+                    "coordinates": multiPolygonCoords[0]
+                };
+            } else {
+                geometryForApi = {
+                    "crs": { "type": "name", "properties": { "name": "EPSG:3857" } },
+                    "type": "MultiPolygon",
+                    "coordinates": multiPolygonCoords
+                };
+            }
+
             const requestBody = {
                 "geom": { 
                     "type": "FeatureCollection", 
@@ -2118,15 +2147,18 @@ function extractParcelContoursFromXml() {
                 },
                 "categories": [{ "id": categoryId }]
             };
+            
             const response = await fetch('https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject', {
                 method: 'POST', 
                 headers: { 'Content-Type': 'application/json' }, 
                 body: JSON.stringify(requestBody)
             });
+            
             if (!response.ok) {
                 console.error(`Ошибка запроса для категории ${categoryId}: ${response.status}`);
                 return [];
             }
+            
             const data = await response.json();
             return data.features || [];
         } catch (error) {
