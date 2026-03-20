@@ -2,42 +2,43 @@
 // МОДУЛЬ ПЗЗ (Правила землепользования и застройки)
 // Инкапсулирует логику поиска, сохранения, отрисовки 
 // и просмотра градостроительных регламентов.
-// Переведен на собственный сервер (Python Flask + SQLite)
 // ==========================================
 
 console.log("[PZZ Module] Модуль успешно загружен");
 
-// Базовый URL для нового API
-const PZZ_API_BASE = 'https://mapruapp.ru/api/pzz';
-
-// --- 1. Работа с базой данных (Fetch API) ---
+// --- 1. Работа с базой данных (Supabase) ---
 
 async function getPzzDataByRegNumber(regNumber) {
-    if (!regNumber) {
-        console.warn("[PZZ DB] Пропуск запроса данных: нет номера");
+    if (!supabaseClient || !regNumber) {
+        console.warn("[PZZ DB] Пропуск запроса данных: нет клиента Supabase или номера", regNumber);
         return null;
     }
     console.log(`[PZZ DB] Запрашиваем полные данные для ${regNumber}...`);
     try {
-        const response = await fetch(`${PZZ_API_BASE}/get?reg_number=${encodeURIComponent(regNumber)}`);
-        if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
-        
-        const data = await response.json();
+        const { data, error } = await supabaseClient
+            .from('municipal_pzz')
+            .select('pzz_link, doc_date, doc_number, doc_name, regulations_json')
+            .eq('reg_number', regNumber)
+            .single();
+            
+        if (error && error.code !== 'PGRST116') throw error;
         console.log(`[PZZ DB] Ответ от базы для ${regNumber}:`, data ? "Данные найдены" : "Данные отсутствуют");
-        return data; // Если ничего не найдено, сервер вернет null
+        return data || null;
     } catch (err) {
         console.error("[PZZ DB] Ошибка получения данных ПЗЗ:", err);
         return null;
     }
 }
 
-async function findPzzByPointDatabase(pointX, pointY) {
+async function findPzzByPointSupabase(pointX, pointY) {
+    if (!supabaseClient) return null;
     console.log(`[PZZ DB] Поиск в БД по точке X=${pointX}, Y=${pointY}...`);
     try {
-        const response = await fetch(`${PZZ_API_BASE}/point?point_x=${pointX}&point_y=${pointY}`);
-        if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
-        
-        const data = await response.json();
+        const { data, error } = await supabaseClient.rpc('get_pzz_by_point', {
+            point_x: pointX,
+            point_y: pointY
+        });
+        if (error) throw error;
         console.log(`[PZZ DB] Найдено объектов по точке: ${data ? data.length : 0}`);
         return data || [];
     } catch (err) {
@@ -46,26 +47,17 @@ async function findPzzByPointDatabase(pointX, pointY) {
     }
 }
 
-async function savePzzToDatabaseFull(payload) {
+async function savePzzToSupabaseFull(payload) {
+    if (!supabaseClient) return false;
     console.log("[PZZ DB] Отправка данных на сохранение:", { ...payload, regulations_json: payload.regulations_json ? "(JSON Data)" : "null" });
     try {
-        const response = await fetch(`${PZZ_API_BASE}/upsert`, {
-            method: 'POST',
-            headers: {
-                'Content-Type': 'application/json'
-            },
-            body: JSON.stringify(payload)
-        });
+        const { error } = await supabaseClient
+            .from('municipal_pzz')
+            .upsert(payload, { onConflict: 'reg_number' });
         
-        if (!response.ok) throw new Error(`HTTP Error: ${response.status}`);
-        const result = await response.json();
-        
-        if (result.success) {
-            console.log("[PZZ DB] Сохранение успешно завершено");
-            return true;
-        } else {
-            throw new Error(result.error || "Неизвестная ошибка сервера");
-        }
+        if (error) throw error;
+        console.log("[PZZ DB] Сохранение успешно завершено");
+        return true;
     } catch (err) {
         console.error("[PZZ DB] Ошибка сохранения ПЗЗ:", err);
         return false;
@@ -125,11 +117,10 @@ async function handlePzzAction(lat, lon) {
             targetGeometry = fd?.geometry;
             isAlreadyOnMap = true;
         } else {
-            console.log("[PZZ Action] На карте объектов нет. Этап 2: Поиск в базе данных сервера...");
+            console.log("[PZZ Action] На карте объектов нет. Этап 2: Поиск в базе данных Supabase...");
             const centerPoint = typeof toEPSG3857 === 'function' ? toEPSG3857(lat, lon) : null;
             if (centerPoint) {
-                // Изменен вызов на новую функцию API
-                const dbDataList = await findPzzByPointDatabase(centerPoint.x, centerPoint.y);
+                const dbDataList = await findPzzByPointSupabase(centerPoint.x, centerPoint.y);
                 
                 if (dbDataList && dbDataList.length > 0) {
                     console.log(`[PZZ Action] Объект найден в БД: ${dbDataList[0].reg_number}`);
@@ -346,6 +337,7 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
     modal.style.width = '450px';
     modal.style.maxWidth = '95vw';
     modal.style.zIndex = '20000';
+    // КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: ДЕЛАЕМ ОКНО ВИДИМЫМ!
     modal.style.display = 'block'; 
 
     modal.innerHTML = `
@@ -415,6 +407,7 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
     document.body.appendChild(modal);
     console.log("[PZZ Modal] Модальное окно добавлено в DOM");
 
+    // Блокируем всплытие событий (защита от глобального Paste/Keydown карты)
     const stopProp = (e) => e.stopPropagation();
     modal.addEventListener('paste', stopProp);
     modal.addEventListener('keydown', stopProp);
@@ -517,8 +510,7 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
             updated_at: new Date().toISOString()
         };
 
-        // Изменен вызов на новую функцию API
-        const success = await savePzzToDatabaseFull(payload);
+        const success = await savePzzToSupabaseFull(payload);
 
         if (success) {
             if (typeof window.showNotification === 'function') window.showNotification('Данные ПЗЗ успешно сохранены', 'success');
@@ -530,7 +522,7 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
         }
     });
 
-    if (viewerBtn) {
+if (viewerBtn) {
         viewerBtn.addEventListener('click', () => {
             console.log("[PZZ Modal] Нажата кнопка открытия просмотрщика регламентов");
             openPzzViewer(pzzData, regNumber, moName);
@@ -545,7 +537,6 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
 }
 
 // --- 4. ПОЛНОЭКРАННЫЙ ПРОСМОТРЩИК JSON ---
-// (Оставлен без изменений, так как он работает с локальными данными)
 
 function openPzzViewer(pzzData, regNumber, moName) {
     if (!pzzData || !pzzData.regulations_json) {
@@ -663,7 +654,7 @@ function openPzzViewer(pzzData, regNumber, moName) {
                                     <th width="8%">Код</th>
                                     <th width="28%">Наименование вида использования</th>
                                     <th width="12%">Площадь уч-ка (кв.м)</th>
-                                    <th width="10%">Ширина уч-ка (м)</th>
+                                    <th width="10%">Ширина уч-ка (м)</th> <!-- ДОБАВЛЕНО -->
                                     <th width="12%">Этажи / Высота</th>
                                     <th width="10%">% заст-ки</th>
                                     <th width="20%">Отступы (м)</th>
@@ -725,6 +716,7 @@ function openPzzViewer(pzzData, regNumber, moName) {
 
         for (const [type, uses] of Object.entries(grouped)) {
             const trHead = doc.createElement('tr');
+            // ИЗМЕНЕНО: colspan = 7 (т.к. добавилась колонка ширины)
             trHead.innerHTML = `<td colspan="7" class="type-header">${highlightText(type)}</td>`;
             tableBody.appendChild(trHead);
 
@@ -734,7 +726,7 @@ function openPzzViewer(pzzData, regNumber, moName) {
                     <td><strong>${highlightText(use.code)}</strong></td>
                     <td>${highlightText(use.name)}</td>
                     <td>${highlightText(use.area || 'н.у.')}</td>
-                    <td>${highlightText(use.width || 'н.у.')}</td>
+                    <td>${highlightText(use.width || 'н.у.')}</td> <!-- ДОБАВЛЕНО -->
                     <td>${highlightText(use.height || 'н.у.')}</td>
                     <td>${highlightText(use.percent || 'н.у.')}</td>
                     <td>${highlightText(use.setback || 'н.у.')}</td>
