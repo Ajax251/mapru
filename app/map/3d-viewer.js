@@ -879,12 +879,12 @@ try {
     
     scene.add(ground);
 
-    const mapTilesGroup = new THREE.Group();
+ const mapTilesGroup = new THREE.Group();
     mapTilesGroup.position.y = -0.4;
     scene.add(mapTilesGroup);
     
     const textureLoader = new THREE.TextureLoader();
-    textureLoader.setCrossOrigin('anonymous'); // Обязательно для WebGL
+    textureLoader.setCrossOrigin('anonymous'); 
 
     window.loadMapTiles = function(type) {
         while(mapTilesGroup.children.length > 0){
@@ -901,18 +901,17 @@ try {
         }
         mapTilesGroup.visible = true;
 
-        const z = 18; // Зум 18 дает отличную детализацию (размер тайла ~150м)
-        const E = 20037508.342789244; // Стандартный радиус EPSG:3857
+        const z = 18; 
+        const E = 20037508.342789244; 
         const tileSize = (2 * E) / Math.pow(2, z);
 
-        // Находим центральный тайл по EPSG:3857
-        const oX = originX;
-        const oY = originY;
+        const oX = ${originX};
+        const oY = ${originY};
 
         const tX = Math.floor((oX + E) / tileSize);
         const tY = Math.floor((E - oY) / tileSize);
 
-        const halfGrid = 6; // Сетка 13x13 тайлов (~2x2 км)
+        const halfGrid = 6; 
 
         for (let i = -halfGrid; i <= halfGrid; i++) {
             for (let j = -halfGrid; j <= halfGrid; j++) {
@@ -928,21 +927,21 @@ try {
                 const tileHeight = maxY - minY;
 
                 const posX = (maxX + minX) / 2 - oX;
-                const posZ = -( (maxY + minY) / 2 - oY ); // В Three.js Z уходит в минус на север
+                const posZ = -( (maxY + minY) / 2 - oY ); 
 
                 const planeGeo = new THREE.PlaneGeometry(tileWidth, tileHeight);
                 planeGeo.rotateX(-Math.PI / 2);
 
                 let url = '';
-                if (type === 'osm') url = `https://tile.openstreetmap.org/${z}/${currentTx}/${currentTy}.png`;
-                if (type === 'gsat') url = `https://mt1.google.com/vt/lyrs=s&x=${currentTx}&y=${currentTy}&z=${z}`;
-                if (type === 'ghyb') url = `https://mt1.google.com/vt/lyrs=y&x=${currentTx}&y=${currentTy}&z=${z}`;
+                if (type === 'osm') url = 'https://tile.openstreetmap.org/' + z + '/' + currentTx + '/' + currentTy + '.png';
+                if (type === 'gsat') url = 'https://mt1.google.com/vt/lyrs=s&x=' + currentTx + '&y=' + currentTy + '&z=' + z;
+                if (type === 'ghyb') url = 'https://mt1.google.com/vt/lyrs=y&x=' + currentTx + '&y=' + currentTy + '&z=' + z;
 
                 const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0 });
                 textureLoader.load(url, 
                     (tex) => { tex.colorSpace = THREE.SRGBColorSpace; mat.map = tex; mat.needsUpdate = true; },
                     undefined,
-                    (err) => { /* Тайлы могут не существовать на морях и полюсах */ }
+                    (err) => { }
                 );
                 
                 const mesh = new THREE.Mesh(planeGeo, mat);
