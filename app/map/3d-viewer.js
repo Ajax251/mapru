@@ -893,30 +893,82 @@ try {
         yandexMapGroup.visible = true;
 
         const z = 17;
-        const eqCircumference = 40075016.68557849;
-        const tileMeters = eqCircumference / Math.pow(2, z); 
+        const e = 0.0818191908426; // Эксцентриситет WGS84 для Яндекс Карт
+
+        // Математика конвертации (EPSG:3857 <-> EPSG:4326 <-> EPSG:3395)
+        function epsg3857ToLonLat(x, y) {
+            const lon = (x / 20037508.34) * 180;
+            let lat = (y / 20037508.34) * 180;
+            lat = 180 / Math.PI * (2 * Math.atan(Math.exp(lat * Math.PI / 180)) - Math.PI / 2);
+            return [lon, lat];
+        }
+
+        function lonLatTo3857(lon, lat) {
+            const x = lon * 20037508.34 / 180;
+            let y = Math.log(Math.tan((90 + lat) * Math.PI / 360)) / (Math.PI / 180);
+            y = y * 20037508.34 / 180;
+            return [x, y];
+        }
+
+        function latToYandexY(lat, zoom) {
+            const beta = lat * Math.PI / 180;
+            const phi = (1 - e * Math.sin(beta)) / (1 + e * Math.sin(beta));
+            const theta = Math.tan(Math.PI / 4 + beta / 2) * Math.pow(phi, e / 2);
+            return (1 - Math.log(theta) / Math.PI) / 2 * Math.pow(2, zoom);
+        }
+
+        function lonToYandexX(lon, zoom) {
+            return (lon + 180) / 360 * Math.pow(2, zoom);
+        }
+
+        function yandexYToLat(y, zoom) {
+            const n = Math.PI - 2 * Math.PI * y / Math.pow(2, zoom);
+            let lat = (2 * Math.atan(Math.exp(n)) - Math.PI / 2) * 180 / Math.PI;
+            for (let i = 0; i < 5; i++) {
+                const beta = lat * Math.PI / 180;
+                const phi = (1 - e * Math.sin(beta)) / (1 + e * Math.sin(beta));
+                lat = (2 * Math.atan(Math.exp(n) * Math.pow(phi, e / 2)) - Math.PI / 2) * 180 / Math.PI;
+            }
+            return lat;
+        }
+
+        function yandexXToLon(x, zoom) {
+            return x / Math.pow(2, zoom) * 360 - 180;
+        }
 
         const oX = ${originX};
         const oY = ${originY};
-
-        const tX = Math.floor((oX + eqCircumference/2) / tileMeters);
-        const tY = Math.floor((eqCircumference/2 - oY) / tileMeters);
+        const centerLonLat = epsg3857ToLonLat(oX, oY);
+        
+        const tX = Math.floor(lonToYandexX(centerLonLat[0], z));
+        const tY = Math.floor(latToYandexY(centerLonLat[1], z));
 
         const gridSize = 10;
         const halfGrid = Math.floor(gridSize / 2);
-
-        const planeGeo = new THREE.PlaneGeometry(tileMeters, tileMeters);
-        planeGeo.rotateX(-Math.PI / 2);
 
         for (let i = -halfGrid; i <= halfGrid; i++) {
             for (let j = -halfGrid; j <= halfGrid; j++) {
                 const currentTx = tX + i;
                 const currentTy = tY + j;
 
-                const tileCenterX = (currentTx * tileMeters + tileMeters/2) - eqCircumference/2;
-                const tileCenterY = eqCircumference/2 - (currentTy * tileMeters + tileMeters/2);
-                const posX = tileCenterX - oX;
-                const posZ = -(tileCenterY - oY);
+                // Вычисляем точные географические границы тайла Яндекса
+                const minLon = yandexXToLon(currentTx, z);
+                const maxLon = yandexXToLon(currentTx + 1, z);
+                const maxLat = yandexYToLat(currentTy, z); 
+                const minLat = yandexYToLat(currentTy + 1, z); 
+
+                // Переводим границы тайла в пространство вашей 3D сцены (EPSG:3857)
+                const min3857 = lonLatTo3857(minLon, minLat);
+                const max3857 = lonLatTo3857(maxLon, maxLat);
+
+                const tileWidth = max3857[0] - min3857[0];
+                const tileHeight = max3857[1] - min3857[1];
+                
+                const posX = (max3857[0] + min3857[0]) / 2 - oX;
+                const posZ = -( (max3857[1] + min3857[1]) / 2 - oY );
+
+                const planeGeo = new THREE.PlaneGeometry(tileWidth, tileHeight);
+                planeGeo.rotateX(-Math.PI / 2);
 
                 if (type === 'yhyb') {
                     const matSat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0 });
@@ -929,7 +981,7 @@ try {
                     yandexMapGroup.add(meshSat);
 
                     const matSkl = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0, transparent: true });
-                    textureLoader.load('https://core-renderer-tiles.maps.yandex.net/tiles?l=skl&x='+currentTx+'&y='+currentTy+'&z='+z+'&scale=1&lang=ru_RU', (tex) => {
+                    textureLoader.load('https://core-k.maps.yandex.net/maptiles_v2?l=skl&x='+currentTx+'&y='+currentTy+'&z='+z+'&scale=1&lang=ru_RU', (tex) => {
                         tex.colorSpace = THREE.SRGBColorSpace; matSkl.map = tex; matSkl.needsUpdate = true;
                     });
                     const meshSkl = new THREE.Mesh(planeGeo, matSkl);
@@ -938,7 +990,7 @@ try {
                     yandexMapGroup.add(meshSkl);
                 } else {
                     let url = '';
-                    if (type === 'ymap') url = 'https://core-renderer-tiles.maps.yandex.net/tiles?l=map&x='+currentTx+'&y='+currentTy+'&z='+z+'&scale=1&lang=ru_RU';
+                    if (type === 'ymap') url = 'https://core-k.maps.yandex.net/maptiles_v2?l=map&x='+currentTx+'&y='+currentTy+'&z='+z+'&scale=1&lang=ru_RU';
                     if (type === 'ysat') url = 'https://core-sat.maps.yandex.net/tiles?l=sat&x='+currentTx+'&y='+currentTy+'&z='+z+'&lang=ru_RU';
                     
                     const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0 });
