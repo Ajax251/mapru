@@ -10,7 +10,7 @@ window.open3DVisualization = function () {
             // Чтение сохраненных настроек
             const savedTheme = localStorage.getItem('3d_viewer_theme') || 'light';
             const savedGroundColor = localStorage.getItem('3d_ground_color') || '#f0f2f5';
-            const savedGroundTex = localStorage.getItem('3d_ground_texture') || 'checker';
+            const savedGroundTex = localStorage.getItem('3d_ground_texture') || 'gsat';
 
             const cleanAddress = (rawAddress) => {
                 if (!rawAddress) return '';
