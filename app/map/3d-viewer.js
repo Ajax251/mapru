@@ -879,154 +879,82 @@ try {
     
     scene.add(ground);
 
-    const yandexMapGroup = new THREE.Group();
-    yandexMapGroup.position.y = -0.4;
-    scene.add(yandexMapGroup);
+    const mapTilesGroup = new THREE.Group();
+    mapTilesGroup.position.y = -0.4;
+    scene.add(mapTilesGroup);
+    
     const textureLoader = new THREE.TextureLoader();
-    // textureLoader.setCrossOrigin('anonymous'); // Отключено для обхода CORS ошибок Canvas Tainting, если браузер блокирует
+    textureLoader.setCrossOrigin('anonymous'); // Обязательно для WebGL
 
-    window.loadYandexMap = function(type) {
-        while(yandexMapGroup.children.length > 0){
-            const child = yandexMapGroup.children[0];
-            yandexMapGroup.remove(child);
+    window.loadMapTiles = function(type) {
+        while(mapTilesGroup.children.length > 0){
+            const child = mapTilesGroup.children[0];
+            mapTilesGroup.remove(child);
             if(child.material.map) child.material.map.dispose();
             child.material.dispose();
             child.geometry.dispose();
         }
 
-        if (!['ymap', 'ysat', 'yhyb'].includes(type)) {
-            yandexMapGroup.visible = false;
+        if (!['osm', 'gsat', 'ghyb'].includes(type)) {
+            mapTilesGroup.visible = false;
             return;
         }
-        yandexMapGroup.visible = true;
+        mapTilesGroup.visible = true;
 
-        const z = 17;
-        const e = 0.0818191908426; // Эксцентриситет WGS84 для Яндекс Карт
+        const z = 18; // Зум 18 дает отличную детализацию (размер тайла ~150м)
+        const E = 20037508.342789244; // Стандартный радиус EPSG:3857
+        const tileSize = (2 * E) / Math.pow(2, z);
 
-        // Математика конвертации (EPSG:3857 <-> EPSG:4326 <-> EPSG:3395)
-        function epsg3857ToLonLat(x, y) {
-            const lon = (x / 20037508.34) * 180;
-            let lat = (y / 20037508.34) * 180;
-            lat = 180 / Math.PI * (2 * Math.atan(Math.exp(lat * Math.PI / 180)) - Math.PI / 2);
-            return [lon, lat];
-        }
+        // Находим центральный тайл по EPSG:3857
+        const oX = originX;
+        const oY = originY;
 
-        function lonLatTo3857(lon, lat) {
-            const x = lon * 20037508.34 / 180;
-            let y = Math.log(Math.tan((90 + lat) * Math.PI / 360)) / (Math.PI / 180);
-            y = y * 20037508.34 / 180;
-            return [x, y];
-        }
+        const tX = Math.floor((oX + E) / tileSize);
+        const tY = Math.floor((E - oY) / tileSize);
 
-        function latToYandexY(lat, zoom) {
-            const beta = lat * Math.PI / 180;
-            const phi = (1 - e * Math.sin(beta)) / (1 + e * Math.sin(beta));
-            const theta = Math.tan(Math.PI / 4 + beta / 2) * Math.pow(phi, e / 2);
-            return (1 - Math.log(theta) / Math.PI) / 2 * Math.pow(2, zoom);
-        }
-
-        function lonToYandexX(lon, zoom) {
-            return (lon + 180) / 360 * Math.pow(2, zoom);
-        }
-
-        function yandexYToLat(y, zoom) {
-            const n = Math.PI - 2 * Math.PI * y / Math.pow(2, zoom);
-            let lat = (2 * Math.atan(Math.exp(n)) - Math.PI / 2) * 180 / Math.PI;
-            for (let i = 0; i < 5; i++) {
-                const beta = lat * Math.PI / 180;
-                const phi = (1 - e * Math.sin(beta)) / (1 + e * Math.sin(beta));
-                lat = (2 * Math.atan(Math.exp(n) * Math.pow(phi, e / 2)) - Math.PI / 2) * 180 / Math.PI;
-            }
-            return lat;
-        }
-
-        function yandexXToLon(x, zoom) {
-            return x / Math.pow(2, zoom) * 360 - 180;
-        }
-
-        const oX = ${originX};
-        const oY = ${originY};
-        const centerLonLat = epsg3857ToLonLat(oX, oY);
-        
-        const tX = Math.floor(lonToYandexX(centerLonLat[0], z));
-        const tY = Math.floor(latToYandexY(centerLonLat[1], z));
-
-        const gridSize = 10;
-        const halfGrid = Math.floor(gridSize / 2);
+        const halfGrid = 6; // Сетка 13x13 тайлов (~2x2 км)
 
         for (let i = -halfGrid; i <= halfGrid; i++) {
             for (let j = -halfGrid; j <= halfGrid; j++) {
                 const currentTx = tX + i;
                 const currentTy = tY + j;
 
-                // Вычисляем точные географические границы тайла Яндекса
-                const minLon = yandexXToLon(currentTx, z);
-                const maxLon = yandexXToLon(currentTx + 1, z);
-                const maxLat = yandexYToLat(currentTy, z); 
-                const minLat = yandexYToLat(currentTy + 1, z); 
+                const minX = -E + currentTx * tileSize;
+                const maxX = -E + (currentTx + 1) * tileSize;
+                const minY = E - (currentTy + 1) * tileSize;
+                const maxY = E - currentTy * tileSize;
 
-                // Переводим границы тайла в пространство вашей 3D сцены (EPSG:3857)
-                const min3857 = lonLatTo3857(minLon, minLat);
-                const max3857 = lonLatTo3857(maxLon, maxLat);
+                const tileWidth = maxX - minX;
+                const tileHeight = maxY - minY;
 
-                const tileWidth = max3857[0] - min3857[0];
-                const tileHeight = max3857[1] - min3857[1];
-                
-                const posX = (max3857[0] + min3857[0]) / 2 - oX;
-                const posZ = -( (max3857[1] + min3857[1]) / 2 - oY );
+                const posX = (maxX + minX) / 2 - oX;
+                const posZ = -( (maxY + minY) / 2 - oY ); // В Three.js Z уходит в минус на север
 
                 const planeGeo = new THREE.PlaneGeometry(tileWidth, tileHeight);
                 planeGeo.rotateX(-Math.PI / 2);
 
-          if (type === 'yhyb') {
-                    const urlSat = 'https://core-sat.maps.yandex.net/tiles?l=sat&x='+currentTx+'&y='+currentTy+'&z='+z+'&lang=ru_RU';
-                    console.log("Запрос тайла (Спутник):", urlSat);
-                    const matSat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0 });
-                    textureLoader.load(urlSat, 
-                        (tex) => { tex.colorSpace = THREE.SRGBColorSpace; matSat.map = tex; matSat.needsUpdate = true; },
-                        undefined,
-                        (err) => { console.error("Ошибка загрузки тайла (Спутник):", urlSat, err); }
-                    );
-                    const meshSat = new THREE.Mesh(planeGeo, matSat);
-                    meshSat.position.set(posX, 0, posZ);
-                    meshSat.receiveShadow = true;
-                    yandexMapGroup.add(meshSat);
+                let url = '';
+                if (type === 'osm') url = `https://tile.openstreetmap.org/${z}/${currentTx}/${currentTy}.png`;
+                if (type === 'gsat') url = `https://mt1.google.com/vt/lyrs=s&x=${currentTx}&y=${currentTy}&z=${z}`;
+                if (type === 'ghyb') url = `https://mt1.google.com/vt/lyrs=y&x=${currentTx}&y=${currentTy}&z=${z}`;
 
-                    const urlSkl = 'https://core-renderer-tiles.maps.yandex.net/tiles?l=skl&x='+currentTx+'&y='+currentTy+'&z='+z+'&scale=1&lang=ru_RU';
-                    console.log("Запрос тайла (Схема-надписи):", urlSkl);
-                    const matSkl = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0, transparent: true });
-                    textureLoader.load(urlSkl, 
-                        (tex) => { tex.colorSpace = THREE.SRGBColorSpace; matSkl.map = tex; matSkl.needsUpdate = true; },
-                        undefined,
-                        (err) => { console.error("Ошибка загрузки тайла (Схема-надписи):", urlSkl, err); }
-                    );
-                    const meshSkl = new THREE.Mesh(planeGeo, matSkl);
-                    meshSkl.position.set(posX, 0.05, posZ);
-                    meshSkl.receiveShadow = true;
-                    yandexMapGroup.add(meshSkl);
-                } else {
-                    let url = '';
-                    if (type === 'ymap') url = 'https://core-renderer-tiles.maps.yandex.net/tiles?l=map&x='+currentTx+'&y='+currentTy+'&z='+z+'&scale=1&lang=ru_RU';
-                    if (type === 'ysat') url = 'https://core-sat.maps.yandex.net/tiles?l=sat&x='+currentTx+'&y='+currentTy+'&z='+z+'&lang=ru_RU';
-                    
-                    console.log("Запрос тайла:", url);
-                    const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0 });
-                    textureLoader.load(url, 
-                        (tex) => { tex.colorSpace = THREE.SRGBColorSpace; mat.map = tex; mat.needsUpdate = true; },
-                        undefined,
-                        (err) => { console.error("Ошибка загрузки тайла:", url, err); }
-                    );
-                    const mesh = new THREE.Mesh(planeGeo, mat);
-                    mesh.position.set(posX, 0, posZ);
-                    mesh.receiveShadow = true;
-                    yandexMapGroup.add(mesh);
-                }
+                const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0 });
+                textureLoader.load(url, 
+                    (tex) => { tex.colorSpace = THREE.SRGBColorSpace; mat.map = tex; mat.needsUpdate = true; },
+                    undefined,
+                    (err) => { /* Тайлы могут не существовать на морях и полюсах */ }
+                );
+                
+                const mesh = new THREE.Mesh(planeGeo, mat);
+                mesh.position.set(posX, 0, posZ);
+                mesh.receiveShadow = true;
+                mapTilesGroup.add(mesh);
             }
         }
     };
 
-    if (['ymap', 'ysat', 'yhyb'].includes(currentGroundTex)) {
-        window.loadYandexMap(currentGroundTex);
+    if (['osm', 'gsat', 'ghyb'].includes(currentGroundTex)) {
+        window.loadMapTiles(currentGroundTex);
     }
 
     function createCompass(){
@@ -1092,7 +1020,7 @@ try {
     }
     scene.add(createCompass());
 
-    window.updateSceneTheme = function() {
+ window.updateSceneTheme = function() {
         if(currentTheme === 'dark') {
             scene.background = new THREE.Color(0x0f172a);
             ambientLight.intensity = 0.4;
@@ -1103,9 +1031,9 @@ try {
             dirLight.intensity = 2.0;
         }
         
-        const isYandexMap = ['ymap', 'ysat', 'yhyb'].includes(currentGroundTex);
+        const isMapTile = ['osm', 'gsat', 'ghyb'].includes(currentGroundTex);
         
-        if (isYandexMap) {
+        if (isMapTile) {
             ground.visible = false; // Отключаем подложку полностью, чтобы она не перебивала карту
         } else {
             ground.visible = true;
@@ -1908,10 +1836,10 @@ var groundControl = document.createElement("div");
             <option value="grid" \${currentGroundTex === 'grid' ? 'selected' : ''}>Сетка</option>
             <option value="checker" \${currentGroundTex === 'checker' ? 'selected' : ''}>Шахматы</option>
             <option value="solid" \${currentGroundTex === 'solid' ? 'selected' : ''}>Сплошной</option>
-            <optgroup label="Яндекс Карты">
-                <option value="ymap" \${currentGroundTex === 'ymap' ? 'selected' : ''}>Схема</option>
-                <option value="ysat" \${currentGroundTex === 'ysat' ? 'selected' : ''}>Спутник</option>
-                <option value="yhyb" \${currentGroundTex === 'yhyb' ? 'selected' : ''}>Гибрид</option>
+            <optgroup label="Спутник / Карты">
+                <option value="gsat" \${currentGroundTex === 'gsat' ? 'selected' : ''}>Спутник</option>
+                <option value="ghyb" \${currentGroundTex === 'ghyb' ? 'selected' : ''}>Гибрид</option>
+                <option value="osm" \${currentGroundTex === 'osm' ? 'selected' : ''}>Схема OSM</option>
             </optgroup>
         </select>
     \`;
@@ -1925,10 +1853,10 @@ var groundControl = document.createElement("div");
         currentGroundColor = newColor;
         currentGroundTex = newTex;
 
-        const isYandexMap = ['ymap', 'ysat', 'yhyb'].includes(newTex);
+        const isMapTile = ['osm', 'gsat', 'ghyb'].includes(newTex);
         
-        if (isYandexMap) {
-            ground.visible = false; // Отключаем цветную землю, чтобы она не перебивала тайлы
+        if (isMapTile) {
+            ground.visible = false; // Отключаем цветную землю
         } else {
             ground.visible = true;
             ground.material.color.setHex(parseInt(newColor.replace('#','0x')));
@@ -1940,8 +1868,8 @@ var groundControl = document.createElement("div");
             ground.material.needsUpdate = true;
         }
 
-        if (typeof window.loadYandexMap === 'function') {
-            window.loadYandexMap(newTex);
+        if (typeof window.loadMapTiles === 'function') {
+            window.loadMapTiles(newTex);
         }
     };
 
