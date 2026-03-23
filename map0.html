@@ -4062,7 +4062,9 @@ function openExternalMaps(event) {
         const twoGisButton = createExternalMapButton('2gis', 'img/2gis.png', '');
         const exportAllKmlButton = createExternalMapButton('export_all_kml', 'img/emap.png', '');
 
-        [nspdButton, yandexButton, googleButton, twoGisButton, exportAllKmlButton].forEach((btn) => {
+        [nspdButton, yandexButton, googleButton, twoGisButton, exportAllKmlButton].forEach((btn, index) => {
+            btn.classList.add('external-map-button-animation');
+            btn.style.animationDelay = `${index * 0.1}s`;
             externalMapsContainer.appendChild(btn);
         });
 
@@ -15127,21 +15129,24 @@ async function getParcelsNearby(lat, lon) {
     const thisSessionId = Date.now();
     nearbySearchSessionId = thisSessionId;
 
+    
     const loaderContainer = document.getElementById('loaderContainer');
     const isFreshCall = !loaderContainer || loaderContainer.style.display === 'none' || loaderContainer.style.display === '';
 
     const targetPolygon = findPolygonAtPoint(lat, lon);
 
+   
     if (isFreshCall) {
         if (targetPolygon) {
-            currentSearchRadius = 'obj'; 
+            currentSearchRadius = 'obj'; // Если кликнули на полигон - по умолчанию буфер
         } else if (currentSearchRadius === 'obj') {
-            currentSearchRadius = 50; 
+            currentSearchRadius = 50; // Если полигона нет, сбрасываем на 50м
         }
     }
 
     const radTxt = currentSearchRadius === 'obj' ? 'Буфер 10м' : `R=${currentSearchRadius}м`;
 
+  
     showLoader(`
         <div style="text-align:center;">
             <i class="fas fa-crosshairs fa-spin" style="font-size: 2.2rem; color: #3b82f6; margin-bottom: 10px;"></i>
@@ -15151,6 +15156,7 @@ async function getParcelsNearby(lat, lon) {
     `);
 
     updateLoaderWithRadiusButtons(lat, lon); 
+
 
     await new Promise(resolve => setTimeout(resolve, 2000));
 
@@ -15207,7 +15213,10 @@ async function getParcelsNearby(lat, lon) {
             ];
         }
 
-        if (searchPolygonCoordsEPSG3857 && searchPolygonCoordsEPSG3857.length > 0) {
+
+
+   if (searchPolygonCoordsEPSG3857 && searchPolygonCoordsEPSG3857.length > 0) {
+            // Переводим EPSG:3857 в WGS84 [lon, lat] для Turf
             const wgsPolyCoords = searchPolygonCoordsEPSG3857.map(coord => proj4("EPSG:3857", "EPSG:4326", coord));
             const area = turf.area(turf.polygon([wgsPolyCoords]));
             
@@ -15219,6 +15228,8 @@ async function getParcelsNearby(lat, lon) {
             }
         }
         
+        
+  
         if (loadingText) {
             loadingText.innerHTML = `
                 <div style="text-align:center;">
@@ -15241,6 +15252,7 @@ async function getParcelsNearby(lat, lon) {
             return;
         }
 
+        // 3) Иконка отрисовки слоев
         if (loadingText) {
             loadingText.innerHTML = `
                 <div style="text-align:center;">
@@ -15255,9 +15267,8 @@ async function getParcelsNearby(lat, lon) {
 
         if (thisSessionId !== nearbySearchSessionId) return;
 
-        syncFeaturesDataFromMap();
         const sidebarTitle = currentSearchRadius === 'obj' ? 'ЗУ (Вокруг объекта)' : `ЗУ (рядом ${currentSearchRadius}м)`;
-        await populateSidebarWithFoundObjects(parcelFeaturesData.length > 0 ? parcelFeaturesData : foundFeatures, sidebarTitle);
+        await populateSidebarWithFoundObjects(foundFeatures, sidebarTitle);
         
         const currentMapType = map.getType();
         const strokeColor = (currentMapType === 'yandex#satellite' || currentMapType === 'yandex#hybrid') ? '#FFFFFF' : '#FF0000';
@@ -15287,6 +15298,7 @@ async function getParcelsNearby(lat, lon) {
 
     } catch (error) {
         if (thisSessionId === nearbySearchSessionId) {
+            console.error('Ошибка при поиске участков рядом:', error);
             showNotification(`Ошибка поиска: ${error.message}`, 'error');
         }
     } finally {
@@ -26468,39 +26480,62 @@ async function exportSidebarToExcel() {
 
 
 
+// Draw found parcels on the map
 async function drawFoundParcels(parcels, markAsFoundInArea = false) {
     let combinedBounds = null;
-    const drawnParcelObjects = [];
+    const drawnParcelObjects = []; // Keep track of objects drawn in this call
 
+    // --- Clear Previous Objects Marked as 'isFoundInArea' ---
+    if (markAsFoundInArea) {
+        const objectsToRemove = [];
+        polygons.forEach((obj) => {
+            // Check if the flag exists and is explicitly true
+            if (obj?.properties?.get('isFoundInArea') === true) {
+                objectsToRemove.push(obj);
+            }
+        });
+        objectsToRemove.forEach(obj => {
+            if (map?.geoObjects.indexOf(obj) !== -1) map.geoObjects.remove(obj);
+            polygons = polygons.filter(p => p !== obj);
+            if (obj instanceof ymaps.Placemark) {
+                parcelPlacemarks = parcelPlacemarks.filter(pm => pm !== obj);
+            }
+        });
+        console.log(`Removed ${objectsToRemove.length} previous 'isFoundInArea' objects.`);
+    }
+
+    // --- Process and Draw New Parcels ---
     for (const feature of parcels) {
         try {
             if (!feature?.properties?.descr || !feature?.geometry?.coordinates) {
+                 console.warn("Skipping feature due to missing properties or geometry:", feature);
                  continue;
-            }
-
-            const isAlreadyDrawn = polygons.some(p => p instanceof ymaps.Polygon && p.properties.get('cadastralNumber') === feature.properties.descr);
-            if (isAlreadyDrawn) {
-                continue;
             }
 
             const geometryType = feature.geometry.type;
             
+            // --- ИЗМЕНЕНИЕ: Собираем полные структуры полигонов (включая внутренние контуры) ---
             let polygonsRingsList = [];
             
             if (geometryType === 'Polygon' && feature.geometry.coordinates) {
+                // Для Polygon coordinates - это массив колец [ [outer], [inner1], [inner2]... ]
                 polygonsRingsList.push(feature.geometry.coordinates); 
             } else if (geometryType === 'MultiPolygon' && Array.isArray(feature.geometry.coordinates)) {
+                // Для MultiPolygon coordinates - это массив полигонов
                 polygonsRingsList = feature.geometry.coordinates;
             } else {
                 continue; 
             }
 
+            // Перебираем каждый полигон (который может состоять из нескольких колец)
             for (const singlePolyRings of polygonsRingsList) {
                  if (!Array.isArray(singlePolyRings) || singlePolyRings.length === 0) continue;
 
+                 // Обрабатываем ВСЕ кольца (внешнее + внутренние)
                  const allProcessedRings = singlePolyRings.map(ring => {
                      if (!Array.isArray(ring) || ring.length < 3) return null;
 
+                     // --- Coordinate Conversion ---
                      const coordinates = ring.map(coord => {
                          if (!Array.isArray(coord) || coord.length !== 2 || typeof coord[0] !== 'number' || typeof coord[1] !== 'number') return null;
                          try { 
@@ -26511,11 +26546,13 @@ async function drawFoundParcels(parcels, markAsFoundInArea = false) {
                      
                      if (coordinates.length < 3) return null; 
                      
+                     // Применяем смещение
                      return coordinates.map(coord => [coord[0] - mapOffsetY * 0.000008983, coord[1] - mapOffsetX * 0.000008983]);
                  }).filter(r => r !== null);
 
                  if (allProcessedRings.length === 0) continue;
 
+                 // --- Extract Properties ---
                  const cadastralNumber = feature.properties.descr;
                  const parcelOptions = feature.properties.options || {};
                  const address = parcelOptions.readable_address || 'Адрес не указан';
@@ -26538,6 +26575,7 @@ async function drawFoundParcels(parcels, markAsFoundInArea = false) {
                      rightType: rightType
                  };
                  
+                 // --- Create Polygon ---
                  const polygonProperties = {
                      hintContent: hintContent,
                      cadastralNumber: cadastralNumber,
@@ -26547,11 +26585,11 @@ async function drawFoundParcels(parcels, markAsFoundInArea = false) {
                      vri: vri,
                      featureData: feature 
                  };
-                 
                  if (markAsFoundInArea) {
                      polygonProperties.isFoundInArea = true; 
                  }
 
+                 // Передаем массив массивов координат (allProcessedRings), чтобы Яндекс отрисовал полигон с дырками
                  const parcelPolygon = new ymaps.Polygon(allProcessedRings, polygonProperties, {
                      strokeColor: strokeColor,
                      strokeWidth: polygonStyle.width - 1, 
@@ -26563,6 +26601,7 @@ async function drawFoundParcels(parcels, markAsFoundInArea = false) {
                      zIndex: 800 
                  });
 
+                 // Add event listeners
                  parcelPolygon.events.add('click', function (e) {
                      if (e.get('altKey')) { parcelPolygon.options.set('fillColor', `${strokeColor}33`); }
                      else {
@@ -26574,32 +26613,23 @@ async function drawFoundParcels(parcels, markAsFoundInArea = false) {
                          map.balloon.open(e.get('coords'), balloonContent);
                      }
                  });
-                 
                  parcelPolygon.events.add('dblclick', async function (e) {
-                     try { 
-                         await navigator.clipboard.writeText(cadastralNumber); 
-                         showNotification(`Скопировано: ${cadastralNumber}`, 'success', 'check-circle'); 
-                     } catch (err) { 
-                         showNotification('Ошибка копирования КН', 'error', 'exclamation-circle'); 
-                     }
+                     try { await navigator.clipboard.writeText(cadastralNumber); showNotification(`Скопировано: ${cadastralNumber}`, 'success', 'check-circle'); }
+                     catch (err) { console.error('Ошибка копирования КН:', err); showNotification('Ошибка копирования КН', 'error', 'exclamation-circle'); }
                  });
 
                  map.geoObjects.add(parcelPolygon);
                  polygons.push(parcelPolygon); 
                  drawnParcelObjects.push(parcelPolygon); 
 
+                 // --- Update Combined Bounds for *this call* ---
                  const parcelBounds = parcelPolygon.geometry.getBounds();
                  if (parcelBounds?.[0]?.[0] !== undefined && isFinite(parcelBounds[0][0])) {
-                     if (!combinedBounds) { 
-                         combinedBounds = [[parcelBounds[0][0], parcelBounds[0][1]], [parcelBounds[1][0], parcelBounds[1][1]]]; 
-                     } else { 
-                         combinedBounds[0][0] = Math.min(combinedBounds[0][0], parcelBounds[0][0]); 
-                         combinedBounds[0][1] = Math.min(combinedBounds[0][1], parcelBounds[0][1]); 
-                         combinedBounds[1][0] = Math.max(combinedBounds[1][0], parcelBounds[1][0]); 
-                         combinedBounds[1][1] = Math.max(combinedBounds[1][1], parcelBounds[1][1]); 
-                     }
+                     if (!combinedBounds) { combinedBounds = [[parcelBounds[0][0], parcelBounds[0][1]], [parcelBounds[1][0], parcelBounds[1][1]]]; }
+                     else { combinedBounds[0][0] = Math.min(combinedBounds[0][0], parcelBounds[0][0]); combinedBounds[0][1] = Math.min(combinedBounds[0][1], parcelBounds[0][1]); combinedBounds[1][0] = Math.max(combinedBounds[1][0], parcelBounds[1][0]); combinedBounds[1][1] = Math.max(combinedBounds[1][1], parcelBounds[1][1]); }
                  }
 
+                 // --- Create Label ---
                   if (parcelBounds?.[0]?.[0] !== undefined && isFinite(parcelBounds[0][0])) {
                      const parcelCenterGeo = [(parcelBounds[0][0] + parcelBounds[1][0]) / 2, (parcelBounds[0][1] + parcelBounds[1][1]) / 2];
                      const parts = cadastralNumber.split(':');
@@ -26611,7 +26641,6 @@ async function drawFoundParcels(parcels, markAsFoundInArea = false) {
                          hintContent: hintContent,
                          cadastralNumber: cadastralNumber
                      };
-                     
                      if (markAsFoundInArea) {
                          labelProperties.isFoundInArea = true; 
                      }
@@ -26624,17 +26653,19 @@ async function drawFoundParcels(parcels, markAsFoundInArea = false) {
                          visible: map.getZoom() > 14,
                          zIndex: 850 
                      });
-                     
                      parcelText.polygon = parcelPolygon; 
                      map.geoObjects.add(parcelText);
                      parcelPlacemarks.push(parcelText); 
                      polygons.push(parcelText); 
                      drawnParcelObjects.push(parcelText);
                   }
-            }
-        } catch (error) {}
-    }
+            } // End polygonsRingsList loop
+        } catch (error) {
+            console.error('Ошибка при отрисовке найденного земельного участка:', error, feature);
+        }
+    } // End feature loop
 
+    // --- Set Map Bounds based on objects drawn *in this call* ---
     if (combinedBounds && combinedBounds[0] && combinedBounds[1] && combinedBounds[0].length === 2 && combinedBounds[1].length === 2 && isFinite(combinedBounds[0][0])) {
         const currentBounds = map.getBounds();
         let shouldSetBounds = true;
@@ -26652,18 +26683,18 @@ async function drawFoundParcels(parcels, markAsFoundInArea = false) {
             const latMargin = (combinedBounds[1][0] - combinedBounds[0][0]) * 0.15 || 0.0005; 
             const lonMargin = (combinedBounds[1][1] - combinedBounds[0][1]) * 0.15 || 0.0005;
             const viewBounds = [[combinedBounds[0][0] - latMargin, combinedBounds[0][1] - lonMargin], [combinedBounds[1][0] + latMargin, combinedBounds[1][1] + lonMargin]];
-            try { 
-                map.setBounds(viewBounds, { checkZoomRange: true, duration: 300 }); 
-            } catch (setBoundsError) {}
+            try { map.setBounds(viewBounds, { checkZoomRange: true, duration: 300 }); }
+            catch (setBoundsError) { console.error("Ошибка установки границ:", setBoundsError, viewBounds); }
         }
     } else if (drawnParcelObjects.length === 1 && drawnParcelObjects[0] instanceof ymaps.Placemark) {
          map.setCenter(drawnParcelObjects[0].geometry.getCoordinates(), map.getZoom() > 16 ? map.getZoom() : 17);
     }
 
+    // --- Update UI ---
     updatePlacemarksVisibility();
     applyCurrentTheme(); 
     
-    if (isGlobalFillActive) {
+      if (isGlobalFillActive) {
         applyGlobalFill();
     }
 
