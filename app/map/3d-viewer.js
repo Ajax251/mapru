@@ -1817,22 +1817,22 @@ try {
     addLayerUi("Инфраструктура", "#f59e0b", sceneGroups.structures, data.structures);
     addLayerUi("ЗОУИТ", "#8b5cf6", sceneGroups.zouit, data.zouits);
     
-   var groundControl = document.createElement("div"); 
+var groundControl = document.createElement("div"); 
     groundControl.style.cssText = "margin-top: 15px; border-top: 1px solid var(--border-color); padding-top: 15px; display: flex; align-items: center; gap: 10px;";
-    groundControl.innerHTML = `
+    groundControl.innerHTML = \`
         <label style="font-size:13px;font-weight:600;">Подложка:</label>
-        <input type="color" id="ground-color-picker" value="${currentGroundColor}" style="border:none;width:24px;height:24px;cursor:pointer;background:none;padding:0;">
+        <input type="color" id="ground-color-picker" value="\${currentGroundColor}" style="border:none;width:24px;height:24px;cursor:pointer;background:none;padding:0;">
         <select id="ground-texture-picker" style="padding:4px; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-color); color:var(--text-color); font-size:12px; outline:none; max-width: 150px;">
-            <option value="grid" ${currentGroundTex === 'grid' ? 'selected' : ''}>Сетка</option>
-            <option value="checker" ${currentGroundTex === 'checker' ? 'selected' : ''}>Шахматы</option>
-            <option value="solid" ${currentGroundTex === 'solid' ? 'selected' : ''}>Сплошной</option>
+            <option value="grid" \${currentGroundTex === 'grid' ? 'selected' : ''}>Сетка</option>
+            <option value="checker" \${currentGroundTex === 'checker' ? 'selected' : ''}>Шахматы</option>
+            <option value="solid" \${currentGroundTex === 'solid' ? 'selected' : ''}>Сплошной</option>
             <optgroup label="Яндекс Карты">
-                <option value="ymap" ${currentGroundTex === 'ymap' ? 'selected' : ''}>Схема</option>
-                <option value="ysat" ${currentGroundTex === 'ysat' ? 'selected' : ''}>Спутник</option>
-                <option value="yhyb" ${currentGroundTex === 'yhyb' ? 'selected' : ''}>Гибрид</option>
+                <option value="ymap" \${currentGroundTex === 'ymap' ? 'selected' : ''}>Схема</option>
+                <option value="ysat" \${currentGroundTex === 'ysat' ? 'selected' : ''}>Спутник</option>
+                <option value="yhyb" \${currentGroundTex === 'yhyb' ? 'selected' : ''}>Гибрид</option>
             </optgroup>
         </select>
-    `;
+    \`;
     uiContainer.appendChild(groundControl);
 
    const applyGroundSettings = () => {
