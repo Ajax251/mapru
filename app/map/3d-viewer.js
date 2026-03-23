@@ -970,20 +970,28 @@ try {
                 const planeGeo = new THREE.PlaneGeometry(tileWidth, tileHeight);
                 planeGeo.rotateX(-Math.PI / 2);
 
-           if (type === 'yhyb') {
+          if (type === 'yhyb') {
+                    const urlSat = 'https://core-sat.maps.yandex.net/tiles?l=sat&x='+currentTx+'&y='+currentTy+'&z='+z+'&lang=ru_RU';
+                    console.log("Запрос тайла (Спутник):", urlSat);
                     const matSat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0 });
-                    textureLoader.load('https://core-sat.maps.yandex.net/tiles?l=sat&x='+currentTx+'&y='+currentTy+'&z='+z+'&lang=ru_RU', (tex) => {
-                        tex.colorSpace = THREE.SRGBColorSpace; matSat.map = tex; matSat.needsUpdate = true;
-                    });
+                    textureLoader.load(urlSat, 
+                        (tex) => { tex.colorSpace = THREE.SRGBColorSpace; matSat.map = tex; matSat.needsUpdate = true; },
+                        undefined,
+                        (err) => { console.error("Ошибка загрузки тайла (Спутник):", urlSat, err); }
+                    );
                     const meshSat = new THREE.Mesh(planeGeo, matSat);
                     meshSat.position.set(posX, 0, posZ);
                     meshSat.receiveShadow = true;
                     yandexMapGroup.add(meshSat);
 
+                    const urlSkl = 'https://core-renderer-tiles.maps.yandex.net/tiles?l=skl&x='+currentTx+'&y='+currentTy+'&z='+z+'&scale=1&lang=ru_RU';
+                    console.log("Запрос тайла (Схема-надписи):", urlSkl);
                     const matSkl = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0, transparent: true });
-                    textureLoader.load('https://core-renderer-tiles.maps.yandex.net/tiles?l=skl&x='+currentTx+'&y='+currentTy+'&z='+z+'&scale=1&lang=ru_RU', (tex) => {
-                        tex.colorSpace = THREE.SRGBColorSpace; matSkl.map = tex; matSkl.needsUpdate = true;
-                    });
+                    textureLoader.load(urlSkl, 
+                        (tex) => { tex.colorSpace = THREE.SRGBColorSpace; matSkl.map = tex; matSkl.needsUpdate = true; },
+                        undefined,
+                        (err) => { console.error("Ошибка загрузки тайла (Схема-надписи):", urlSkl, err); }
+                    );
                     const meshSkl = new THREE.Mesh(planeGeo, matSkl);
                     meshSkl.position.set(posX, 0.05, posZ);
                     meshSkl.receiveShadow = true;
@@ -993,10 +1001,13 @@ try {
                     if (type === 'ymap') url = 'https://core-renderer-tiles.maps.yandex.net/tiles?l=map&x='+currentTx+'&y='+currentTy+'&z='+z+'&scale=1&lang=ru_RU';
                     if (type === 'ysat') url = 'https://core-sat.maps.yandex.net/tiles?l=sat&x='+currentTx+'&y='+currentTy+'&z='+z+'&lang=ru_RU';
                     
+                    console.log("Запрос тайла:", url);
                     const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0 });
-                    textureLoader.load(url, (tex) => {
-                        tex.colorSpace = THREE.SRGBColorSpace; mat.map = tex; mat.needsUpdate = true;
-                    });
+                    textureLoader.load(url, 
+                        (tex) => { tex.colorSpace = THREE.SRGBColorSpace; mat.map = tex; mat.needsUpdate = true; },
+                        undefined,
+                        (err) => { console.error("Ошибка загрузки тайла:", url, err); }
+                    );
                     const mesh = new THREE.Mesh(planeGeo, mat);
                     mesh.position.set(posX, 0, posZ);
                     mesh.receiveShadow = true;
