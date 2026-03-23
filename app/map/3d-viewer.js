@@ -970,7 +970,7 @@ try {
                 const planeGeo = new THREE.PlaneGeometry(tileWidth, tileHeight);
                 planeGeo.rotateX(-Math.PI / 2);
 
-                if (type === 'yhyb') {
+           if (type === 'yhyb') {
                     const matSat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0 });
                     textureLoader.load('https://core-sat.maps.yandex.net/tiles?l=sat&x='+currentTx+'&y='+currentTy+'&z='+z+'&lang=ru_RU', (tex) => {
                         tex.colorSpace = THREE.SRGBColorSpace; matSat.map = tex; matSat.needsUpdate = true;
@@ -981,7 +981,7 @@ try {
                     yandexMapGroup.add(meshSat);
 
                     const matSkl = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0, transparent: true });
-                    textureLoader.load('https://core-k.maps.yandex.net/maptiles_v2?l=skl&x='+currentTx+'&y='+currentTy+'&z='+z+'&scale=1&lang=ru_RU', (tex) => {
+                    textureLoader.load('https://core-renderer-tiles.maps.yandex.net/tiles?l=skl&x='+currentTx+'&y='+currentTy+'&z='+z+'&scale=1&lang=ru_RU', (tex) => {
                         tex.colorSpace = THREE.SRGBColorSpace; matSkl.map = tex; matSkl.needsUpdate = true;
                     });
                     const meshSkl = new THREE.Mesh(planeGeo, matSkl);
@@ -990,7 +990,7 @@ try {
                     yandexMapGroup.add(meshSkl);
                 } else {
                     let url = '';
-                    if (type === 'ymap') url = 'https://core-k.maps.yandex.net/maptiles_v2?l=map&x='+currentTx+'&y='+currentTy+'&z='+z+'&scale=1&lang=ru_RU';
+                    if (type === 'ymap') url = 'https://core-renderer-tiles.maps.yandex.net/tiles?l=map&x='+currentTx+'&y='+currentTy+'&z='+z+'&scale=1&lang=ru_RU';
                     if (type === 'ysat') url = 'https://core-sat.maps.yandex.net/tiles?l=sat&x='+currentTx+'&y='+currentTy+'&z='+z+'&lang=ru_RU';
                     
                     const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0 });
