@@ -993,7 +993,7 @@ try {
 
             if (type === 'yhyb') {
                 // Спутниковый слой
-                const urlSat = `https://core-sat.maps.yandex.net/tiles?l=sat&x=${tx}&y=${ty}&z=${z}&lang=ru_RU`;
+           const urlSat = 'https://core-sat.maps.yandex.net/tiles?l=sat&x='+tx+'&y='+ty+'&z='+z+'&lang=ru_RU';
                 const matSat = new THREE.MeshStandardMaterial({
                     color: 0xffffff, roughness: 1.0, side: THREE.FrontSide
                 });
@@ -1011,7 +1011,8 @@ try {
 
                 // Слой подписей поверх спутника
                 const geoSkl = geo.clone(); // клонируем геометрию для второго слоя
-                const urlSkl = `https://core-renderer-tiles.maps.yandex.net/tiles?l=skl&x=${tx}&y=${ty}&z=${z}&scale=1&lang=ru_RU`;
+            const urlSkl = 'https://core-renderer-tiles.maps.yandex.net/tiles?l=skl&x='+tx+'&y='+ty+'&z='+z+'&scale=1&lang=ru_RU';
+
                 const matSkl = new THREE.MeshStandardMaterial({
                     color: 0xffffff, roughness: 1.0,
                     transparent: true, side: THREE.FrontSide,
@@ -1030,12 +1031,12 @@ try {
                 yandexMapGroup.add(meshSkl);
 
             } else {
-                let url = '';
-                if (type === 'ymap') {
-                    url = `https://core-renderer-tiles.maps.yandex.net/tiles?l=map&x=${tx}&y=${ty}&z=${z}&scale=1&lang=ru_RU`;
-                } else if (type === 'ysat') {
-                    url = `https://core-sat.maps.yandex.net/tiles?l=sat&x=${tx}&y=${ty}&z=${z}&lang=ru_RU`;
-                }
+    let url = '';
+    if (type === 'ymap') {
+        url = 'https://core-renderer-tiles.maps.yandex.net/tiles?l=map&x='+tx+'&y='+ty+'&z='+z+'&scale=1&lang=ru_RU';
+    } else if (type === 'ysat') {
+        url = 'https://core-sat.maps.yandex.net/tiles?l=sat&x='+tx+'&y='+ty+'&z='+z+'&lang=ru_RU';
+    }
 
                 const mat = new THREE.MeshStandardMaterial({
                     color: 0xffffff, roughness: 1.0, side: THREE.FrontSide
