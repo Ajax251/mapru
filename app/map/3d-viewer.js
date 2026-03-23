@@ -352,10 +352,11 @@ window.open3DVisualization = function () {
                 });
             });
 
-            if (window.turf && allLocalFeatures.target && allLocalFeatures.target.length > 0) {
+          if (window.turf && allLocalFeatures.target && allLocalFeatures.target.length > 0) {
                 const createTurfPolys = (featureArray, idPrefix) => {
                     const result = [];
-                    featureArray.forEach((f, idx) => {
+                    // Добавлена защита (featureArray || [])
+                    (featureArray || []).forEach((f, idx) => {
                         if (f.type === 'Polygon') {
                             f.polygons.forEach((polyRings) => {
                                 try {
@@ -384,7 +385,8 @@ window.open3DVisualization = function () {
 
                 const targetTurf = createTurfPolys(allLocalFeatures.target, 'target');
                 const objectsToCheck = [
-                    ...createTurfPolys(allLocalFeatures.parels, 'ЗУ ')
+                    // Исправлена опечатка с parels на parcels
+                    ...createTurfPolys(allLocalFeatures.parcels, 'ЗУ ')
                 ];
 
                 targetTurf.forEach(target => {
