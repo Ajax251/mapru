@@ -878,8 +878,9 @@ try {
         return t;
     }
     
-    let currentGroundColor = "${savedGroundColor}";
+let currentGroundColor = "${savedGroundColor}";
     let currentGroundTex = "${savedGroundTex}"; 
+    let currentParcelOpacity = ${savedParcelOpacity}; // <-- Передали значение внутрь iframe
     const groundMat = new THREE.MeshStandardMaterial({roughness: 1.0, color: currentGroundColor});
     if (!['solid', 'ymap', 'ysat', 'yhyb'].includes(currentGroundTex)) {
         groundMat.map = createGroundTexture(currentGroundTex, currentGroundColor);
@@ -1437,8 +1438,8 @@ try {
             var shape=createShape(poly);
             if(shape.getPoints().length>2){
                 var pGrp = new THREE.Group();
-             var mat=new THREE.MeshStandardMaterial({
-                    color:pColor, roughness:0.85, metalness:0.05, transparent:true, opacity: savedParcelOpacity, // Используем переменную
+         var mat=new THREE.MeshStandardMaterial({
+                    color:pColor, roughness:0.85, metalness:0.05, transparent:true, opacity: currentParcelOpacity,
                     depthWrite: false, // Отключаем мерцание с целевым объектом
                     polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 // Смещаем от граней
                 });
@@ -1869,11 +1870,23 @@ var groundControl = document.createElement("div");
     \`;
     uiContainer.appendChild(groundControl);
 
-    // Добавляем обработчик для нового ползунка
+ // Добавляем обработчик для нового ползунка
     document.getElementById("parcel-opacity-slider").addEventListener("input", function(e) {
-        const val = e.target.value;
+        const val = parseFloat(e.target.value);
         document.getElementById("parcel-opacity-val").innerText = Math.round(val * 100) + "%";
-        window.parent.postMessage({ type: 'setParcelOpacity', opacity: parseFloat(val) }, '*');
+        currentParcelOpacity = val; // Обновляем локальную переменную для экспорта
+        
+        // Меняем прозрачность ЗУ мгновенно
+        if (sceneGroups && sceneGroups.parcels) {
+            sceneGroups.parcels.children.forEach(group => {
+                group.children.forEach(child => {
+                    if (child.isMesh && child.material) child.material.opacity = val;
+                });
+            });
+        }
+        
+        // Отправляем сигнал родителю ТОЛЬКО для сохранения в localStorage
+        window.parent.postMessage({ type: 'setParcelOpacity', opacity: val }, '*');
     });
 
    const applyGroundSettings = () => {
@@ -2091,22 +2104,12 @@ const altValueEl = document.getElementById("alt-value");
                 }
                 
                 // Принимаем сообщение от ползунка и меняем прозрачность у всех ЗУ
+               // Сохраняем прозрачность в кэш
                 if(e.data && e.data.type === 'setParcelOpacity') {
-                    const newOpacity = e.data.opacity;
-                    localStorage.setItem('3d_parcel_opacity', newOpacity);
-                    if (sceneGroups.parcels) {
-                        sceneGroups.parcels.children.forEach(group => {
-                            group.children.forEach(child => {
-                                // Меняем прозрачность только у полигонов, не трогая линии (контуры)
-                                if (child.isMesh && child.material) {
-                                    child.material.opacity = newOpacity;
-                                }
-                            });
-                        });
-                    }
+                    localStorage.setItem('3d_parcel_opacity', e.data.opacity);
                 }
 
-             if(e.data && e.data.type === 'export3DHtml') {
+                if(e.data && e.data.type === 'export3DHtml') {
                     const latestTheme = localStorage.getItem('3d_viewer_theme') || 'light';
                     const latestColor = localStorage.getItem('3d_ground_color') || '#f0f2f5';
                     const latestTex = 'gsat'; // Временно принудительно Спутник
@@ -2121,11 +2124,10 @@ const altValueEl = document.getElementById("alt-value");
                     exportStr = exportStr.replace(`let currentGroundTex = "${savedGroundTex}";`, `let currentGroundTex = "${latestTex}";`);
                     exportStr = exportStr.replace(`body data-theme="${savedTheme}"`, `body data-theme="${latestTheme}"`);
                     
-                    // Обновляем значение прозрачности в экспортируемом HTML
-                    exportStr = exportStr.replace(
-                        /const savedParcelOpacity = [0-9.]+|parseFloat\(localStorage\.getItem\('3d_parcel_opacity'\)\) \|\| [0-9.]+/g, 
-                        `const savedParcelOpacity = ${latestParcelOpacity};`
-                    );
+                    // Обновляем значение прозрачности ЗУ в экспортируемом HTML
+                    exportStr = exportStr.replace(`let currentParcelOpacity = ${savedParcelOpacity};`, `let currentParcelOpacity = ${latestParcelOpacity};`);
+                    exportStr = exportStr.replace(`value="${savedParcelOpacity}"`, `value="${latestParcelOpacity}"`);
+                    exportStr = exportStr.replace(`>${Math.round(savedParcelOpacity * 100)}%<`, `>${Math.round(latestParcelOpacity * 100)}%<`);
                     
                     const blob = new Blob([exportStr], {type:"text/html;charset=utf-8"});
                     const url = URL.createObjectURL(blob);
