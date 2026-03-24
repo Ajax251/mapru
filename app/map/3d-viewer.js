@@ -945,16 +945,18 @@ let currentGroundColor = "${savedGroundColor}";
         mapTilesGroup.visible = true;
 
         const z = 18; 
-        // Идеальное согласование размеров тайла и Web Mercator
+        
+        // ДОБАВЛЯЕМ КОНСТАНТЫ ВНУТРЬ IFRAME
+        const EARTH_RADIUS = 6378137.0; 
+        const MAX_EXTENT = Math.PI * EARTH_RADIUS;
+
         const tileSizeMeters = (MAX_EXTENT * 2) / Math.pow(2, z);
 
-        // oX и oY - это центр нашей 3D сцены в координатах EPSG:3857
-        const oX = originX;
-        const oY = originY;
+        // ВАЖНО: ИСПОЛЬЗУЕМ ${} ДЛЯ ПРОБРОСА ПЕРЕМЕННЫХ ИЗВНЕ В СТРОКУ
+        const oX = ${originX};
+        const oY = ${originY};
 
-        // Вычисляем глобальные индексы тайлов (TileX, TileY) для центра
         const tX = Math.floor((oX + MAX_EXTENT) / tileSizeMeters);
-        // В Web Mercator Y растет вверх, а в тайлах Google Y растет вниз
         const tY = Math.floor((MAX_EXTENT - oY) / tileSizeMeters);
 
         const halfGrid = 6; 
@@ -964,20 +966,16 @@ let currentGroundColor = "${savedGroundColor}";
                 const currentTx = tX + i;
                 const currentTy = tY + j;
 
-                // Вычисляем точные координаты углов тайла в EPSG:3857
                 const tileMinX = -MAX_EXTENT + currentTx * tileSizeMeters;
                 const tileMaxX = tileMinX + tileSizeMeters;
                 const tileMaxY = MAX_EXTENT - currentTy * tileSizeMeters;
                 const tileMinY = tileMaxY - tileSizeMeters;
 
-                // Переводим координаты тайла в локальную систему координат 3D-сцены (сдвигаем на origin)
                 const localMinX = tileMinX - oX;
                 const localMaxX = tileMaxX - oX;
-                // В 3D-сцене Three.js ось Z направлена "на нас", поэтому Y (из 3857) идет в -Z
                 const localMinZ = -(tileMinY - oY);
                 const localMaxZ = -(tileMaxY - oY);
 
-                // Позиция центра тайла в 3D
                 const posX = (localMinX + localMaxX) / 2;
                 const posZ = (localMinZ + localMaxZ) / 2;
 
