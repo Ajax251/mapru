@@ -1845,28 +1845,28 @@ try {
     
 var groundControl = document.createElement("div"); 
     groundControl.style.cssText = "margin-top: 15px; border-top: 1px solid var(--border-color); padding-top: 15px; display: flex; flex-direction: column; gap: 12px;";
-    groundControl.innerHTML = `
+    groundControl.innerHTML = \`
         <div style="display: flex; align-items: center; gap: 10px;">
             <label style="font-size:13px;font-weight:600;">Подложка:</label>
-            <input type="color" id="ground-color-picker" value="${currentGroundColor}" style="border:none;width:24px;height:24px;cursor:pointer;background:none;padding:0;">
+            <input type="color" id="ground-color-picker" value="\${currentGroundColor}" style="border:none;width:24px;height:24px;cursor:pointer;background:none;padding:0;">
             <select id="ground-texture-picker" style="padding:4px; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-color); color:var(--text-color); font-size:12px; outline:none; max-width: 150px;">
-                <option value="grid" ${currentGroundTex === 'grid' ? 'selected' : ''}>Сетка</option>
-                <option value="checker" ${currentGroundTex === 'checker' ? 'selected' : ''}>Шахматы</option>
-                <option value="solid" ${currentGroundTex === 'solid' ? 'selected' : ''}>Сплошной</option>
+                <option value="grid" \${currentGroundTex === 'grid' ? 'selected' : ''}>Сетка</option>
+                <option value="checker" \${currentGroundTex === 'checker' ? 'selected' : ''}>Шахматы</option>
+                <option value="solid" \${currentGroundTex === 'solid' ? 'selected' : ''}>Сплошной</option>
                 <optgroup label="Спутник / Карты">
-                    <option value="gsat" ${currentGroundTex === 'gsat' ? 'selected' : ''}>Спутник</option>
-                    <option value="ghyb" ${currentGroundTex === 'ghyb' ? 'selected' : ''}>Гибрид</option>
-                    <option value="osm" ${currentGroundTex === 'osm' ? 'selected' : ''}>Схема OSM</option>
+                    <option value="gsat" \${currentGroundTex === 'gsat' ? 'selected' : ''}>Спутник</option>
+                    <option value="ghyb" \${currentGroundTex === 'ghyb' ? 'selected' : ''}>Гибрид</option>
+                    <option value="osm" \${currentGroundTex === 'osm' ? 'selected' : ''}>Схема OSM</option>
                 </optgroup>
             </select>
         </div>
         <div style="width: 100%;">
             <label style="font-size:12px;font-weight:600;display:flex;justify-content:space-between;color:var(--text-muted);">
-                Заливка ЗУ: <span id="parcel-opacity-val">${Math.round(${savedParcelOpacity} * 100)}%</span>
+                Заливка ЗУ: <span id="parcel-opacity-val">${Math.round(savedParcelOpacity * 100)}%</span>
             </label>
             <input type="range" id="parcel-opacity-slider" min="0" max="1" step="0.05" value="${savedParcelOpacity}" style="width:100%; accent-color:#10b981; cursor:pointer; margin-top:4px;">
         </div>
-    `;
+    \`;
     uiContainer.appendChild(groundControl);
 
     // Добавляем обработчик для нового ползунка
