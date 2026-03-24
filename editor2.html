@@ -4890,11 +4890,8 @@ async function handleContextMenu(e) {
                 }
             });
 
-          obj1.contours = finalCleanedList;
-            // Вызываем очистку только если функция существует
-            if (typeof cleanObjectContours === 'function') {
-                cleanObjectContours(obj1);
-            }
+            obj1.contours = finalCleanedList;
+            cleanObjectContours(obj1);
             updateObjectMetrics(obj1);
 
             // Удаляем второй объект
@@ -4913,7 +4910,65 @@ async function handleContextMenu(e) {
         }
     }
 
+function computeUnion(polyA, polyB) {
+    console.log("  [computeUnion] polyA:", polyA.length, "pts, polyB:", polyB.length, "pts");
+    
+    const areaA = calculatePolygonArea(polyA);
+    const areaB = calculatePolygonArea(polyB);
+    
+    console.log("  [computeUnion] areaA:", areaA.toFixed(2), "areaB:", areaB.toFixed(2));
+    
+    const normA = areaA < 0 ? reverseContour(polyA) : polyA;
+    const normB = areaB < 0 ? reverseContour(polyB) : polyB;
+    
+    const intersections = findIntersectionsRobust(normA, normB);
+    console.log("  [computeUnion] intersections after norm:", intersections.length);
+    
+    if (intersections.length === 0) {
+        const aInB = isPointInPolygonRobust(normA[0], normB);
+        const bInA = isPointInPolygonRobust(normB[0], normA);
+        console.log("  [computeUnion] No intersections! A in B:", aInB, "B in A:", bInA);
+        
+        if (aInB) return [normB];
+        if (bInA) return [normA];
+        return [normA, normB];
+    }
 
+    const polyAWithInt = insertPointsAndMark(normA, intersections, true);
+    const polyBWithInt = insertPointsAndMark(normB, intersections, false);
+
+    const arcsA = splitByIntersections(polyAWithInt);
+    const arcsB = splitByIntersections(polyBWithInt);
+    
+    console.log("  [computeUnion] arcsA:", arcsA.length, "arcsB:", arcsB.length);
+
+    const finalArcs = [];
+
+    arcsA.forEach((arc, i) => {
+        const mid = getArcMidpoint(arc);
+        const inside = isPointInPolygonRobust(mid, normB, false);
+        console.log(`    arcA[${i}]: mid=(${mid.x.toFixed(2)},${mid.y.toFixed(2)}) insideB=${inside} -> ${inside ? 'SKIP' : 'KEEP'}`);
+        if (!inside) {
+            finalArcs.push(arc);
+        }
+    });
+
+    arcsB.forEach((arc, i) => {
+        const mid = getArcMidpoint(arc);
+        const inside = isPointInPolygonRobust(mid, normA, false);
+        console.log(`    arcB[${i}]: mid=(${mid.x.toFixed(2)},${mid.y.toFixed(2)}) insideA=${inside} -> ${inside ? 'SKIP' : 'KEEP'}`);
+        if (!inside) {
+            finalArcs.push(arc);
+        }
+    });
+
+    console.log("  [computeUnion] finalArcs:", finalArcs.length);
+    
+    const result = stitchArcs(finalArcs);
+    console.log("  [computeUnion] stitched polygons:", result.length);
+    
+    return result;
+}
 
 
     function comparePolygons(p1, p2) {
@@ -4947,57 +5002,6 @@ async function handleContextMenu(e) {
             }
         });
     }
-    
-    
-    function computeUnion(polyA, polyB) {
-    // ИСПОЛЬЗУЕМ getSignedArea вместо calculatePolygonArea, так как нам важен знак!
-    const areaA = getSignedArea(polyA);
-    const areaB = getSignedArea(polyB);
-    
-    console.log(`[Union] Направление/Площадь А: ${areaA.toFixed(2)}, Площадь Б: ${areaB.toFixed(2)}`);
-    
-    // Нормализуем так, чтобы оба обхода были в одном направлении
-    const normA = areaA < 0 ? reverseContour(polyA) : polyA;
-    const normB = areaB < 0 ? reverseContour(polyB) : polyB;
-    
-    const intersections = findIntersectionsRobust(normA, normB);
-    console.log(`[Union] Найдено пересечений: ${intersections.length}`);
-    
-    if (intersections.length === 0) {
-        if (isPointInPolygonRobust(normA[0], normB, true)) return [normB];
-        if (isPointInPolygonRobust(normB[0], normA, true)) return [normA];
-        return [normA, normB];
-    }
-
-    const polyAWithInt = insertPointsAndMark(normA, intersections, true);
-    const polyBWithInt = insertPointsAndMark(normB, intersections, false);
-
-    const arcsA = splitByIntersections(polyAWithInt);
-    const arcsB = splitByIntersections(polyBWithInt);
-
-    const finalArcs =[];
-
-    arcsA.forEach((arc, i) => {
-        const mid = getArcMidpoint(arc);
-        // boundaryResult = true (общие границы считаются "внутри" и отбрасываются)
-        const inside = isPointInPolygonRobust(mid, normB, true);
-        console.log(`[Union] Дуга A${i} (точек: ${arc.length}), центр(${mid.x.toFixed(2)},${mid.y.toFixed(2)}) внутри Б: ${inside}`);
-        if (!inside) {
-            finalArcs.push(arc);
-        }
-    });
-
-    arcsB.forEach((arc, i) => {
-        const mid = getArcMidpoint(arc);
-        const inside = isPointInPolygonRobust(mid, normA, true);
-        console.log(`[Union] Дуга B${i} (точек: ${arc.length}), центр(${mid.x.toFixed(2)},${mid.y.toFixed(2)}) внутри А: ${inside}`);
-        if (!inside) {
-            finalArcs.push(arc);
-        }
-    });
-
-    return stitchArcs(finalArcs);
-}
     
     
  function handleDoubleClick(e) {
@@ -7166,7 +7170,50 @@ function reverseContour(contour) {
     }
 }
 
+// --- ТАКЖЕ исправьте computeUnion - добавьте нормализацию направления ---
 
+function computeUnion(polyA, polyB) {
+    // Нормализуем направление обхода (оба должны быть CCW)
+    const areaA = calculatePolygonArea(polyA);
+    const areaB = calculatePolygonArea(polyB);
+    
+    const normA = areaA < 0 ? reverseContour(polyA) : polyA;
+    const normB = areaB < 0 ? reverseContour(polyB) : polyB;
+    
+    const intersections = findIntersectionsRobust(normA, normB);
+    
+    if (intersections.length === 0) {
+        if (isPointInPolygonRobust(normA[0], normB)) return [normB];
+        if (isPointInPolygonRobust(normB[0], normA)) return [normA];
+        return [normA, normB];
+    }
+
+    const polyAWithInt = insertPointsAndMark(normA, intersections, true);
+    const polyBWithInt = insertPointsAndMark(normB, intersections, false);
+
+    const arcsA = splitByIntersections(polyAWithInt);
+    const arcsB = splitByIntersections(polyBWithInt);
+
+    const finalArcs = [];
+
+    arcsA.forEach(arc => {
+        const mid = getArcMidpoint(arc);
+        if (!isPointInPolygonRobust(mid, normB, false)) {
+            finalArcs.push(arc);
+        }
+    });
+
+    arcsB.forEach(arc => {
+        const mid = getArcMidpoint(arc);
+        if (!isPointInPolygonRobust(mid, normA, false)) {
+            finalArcs.push(arc);
+        }
+    });
+
+    return stitchArcs(finalArcs);
+}
+
+// --- Убедитесь что calculatePolygonArea возвращает знаковую площадь ---
 
 function calculatePolygonArea(poly) {
     if (!poly || poly.length < 3) return 0;
@@ -7633,19 +7680,28 @@ function splitByIntersections(pointsWithFlags) {
 function stitchArcs(arcs) {
     console.log("  [stitchArcs] Input arcs:", arcs.length);
     
-    if (arcs.length === 0) return[];
+    if (arcs.length === 0) return [];
     
-    const polygons =[];
+    // Логируем начало/конец каждой дуги
+    arcs.forEach((arc, i) => {
+        const head = arc[0];
+        const tail = arc[arc.length - 1];
+        console.log(`    Arc ${i}: (${head.x.toFixed(2)},${head.y.toFixed(2)}) -> (${tail.x.toFixed(2)},${tail.y.toFixed(2)}) [${arc.length} pts]`);
+    });
+    
+    const polygons = [];
     const used = new Array(arcs.length).fill(false);
-    const tolerance = 0.01;
+    const tolerance = 0.01; // УВЕЛИЧИЛ TOLERANCE!
 
     while(true) {
         const startIdx = used.findIndex(u => !u);
         if (startIdx === -1) break;
 
-        let poly =[];
+        const poly = [];
         let currIdx = startIdx;
         let watchdog = 0;
+        
+        console.log(`    Starting chain from arc ${startIdx}`);
         
         while (currIdx !== -1 && !used[currIdx] && watchdog < arcs.length * 2) {
             used[currIdx] = true;
@@ -7670,6 +7726,8 @@ function stitchArcs(arcs) {
                 }
             }
             
+            console.log(`      Arc ${currIdx} tail: (${tail.x.toFixed(2)},${tail.y.toFixed(2)}), next: ${nextIdx}, minDist: ${minDist.toFixed(6)}`);
+            
             if (nextIdx !== -1) {
                 currIdx = nextIdx;
             } else {
@@ -7679,26 +7737,12 @@ function stitchArcs(arcs) {
         }
         
         if (poly.length >= 3) {
-            // ИЗМЕНЕНИЕ: Убираем дубликаты подряд
-            const cleanPoly =[];
-            for (let i = 0; i < poly.length; i++) {
-                if (cleanPoly.length > 0) {
-                    const prev = cleanPoly[cleanPoly.length - 1];
-                    if (Math.abs(poly[i].x - prev.x) < 0.001 && Math.abs(poly[i].y - prev.y) < 0.001) {
-                        continue; // Пропускаем дубликат
-                    }
-                }
-                cleanPoly.push(poly[i]);
-            }
-            poly = cleanPoly;
-
-            // Проверка замыкания
             const first = poly[0];
-            const last = poly[poly.length - 1];
+            const last = poly[poly.length-1];
             if ((first.x - last.x)**2 + (first.y - last.y)**2 > tolerance) {
                  poly.push({x: first.x, y: first.y});
             }
-            
+            console.log(`    Completed polygon with ${poly.length} points`);
             polygons.push(poly);
         }
     }
@@ -7836,26 +7880,24 @@ function loadProjectFromJson(event) {
     }
     
 
-function isPointInPolygonRobust(pt, poly, boundaryResult = false) {
-    let inside = false;
-    const rx = pt.x; const ry = pt.y;
-    
-    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
-        const xi = poly[i].x; const yi = poly[i].y;
-        const xj = poly[j].x; const yj = poly[j].y;
-
-        // Проверка на попадание точно в ребро
-        const dist = pointLineDistSq(rx, ry, xi, yi, xj, yj);
-        // ИЗМЕНЕНО: допуск увеличен с 1e-10 до 1e-4. 
-        // 1e-4 — это квадрат 0.01м (1 см). Это нивелирует погрешности округления.
-        if (dist < 1e-4) return boundaryResult;
+    function isPointInPolygonRobust(pt, poly, boundaryResult = false) {
+        let inside = false;
+        const rx = pt.x; const ry = pt.y;
         
-        const intersect = ((yi > ry) !== (yj > ry)) &&
-            (rx < (xj - xi) * (ry - yi) / (yj - yi) + xi);
-        if (intersect) inside = !inside;
+        for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+            const xi = poly[i].x; const yi = poly[i].y;
+            const xj = poly[j].x; const yj = poly[j].y;
+
+            // Проверка на попадание точно в ребро
+            const dist = pointLineDistSq(rx, ry, xi, yi, xj, yj);
+            if (dist < 1e-10) return boundaryResult;
+            
+            const intersect = ((yi > ry) !== (yj > ry)) &&
+                (rx < (xj - xi) * (ry - yi) / (yj - yi) + xi);
+            if (intersect) inside = !inside;
+        }
+        return inside;
     }
-    return inside;
-}
 
     function pointLineDistSq(px, py, x1, y1, x2, y2) {
         const A = px - x1; const B = py - y1;
@@ -7878,37 +7920,6 @@ function isPointInPolygonRobust(pt, poly, boundaryResult = false) {
         updateToggleButtonStates();
         saveState();
     }
-    
-    
-    function cleanObjectContours(obj) {
-    if (!obj || !obj.contours) return;
-    const cleaned =[];
-    obj.contours.forEach(contour => {
-        if (!contour || contour.length < 3) return;
-        const newContour =[];
-        for (let i = 0; i < contour.length; i++) {
-            const pt = contour[i];
-            // Пропускаем точки, если они идентичны предыдущей
-            if (newContour.length > 0) {
-                const prev = newContour[newContour.length - 1];
-                if (Math.abs(pt.x - prev.x) < 0.001 && Math.abs(pt.y - prev.y) < 0.001) {
-                    continue;
-                }
-            }
-            newContour.push({x: pt.x, y: pt.y});
-        }
-        // Замыкаем, если остались точки
-        if (newContour.length >= 3) {
-            const first = newContour[0];
-            const last = newContour[newContour.length - 1];
-            if (Math.abs(first.x - last.x) > 0.001 || Math.abs(first.y - last.y) > 0.001) {
-                newContour.push({x: first.x, y: first.y});
-            }
-            cleaned.push(newContour);
-        }
-    });
-    obj.contours = cleaned;
-}
 
 function drawCoordinateLabels(ctx) {
         if (!userObjects || userObjects.length === 0) return;
