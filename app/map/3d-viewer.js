@@ -2126,8 +2126,7 @@ const altValueEl = document.getElementById("alt-value");
                         /const savedParcelOpacity = [0-9.]+|parseFloat\(localStorage\.getItem\('3d_parcel_opacity'\)\) \|\| [0-9.]+/g, 
                         `const savedParcelOpacity = ${latestParcelOpacity}`
                     );
-                    const latestTheme = localStorage.getItem('3d_viewer_theme') || 'light';
-                    const latestColor = localStorage.getItem('3d_ground_color') || '#f0f2f5';
+              
                   
                     const latestTex = 'gsat';
                     
