@@ -122,6 +122,7 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
 
         .layers-widget { top: 90px; width: 230px; padding: 10px 15px; }
         .layers-btn { width: 100%; background: #3b82f6; color: white; border: none; padding: 8px; border-radius: 6px; cursor: pointer; font-weight: bold; font-size: 0.9rem; transition: 0.2s; display: flex; align-items: center; justify-content: center; gap: 8px;}
+        .base-map-select { width: 100%; padding: 8px; margin-bottom: 12px; border-radius: 6px; border: 1px solid #cbd5e1; background: #f8fafc; font-size: 0.9rem; color: #1e293b; font-weight: 600; cursor: pointer; outline: none; }
         .layers-btn:hover { background: #2563eb; }
         .print-btn { background: #10b981; margin-top: 10px; }
         .print-btn:hover { background: #059669; }
@@ -160,8 +161,16 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
                 <p><i class="fas fa-hand-pointer"></i> Кликните на объект для деталей</p>
             </div>
             
-            <div class="widget-panel layers-widget">
-                <button class="layers-btn" id="layers-toggle"><i class="fas fa-layer-group"></i> Слои карты</button>
+  <div class="widget-panel layers-widget">
+                <select id="base-map-select" class="base-map-select" title="Базовая карта">
+                    <option value="yandex#map">Яндекс Схема</option>
+                    <option value="yandex#satellite">Яндекс Спутник</option>
+                    <option value="yandex#hybrid">Яндекс Гибрид</option>
+                    <option value="google#satellite">Google Спутник</option>
+                    <option value="google#hybrid">Google Гибрид</option>
+                    <option value="osm#map">Схема OSM</option>
+                </select>
+                <button class="layers-btn" id="layers-toggle"><i class="fas fa-layer-group"></i> Векторные слои</button>
                 <div id="layers-list" class="layers-list">
                     <label><input type="checkbox" class="layer-cb" value="ZU" checked> Земельные участки</label>
                     <label><input type="checkbox" class="layer-cb" value="OKS" checked> Здания (ОКС)</label>
@@ -260,26 +269,32 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
 
             // --- КОНЕЦ: Код для поддержки Google и OSM карт ---
 
-            var map = new ymaps.Map("map", { center: [${center[0]}, ${center[1]}], zoom: ${zoom}, type: "${mapType}", controls:['zoomControl', 'typeSelector', 'fullscreenControl', 'rulerControl'] });
+ 
+            var map = new ymaps.Map("map", { center: [${center[0]}, ${center[1]}], zoom: ${zoom}, type: "${mapType}", controls:['zoomControl', 'fullscreenControl', 'rulerControl'] });
             
             // --- НАЧАЛО: Обновление переключателя и логика сдвига ---
 
-            // 2. Добавление слоев в меню переключателя
-            var typeSelector = map.controls.get('typeSelector');
-            if (typeSelector) {
-                typeSelector.options.set('mapTypes', [
-                    'yandex#map', 'yandex#satellite', 'yandex#hybrid',
-                    'google#satellite', 'google#hybrid', 'osm#map'
-                ]);
+            // 2. Привязка кастомного HTML-переключателя базовой карты
+            var baseMapSelect = document.getElementById('base-map-select');
+            if (baseMapSelect) {
+                baseMapSelect.value = "${mapType}"; // Устанавливаем текущий тип из приложения
+                baseMapSelect.addEventListener('change', function(e) {
+                    map.setType(e.target.value);
+                });
             }
-
             // 3. Логика автоматического сдвига при переключении
             let isGoogleLayerActive = ['google#satellite', 'google#hybrid', 'osm#map'].includes("${mapType}");
             let kmlOffsetX = ${kmlMapOffsetX};
             let kmlOffsetY = ${kmlMapOffsetY};
 
-            map.events.add('typechange', function() {
+           map.events.add('typechange', function() {
                 var currentType = map.getType();
+                
+                // Синхронизируем HTML-селект
+                if (baseMapSelect && baseMapSelect.value !== currentType) {
+                    baseMapSelect.value = currentType;
+                }
+
                 var isGoogleOrOsm = ['google#satellite', 'google#hybrid', 'osm#map'].includes(currentType);
                 
                 if (isGoogleOrOsm && !isGoogleLayerActive) {
