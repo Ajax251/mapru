@@ -2106,7 +2106,7 @@ const altValueEl = document.getElementById("alt-value");
                     }
                 }
 
-                if(e.data && e.data.type === 'export3DHtml') {
+             if(e.data && e.data.type === 'export3DHtml') {
                     const latestTheme = localStorage.getItem('3d_viewer_theme') || 'light';
                     const latestColor = localStorage.getItem('3d_ground_color') || '#f0f2f5';
                     const latestTex = 'gsat'; // Временно принудительно Спутник
@@ -2124,20 +2124,8 @@ const altValueEl = document.getElementById("alt-value");
                     // Обновляем значение прозрачности в экспортируемом HTML
                     exportStr = exportStr.replace(
                         /const savedParcelOpacity = [0-9.]+|parseFloat\(localStorage\.getItem\('3d_parcel_opacity'\)\) \|\| [0-9.]+/g, 
-                        `const savedParcelOpacity = ${latestParcelOpacity}`
+                        `const savedParcelOpacity = ${latestParcelOpacity};`
                     );
-              
-                  
-                    const latestTex = 'gsat';
-                    
-                    let exportStr = srcDocContent;
-                    
-                    exportStr = exportStr.replace(/<div class="export-block"[^>]*>[\s\S]*?<\/div>/, '');
-                    
-                    exportStr = exportStr.replace(`let currentTheme = "${savedTheme}";`, `let currentTheme = "${latestTheme}";`);
-                    exportStr = exportStr.replace(`let currentGroundColor = "${savedGroundColor}";`, `let currentGroundColor = "${latestColor}";`);
-                    exportStr = exportStr.replace(`let currentGroundTex = "${savedGroundTex}";`, `let currentGroundTex = "${latestTex}";`);
-                    exportStr = exportStr.replace(`body data-theme="${savedTheme}"`, `body data-theme="${latestTheme}"`);
                     
                     const blob = new Blob([exportStr], {type:"text/html;charset=utf-8"});
                     const url = URL.createObjectURL(blob);
@@ -2179,3 +2167,4 @@ const altValueEl = document.getElementById("alt-value");
         }
     }, 100);
 };
+        
