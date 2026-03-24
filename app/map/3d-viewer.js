@@ -952,7 +952,7 @@ let currentGroundColor = "${savedGroundColor}";
 
         const tileSizeMeters = (MAX_EXTENT * 2) / Math.pow(2, z);
 
-        // ВАЖНО: ИСПОЛЬЗУЕМ ${} ДЛЯ ПРОБРОСА ПЕРЕМЕННЫХ ИЗВНЕ В СТРОКУ
+    
         const oX = ${originX};
         const oY = ${originY};
 
