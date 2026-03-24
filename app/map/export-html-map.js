@@ -381,7 +381,7 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
 
             var NumberedPointLayout = ymaps.templateLayoutFactory.createClass('<div class="numbered-point-label" style="font-size: 14px;">$[properties.iconContent]</div>');
 
-       function clearSelection() {
+           function clearSelection() {
                 if (activeGeoObject && activeGeoObjectOriginalStyle) {
                     activeGeoObject.options.set({
                         strokeColor: activeGeoObjectOriginalStyle.strokeColor,
@@ -474,46 +474,6 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
                             // Получаем данные именно для выбранного объекта
                             var featureData = target.properties.get('featureData');
                             openSidebar(featureData);
-                        }
-                    });
-                } else if (item.type === 'Label') {
-
-            mapData.forEach(function(item) {
-                var geoObject;
-                if (item.type === 'Polygon' || item.type === 'LineString') {
-                    var options = {
-                        strokeColor: item.style.strokeColor, strokeWidth: item.style.strokeWidth,
-                        strokeOpacity: item.style.strokeOpacity, cursor: 'pointer'
-                    };
-                    if (item.type === 'Polygon') options.fillColor = item.style.fillColor;
-                    
-                    geoObject = item.type === 'Polygon' 
-                        ? new ymaps.Polygon(item.coords, { featureData: item.featureData }, options)
-                        : new ymaps.Polyline(item.coords, { featureData: item.featureData }, options);
-                        
-                    // Сохраняем базовый стиль для восстановления после отключения выносок
-                    geoObject._baseStyle = {
-                        strokeColor: item.style.strokeColor,
-                        strokeWidth: item.style.strokeWidth,
-                        strokeOpacity: item.style.strokeOpacity,
-                        fillColor: item.style.fillColor || '#00000000'
-                    };
-                        
-                    geoObject.events.add('click', function (e) {
-                        e.stopPropagation();
-                        var target = e.get('target');
-                        if (activeGeoObject === target) {
-                            clearSelection();
-                            document.getElementById('sidebar').classList.remove('open');
-                        } else {
-                            clearSelection();
-                            activeGeoObjectOriginalStyle = {
-                                strokeColor: target.options.get('strokeColor'), strokeWidth: target.options.get('strokeWidth'),
-                                strokeOpacity: target.options.get('strokeOpacity'), fillColor: target.options.get('fillColor')
-                            };
-                            target.options.set({ strokeColor: '#00BFFF', strokeWidth: Math.max(activeGeoObjectOriginalStyle.strokeWidth + 1, 3), strokeOpacity: 1, fillColor: 'rgba(0, 191, 255, 0.2)' });
-                            activeGeoObject = target;
-                            openSidebar(item.featureData);
                         }
                     });
                 } else if (item.type === 'Label') {
