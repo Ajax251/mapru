@@ -1,4 +1,4 @@
-async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffsetX, mapOffsetY, kmlMapOffsetX = 0, kmlMapOffsetY = 0) {
+async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffsetX, mapOffsetY) {
     if (!mapInstance) {
         showNotification('Карта не инициализирована', 'error');
         return;
@@ -233,87 +233,8 @@ async function generateStandaloneHtmlMap(allObjectsArray, mapInstance, mapOffset
     <script>
         ymaps.ready(init);
 
-      function init() {
-            // --- НАЧАЛО: Код для поддержки Google и OSM карт ---
-            
-            // 1. Регистрация слоев в API Яндекс.Карт
-            ymaps.layer.storage.add('google#satellite', function () {
-                return new ymaps.Layer('https://mt1.google.com/vt/lyrs=s&x=%x&y=%y&z=%z', {
-                    projection: ymaps.projection.sphericalMercator
-                });
-            });
-            ymaps.mapType.storage.add('google#satellite', new ymaps.MapType('Google Спутник', ['google#satellite']));
-
-            ymaps.layer.storage.add('google#hybrid', function () {
-                return new ymaps.Layer('https://mt1.google.com/vt/lyrs=y&x=%x&y=%y&z=%z', {
-                    projection: ymaps.projection.sphericalMercator
-                });
-            });
-            ymaps.mapType.storage.add('google#hybrid', new ymaps.MapType('Google Гибрид', ['google#hybrid']));
-
-            ymaps.layer.storage.add('osm#map', function () {
-                return new ymaps.Layer('https://tile.openstreetmap.org/%z/%x/%y.png', {
-                    projection: ymaps.projection.sphericalMercator
-                });
-            });
-            ymaps.mapType.storage.add('osm#map', new ymaps.MapType('OSM', ['osm#map']));
-
-            // --- КОНЕЦ: Код для поддержки Google и OSM карт ---
-
+        function init() {
             var map = new ymaps.Map("map", { center: [${center[0]}, ${center[1]}], zoom: ${zoom}, type: "${mapType}", controls:['zoomControl', 'typeSelector', 'fullscreenControl', 'rulerControl'] });
-            
-            // --- НАЧАЛО: Обновление переключателя и логика сдвига ---
-
-            // 2. Добавление слоев в меню переключателя
-            var typeSelector = map.controls.get('typeSelector');
-            if (typeSelector) {
-                typeSelector.options.set('mapTypes', [
-                    'yandex#map', 'yandex#satellite', 'yandex#hybrid',
-                    'google#satellite', 'google#hybrid', 'osm#map'
-                ]);
-            }
-
-            // 3. Логика автоматического сдвига при переключении
-            let isGoogleLayerActive = ['google#satellite', 'google#hybrid', 'osm#map'].includes("${mapType}");
-            let kmlOffsetX = ${kmlMapOffsetX};
-            let kmlOffsetY = ${kmlMapOffsetY};
-
-            map.events.add('typechange', function() {
-                var currentType = map.getType();
-                var isGoogleOrOsm = ['google#satellite', 'google#hybrid', 'osm#map'].includes(currentType);
-                
-                if (isGoogleOrOsm && !isGoogleLayerActive) {
-                    isGoogleLayerActive = true;
-                    shiftAllObjects(kmlOffsetY, kmlOffsetX);
-                } else if (!isGoogleOrOsm && isGoogleLayerActive) {
-                    isGoogleLayerActive = false;
-                    shiftAllObjects(-kmlOffsetY, -kmlOffsetX);
-                }
-            });
-
-            function shiftAllObjects(deltaLat, deltaLon) {
-                if (deltaLat === 0 && deltaLon === 0) return;
-                const dLat = deltaLat * 0.000008983;
-                const dLon = deltaLon * 0.000008983;
-
-                map.geoObjects.each(function(obj) {
-                    if (obj.geometry && typeof obj.geometry.setCoordinates === 'function') {
-                        const shiftCoords = (coords) => {
-                            if (typeof coords[0] === 'number') return [coords[0] + dLat, coords[1] + dLon];
-                            return coords.map(shiftCoords);
-                        };
-                        obj.geometry.setCoordinates(shiftCoords(obj.geometry.getCoordinates()));
-                    }
-                });
-            }
-
-            // 4. Применяем сдвиг сразу при загрузке, если начальный слой - Google/OSM
-            if (isGoogleLayerActive) {
-                 setTimeout(() => shiftAllObjects(kmlOffsetY, kmlOffsetX), 100);
-            }
-            
-            // --- КОНЕЦ: Обновление переключателя и логика сдвига ---
-
             var mapData = ${jsonFeatures};
             
             var layerGroups = { ZU: [], OKS: [], Structure: [], ZOUIT:[], Labels:[] };
