@@ -30,38 +30,29 @@ window.open3DVisualization = function () {
                 return clean;
             };
 
-         // Используем константу радиуса Земли для чистого Web Mercator (EPSG:3857)
-            const EARTH_RADIUS = 6378137.0; 
-            const MAX_EXTENT = Math.PI * EARTH_RADIUS; // ~20037508.34
-
             const to3857 = (yandexCoord) => {
-                if (!yandexCoord || typeof yandexCoord[0] !== 'number') return [0, 0];
+                if (!yandexCoord || typeof yandexCoord[0] !== 'number') return[0, 0];
                 
                 let trueLat = yandexCoord[0];
                 let trueLon = yandexCoord[1];
 
+                // 1. Узнаем, был ли активен слой Google на 2D карте (откуда пришли координаты)
                 const mapMode2D = localStorage.getItem('mapMode') || 'map';
                 const isGoogle2D = ['google-sat', 'google-hyb', 'osm'].includes(mapMode2D);
 
-                // Вычитаем смещение 2D-Google (если было)
+                // 2. Если на 2D карте был Google, ВЫЧИТАЕМ его визуальное смещение
                 if (isGoogle2D) {
                     trueLat -= (kmlOffsetY * 0.000008983);
                     trueLon -= (kmlOffsetX * 0.000008983);
                 }
                 
-                // Отменяем базовое смещение Росреестра
+                // 3. Возвращаем к "истинным" WGS84, отменяя базовое смещение 
                 trueLat += (window.mapOffsetY * 0.000008983);
                 trueLon += (window.mapOffsetX * 0.000008983);
                 
-                // РУЧНАЯ точная конвертация в EPSG:3857 (Web Mercator) без промежуточных библиотек
-                const x = trueLon * MAX_EXTENT / 180.0;
-                let y = Math.log(Math.tan((90 + trueLat) * Math.PI / 360.0)) / (Math.PI / 180.0);
-                y = y * MAX_EXTENT / 180.0;
-
-                return [x, y];
+                // 4. Проецируем чистые координаты в Web Mercator (идеально для 3D тайлов Google)
+                return window.proj4("EPSG:4326", destSc, [trueLon, trueLat]);
             };
-
-        
 
             if (!window.quickReportTargetObjects || window.quickReportTargetObjects.length === 0) {
                 if (typeof showNotification === 'function') showNotification("Нет объектов для 3D. Выберите объекты на карте.", "warning");
@@ -929,7 +920,7 @@ let currentGroundColor = "${savedGroundColor}";
     const textureLoader = new THREE.TextureLoader();
     textureLoader.setCrossOrigin('anonymous'); 
 
-   window.loadMapTiles = function(type) {
+    window.loadMapTiles = function(type) {
         while(mapTilesGroup.children.length > 0){
             const child = mapTilesGroup.children[0];
             mapTilesGroup.remove(child);
@@ -945,19 +936,14 @@ let currentGroundColor = "${savedGroundColor}";
         mapTilesGroup.visible = true;
 
         const z = 18; 
-        
-        // ДОБАВЛЯЕМ КОНСТАНТЫ ВНУТРЬ IFRAME
-        const EARTH_RADIUS = 6378137.0; 
-        const MAX_EXTENT = Math.PI * EARTH_RADIUS;
+        const E = 20037508.342789244; 
+        const tileSize = (2 * E) / Math.pow(2, z);
 
-        const tileSizeMeters = (MAX_EXTENT * 2) / Math.pow(2, z);
-
-    
         const oX = ${originX};
         const oY = ${originY};
 
-        const tX = Math.floor((oX + MAX_EXTENT) / tileSizeMeters);
-        const tY = Math.floor((MAX_EXTENT - oY) / tileSizeMeters);
+        const tX = Math.floor((oX + E) / tileSize);
+        const tY = Math.floor((E - oY) / tileSize);
 
         const halfGrid = 6; 
 
@@ -966,20 +952,18 @@ let currentGroundColor = "${savedGroundColor}";
                 const currentTx = tX + i;
                 const currentTy = tY + j;
 
-                const tileMinX = -MAX_EXTENT + currentTx * tileSizeMeters;
-                const tileMaxX = tileMinX + tileSizeMeters;
-                const tileMaxY = MAX_EXTENT - currentTy * tileSizeMeters;
-                const tileMinY = tileMaxY - tileSizeMeters;
+                const minX = -E + currentTx * tileSize;
+                const maxX = -E + (currentTx + 1) * tileSize;
+                const minY = E - (currentTy + 1) * tileSize;
+                const maxY = E - currentTy * tileSize;
 
-                const localMinX = tileMinX - oX;
-                const localMaxX = tileMaxX - oX;
-                const localMinZ = -(tileMinY - oY);
-                const localMaxZ = -(tileMaxY - oY);
+                const tileWidth = maxX - minX;
+                const tileHeight = maxY - minY;
 
-                const posX = (localMinX + localMaxX) / 2;
-                const posZ = (localMinZ + localMaxZ) / 2;
+                const posX = (maxX + minX) / 2 - oX;
+                const posZ = -( (maxY + minY) / 2 - oY ); 
 
-                const planeGeo = new THREE.PlaneGeometry(tileSizeMeters, tileSizeMeters);
+                const planeGeo = new THREE.PlaneGeometry(tileWidth, tileHeight);
                 planeGeo.rotateX(-Math.PI / 2);
 
                 let url = '';
@@ -988,13 +972,8 @@ let currentGroundColor = "${savedGroundColor}";
                 if (type === 'ghyb') url = 'https://mt1.google.com/vt/lyrs=y&x=' + currentTx + '&y=' + currentTy + '&z=' + z;
 
                 const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0 });
-                
                 textureLoader.load(url, 
-                    (tex) => { 
-                        tex.colorSpace = THREE.SRGBColorSpace; 
-                        mat.map = tex; 
-                        mat.needsUpdate = true; 
-                    },
+                    (tex) => { tex.colorSpace = THREE.SRGBColorSpace; mat.map = tex; mat.needsUpdate = true; },
                     undefined,
                     (err) => { }
                 );
