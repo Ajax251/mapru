@@ -4169,19 +4169,6 @@ function getTrueWgs84Coords(mapLat, mapLon) {
     return [lat, lon];
 }
 
-function convertApi3857ToMapCoords(coord3857) {
-    const wgs = proj4('EPSG:3857', 'EPSG:4326', coord3857);
-    let lon = wgs[0] - (mapOffsetX * 0.000008983);
-    let lat = wgs[1] - (mapOffsetY * 0.000008983);
-    
-    // Если включен Google, применяем его смещение к "виртуальным" объектам из API
-    if (isGoogleLayerActive) {
-        lon += (kmlMapOffsetX * 0.000008983);
-        lat += (kmlMapOffsetY * 0.000008983);
-    }
-    return [lon, lat]; // Формат [lon, lat] требуемый для Turf.js
-}
-
 function toEPSG3857(latitude, longitude) {
     const RADIUS = 6378137;
     const x = RADIUS * longitude * Math.PI / 180;
@@ -10861,7 +10848,14 @@ function findLinearIntersections(turfLines, targetFeatures) {
                 // --- ГЛАВНОЕ ИСПРАВЛЕНИЕ ---
                 // Преобразуем координаты полигона-кандидата в WGS-84 и ОДИН РАЗ применяем к ним смещение карты.
                 // Теперь эти координаты находятся в той же системе, что и `turfLines`.
-            const polygonWgsCoordsWithOffset = rings[0].map(convertApi3857ToMapCoords);
+                const polygonWgsCoordsWithOffset = rings[0].map(coord3857 => {
+                    const wgsCoord = proj4('EPSG:3857', 'EPSG:4326', coord3857);
+                    // turf.js работает с [долгота, широта]
+                    const lonWithOffset = wgsCoord[0] - (mapOffsetX * 0.000008983);
+                    const latWithOffset = wgsCoord[1] - (mapOffsetY * 0.000008983);
+                    return [lonWithOffset, latWithOffset];
+                });
+
                 // Проходим по каждой линии из нашего объекта
                 for (const lineFeature of turfLines) {
                     const lineCoords = lineFeature.geometry.coordinates; // Координаты линии [долгота, широта]
@@ -12160,8 +12154,13 @@ async function executeQuickReport(targetObject) {
         const results = { zu: [], oks:[], structure: [], zouit:[] };
 
         // Хелпер для конвертации колец из API 3857 в визуальные координаты [lon, lat] карты
-          const processApiRing = (ring3857) => {
-            const mappedRing = ring3857.map(convertApi3857ToMapCoords);
+        const processApiRing = (ring3857) => {
+            const mappedRing = ring3857.map(c => {
+                const wgs = proj4('EPSG:3857', 'EPSG:4326', c); // [lon, lat]
+                const visLon = wgs[0] - (mapOffsetX * 0.000008983);
+                const visLat = wgs[1] - (mapOffsetY * 0.000008983);
+                return [visLon, visLat];
+            });
             return ensureClosedRing(mappedRing);
         };
 
@@ -15434,10 +15433,15 @@ async function executeParcelsOnObjectSearch(targetObject) {
                     const featureGeometryType = feature.geometry.type;
                     let featureTurfPolygons =[];
 
-                   const processRingToMapCoords = (ring3857) => {
-                        return ring3857.map(convertApi3857ToMapCoords);
+                    const processRingToMapCoords = (ring3857) => {
+                        return ring3857.map(coord => {
+                            const wgs = proj4('EPSG:3857', 'EPSG:4326', coord);
+                            const lat = wgs[1] - mapOffsetY * 0.000008983;
+                            const lon = wgs[0] - mapOffsetX * 0.000008983;
+                            return [lon, lat]; 
+                        });
                     };
-                    
+
                     if (featureGeometryType === 'Polygon') {
                         const allRings = feature.geometry.coordinates.map(processRingToMapCoords);
                         featureTurfPolygons.push(turf.polygon(allRings));
@@ -19137,7 +19141,7 @@ async function exportQuickReportToHtml() {
 
         const zoneResults =[];
 
-   const transformCoordToMapWgs = (c) => {
+        const transformCoordToMapWgs = (c) => {
             if (!Array.isArray(c) || c.length < 2) return null;
             try {
                 let wgs;
@@ -19145,13 +19149,7 @@ async function exportQuickReportToHtml() {
                 else wgs = [c[0], c[1]];
                 
                 if (!isFinite(wgs[0]) || !isFinite(wgs[1])) return null;
-                let lon = wgs[0] - (mapOffsetX * 0.000008983);
-                let lat = wgs[1] - (mapOffsetY * 0.000008983);
-                if (isGoogleLayerActive) {
-                    lon += (kmlMapOffsetX * 0.000008983);
-                    lat += (kmlMapOffsetY * 0.000008983);
-                }
-                return [lon, lat];
+                return[wgs[0] - (mapOffsetX * 0.000008983), wgs[1] - (mapOffsetY * 0.000008983)];
             } catch (e) { return null; }
         };
 
@@ -20120,9 +20118,13 @@ async function generateConsolidatedReport(targetObject) {
         const fetchedCandidateFeatures = await searchParcelsByArea(searchPolygonForApi);
 
         // Хелпер для извлечения Turf-полигонов из геометрии API
-       const processRingsToTurf = (featureGeom) => {
+        const processRingsToTurf = (featureGeom) => {
             if (!featureGeom || !featureGeom.coordinates) return[];
-            const processRing = (ring3857) => ring3857.map(convertApi3857ToMapCoords);
+            
+            const processRing = (ring3857) => ring3857.map(c => {
+                const wgs = proj4('EPSG:3857', 'EPSG:4326', c);
+                return [wgs[0] - mapOffsetX * 0.000008983, wgs[1] - mapOffsetY * 0.000008983];
+            });
 
             let turfPolys =[];
             if (featureGeom.type === 'Polygon') {
@@ -20201,7 +20203,10 @@ async function generateConsolidatedReport(targetObject) {
                 if (feature.geometry.type === 'MultiPolygon' || feature.geometry.coordinates.length > 1) {
                     isCovering = false; 
                 } else {
-                    const wgsRing = feature.geometry.coordinates[0].map(convertApi3857ToMapCoords);
+                    const wgsRing = feature.geometry.coordinates[0].map(c => {
+                        const wgs = proj4('EPSG:3857', 'EPSG:4326', c);
+                        return [wgs[0] - (mapOffsetX * 0.000008983), wgs[1] - (mapOffsetY * 0.000008983)];
+                    });
                     const featureTurf = turf.polygon([wgsRing]);
                     for (const mainTurfPoly of targetTurfPolygons) {
                         if (!turf.booleanContains(featureTurf, mainTurfPoly)) {
@@ -25014,9 +25019,9 @@ async function drawAllObjectsToCanvas(mainObject, otherObjects, showPoints = tru
         polygonsArray.forEach(polyRings => {
             const processedPoly = polyRings.map(ring => {
                 return ring.map(coord => {
-                  if (isYmapsObject) {
-                        // Используем системную функцию для снятия всех смещений разом
-                        const [trueLat, trueLon] = getTrueWgs84Coords(coord[0], coord[1]);
+                    if (isYmapsObject) {
+                        const trueLat = coord[0] + (mapOffsetY * 0.000008983);
+                        const trueLon = coord[1] + (mapOffsetX * 0.000008983);
                         return { projected: proj4('EPSG:4326', 'EPSG:3857', [trueLon, trueLat]), original: [trueLat, trueLon] };
                     } else {
                         return { projected: coord, original: proj4('EPSG:3857', 'EPSG:4326', coord).reverse() };
