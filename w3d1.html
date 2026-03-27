@@ -49,6 +49,7 @@
         p { margin: 0; font-size: 13px; color: #94a3b8; }
 
         #stats { margin-top: 10px; font-weight: bold; color: #10b981; }
+        .error-text { color: #ef4444 !important; }
 
         #tooltip {
             position: absolute;
@@ -76,13 +77,17 @@
     <div id="ui-panel">
         <h1>3D Кадастр (Deck.gl)</h1>
         <p>ПКМ - вращение и наклон камеры<br>ЛКМ - перемещение</p>
-        <div id="stats">Загружено объектов: 0</div>
+        <div id="stats">Ожидание подключения...</div>
     </div>
 
     <div id="tooltip"></div>
 
     <script>
-        const API_URL = 'http://127.0.0.1:8010/api/3d/buildings';
+        // =========================================================================
+        // ИЗМЕНЕНИЕ 1: Меняем локальный адрес на адрес вашего боевого сервера
+        // Убедитесь, что протокол HTTPS (если на сервере есть SSL сертификат)
+        // =========================================================================
+        const API_URL = 'https://mapruapp.ru/api/3d/buildings'; 
         
         // --- Вспомогательные математические функции ---
         // НСПД отдает данные в EPSG:3857 (метры), а Deck.gl работает в WGS84 (градусы)
@@ -101,7 +106,6 @@
             return [x, y];
         }
 
-        // Рекурсивная функция для перевода целого GeoJSON из 3857 в 4326
         function convertGeometryToWgs84(coords) {
             if (typeof coords[0] === 'number') {
                 return mercatorToWgs84(coords[0], coords[1]);
@@ -110,9 +114,8 @@
         }
 
         // --- Инициализация Карты и Deck.gl ---
-        const { DeckGL, GeoJsonLayer, MapView, lightingEffect, ambientLight, directionalLight } = deck;
+        const { DeckGL, GeoJsonLayer } = deck;
 
-        // Стиль подложки (Google Satellite)
         const mapStyle = {
             version: 8,
             sources: {
@@ -131,62 +134,51 @@
             }]
         };
 
-        // Начальная позиция камеры (Казань / Нурлат - можно поменять)
+        // Начальная позиция камеры
         const INITIAL_VIEW_STATE = {
             longitude: 50.7910,
             latitude: 54.8492,
             zoom: 16,
-            pitch: 60, // Наклон камеры (3D эффект)
-            bearing: 0 // Поворот
+            pitch: 60,
+            bearing: 0
         };
 
-        let currentData = []; // Сюда будем складывать загруженные здания
+        let currentData = []; 
         let fetchTimeout = null;
 
-        // Создаем Deck.gl инстанс
         const deckgl = new DeckGL({
             container: 'map-container',
             mapStyle: mapStyle,
             initialViewState: INITIAL_VIEW_STATE,
-            controller: true, // Включаем управление мышью
+            controller: true, 
             
-            // Эта функция вызывается каждый раз, когда камера двигается
             onViewStateChange: ({viewState}) => {
-                // Запускаем загрузку данных с задержкой (Debounce), 
-                // чтобы не спамить сервер, пока пользователь крутит карту
                 clearTimeout(fetchTimeout);
                 fetchTimeout = setTimeout(() => fetchBuildings(viewState), 300);
             },
-            
-            layers: [] // Слои будем обновлять функцией renderLayers
+            layers: []
         });
 
-        // --- Функция рендеринга слоя ---
         function renderLayers() {
             const buildingsLayer = new GeoJsonLayer({
                 id: 'buildings-layer',
                 data: currentData,
-                
-                // Настройки 3D рендеринга
                 extruded: true, 
                 wireframe: true,
                 filled: true,
 
-                // Высота здания (считаем этажи * 3.5 метра)
                 getElevation: d => {
                     const floors = parseInt(d.properties?.options?.floors) || 1;
                     return floors * 3.5;
                 },
                 
-                // Цвет здания (синеватый полупрозрачный)
                 getFillColor: [59, 130, 246, 200],
-                getLineColor: [255, 255, 255, 100], // Белые контуры крыш
+                getLineColor: [255, 255, 255, 100],
                 
-                pickable: true, // Включаем возможность наведения мышью
-                autoHighlight: true, // Авто-подсветка при наведении
-                highlightColor: [255, 200, 0, 255], // Желтый цвет при наведении
+                pickable: true,
+                autoHighlight: true,
+                highlightColor: [255, 200, 0, 255],
 
-                // Обработчик наведения мыши
                 onHover: (info) => {
                     const tooltip = document.getElementById('tooltip');
                     if (info.object) {
@@ -209,30 +201,34 @@
                     }
                 },
                 
-                // Плавные переходы при обновлении данных
                 transitions: {
                     getElevation: 500
                 }
             });
 
             deckgl.setProps({ layers: [buildingsLayer] });
-            document.getElementById('stats').innerText = `Загружено объектов: ${currentData.length}`;
+            
+            // ИЗМЕНЕНИЕ 2: Обновляем статус без ошибки
+            const statsDiv = document.getElementById('stats');
+            statsDiv.classList.remove('error-text');
+            statsDiv.innerText = `Загружено объектов: ${currentData.length}`;
         }
 
-        // --- Основная функция загрузки данных с бэкенда ---
         async function fetchBuildings(viewState) {
-            // Если слишком высоко, не грузим здания (чтобы не перегрузить ПК)
+            const statsDiv = document.getElementById('stats');
+
             if (viewState.zoom < 13) {
                 currentData = [];
                 renderLayers();
+                statsDiv.innerText = `Слишком высоко. Приблизьте карту.`;
+                statsDiv.classList.remove('error-text');
                 return;
             }
 
-            // Получаем границы экрана в градусах
-            const viewport = new deck.WebMercatorViewport(viewState);
-            const bounds = viewport.getBounds(); // [minLon, minLat, maxLon, maxLat]
+            statsDiv.innerText = `Загрузка данных с сервера...`;
 
-            // Добавляем +20% запаса по краям, чтобы здания подгружались заранее
+            const viewport = new deck.WebMercatorViewport(viewState);
+            const bounds = viewport.getBounds();
             const width = bounds[2] - bounds[0];
             const height = bounds[3] - bounds[1];
             
@@ -241,7 +237,6 @@
             const minLat = bounds[1] - height * 0.2;
             const maxLat = bounds[3] + height * 0.2;
 
-            // Конвертируем WGS84 в EPSG:3857, так как наша БД SQLite ищет по метрам
             const minMercator = wgs84ToMercator(minLon, minLat);
             const maxMercator = wgs84ToMercator(maxLon, maxLat);
 
@@ -249,11 +244,10 @@
 
             try {
                 const response = await fetch(url);
-                if (!response.ok) throw new Error('Network error');
+                if (!response.ok) throw new Error(`Ошибка HTTP: ${response.status}`);
                 
                 const geojsonData = await response.json();
 
-                // Deck.gl требует координаты в WGS84, конвертируем их на лету
                 geojsonData.features.forEach(f => {
                     f.geometry.coordinates = convertGeometryToWgs84(f.geometry.coordinates);
                 });
@@ -263,10 +257,13 @@
 
             } catch (err) {
                 console.error('Ошибка загрузки 3D зданий:', err);
+                
+                // ИЗМЕНЕНИЕ 3: Выводим понятную ошибку пользователю в интерфейс
+                statsDiv.innerText = `Ошибка подключения к серверу!`;
+                statsDiv.classList.add('error-text');
             }
         }
 
-        // Запускаем первую загрузку при старте
         fetchBuildings(INITIAL_VIEW_STATE);
 
     </script>
