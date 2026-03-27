@@ -1,0 +1,294 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Бесконечный 3D Кадастр</title>
+
+    <!-- Подключаем MapLibre GL (базовая карта) -->
+    <link href="https://unpkg.com/maplibre-gl@3.3.1/dist/maplibre-gl.css" rel="stylesheet" />
+    <script src="https://unpkg.com/maplibre-gl@3.3.1/dist/maplibre-gl.js"></script>
+
+    <!-- Подключаем Deck.gl (3D движок) -->
+    <script src="https://unpkg.com/deck.gl@latest/dist.min.js"></script>
+
+    <style>
+        body {
+            margin: 0;
+            padding: 0;
+            overflow: hidden;
+            background-color: #0f172a;
+            font-family: 'Segoe UI', Tahoma, Geneva, Verdana, sans-serif;
+        }
+
+        #map-container {
+            width: 100vw;
+            height: 100vh;
+            position: absolute;
+            top: 0;
+            left: 0;
+        }
+
+        #ui-panel {
+            position: absolute;
+            top: 20px;
+            left: 20px;
+            background: rgba(15, 23, 42, 0.85);
+            backdrop-filter: blur(10px);
+            border: 1px solid rgba(255,255,255,0.15);
+            padding: 15px 20px;
+            border-radius: 12px;
+            color: #f8fafc;
+            box-shadow: 0 10px 30px rgba(0,0,0,0.5);
+            z-index: 10;
+            width: 220px;
+        }
+
+        h1 { margin: 0 0 5px 0; font-size: 18px; color: #60a5fa; }
+        p { margin: 0; font-size: 12px; color: #94a3b8; line-height: 1.4; }
+
+        #stats { margin-top: 15px; font-weight: bold; color: #10b981; font-size: 13px; }
+        .error-text { color: #ef4444 !important; }
+
+        /* Стиль для селектора карт */
+        .layer-select {
+            width: 100%;
+            margin-top: 12px;
+            padding: 8px;
+            background: rgba(0, 0, 0, 0.5);
+            color: #fff;
+            border: 1px solid #475569;
+            border-radius: 6px;
+            outline: none;
+            font-size: 13px;
+            cursor: pointer;
+        }
+        .layer-select:focus {
+            border-color: #60a5fa;
+        }
+
+        #tooltip {
+            position: absolute;
+            background: rgba(255, 255, 255, 0.95);
+            border: 1px solid #ccc;
+            padding: 10px 15px;
+            border-radius: 8px;
+            color: #1e293b;
+            font-size: 13px;
+            box-shadow: 0 4px 15px rgba(0,0,0,0.2);
+            pointer-events: none;
+            display: none;
+            z-index: 20;
+            transform: translate(-50%, -100%);
+            margin-top: -15px;
+        }
+        .tt-title { font-weight: 800; color: #2563eb; display: block; margin-bottom: 5px; }
+        .tt-info { display: block; margin-bottom: 2px; }
+    </style>
+</head>
+<body>
+
+    <div id="map-container"></div>
+
+    <div id="ui-panel">
+        <h1>3D Кадастр</h1>
+        <p>ПКМ - вращение камеры<br>ЛКМ - перемещение</p>
+        
+        <!-- Выпадающий список для выбора базового слоя -->
+        <select id="layer-selector" class="layer-select">
+            <option value="hybrid" selected>Google Гибрид</option>
+            <option value="satellite">Google Спутник</option>
+            <option value="map">Google Схема</option>
+        </select>
+
+        <div id="stats">Ожидание подключения...</div>
+    </div>
+
+    <div id="tooltip"></div>
+
+    <script>
+        const API_URL = 'https://mapruapp.ru/api/3d/buildings'; 
+        
+        // --- Конвертация координат ---
+        function mercatorToWgs84(x, y) {
+            const lon = (x / 20037508.34) * 180;
+            let lat = (y / 20037508.34) * 180;
+            lat = 180 / Math.PI * (2 * Math.atan(Math.exp(lat * Math.PI / 180)) - Math.PI / 2);
+            return [lon, lat];
+        }
+
+        function wgs84ToMercator(lon, lat) {
+            const x = lon * 20037508.34 / 180;
+            let y = Math.log(Math.tan((90 + lat) * Math.PI / 360)) / (Math.PI / 180);
+            y = y * 20037508.34 / 180;
+            return [x, y];
+        }
+
+        function convertGeometryToWgs84(coords) {
+            if (typeof coords[0] === 'number') {
+                return mercatorToWgs84(coords[0], coords[1]);
+            }
+            return coords.map(convertGeometryToWgs84);
+        }
+
+        // --- Базовые стили карт Google ---
+        const BASE_MAPS = {
+            'hybrid': {
+                version: 8,
+                sources: { 'g-hyb': { type: 'raster', tiles: ['https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}'], tileSize: 256 } },
+                layers: [{ id: 'hyb', type: 'raster', source: 'g-hyb', minzoom: 0, maxzoom: 22 }]
+            },
+            'satellite': {
+                version: 8,
+                sources: { 'g-sat': { type: 'raster', tiles: ['https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}'], tileSize: 256 } },
+                layers: [{ id: 'sat', type: 'raster', source: 'g-sat', minzoom: 0, maxzoom: 22 }]
+            },
+            'map': {
+                version: 8,
+                sources: { 'g-map': { type: 'raster', tiles: ['https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}'], tileSize: 256 } },
+                layers: [{ id: 'map', type: 'raster', source: 'g-map', minzoom: 0, maxzoom: 22 }]
+            }
+        };
+
+        const { DeckGL, GeoJsonLayer } = deck;
+
+        const INITIAL_VIEW_STATE = {
+            longitude: 50.7910,
+            latitude: 54.8492,
+            zoom: 16,
+            pitch: 60,
+            bearing: 0
+        };
+
+        let currentData = []; 
+        let fetchTimeout = null;
+
+        // Создаем Deck.gl инстанс (по умолчанию Гибрид)
+        const deckgl = new DeckGL({
+            container: 'map-container',
+            mapStyle: BASE_MAPS['hybrid'],
+            initialViewState: INITIAL_VIEW_STATE,
+            controller: true, 
+            
+            onViewStateChange: ({viewState}) => {
+                clearTimeout(fetchTimeout);
+                fetchTimeout = setTimeout(() => fetchBuildings(viewState), 300);
+            },
+            layers: []
+        });
+
+        // Слушатель для переключателя слоев
+        document.getElementById('layer-selector').addEventListener('change', (e) => {
+            const selectedStyle = BASE_MAPS[e.target.value];
+            deckgl.setProps({ mapStyle: selectedStyle });
+        });
+
+        // --- Рендер 3D объектов ---
+        function renderLayers() {
+            const buildingsLayer = new GeoJsonLayer({
+                id: 'buildings-layer',
+                data: currentData,
+                extruded: true, 
+                wireframe: true,
+                filled: true,
+
+                getElevation: d => {
+                    const floors = parseInt(d.properties?.options?.floors) || 1;
+                    return floors * 3.5;
+                },
+                
+                getFillColor: [59, 130, 246, 200],
+                getLineColor: [255, 255, 255, 100],
+                
+                pickable: true,
+                autoHighlight: true,
+                highlightColor: [255, 200, 0, 255],
+
+                onHover: (info) => {
+                    const tooltip = document.getElementById('tooltip');
+                    if (info.object) {
+                        const props = info.object.properties.options || {};
+                        const name = props.name || props.purpose || props.building_name || 'Объект недвижимости';
+                        const cadNum = props.cad_num || info.object.id || 'Без номера';
+                        const area = props.build_record_area || 'Не указана';
+
+                        tooltip.innerHTML = `
+                            <span class="tt-title">${name}</span>
+                            <span class="tt-info"><b>КН:</b> ${cadNum}</span>
+                            <span class="tt-info"><b>Площадь:</b> ${area} м²</span>
+                            <span class="tt-info"><b>Этажность:</b> ${props.floors || 1}</span>
+                        `;
+                        tooltip.style.left = `${info.x}px`;
+                        tooltip.style.top = `${info.y}px`;
+                        tooltip.style.display = 'block';
+                    } else {
+                        tooltip.style.display = 'none';
+                    }
+                },
+                
+                transitions: {
+                    getElevation: 500
+                }
+            });
+
+            deckgl.setProps({ layers: [buildingsLayer] });
+            
+            const statsDiv = document.getElementById('stats');
+            statsDiv.classList.remove('error-text');
+            statsDiv.innerText = `Отображено ОКС: ${currentData.length}`;
+        }
+
+        // --- Загрузка данных с бэкенда ---
+        async function fetchBuildings(viewState) {
+            const statsDiv = document.getElementById('stats');
+
+            if (viewState.zoom < 13) {
+                currentData = [];
+                renderLayers();
+                statsDiv.innerText = `Приблизьте карту для загрузки`;
+                statsDiv.classList.remove('error-text');
+                return;
+            }
+
+            statsDiv.innerText = `Загрузка данных...`;
+
+            const viewport = new deck.WebMercatorViewport(viewState);
+            const bounds = viewport.getBounds();
+            const width = bounds[2] - bounds[0];
+            const height = bounds[3] - bounds[1];
+            
+            const minLon = bounds[0] - width * 0.2;
+            const maxLon = bounds[2] + width * 0.2;
+            const minLat = bounds[1] - height * 0.2;
+            const maxLat = bounds[3] + height * 0.2;
+
+            const minMercator = wgs84ToMercator(minLon, minLat);
+            const maxMercator = wgs84ToMercator(maxLon, maxLat);
+
+            const url = `${API_URL}?min_x=${minMercator[0]}&max_x=${maxMercator[0]}&min_y=${minMercator[1]}&max_y=${maxMercator[1]}`;
+
+            try {
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(`Ошибка HTTP: ${response.status}`);
+                
+                const geojsonData = await response.json();
+
+                geojsonData.features.forEach(f => {
+                    f.geometry.coordinates = convertGeometryToWgs84(f.geometry.coordinates);
+                });
+
+                currentData = geojsonData.features;
+                renderLayers();
+
+            } catch (err) {
+                console.error('Ошибка загрузки 3D зданий:', err);
+                statsDiv.innerText = `Ошибка сервера`;
+                statsDiv.classList.add('error-text');
+            }
+        }
+
+        fetchBuildings(INITIAL_VIEW_STATE);
+
+    </script>
+</body>
+</html>
