@@ -1,0 +1,392 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Бесконечный 3D Кадастр ПРО</title>
+
+    <link href="https://unpkg.com/maplibre-gl@3.3.1/dist/maplibre-gl.css" rel="stylesheet" />
+    <script src="https://unpkg.com/maplibre-gl@3.3.1/dist/maplibre-gl.js"></script>
+    <script src="https://unpkg.com/deck.gl@latest/dist.min.js"></script>
+    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
+
+    <style>
+        body { margin: 0; padding: 0; overflow: hidden; background-color: #0f172a; font-family: 'Segoe UI', Tahoma, sans-serif; }
+        #map-container { width: 100vw; height: 100vh; position: absolute; top: 0; left: 0; }
+
+        #ui-panel {
+            position: absolute; top: 20px; left: 20px; width: 260px;
+            background: rgba(15, 23, 42, 0.85); backdrop-filter: blur(12px);
+            border: 1px solid rgba(255,255,255,0.15); padding: 20px;
+            border-radius: 16px; color: #f8fafc; box-shadow: 0 10px 40px rgba(0,0,0,0.5);
+            z-index: 10;
+        }
+
+        h1 { margin: 0 0 5px 0; font-size: 18px; color: #60a5fa; display: flex; align-items: center; gap: 8px; }
+        p { margin: 0 0 15px 0; font-size: 12px; color: #94a3b8; line-height: 1.4; border-bottom: 1px solid rgba(255,255,255,0.1); padding-bottom: 10px; }
+
+        .layer-control { display: flex; align-items: center; margin-bottom: 10px; cursor: pointer; }
+        .layer-control input { margin-right: 10px; cursor: pointer; width: 16px; height: 16px; accent-color: #3b82f6; }
+        .layer-control label { cursor: pointer; font-size: 14px; font-weight: 500; display: flex; align-items: center; gap: 8px; width: 100%;}
+        .color-box { width: 14px; height: 14px; border-radius: 3px; display: inline-block; }
+
+        .layer-select { width: 100%; margin-top: 15px; padding: 8px; background: rgba(0, 0, 0, 0.5); color: #fff; border: 1px solid #475569; border-radius: 6px; outline: none; font-size: 13px; cursor: pointer; }
+        #stats { margin-top: 15px; font-weight: bold; color: #10b981; font-size: 13px; text-align: center; background: rgba(0,0,0,0.3); padding: 8px; border-radius: 6px; }
+        .error-text { color: #ef4444 !important; }
+
+        /* Тултип */
+        #tooltip {
+            position: absolute; background: rgba(255, 255, 255, 0.95); backdrop-filter: blur(10px);
+            border: 1px solid #ccc; padding: 12px 16px; border-radius: 12px; color: #1e293b;
+            font-size: 13px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); pointer-events: none;
+            display: none; z-index: 20; transform: translate(15px, 15px); max-width: 300px;
+        }
+        .tt-title { font-weight: 800; font-size: 15px; display: block; margin-bottom: 6px; border-bottom: 1px solid #eee; padding-bottom: 4px;}
+        .tt-id { font-family: monospace; color: #3b82f6; font-size: 12px; margin-bottom: 6px; display: block;}
+        .tt-info { display: block; margin-bottom: 4px; line-height: 1.3;}
+        .tt-area { display: inline-block; margin-top: 6px; background: rgba(16, 185, 129, 0.15); color: #10b981; padding: 3px 8px; border-radius: 4px; font-weight: 700; font-size: 12px; }
+    </style>
+</head>
+<body>
+
+    <div id="map-container"></div>
+
+    <div id="ui-panel">
+        <h1><i class="fas fa-cube"></i> Кадастр 3D</h1>
+        <p>ПКМ - вращение | ЛКМ - перемещение</p>
+        
+        <!-- Чекбоксы слоев -->
+        <label class="layer-control">
+            <input type="checkbox" id="cb-zu" value="zu">
+            <label for="cb-zu"><div class="color-box" style="background:#10b981;"></div> Участки (ЗУ)</label>
+        </label>
+        <label class="layer-control">
+            <input type="checkbox" id="cb-oks" value="oks" checked>
+            <label for="cb-oks"><div class="color-box" style="background:#3b82f6;"></div> Здания (ОКС)</label>
+        </label>
+        <label class="layer-control">
+            <input type="checkbox" id="cb-str" value="str" checked>
+            <label for="cb-str"><div class="color-box" style="background:#f59e0b;"></div> Сооружения</label>
+        </label>
+        <label class="layer-control">
+            <input type="checkbox" id="cb-zones" value="zones">
+            <label for="cb-zones"><div class="color-box" style="background:#8b5cf6;"></div> ЗОУИТ и Зоны</label>
+        </label>
+
+        <!-- Подложка -->
+        <select id="layer-selector" class="layer-select">
+            <option value="hybrid" selected>Google Гибрид</option>
+            <option value="satellite">Google Спутник</option>
+            <option value="map">Google Схема</option>
+            <option value="dark">Темная тема (Без карты)</option>
+        </select>
+
+        <div id="stats">Ожидание...</div>
+    </div>
+
+    <div id="tooltip"></div>
+
+    <script>
+        // ИЗМЕНЕНИЕ: Новый эндпоинт
+        const API_URL = 'https://mapruapp.ru/api/3d/objects'; 
+        
+        // --- СЛОВАРИ ЦВЕТОВ ИЗ ВАШЕГО КОДА ---
+        const BUILDING_DICT = {
+            education:{keys:["школ","детск","сад","учебн","институт"], wall:0xfce4c8, roof:0x5c4033},
+            medical:{keys:["больниц","поликлиник","мед","здрав","госпитал"], wall:0xf0f4f8, roof:0x94a3b8},
+            mkd:{keys:["многоквартирный","мкд","общежити","квартир"], wall:0xe2e8f0, roof:0x475569},
+            priv:{keys:["жилой дом","индивидуальн","частн","дачн"], wall:0xf0dcc8, roof:0x8b4513},
+            commercial:{keys:["магазин","торгов","офис","бизнес","тц"], wall:0xe0e7ff, roof:0x312e81},
+            industrial:{keys:["склад","цех","завод","промышлен","гараж"], wall:0x94a3b8, roof:0x334155},
+            def:{wall:0xf8fafc, roof:0x64748b}
+        };
+
+        const INFRA_COLORS = { gas: 0xf59e0b, water: 0x3b82f6, heat: 0xef4444, electric: 0xff0000, sewer: 0x6b7280, def: 0x8b5cf6 };
+
+        // Хелпер: HEX Number -> [R, G, B, A] для Deck.gl
+        function hexToRgba(hexNum, alpha = 255) {
+            return [ (hexNum >> 16) & 255, (hexNum >> 8) & 255, hexNum & 255, alpha ];
+        }
+
+        // --- ЛОГИКА АНАЛИЗА ОБЪЕКТОВ ---
+        // Предварительно обрабатываем фичи при получении от сервера, чтобы рендер летал
+        function prepareFeatureData(f) {
+            const p = f.properties || {};
+            const o = p.options || {};
+            const layerType = p._layer_type; // zu, oks, structure, zouit
+            
+            const descr = p.descr || '';
+            const purpose = o.purpose || o.params_purpose || '';
+            let name = o.building_name || o.name_by_doc || o.params_name || o.name || o.type_zone || '';
+            if (!name || name === 'Сооружение' || name === 'Здание') name = purpose || descr;
+            
+            const rawText = (descr + ' ' + name + ' ' + purpose).toLowerCase();
+            
+            // Собираем метадату для тултипа
+            let meta = {
+                id: o.cad_num || o.cad_number || o.reg_numb_border || descr || 'Без номера',
+                name: name || 'Объект',
+                address: (o.readable_address || o.address_readable_address || '').replace(/Российская Федерация[,\s]*/gi, '').replace(/Республика Татарстан[,\s]*/gi, ''),
+                floors: parseInt(o.floors) || null,
+                year: o.year_built || o.params_year_built || '',
+                material: o.materials || '',
+                extent: o.params_extension || ''
+            };
+
+            let rawAreaVal = o.build_record_area || o.area || o.specified_area || o.declared_area || o.land_record_area || '';
+            meta.area = parseFloat(String(rawAreaVal).replace(/[\s\xA0]/g, '').replace(',', '.'));
+
+            // Назначаем визуальные параметры
+            let renderCache = { height: 0, color: [200, 200, 200, 200], lineColor: [255, 255, 255, 100], typeName: 'Объект' };
+
+            if (layerType === 'oks') {
+                renderCache.typeName = 'Здание (ОКС)';
+                let defaultFloors = 1;
+                if (rawText.includes('многоквартир') || rawText.includes('мкд')) defaultFloors = 9;
+                else if (rawText.includes('жило') || rawText.includes('дом')) defaultFloors = 2;
+                else if (rawText.includes('школ') || rawText.includes('больниц')) defaultFloors = 3;
+                
+                const floorsCount = meta.floors || defaultFloors;
+                meta.floors = floorsCount; // Обновляем для тултипа
+                renderCache.height = floorsCount * 3.5;
+
+                // Ищем цвет по словарю
+                let style = BUILDING_DICT.def;
+                for (const key in BUILDING_DICT) {
+                    if (BUILDING_DICT[key].keys && BUILDING_DICT[key].keys.some(k => rawText.includes(k))) {
+                        style = BUILDING_DICT[key]; break;
+                    }
+                }
+                renderCache.color = hexToRgba(style.wall, 255);
+                renderCache.lineColor = hexToRgba(style.roof, 255); // Крыша как цвет линии
+            } 
+            else if (layerType === 'structure') {
+                renderCache.typeName = 'Сооружение';
+                renderCache.height = 1.5; // Небольшой объем для видимости
+                
+                let isSewer = rawText.includes('канализ') || rawText.includes('сток');
+                let isGas = rawText.includes('газ');
+                let isHeat = rawText.includes('тепло');
+                let isWater = (rawText.includes('водо') || rawText.includes('вод')) && !isSewer;
+                let isElectric = rawText.includes('электро') || rawText.includes('лэп') || rawText.includes('вл ');
+                
+                let cHex = INFRA_COLORS.def;
+                if (isGas) cHex = INFRA_COLORS.gas;
+                if (isWater) cHex = INFRA_COLORS.water;
+                if (isHeat) cHex = INFRA_COLORS.heat;
+                if (isElectric) cHex = INFRA_COLORS.electric;
+                if (isSewer) cHex = INFRA_COLORS.sewer;
+
+                renderCache.color = hexToRgba(cHex, 200);
+            }
+            else if (layerType === 'zouit') {
+                renderCache.typeName = 'ЗОУИТ / Зона';
+                renderCache.height = 5; // ЗОУИТ делаем высокими "заборами"
+                
+                let cHex = 0x9400D3; // Фиолетовый по дефолту
+                if (rawText.includes('электро') || rawText.includes('лэп') || rawText.includes('вл ')) cHex = 0xFF0000;
+                else if (rawText.includes('газ')) cHex = 0xFFBF00;
+                else if (rawText.includes('тепло')) cHex = 0xef4444; 
+                else if (rawText.includes('водо') || rawText.includes('вод')) cHex = 0x3b82f6;
+                else if (rawText.includes('канализ') || rawText.includes('сток')) cHex = 0x6b7280;
+
+                renderCache.color = hexToRgba(cHex, 80); // Сильная прозрачность
+                renderCache.lineColor = hexToRgba(cHex, 255);
+            }
+            else if (layerType === 'zu') {
+                renderCache.typeName = 'Земельный участок';
+                renderCache.height = 0.2; // Почти плоские
+                renderCache.color = [16, 185, 129, 60]; // Прозрачно зеленый
+                renderCache.lineColor = [4, 120, 87, 255]; // Темно зеленый контур
+            }
+
+            f.properties._meta = meta;
+            f.properties._renderCache = renderCache;
+            return f;
+        }
+
+        // --- Конвертация координат ---
+        function mercatorToWgs84(x, y) {
+            const lon = (x / 20037508.34) * 180;
+            let lat = (y / 20037508.34) * 180;
+            lat = 180 / Math.PI * (2 * Math.atan(Math.exp(lat * Math.PI / 180)) - Math.PI / 2);
+            return [lon, lat];
+        }
+        function wgs84ToMercator(lon, lat) {
+            const x = lon * 20037508.34 / 180;
+            let y = Math.log(Math.tan((90 + lat) * Math.PI / 360)) / (Math.PI / 180);
+            return [x, y * 20037508.34 / 180];
+        }
+        function convertGeometryToWgs84(coords) {
+            if (typeof coords[0] === 'number') return mercatorToWgs84(coords[0], coords[1]);
+            return coords.map(convertGeometryToWgs84);
+        }
+
+        // --- Инициализация Карты ---
+        const BASE_MAPS = {
+            'hybrid': { version: 8, sources: { 'g': { type: 'raster', tiles: ['https://mt1.google.com/vt/lyrs=y&x={x}&y={y}&z={z}'], tileSize: 256 } }, layers: [{ id: 'b', type: 'raster', source: 'g', minzoom: 0, maxzoom: 22 }] },
+            'satellite': { version: 8, sources: { 'g': { type: 'raster', tiles: ['https://mt1.google.com/vt/lyrs=s&x={x}&y={y}&z={z}'], tileSize: 256 } }, layers: [{ id: 'b', type: 'raster', source: 'g', minzoom: 0, maxzoom: 22 }] },
+            'map': { version: 8, sources: { 'g': { type: 'raster', tiles: ['https://mt1.google.com/vt/lyrs=m&x={x}&y={y}&z={z}'], tileSize: 256 } }, layers: [{ id: 'b', type: 'raster', source: 'g', minzoom: 0, maxzoom: 22 }] },
+            'dark': { version: 8, sources: {}, layers: [{ id: 'bg', type: 'background', paint: { 'background-color': '#0f172a' } }] }
+        };
+
+        const { DeckGL, GeoJsonLayer } = deck;
+
+        const INITIAL_VIEW_STATE = { longitude: 50.7910, latitude: 54.8492, zoom: 16, pitch: 60, bearing: 0 };
+        let currentData = []; 
+        let fetchTimeout = null;
+
+        const deckgl = new DeckGL({
+            container: 'map-container',
+            mapStyle: BASE_MAPS['hybrid'],
+            initialViewState: INITIAL_VIEW_STATE,
+            controller: true, 
+            onViewStateChange: ({viewState}) => {
+                clearTimeout(fetchTimeout);
+                fetchTimeout = setTimeout(() => fetchObjects(viewState), 300);
+            },
+            layers: []
+        });
+
+        // Управление UI
+        document.getElementById('layer-selector').addEventListener('change', (e) => {
+            deckgl.setProps({ mapStyle: BASE_MAPS[e.target.value] });
+        });
+
+        const checkboxes = document.querySelectorAll('.layer-control input');
+        checkboxes.forEach(cb => {
+            cb.addEventListener('change', () => {
+                const viewState = deckgl.viewState || INITIAL_VIEW_STATE;
+                fetchObjects(viewState); // Перезагружаем при смене галочек
+            });
+        });
+
+        // --- Рендер ---
+        function renderLayers() {
+            // Разделяем полигоны и линии, чтобы они рендерились корректно
+            const layer = new GeoJsonLayer({
+                id: 'objects-layer',
+                data: currentData,
+                
+                extruded: true, 
+                wireframe: true,
+                filled: true,
+
+                // Берем заранее посчитанные данные из кэша
+                getElevation: d => d.properties._renderCache.height,
+                getFillColor: d => d.properties._renderCache.color,
+                getLineColor: d => d.properties._renderCache.lineColor,
+                getLineWidth: d => d.geometry.type.includes('Line') ? 3 : 1, // Линии потолще
+                lineWidthUnits: 'pixels',
+
+                pickable: true,
+                autoHighlight: true,
+                highlightColor: [255, 200, 0, 200],
+
+                onHover: (info) => {
+                    const tooltip = document.getElementById('tooltip');
+                    if (info.object) {
+                        const meta = info.object.properties._meta;
+                        const cache = info.object.properties._renderCache;
+                        
+                        let html = `<span class="tt-title" style="color: rgb(${cache.lineColor[0]},${cache.lineColor[1]},${cache.lineColor[2]})">${cache.typeName}</span>`;
+                        html += `<span class="tt-id">${meta.id}</span>`;
+                        if (meta.name && meta.name !== 'Объект') html += `<span class="tt-info"><b>Название:</b> ${meta.name}</span>`;
+                        if (meta.address) html += `<span class="tt-info"><b>Адрес:</b> ${meta.address}</span>`;
+                        if (meta.floors) html += `<span class="tt-info"><b>Этажность:</b> ${meta.floors}</span>`;
+                        if (meta.year) html += `<span class="tt-info"><b>Год:</b> ${meta.year}</span>`;
+                        if (meta.material) html += `<span class="tt-info"><b>Материал:</b> ${meta.material}</span>`;
+                        if (meta.extent) html += `<span class="tt-info"><b>Длина:</b> ${meta.extent} м</span>`;
+                        if (meta.area && !isNaN(meta.area)) html += `<div class="tt-area">${meta.area.toLocaleString('ru-RU')} м²</div>`;
+
+                        tooltip.innerHTML = html;
+                        tooltip.style.left = `${info.x}px`;
+                        tooltip.style.top = `${info.y}px`;
+                        tooltip.style.display = 'block';
+                    } else {
+                        tooltip.style.display = 'none';
+                    }
+                },
+                transitions: { getElevation: 500, getFillColor: 500 }
+            });
+
+            deckgl.setProps({ layers: [layer] });
+            
+            const stats = { zu: 0, oks: 0, str: 0, zones: 0 };
+            currentData.forEach(d => {
+                if (d.properties._layer_type === 'zu') stats.zu++;
+                else if (d.properties._layer_type === 'oks') stats.oks++;
+                else if (d.properties._layer_type === 'structure') stats.str++;
+                else if (d.properties._layer_type === 'zouit') stats.zones++;
+            });
+
+            const statsDiv = document.getElementById('stats');
+            statsDiv.classList.remove('error-text');
+            statsDiv.innerHTML = `ОКС: ${stats.oks} | ЗУ: ${stats.zu}<br>Сооруж: ${stats.str} | Зоны: ${stats.zones}`;
+        }
+
+        // --- Загрузка ---
+        async function fetchObjects(viewState) {
+            const statsDiv = document.getElementById('stats');
+
+            if (viewState.zoom < 13) {
+                currentData = [];
+                renderLayers();
+                statsDiv.innerText = `Приблизьте карту для загрузки`;
+                statsDiv.classList.remove('error-text');
+                return;
+            }
+
+            // Собираем включенные слои
+            const activeLayers = Array.from(checkboxes).filter(cb => cb.checked).map(cb => cb.value).join(',');
+            
+            if (!activeLayers) {
+                currentData = [];
+                renderLayers();
+                statsDiv.innerText = `Выберите слои для загрузки`;
+                return;
+            }
+
+            statsDiv.innerText = `Загрузка данных...`;
+
+            const viewport = new deck.WebMercatorViewport(viewState);
+            const bounds = viewport.getBounds();
+            const width = bounds[2] - bounds[0];
+            const height = bounds[3] - bounds[1];
+            
+            const minLon = bounds[0] - width * 0.2;
+            const maxLon = bounds[2] + width * 0.2;
+            const minLat = bounds[1] - height * 0.2;
+            const maxLat = bounds[3] + height * 0.2;
+
+            const minMercator = wgs84ToMercator(minLon, minLat);
+            const maxMercator = wgs84ToMercator(maxLon, maxLat);
+
+            const url = `${API_URL}?min_x=${minMercator[0]}&max_x=${maxMercator[0]}&min_y=${minMercator[1]}&max_y=${maxMercator[1]}&layers=${activeLayers}`;
+
+            try {
+                const response = await fetch(url);
+                if (!response.ok) throw new Error(`HTTP: ${response.status}`);
+                
+                const geojsonData = await response.json();
+
+                // Конвертируем координаты и просчитываем стили ОДИН РАЗ при загрузке
+                currentData = geojsonData.features.map(f => {
+                    f.geometry.coordinates = convertGeometryToWgs84(f.geometry.coordinates);
+                    return prepareFeatureData(f); 
+                });
+                
+                renderLayers();
+
+            } catch (err) {
+                console.error('Ошибка загрузки 3D:', err);
+                statsDiv.innerText = `Ошибка сервера`;
+                statsDiv.classList.add('error-text');
+            }
+        }
+
+        fetchObjects(INITIAL_VIEW_STATE);
+
+    </script>
+</body>
+</html>
