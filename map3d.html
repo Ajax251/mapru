@@ -97,6 +97,52 @@
                 color: #64748b; font-size: 20px; cursor: pointer;
             }
         }
+        
+        .action-buttons-row {
+            display: flex;
+            gap: 10px;
+            width: 100%;
+            margin-top: 5px;
+        }
+        .action-btn {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            border: none;
+            border-radius: 8px;
+            color: white;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+        }
+        .action-btn:active {
+            transform: translateY(2px);
+            box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+        }
+     
+        .btn-load-db {
+            flex: 2; 
+            background-color: #8b5cf6; 
+            font-size: 18px; 
+            padding: 10px 8px;
+        }
+        .btn-load-db:hover { background-color: #7c3aed; }
+        
+        .btn-sync {
+            flex: 1;
+            background-color: #10b981;
+            font-size: 15px; 
+            padding: 10px 8px; 
+        }
+        .btn-sync:hover { background-color: #059669; }
+        
+        .btn-export {
+            flex: 1;
+            background-color: #0284c7;
+            font-size: 15px;
+            padding: 10px 8px; 
+        }
+        .btn-export:hover { background-color: #0369a1; }
     </style>
 </head>
 <body>
@@ -155,8 +201,11 @@
             -->
         </div>
 
-  <button class="download-btn btn-green" id="download-btn"><i class="fas fa-sync-alt"></i> Актуализировать данные</button>
-<button class="download-btn btn-blue" id="export-html-btn"><i class="fas fa-file-code"></i> Сохранить в HTML</button>
+<div class="action-buttons-row" id="action-buttons-row">
+            <button class="action-btn btn-load-db" id="load-db-btn" title="Загрузить объекты для текущей области"><i class="fas fa-cloud-download-alt"></i></button>
+            <button class="action-btn btn-sync" id="download-btn" title="Актуализировать данные"><i class="fas fa-sync-alt"></i></button>
+            <button class="action-btn btn-export" id="export-html-btn" title="Сохранить в HTML"><i class="fas fa-file-code"></i></button>
+        </div>
 
         <div id="stats">Инициализация...</div>
     </div>
@@ -625,7 +674,7 @@ controls.enableZoom = false;
             }));
         }
 
-        // ================= УМНЫЙ ПОИСК И АВТОЗАГРУЗКА В БД =================
+        // =================  ПОИСК И АВТОЗАГРУЗКА  =================
         function setupSearch() {
             const input = document.getElementById('search-input');
             const btn = document.getElementById('search-btn');
@@ -681,7 +730,7 @@ controls.enableZoom = false;
                             flyToCoordinate(wgsPoint[0], wgsPoint[1], 200, 300);
                          
                             
-                            // Автосохранение в БД
+                            // Автосохранение 
                             fetch(API_URL_SAVE, {
                                 method: 'POST', headers: { 'Content-Type': 'application/json' },
                                 body: JSON.stringify({ features: [feature] })
@@ -1120,9 +1169,10 @@ function getNetworkColor(text) {
             }
         }
 
-        // ================= ЗАГРУЗКА ИЗ БД =================
-   async function triggerFetch() {
-           
+        // ================= ЗАГРУЗКА =================
+let currentFetchController = null; // Контроллер для отмены старых запросов
+
+        async function triggerFetch() {
             if (window.EMBEDDED_FEATURES) return; 
 
             const activeLayers = Array.from(document.querySelectorAll('.layer-control input')).filter(cb => cb.checked).map(cb => cb.value);
@@ -1131,20 +1181,29 @@ function getNetworkColor(text) {
             const targetX = controls.target.x;
             const targetZ = controls.target.z;
             const dist = camera.position.distanceTo(controls.target);
-            const radius = Math.min(dist * 1.5 + 500, 3000); 
+            
+            // ИСПРАВЛЕНИЕ 1: Уменьшаем макс. радиус до 1500м, чтобы не упираться в лимит БД (3000 объектов) и грузить точно по центру экрана
+            const radius = Math.min(dist * 1.0 + 200, 1500); 
             
             const minX = originMercator[0] + targetX - radius;
             const maxX = originMercator[0] + targetX + radius;
             const minY = originMercator[1] - targetZ - radius;
             const maxY = originMercator[1] - targetZ + radius;
 
-            const url = `${API_URL_READ}?min_x=${minX}&max_x=${maxX}&min_y=${minY}&max_y=${maxY}&layers=${activeLayers.join(',')}`;
+          const url = `${API_URL_READ}?min_x=${minX}&max_x=${maxX}&min_y=${minY}&max_y=${maxY}&layers=${activeLayers.join(',')}`;
 
-            document.getElementById('stats').innerHTML = 'Синхронизация с БД... <i class="fas fa-spinner loading-pulse"></i>';
+            document.getElementById('stats').innerHTML = 'Синхронизация... <i class="fas fa-spinner loading-pulse"></i>';
             isFetching = true;
 
+            // ИСПРАВЛЕНИЕ 2: Отменяем предыдущий запрос, если мы быстро сдвинули карту
+            if (currentFetchController) {
+                currentFetchController.abort();
+            }
+            currentFetchController = new AbortController();
+
             try {
-                const response = await fetch(url);
+                // Передаем сигнал прерывания в fetch
+                const response = await fetch(url, { signal: currentFetchController.signal });
                 if(!response.ok) throw new Error('Network error');
                 const data = await response.json();
 
@@ -1153,16 +1212,12 @@ function getNetworkColor(text) {
                     if (loadedFeatureIds.has(f.id)) return;
                     loadedFeatureIds.add(f.id);
                     
-                    // Получаем тип слоя и исправляем возможные расхождения с бэкендом
                     let layerType = f.properties._layer_type;
                     if (layerType === 'structure') layerType = 'str';
                     if (layerType === 'zouit') layerType = 'zones';
                     
                     if (layerType) {
-                        // Защита: если массива еще нет, создаем его (предотвращает ошибку .push is not a function)
-                        if (!allLoadedFeatures[layerType]) {
-                            allLoadedFeatures[layerType] = [];
-                        }
+                        if (!allLoadedFeatures[layerType]) allLoadedFeatures[layerType] = [];
                         allLoadedFeatures[layerType].push(f);
                         buildModel(f, layerType);
                         addedCount++;
@@ -1171,13 +1226,10 @@ function getNetworkColor(text) {
 
                 document.getElementById('stats').innerText = `Кэш сессии: ${loadedFeatureIds.size} объектов`;
                 
-                // Подсветка после поиска
                 if (pendingHighlightId) {
                     let targetMesh = null;
                     interactables.forEach(m => {
-                        if (m.userData.parentGroup.userData.meta.id === pendingHighlightId) {
-                            targetMesh = m.userData.parentGroup;
-                        }
+                        if (m.userData.parentGroup.userData.meta.id === pendingHighlightId) targetMesh = m.userData.parentGroup;
                     });
                     if (targetMesh) {
                         setHighlight(targetMesh, true);
@@ -1188,10 +1240,15 @@ function getNetworkColor(text) {
                 }
 
             } catch (err) {
+                // Игнорируем ошибки "прерывания" запроса (это нормально при скролле)
+                if (err.name === 'AbortError') return; 
                 console.error(err);
                 document.getElementById('stats').innerText = 'Нет связи';
             } finally {
-                isFetching = false;
+                // Снимаем флаг загрузки, только если запрос не был прерван новым
+                if (currentFetchController && !currentFetchController.signal.aborted) {
+                    isFetching = false;
+                }
             }
         }
 
@@ -1259,8 +1316,13 @@ function getNetworkColor(text) {
             });
                       const exportBtn = document.getElementById('export-html-btn');
 if (exportBtn) exportBtn.onclick = exportToStandaloneHTML;
+  const loadDbBtn = document.getElementById('load-db-btn');
+            if (loadDbBtn) {
+                loadDbBtn.onclick = () => {
+                    triggerFetch(); 
+                };
         }
-        
+   }
         
         
            function loadFromEmbeddedData() {
@@ -1302,11 +1364,9 @@ if (exportBtn) exportBtn.onclick = exportToStandaloneHTML;
             }
 
             // 2. Вырезаем ненужные элементы по их ID или классам
-            const exportBtn = docClone.querySelector('#export-html-btn');
-            if(exportBtn) exportBtn.remove();
-
-            const downloadBtn = docClone.querySelector('#download-btn');
-            if(downloadBtn) downloadBtn.remove();
+         // Полностью удаляем весь ряд с кнопками
+            const actionRow = docClone.querySelector('#action-buttons-row');
+            if(actionRow) actionRow.remove();
             
             const downloadModal = docClone.querySelector('#download-modal');
             if(downloadModal) downloadModal.remove();
@@ -1383,8 +1443,9 @@ function showTooltipFromMeta(meta, type) {
             if(meta.ext) html += `<div class="tt-info"><b>Протяженность:</b> ${meta.ext} м</div>`;
             if(meta.area && !isNaN(meta.area)) html += `<div class="tt-area">${meta.area.toLocaleString('ru-RU')} м²</div>`;
 
-            tooltip.innerHTML = html;
-            tooltip.style.display = "block";
+tooltip.innerHTML = html;
+tooltip.style.display = "block";
+tooltip.style.opacity = "1"; 
             
             if (isMobile) {
                 document.getElementById('mobile-tt-close').onclick = () => { tooltip.style.display = "none"; };
