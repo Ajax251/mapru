@@ -7,10 +7,18 @@ window.open3DVisualization = function () {
             let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
             const allLocalFeatures = { target:[], parcels:[], buildings: [], structures: [], zouits: [], intersections:[] };
 
-            // Чтение сохраненных настроек
+      // Чтение сохраненных настроек
             const savedTheme = localStorage.getItem('3d_viewer_theme') || 'light';
             const savedGroundColor = localStorage.getItem('3d_ground_color') || '#f0f2f5';
-            const savedGroundTex = localStorage.getItem('3d_ground_texture') || 'checker';
+            // Временно принудительно Спутник по умолчанию
+            // const savedGroundTex = localStorage.getItem('3d_ground_texture') || 'gsat';
+            const savedGroundTex = 'gsat';
+            const savedParcelOpacity = parseFloat(localStorage.getItem('3d_parcel_opacity')) || 0.4; 
+
+            // НОВЫЙ БЛОК: Читаем смещения для Google/KML и определяем, активен ли слой Google/OSM
+   // СТАЛО:
+            const kmlOffsetX = parseFloat(localStorage.getItem('kmlMapOffsetX')) || 0;
+            const kmlOffsetY = parseFloat(localStorage.getItem('kmlMapOffsetY')) || 0;
 
             const cleanAddress = (rawAddress) => {
                 if (!rawAddress) return '';
@@ -24,9 +32,26 @@ window.open3DVisualization = function () {
 
             const to3857 = (yandexCoord) => {
                 if (!yandexCoord || typeof yandexCoord[0] !== 'number') return[0, 0];
-                const trueLat = yandexCoord[0] + (window.mapOffsetY * 0.000008983);
-                const trueLon = yandexCoord[1] + (window.mapOffsetX * 0.000008983);
-                return window.proj4("EPSG:4326", destSc,[trueLon, trueLat]);
+                
+                let trueLat = yandexCoord[0];
+                let trueLon = yandexCoord[1];
+
+                // 1. Узнаем, был ли активен слой Google на 2D карте (откуда пришли координаты)
+                const mapMode2D = localStorage.getItem('mapMode') || 'map';
+                const isGoogle2D = ['google-sat', 'google-hyb', 'osm'].includes(mapMode2D);
+
+                // 2. Если на 2D карте был Google, ВЫЧИТАЕМ его визуальное смещение
+                if (isGoogle2D) {
+                    trueLat -= (kmlOffsetY * 0.000008983);
+                    trueLon -= (kmlOffsetX * 0.000008983);
+                }
+                
+                // 3. Возвращаем к "истинным" WGS84, отменяя базовое смещение 
+                trueLat += (window.mapOffsetY * 0.000008983);
+                trueLon += (window.mapOffsetX * 0.000008983);
+                
+                // 4. Проецируем чистые координаты в Web Mercator (идеально для 3D тайлов Google)
+                return window.proj4("EPSG:4326", destSc, [trueLon, trueLat]);
             };
 
             if (!window.quickReportTargetObjects || window.quickReportTargetObjects.length === 0) {
@@ -352,10 +377,11 @@ window.open3DVisualization = function () {
                 });
             });
 
-            if (window.turf && allLocalFeatures.target && allLocalFeatures.target.length > 0) {
+          if (window.turf && allLocalFeatures.target && allLocalFeatures.target.length > 0) {
                 const createTurfPolys = (featureArray, idPrefix) => {
                     const result = [];
-                    featureArray.forEach((f, idx) => {
+                    // Добавлена защита (featureArray || [])
+                    (featureArray || []).forEach((f, idx) => {
                         if (f.type === 'Polygon') {
                             f.polygons.forEach((polyRings) => {
                                 try {
@@ -384,6 +410,7 @@ window.open3DVisualization = function () {
 
                 const targetTurf = createTurfPolys(allLocalFeatures.target, 'target');
                 const objectsToCheck = [
+                    // Исправлена опечатка с parels на parcels
                     ...createTurfPolys(allLocalFeatures.parcels, 'ЗУ ')
                 ];
 
@@ -447,12 +474,13 @@ window.open3DVisualization = function () {
             let modal = document.getElementById(modalId);
             if (modal) modal.remove();
 
-            modal = document.createElement('div');
+        modal = document.createElement('div');
             modal.id = modalId;
             Object.assign(modal.style, {
-                position: 'fixed', top: '2.5%', left: '2.5%', width: '95%', height: '95%',
+                position: 'fixed', top: '10px', left: '10px', right: '10px', bottom: '10px', 
+                width: 'auto', height: 'auto', // Растягиваем на всё окно с отступом 10px
                 backgroundColor: savedTheme === 'dark' ? '#0f172a' : '#ffffff',
-                borderRadius: '16px', zIndex: '20000',
+                borderRadius: '12px', zIndex: '20000',
                 boxShadow: '0 25px 80px rgba(0,0,0,0.5)', display: 'flex', flexDirection: 'column',
                 overflow: 'hidden', border: '1px solid rgba(128,128,128,0.2)', transition: 'all 0.3s cubic-bezier(0.4, 0, 0.2, 1)'
             });
@@ -511,8 +539,8 @@ window.open3DVisualization = function () {
                     modal.style.top = 'auto'; modal.style.bottom = '20px'; modal.style.left = '20px';
                     iframe.style.display = 'none'; minBtn.innerHTML = '<i class="fas fa-expand-arrows-alt"></i>';
                 } else {
-                    modal.style.width = '95%'; modal.style.height = '95%';
-                    modal.style.top = '2.5%'; modal.style.left = '2.5%'; modal.style.bottom = 'auto';
+                   modal.style.width = 'auto'; modal.style.height = 'auto';
+                    modal.style.top = '10px'; modal.style.left = '10px'; modal.style.right = '10px'; modal.style.bottom = '10px';
                     setTimeout(() => iframe.style.display = 'block', 300);
                     minBtn.innerHTML = '<i class="fas fa-compress-alt"></i>';
                 }
@@ -675,13 +703,56 @@ window.open3DVisualization = function () {
     }
     @keyframes pulseText { 0%, 100% { opacity: 0.5; } 50% { opacity: 1; text-shadow: 0 0 10px rgba(59, 130, 246, 0.5); } }
 
-    #camera-alt-display {
-        position: absolute; top: 20px; left: 20px; z-index: 50;
+   #camera-alt-display {
+        position: absolute; top: 20px; left: 80px; z-index: 50;
         background: var(--panel-bg); backdrop-filter: blur(10px);
         padding: 8px 16px; border-radius: 8px; border: 1px solid var(--border-color);
         color: var(--text-color); font-weight: 600; font-size: 13px;
         box-shadow: 0 4px 12px var(--shadow-color);
         display: flex; align-items: center; gap: 8px; pointer-events: none;
+    }
+      #zoom-slider-container {
+        position: absolute; left: 20px; top: 50%; transform: translateY(-50%);
+        z-index: 20; display: flex; flex-direction: column; align-items: center; gap: 6px;
+    }
+    #zoom-slider-track {
+        background: var(--panel-bg); backdrop-filter: blur(10px);
+        border: 1px solid var(--border-color); border-radius: 12px;
+        padding: 10px 6px; box-shadow: 0 4px 12px var(--shadow-color);
+        display: flex; flex-direction: column; align-items: center; gap: 4px;
+    }
+    .zoom-btn {
+        width: 32px; height: 32px; border: none; border-radius: 8px;
+        background: var(--btn-bg); color: var(--btn-text); font-size: 18px; font-weight: 700;
+        cursor: pointer; display: flex; align-items: center; justify-content: center;
+        border: 1px solid var(--border-color); transition: background 0.2s;
+    }
+    .zoom-btn:hover { background: var(--border-color); }
+    .zoom-btn:active { transform: scale(0.95); }
+    
+    #zoom-slider {
+        -webkit-appearance: none; appearance: none;
+        writing-mode: vertical-lr; direction: rtl;
+        width: 6px; height: 160px;
+        background: transparent; cursor: pointer;
+    }
+    #zoom-slider::-webkit-slider-runnable-track {
+        width: 6px; height: 160px; background: var(--border-color); border-radius: 3px;
+    }
+    #zoom-slider::-webkit-slider-thumb {
+        -webkit-appearance: none; appearance: none;
+        width: 18px; height: 18px; border-radius: 50%;
+        background: var(--btn-text); border: 2px solid #fff;
+        box-shadow: 0 2px 6px var(--shadow-color);
+        margin-left: -6px; cursor: grab;
+    }
+    #zoom-slider::-moz-range-track {
+        width: 6px; height: 160px; background: var(--border-color); border-radius: 3px;
+    }
+    #zoom-slider::-moz-range-thumb {
+        width: 18px; height: 18px; border-radius: 50%;
+        background: var(--btn-text); border: 2px solid #fff;
+        box-shadow: 0 2px 6px var(--shadow-color); cursor: grab;
     }
 </style>
 <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
@@ -711,6 +782,15 @@ window.open3DVisualization = function () {
 <button id="ui-toggle-btn" title="Слои" style="display: none;">
     <svg width="24" height="24" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><polygon points="12 2 2 7 12 12 22 7 12 2"></polygon><polyline points="2 17 12 22 22 17"></polyline><polyline points="2 12 12 17 22 12"></polyline></svg>
 </button>
+
+
+<div id="zoom-slider-container">
+    <div id="zoom-slider-track">
+        <button class="zoom-btn" id="zoom-in-btn">+</button>
+        <input type="range" id="zoom-slider" min="0" max="1" step="0.005" value="0.5">
+        <button class="zoom-btn" id="zoom-out-btn">−</button>
+    </div>
+</div>
 
 <button id="home-btn" title="Сбросить вид">
     <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="M3 9l9-7 9 7v11a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2z"></path><polyline points="9 22 9 12 15 12 15 22"></polyline></svg>
@@ -793,17 +873,184 @@ try {
     const camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 5, 20000);
     camera.position.set(50, 80, 120);
     
-    const controls = new OrbitControls(camera, renderer.domElement);
-    controls.enableDamping = true; controls.dampingFactor = 0.05; 
-    controls.maxPolarAngle = Math.PI/2 - 0.05; // чуть выше горизонта
-    controls.maxDistance = 8000; // Ограничение отдаления, убивает Z-fighting вдалеке
+ const controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true; 
+    controls.dampingFactor = 0.05; 
+    controls.maxPolarAngle = Math.PI/2 - 0.05; 
+    controls.maxDistance = 8000; 
+    
+   
+    controls.minDistance = 15; 
+    controls.zoomSpeed = 0.7;  
+    // ----------------------------------------------------------------------------------
+
     controls.mouseButtons = { LEFT: THREE.MOUSE.PAN, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
-    controls.screenSpacePanning = false; 
+
+        controls.screenSpacePanning = false; 
+            controls.enableZoom = false;
+    
+    renderer.domElement.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        let delta = e.deltaY;
+        if (e.deltaMode === 0) delta = delta / 100;
+        delta = Math.max(-3, Math.min(3, delta));
+        
+        const currentDist = camera.position.distanceTo(controls.target);
+        const zoomFactor = 1 + delta * 0.08;
+        let newDist = currentDist * zoomFactor;
+        newDist = Math.max(iframeZoomState.minDist, Math.min(iframeZoomState.maxDist, newDist));
+        
+        const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
+        camera.position.copy(controls.target).addScaledVector(dir, newDist);
+        
+        updateSliderFromCamera();
+    }, { passive: false });
+    
+    // === НАЧАЛО ВСТАВКИ: Нормализация зума для тачпадов ===
+    controls.enableZoom = false; // Отключаем встроенный зум OrbitControls
+    
+    const zoomState = { currentDistance: 120, minDist: controls.minDistance, maxDist: controls.maxDistance };
+    
+    const applyZoom = (newDist) => {
+        newDist = Math.max(zoomState.minDist, Math.min(zoomState.maxDist, newDist));
+        zoomState.currentDistance = newDist;
+        const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
+        camera.position.copy(controls.target).addScaledVector(dir, newDist);
+    };
+    
+    renderer.domElement.addEventListener('wheel', (e) => {
+        e.preventDefault();
+        
+        // Нормализация: тачпад даёт deltaY ~1-5 (DOM_DELTA_PIXEL), мышь ~100-120
+        let delta = e.deltaY;
+        
+        // Если deltaMode === 0 (пиксели — типично для тачпадов), нормализуем
+        if (e.deltaMode === 0) {
+            delta = delta / 100; // Приводим пиксели к ~1
+        }
+        // deltaMode === 1 — строки (обычная мышь), оставляем как есть но ограничиваем
+        
+        // Ограничиваем максимальный шаг зума
+        delta = Math.max(-3, Math.min(3, delta));
+        
+        const currentDist = camera.position.distanceTo(controls.target);
+        zoomState.currentDistance = currentDist;
+        
+        // Логарифмический зум — одинаково комфортно на любом расстоянии
+        const zoomFactor = 1 + delta * 0.08;
+        const newDist = currentDist * zoomFactor;
+        
+        applyZoom(newDist);
+        
+        // Синхронизируем слайдер зума
+        const zoomSlider = document.getElementById('zoom-slider');
+        if (zoomSlider) {
+            const logMin = Math.log(zoomState.minDist);
+            const logMax = Math.log(zoomState.maxDist);
+            const logCur = Math.log(zoomState.currentDistance);
+            zoomSlider.value = 1 - (logCur - logMin) / (logMax - logMin);
+        }
+    }, { passive: false });
+    
+       // ДОБАВИТЬ ЭТОТ БЛОК: Ручная обработка щипка (pinch-to-zoom) для мобильных устройств
+    let pinchStartDistance = 0;
+
+    renderer.domElement.addEventListener('touchstart', (e) => {
+        if (e.touches.length === 2) {
+            const dx = e.touches[0].pageX - e.touches[1].pageX;
+            const dy = e.touches[0].pageY - e.touches[1].pageY;
+            pinchStartDistance = Math.hypot(dx, dy);
+        }
+    }, { passive: false });
+
+    renderer.domElement.addEventListener('touchmove', (e) => {
+        if (e.touches.length === 2) {
+            e.preventDefault(); // Предотвращаем системное масштабирование страницы
+            
+            const dx = e.touches[0].pageX - e.touches[1].pageX;
+            const dy = e.touches[0].pageY - e.touches[1].pageY;
+            const currentPinchDistance = Math.hypot(dx, dy);
+            
+            // Разница между предыдущим и текущим расстоянием (щипок)
+            let pinchDelta = pinchStartDistance - currentPinchDistance;
+            pinchStartDistance = currentPinchDistance;
+            
+            // Нормализуем чувствительность (скорость зума пальцами)
+            let delta = pinchDelta * 0.15; 
+            delta = Math.max(-3, Math.min(3, delta));
+            
+            const currentDist = camera.position.distanceTo(controls.target);
+            zoomState.currentDistance = currentDist;
+            
+            // Применяем тот же логарифмический зум, что и для мышки
+            const zoomFactor = 1 + delta * 0.08;
+            const newDist = currentDist * zoomFactor;
+            
+            applyZoom(newDist);
+            
+            // Синхронизируем слайдер
+            const zoomSlider = document.getElementById('zoom-slider');
+            if (zoomSlider) {
+                const logMin = Math.log(zoomState.minDist);
+                const logMax = Math.log(zoomState.maxDist);
+                const logCur = Math.log(zoomState.currentDistance);
+                zoomSlider.value = 1 - (logCur - logMin) / (logMax - logMin);
+            }
+        }
+    }, { passive: false });
+    // === КОНЕЦ ВСТАВКИ ===
     controls.target.set(0, 0, 0);
 
     const initialCamPos = new THREE.Vector3(50, 80, 120);
     const initialTarget = new THREE.Vector3(0, 0, 0);
     document.getElementById("home-btn").onclick = function() { camera.position.copy(initialCamPos); controls.target.copy(initialTarget); controls.update(); };
+        // === НАЧАЛО: Обработчики слайдера зума ===
+    const zoomSlider = document.getElementById('zoom-slider');
+    const zoomInBtn = document.getElementById('zoom-in-btn');
+    const zoomOutBtn = document.getElementById('zoom-out-btn');
+    
+    const ZOOM_MIN = ${`controls.minDistance`};
+    const ZOOM_MAX = ${`controls.maxDistance`};
+    
+    // Внутренний zoomState (дублирует родительский, но работает в iframe)
+    const iframeZoomState = { minDist: 15, maxDist: 8000 };
+    
+    const setZoomFromSlider = (val) => {
+        // val: 0 = далеко, 1 = близко (логарифмическая шкала)
+        const logMin = Math.log(iframeZoomState.minDist);
+        const logMax = Math.log(iframeZoomState.maxDist);
+        const logDist = logMin + (1 - val) * (logMax - logMin);
+        const newDist = Math.exp(logDist);
+        
+        const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
+        camera.position.copy(controls.target).addScaledVector(dir, newDist);
+    };
+    
+    const updateSliderFromCamera = () => {
+        const dist = camera.position.distanceTo(controls.target);
+        const logMin = Math.log(iframeZoomState.minDist);
+        const logMax = Math.log(iframeZoomState.maxDist);
+        const logCur = Math.log(Math.max(iframeZoomState.minDist, Math.min(iframeZoomState.maxDist, dist)));
+        zoomSlider.value = 1 - (logCur - logMin) / (logMax - logMin);
+    };
+    
+    zoomSlider.addEventListener('input', (e) => {
+        setZoomFromSlider(parseFloat(e.target.value));
+    });
+    
+    const zoomStep = (direction) => {
+        // direction: +1 = приблизить, -1 = отдалить
+        const dist = camera.position.distanceTo(controls.target);
+        const factor = 1 - direction * 0.15;
+        const newDist = Math.max(iframeZoomState.minDist, Math.min(iframeZoomState.maxDist, dist * factor));
+        const dir = new THREE.Vector3().subVectors(camera.position, controls.target).normalize();
+        camera.position.copy(controls.target).addScaledVector(dir, newDist);
+        updateSliderFromCamera();
+    };
+    
+    zoomInBtn.onclick = () => zoomStep(1);
+    zoomOutBtn.onclick = () => zoomStep(-1);
+    // === КОНЕЦ: Обработчики слайдера зума ===
 
     ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
     scene.add(ambientLight);
@@ -859,18 +1106,101 @@ try {
         return t;
     }
     
-    let currentGroundColor = "${savedGroundColor}";
+let currentGroundColor = "${savedGroundColor}";
     let currentGroundTex = "${savedGroundTex}"; 
+    let currentParcelOpacity = ${savedParcelOpacity}; // <-- Передали значение внутрь iframe
     const groundMat = new THREE.MeshStandardMaterial({roughness: 1.0, color: currentGroundColor});
-    if (currentGroundTex !== 'solid') {
+    if (!['solid', 'ymap', 'ysat', 'yhyb'].includes(currentGroundTex)) {
         groundMat.map = createGroundTexture(currentGroundTex, currentGroundColor);
     }
-    // Земля уменьшена до 50 км для стабильности текстур. 
     ground = new THREE.Mesh(new THREE.PlaneGeometry(50000, 50000), groundMat);
     ground.rotation.x = -Math.PI / 2; 
-    ground.position.y = -0.5; // Смещаем землю вниз
+    ground.position.y = -0.5;
     ground.receiveShadow = true; 
+    
+    // Скрываем базовую подложку, если при старте выбран режим Яндекс Карт (Спутник/Схема)
+    if (['ymap', 'ysat', 'yhyb'].includes(currentGroundTex)) {
+        ground.visible = false;
+    }
+    
     scene.add(ground);
+
+ const mapTilesGroup = new THREE.Group();
+    mapTilesGroup.position.y = -0.4;
+    scene.add(mapTilesGroup);
+    
+    const textureLoader = new THREE.TextureLoader();
+    textureLoader.setCrossOrigin('anonymous'); 
+
+    window.loadMapTiles = function(type) {
+        while(mapTilesGroup.children.length > 0){
+            const child = mapTilesGroup.children[0];
+            mapTilesGroup.remove(child);
+            if(child.material.map) child.material.map.dispose();
+            child.material.dispose();
+            child.geometry.dispose();
+        }
+
+        if (!['osm', 'gsat', 'ghyb'].includes(type)) {
+            mapTilesGroup.visible = false;
+            return;
+        }
+        mapTilesGroup.visible = true;
+
+        const z = 18; 
+        const E = 20037508.342789244; 
+        const tileSize = (2 * E) / Math.pow(2, z);
+
+        const oX = ${originX};
+        const oY = ${originY};
+
+        const tX = Math.floor((oX + E) / tileSize);
+        const tY = Math.floor((E - oY) / tileSize);
+
+        const halfGrid = 6; 
+
+        for (let i = -halfGrid; i <= halfGrid; i++) {
+            for (let j = -halfGrid; j <= halfGrid; j++) {
+                const currentTx = tX + i;
+                const currentTy = tY + j;
+
+                const minX = -E + currentTx * tileSize;
+                const maxX = -E + (currentTx + 1) * tileSize;
+                const minY = E - (currentTy + 1) * tileSize;
+                const maxY = E - currentTy * tileSize;
+
+                const tileWidth = maxX - minX;
+                const tileHeight = maxY - minY;
+
+                const posX = (maxX + minX) / 2 - oX;
+                const posZ = -( (maxY + minY) / 2 - oY ); 
+
+                const planeGeo = new THREE.PlaneGeometry(tileWidth, tileHeight);
+                planeGeo.rotateX(-Math.PI / 2);
+
+                let url = '';
+                if (type === 'osm') url = 'https://tile.openstreetmap.org/' + z + '/' + currentTx + '/' + currentTy + '.png';
+                if (type === 'gsat') url = 'https://mt1.google.com/vt/lyrs=s&x=' + currentTx + '&y=' + currentTy + '&z=' + z;
+                if (type === 'ghyb') url = 'https://mt1.google.com/vt/lyrs=y&x=' + currentTx + '&y=' + currentTy + '&z=' + z;
+
+                const mat = new THREE.MeshStandardMaterial({ color: 0xffffff, roughness: 1.0 });
+                textureLoader.load(url, 
+                    (tex) => { tex.colorSpace = THREE.SRGBColorSpace; mat.map = tex; mat.needsUpdate = true; },
+                    undefined,
+                    (err) => { }
+                );
+                
+                const mesh = new THREE.Mesh(planeGeo, mat);
+                mesh.position.set(posX, 0, posZ);
+                mesh.receiveShadow = true;
+                mapTilesGroup.add(mesh);
+            }
+        }
+    };
+
+    if (['osm', 'gsat', 'ghyb'].includes(currentGroundTex)) {
+        window.loadMapTiles(currentGroundTex);
+    }
 
     function createCompass(){
         const cg = new THREE.Group();
@@ -935,7 +1265,7 @@ try {
     }
     scene.add(createCompass());
 
-    window.updateSceneTheme = function() {
+ window.updateSceneTheme = function() {
         if(currentTheme === 'dark') {
             scene.background = new THREE.Color(0x0f172a);
             ambientLight.intensity = 0.4;
@@ -945,8 +1275,19 @@ try {
             ambientLight.intensity = 0.7;
             dirLight.intensity = 2.0;
         }
-        if (currentGroundTex !== 'solid') {
-            ground.material.map = createGroundTexture(currentGroundTex, currentGroundColor);
+        
+        const isMapTile = ['osm', 'gsat', 'ghyb'].includes(currentGroundTex);
+        
+        if (isMapTile) {
+            ground.visible = false; // Отключаем подложку полностью, чтобы она не перебивала карту
+        } else {
+            ground.visible = true;
+            ground.material.color.setHex(parseInt(currentGroundColor.replace('#', '0x')));
+            if (currentGroundTex !== 'solid') {
+                ground.material.map = createGroundTexture(currentGroundTex, currentGroundColor);
+            } else {
+                ground.material.map = null;
+            }
             ground.material.needsUpdate = true;
         }
     }
@@ -1325,8 +1666,8 @@ try {
             var shape=createShape(poly);
             if(shape.getPoints().length>2){
                 var pGrp = new THREE.Group();
-                var mat=new THREE.MeshStandardMaterial({
-                    color:pColor, roughness:0.85, metalness:0.05, transparent:true, opacity:0.4, 
+         var mat=new THREE.MeshStandardMaterial({
+                    color:pColor, roughness:0.85, metalness:0.05, transparent:true, opacity: currentParcelOpacity,
                     depthWrite: false, // Отключаем мерцание с целевым объектом
                     polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 // Смещаем от граней
                 });
@@ -1731,27 +2072,77 @@ try {
     addLayerUi("Инфраструктура", "#f59e0b", sceneGroups.structures, data.structures);
     addLayerUi("ЗОУИТ", "#8b5cf6", sceneGroups.zouit, data.zouits);
     
-    var groundControl = document.createElement("div"); 
-    groundControl.style.cssText = "margin-top: 15px; border-top: 1px solid var(--border-color); padding-top: 15px; display: flex; align-items: center; gap: 10px;";
+var groundControl = document.createElement("div"); 
+    groundControl.style.cssText = "margin-top: 15px; border-top: 1px solid var(--border-color); padding-top: 15px; display: flex; flex-direction: column; gap: 12px;";
     groundControl.innerHTML = \`
-        <label style="font-size:13px;font-weight:600;">Подложка:</label>
-        <input type="color" id="ground-color-picker" value="\${currentGroundColor}" style="border:none;width:24px;height:24px;cursor:pointer;background:none;padding:0;">
-        <select id="ground-texture-picker" style="padding:4px; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-color); color:var(--text-color); font-size:12px; outline:none;">
-            <option value="grid" \${currentGroundTex === 'grid' ? 'selected' : ''}>Сетка</option>
-            <option value="checker" \${currentGroundTex === 'checker' ? 'selected' : ''}>Шахматы</option>
-            <option value="solid" \${currentGroundTex === 'solid' ? 'selected' : ''}>Сплошной</option>
-        </select>
+        <div style="display: flex; align-items: center; gap: 10px;">
+            <label style="font-size:13px;font-weight:600;">Подложка:</label>
+            <input type="color" id="ground-color-picker" value="\${currentGroundColor}" style="border:none;width:24px;height:24px;cursor:pointer;background:none;padding:0;">
+            <select id="ground-texture-picker" style="padding:4px; border-radius:4px; border:1px solid var(--border-color); background:var(--bg-color); color:var(--text-color); font-size:12px; outline:none; max-width: 150px;">
+                <option value="grid" \${currentGroundTex === 'grid' ? 'selected' : ''}>Сетка</option>
+                <option value="checker" \${currentGroundTex === 'checker' ? 'selected' : ''}>Шахматы</option>
+                <option value="solid" \${currentGroundTex === 'solid' ? 'selected' : ''}>Сплошной</option>
+                <optgroup label="Спутник / Карты">
+                    <option value="gsat" \${currentGroundTex === 'gsat' ? 'selected' : ''}>Спутник</option>
+                    <option value="ghyb" \${currentGroundTex === 'ghyb' ? 'selected' : ''}>Гибрид</option>
+                    <option value="osm" \${currentGroundTex === 'osm' ? 'selected' : ''}>Схема OSM</option>
+                </optgroup>
+            </select>
+        </div>
+        <div style="width: 100%;">
+            <label style="font-size:12px;font-weight:600;display:flex;justify-content:space-between;color:var(--text-muted);">
+                Заливка ЗУ: <span id="parcel-opacity-val">${Math.round(savedParcelOpacity * 100)}%</span>
+            </label>
+            <input type="range" id="parcel-opacity-slider" min="0" max="1" step="0.05" value="${savedParcelOpacity}" style="width:100%; accent-color:#10b981; cursor:pointer; margin-top:4px;">
+        </div>
     \`;
     uiContainer.appendChild(groundControl);
+
+ // Добавляем обработчик для нового ползунка
+    document.getElementById("parcel-opacity-slider").addEventListener("input", function(e) {
+        const val = parseFloat(e.target.value);
+        document.getElementById("parcel-opacity-val").innerText = Math.round(val * 100) + "%";
+        currentParcelOpacity = val; // Обновляем локальную переменную для экспорта
+        
+        // Меняем прозрачность ЗУ мгновенно
+        if (sceneGroups && sceneGroups.parcels) {
+            sceneGroups.parcels.children.forEach(group => {
+                group.children.forEach(child => {
+                    if (child.isMesh && child.material) child.material.opacity = val;
+                });
+            });
+        }
+        
+        // Отправляем сигнал родителю ТОЛЬКО для сохранения в localStorage
+        window.parent.postMessage({ type: 'setParcelOpacity', opacity: val }, '*');
+    });
 
    const applyGroundSettings = () => {
         const newColor = document.getElementById("ground-color-picker").value;
         const newTex = document.getElementById("ground-texture-picker").value;
         window.parent.postMessage({ type: 'saveGroundSettings', color: newColor, tex: newTex }, '*');
-        ground.material.color.setHex(parseInt(newColor.replace('#','0x')));
-        if (newTex === 'solid') ground.material.map = null;
-        else ground.material.map = createGroundTexture(newTex, newColor);
-        ground.material.needsUpdate = true;
+        
+        currentGroundColor = newColor;
+        currentGroundTex = newTex;
+
+        const isMapTile = ['osm', 'gsat', 'ghyb'].includes(newTex);
+        
+        if (isMapTile) {
+            ground.visible = false; // Отключаем цветную землю
+        } else {
+            ground.visible = true;
+            ground.material.color.setHex(parseInt(newColor.replace('#','0x')));
+            if (newTex === 'solid') {
+                ground.material.map = null;
+            } else {
+                ground.material.map = createGroundTexture(newTex, newColor);
+            }
+            ground.material.needsUpdate = true;
+        }
+
+        if (typeof window.loadMapTiles === 'function') {
+            window.loadMapTiles(newTex);
+        }
     };
 
     document.getElementById("ground-color-picker").addEventListener("input", applyGroundSettings);
@@ -1885,7 +2276,10 @@ const altValueEl = document.getElementById("alt-value");
     
     function animate(){
         requestAnimationFrame(animate);
-        controls.update();
+             controls.update();
+        
+        // Синхронизируем слайдер зума с текущим положением камеры
+        if (typeof updateSliderFromCamera === 'function') updateSliderFromCamera();
         
         if (altValueEl) {
             let alt = camera.position.y;
@@ -1930,7 +2324,7 @@ const altValueEl = document.getElementById("alt-value");
                     localStorage.setItem('3d_ground_color', e.data.color);
                     localStorage.setItem('3d_ground_texture', e.data.tex);
                 }
-                if(e.data && e.data.type === 'setTheme') {
+              if(e.data && e.data.type === 'setTheme') {
                     const newTheme = e.data.theme;
                     localStorage.setItem('3d_viewer_theme', newTheme);
                     modal.dataset.theme = newTheme;
@@ -1939,10 +2333,18 @@ const altValueEl = document.getElementById("alt-value");
                     header.style.color = newTheme === 'dark' ? '#f8fafc' : '#1e293b';
                     themeBtn.innerHTML = newTheme === 'dark' ? '<i class="fas fa-sun"></i>' : '<i class="fas fa-moon"></i>';
                 }
+                
+                // Принимаем сообщение от ползунка и меняем прозрачность у всех ЗУ
+               // Сохраняем прозрачность в кэш
+                if(e.data && e.data.type === 'setParcelOpacity') {
+                    localStorage.setItem('3d_parcel_opacity', e.data.opacity);
+                }
+
                 if(e.data && e.data.type === 'export3DHtml') {
                     const latestTheme = localStorage.getItem('3d_viewer_theme') || 'light';
                     const latestColor = localStorage.getItem('3d_ground_color') || '#f0f2f5';
-                    const latestTex = localStorage.getItem('3d_ground_texture') || 'grid';
+                    const latestTex = 'gsat'; // Временно принудительно Спутник
+                    const latestParcelOpacity = localStorage.getItem('3d_parcel_opacity') || '0.4';
                     
                     let exportStr = srcDocContent;
                     
@@ -1952,6 +2354,11 @@ const altValueEl = document.getElementById("alt-value");
                     exportStr = exportStr.replace(`let currentGroundColor = "${savedGroundColor}";`, `let currentGroundColor = "${latestColor}";`);
                     exportStr = exportStr.replace(`let currentGroundTex = "${savedGroundTex}";`, `let currentGroundTex = "${latestTex}";`);
                     exportStr = exportStr.replace(`body data-theme="${savedTheme}"`, `body data-theme="${latestTheme}"`);
+                    
+                    // Обновляем значение прозрачности ЗУ в экспортируемом HTML
+                    exportStr = exportStr.replace(`let currentParcelOpacity = ${savedParcelOpacity};`, `let currentParcelOpacity = ${latestParcelOpacity};`);
+                    exportStr = exportStr.replace(`value="${savedParcelOpacity}"`, `value="${latestParcelOpacity}"`);
+                    exportStr = exportStr.replace(`>${Math.round(savedParcelOpacity * 100)}%<`, `>${Math.round(latestParcelOpacity * 100)}%<`);
                     
                     const blob = new Blob([exportStr], {type:"text/html;charset=utf-8"});
                     const url = URL.createObjectURL(blob);
@@ -1993,3 +2400,4 @@ const altValueEl = document.getElementById("alt-value");
         }
     }, 100);
 };
+        

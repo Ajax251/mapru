@@ -169,8 +169,23 @@ window.open3DVisualization = function () {
                         return { x: c[0] - originX, y: c[1] - originY };
                     })));
                     
-                    let geomType = f.geometry.type.includes('Line') ? 'Line' : 'Polygon';
+               let geomType = f.geometry.type.includes('Line') ? 'Line' : 'Polygon';
                     if (f.geometry.type === 'Point') geomType = 'Point';
+
+                    // --- Добавляем вычисление длины для линий ---
+                    if (geomType === 'Line') {
+                        let len3857 = 0;
+                        const lines = f.geometry.type === 'LineString' ? [f.geometry.coordinates] : f.geometry.coordinates;
+                        lines.forEach(line => {
+                            for (let i = 0; i < line.length - 1; i++) {
+                                let dx = line[i+1][0] - line[i][0];
+                                let dy = line[i+1][1] - line[i][1];
+                                len3857 += Math.sqrt(dx*dx + dy*dy);
+                            }
+                        });
+                        meta.length = len3857 / mercatorScale;
+                    }
+                    // --------------------------------------------
 
                     result.push({ type: geomType, polygons: localPolys, meta: meta });
                 });
@@ -202,21 +217,28 @@ window.open3DVisualization = function () {
                     }
                 }
                 
-                let calcArea = 0;
+          let calcArea = 0;
+                let calcLength = 0;
                 try {
-                    if (typeof calculatePreciseGeometry === 'function' && (type === 'Polygon' || type === 'MultiPolygon')) {
-                        calcArea = calculatePreciseGeometry(obj).area;
+                    if (typeof calculatePreciseGeometry === 'function') {
+                        const stats = calculatePreciseGeometry(obj);
+                        calcArea = stats.area;
+                        calcLength = stats.perimeter;
                     }
                 } catch (e) { 
-                    console.error("Ошибка расчета площади в МСК для 3D:", e); 
+                    console.error("Ошибка расчета геометрии в МСК для 3D:", e); 
                 }
 
                 let areaStr = '';
-                if (egrnArea) {
-                    areaStr = `ЕГРН: ${egrnArea} м²`;
-                    if (calcArea > 0) areaStr += `<br>По координатам: ${Math.round(calcArea).toLocaleString('ru-RU')} м²`;
-                } else if (calcArea > 0) {
-                    areaStr = `Площадь (расчет): ${Math.round(calcArea).toLocaleString('ru-RU')} м²`;
+                if (type.includes('Line')) {
+                    areaStr = `Протяженность: ${calcLength.toFixed(2)} м`;
+                } else {
+                    if (egrnArea) {
+                        areaStr = `ЕГРН: ${egrnArea} м²`;
+                        if (calcArea > 0) areaStr += `<br>По координатам: ${Math.round(calcArea).toLocaleString('ru-RU')} м²`;
+                    } else if (calcArea > 0) {
+                        areaStr = `Площадь (расчет): ${Math.round(calcArea).toLocaleString('ru-RU')} м²`;
+                    }
                 }
 
                 allLocalFeatures.target.push({
@@ -1623,15 +1645,18 @@ let currentGroundColor = "${savedGroundColor}";
         t.polygons.forEach(function(poly){
             if(!poly||!poly[0])return;
             var tGrp = new THREE.Group();
-            if(t.type==="Line"){
-                var vp=poly[0].map(function(p){return new THREE.Vector3(p.x,1.5,-p.y);});
-                if(vp.length>1){
-                    var tube=new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(vp,false,"chordal"),64,0.6,8,false),new THREE.MeshStandardMaterial({color:color}));
-                    tube.castShadow=true; tGrp.add(tube);
-                    attachMeta(tGrp, t.meta, "Целевой объект (Линия)");
-                    sceneGroups.target.add(tGrp);
-                }
-            }else{
+           if(t.type==="Line"){
+                    var vp=poly[0].map(function(p){return new THREE.Vector3(p.x,1.5,-p.y);});
+                    if(vp.length>1){
+                        var tube=new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(vp,false,"chordal"),64,0.6,8,false),new THREE.MeshStandardMaterial({color:color}));
+                        tube.castShadow=true; tGrp.add(tube);
+                        attachMeta(tGrp, t.meta, "Целевой объект (Линия)");
+                        sceneGroups.target.add(tGrp);
+                        
+                        var midPt = vp[Math.floor(vp.length/2)];
+                        addLabel(new THREE.Vector3(midPt.x, 3.5, midPt.z), 10, "Целевая", "Линия", t.meta, "#" + color.toString(16).padStart(6, '0'), tGrp);
+                    }
+                }else{
                 var shape=createShape(poly);
                 if(shape.getPoints().length>2){
                     var depth=0.1; // Целевой плоский
@@ -1656,30 +1681,73 @@ let currentGroundColor = "${savedGroundColor}";
         });
     });
 
-    data.parcels.forEach(function(p,index){
-        // Участки ЗУ строго выше целевого (0.3+)
-        var yOff= 0.3 + (index * 0.01); var depth=0.1;
-        var pHex=PARCEL_PALETTE[index%PARCEL_PALETTE.length];
-        var pColor=new THREE.Color(pHex);
-        var eColor=darken(pHex);
+data.parcels.forEach(function(p,index){
+        var isLine = p.type === 'Line';
+        // Если это линия или имя/ID не похожи на кадастровый номер, считаем объект произвольным
+        var isArbitrary = isLine || !p.meta.id.includes(':') || p.meta.id.toLowerCase().includes('объект') || p.meta.id.toLowerCase().includes('полигон') || p.meta.id.toLowerCase().includes('линия');
+        
+        var yOff = 0.3 + (index * 0.01); var depth = 0.1;
+        var pHex = isArbitrary ? 0x818cf8 : PARCEL_PALETTE[index%PARCEL_PALETTE.length]; // 0x818cf8 - Светлый Indigo
+        var pColor = new THREE.Color(pHex);
+        var eColor = darken(pHex);
+        
         p.polygons.forEach(function(poly){
-            var shape=createShape(poly);
-            if(shape.getPoints().length>2){
-                var pGrp = new THREE.Group();
-         var mat=new THREE.MeshStandardMaterial({
-                    color:pColor, roughness:0.85, metalness:0.05, transparent:true, opacity: currentParcelOpacity,
-                    depthWrite: false, // Отключаем мерцание с целевым объектом
-                    polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1 // Смещаем от граней
-                });
-                var mesh=new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:depth,bevelEnabled:false}),mat);
-                mesh.rotation.x=-Math.PI/2; mesh.position.y=yOff;
-                mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color:eColor})));
-                pGrp.add(mesh);
-                seedParcelWithFlowers(poly[0], pGrp, yOff + depth);
-                attachMeta(pGrp, p.meta, "Земельный участок");
-                sceneGroups.parcels.add(pGrp);
-                var c = getCentroid(poly[0]); c.y = yOff + depth + 1;
-                addLabel(c, 5, "ЗУ", getShortCad(p.meta.id), p.meta, "#" + pColor.getHexString(), pGrp);
+            if(!poly || !poly[0]) return;
+            var pGrp = new THREE.Group();
+            
+            if (isLine) {
+                var vp = poly[0].map(function(pt){return new THREE.Vector3(pt.x, yOff, -pt.y);});
+                if(vp.length > 1){
+                    var tube = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(vp, false, "chordal"), 64, 0.4, 8, false), new THREE.MeshStandardMaterial({color: pColor, roughness: 0.4}));
+                    tube.castShadow = true; 
+                    pGrp.add(tube);
+                    
+                    var lenStr = p.meta.length ? (p.meta.length.toFixed(2) + " м") : "";
+                    p.meta.area = "Протяженность: " + lenStr;
+                    var labelText = (p.meta.name && p.meta.name !== 'Объект') ? p.meta.name : "Произвольная линия";
+                    
+                    attachMeta(pGrp, p.meta, "Произвольный объект");
+                    sceneGroups.parcels.add(pGrp);
+                    
+                    var midPt = vp[Math.floor(vp.length/2)];
+                    addLabel(new THREE.Vector3(midPt.x, yOff + 2, midPt.z), 6, "Объект", labelText, p.meta, "#818cf8", pGrp);
+                }
+            } else {
+                var shape = createShape(poly);
+                if(shape.getPoints().length > 2){
+                    var mat = new THREE.MeshStandardMaterial({
+                        color: pColor, roughness: 0.85, metalness: 0.05, transparent: true, opacity: isArbitrary ? 0.6 : currentParcelOpacity,
+                        depthWrite: false, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1
+                    });
+                    var mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:depth,bevelEnabled:false}),mat);
+                    mesh.rotation.x = -Math.PI/2; mesh.position.y = yOff;
+                    mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color: eColor, linewidth: isArbitrary ? 2 : 1})));
+                    pGrp.add(mesh);
+                    
+                    // Цветочки сеем только на настоящих земельных участках
+                    if (!isArbitrary) seedParcelWithFlowers(poly[0], pGrp, yOff + depth);
+                    
+                    // Вычисление площади для произвольных полигонов, если её нет в метаданных
+                    if (isArbitrary && (!p.meta.area || p.meta.area === '')) {
+                        var calcA = 0;
+                        var pts = poly[0];
+                        for (var i = 0; i < pts.length - 1; i++) {
+                            calcA += pts[i].x * pts[i+1].y - pts[i+1].x * pts[i].y;
+                        }
+                        calcA += pts[pts.length-1].x * pts[0].y - pts[0].x * pts[pts.length-1].y;
+                        calcA = Math.abs(calcA) / 2;
+                        calcA = calcA / (mercatorScale * mercatorScale);
+                        p.meta.area = "Площадь: " + Math.round(calcA).toLocaleString('ru-RU') + " м²";
+                    }
+
+                    var catName = isArbitrary ? "Произвольный площадной объект" : "Земельный участок";
+                    attachMeta(pGrp, p.meta, catName);
+                    sceneGroups.parcels.add(pGrp);
+                    
+                    var c = getCentroid(poly[0]); c.y = yOff + depth + 1;
+                    var shortTitle = isArbitrary ? (p.meta.name !== 'Объект' ? p.meta.name : "Площадной объект") : getShortCad(p.meta.id);
+                    addLabel(c, isArbitrary ? 6 : 5, isArbitrary ? "Объект" : "ЗУ", shortTitle, p.meta, "#" + pColor.getHexString(), pGrp);
+                }
             }
         });
     });
