@@ -1684,7 +1684,7 @@ let currentGroundColor = "${savedGroundColor}";
 data.parcels.forEach(function(p,index){
         try {
             var safeId = String(p.meta.id || '').toLowerCase();
-            console.log(`[3D-Viewer] Обработка объекта parcels[${index}]:`, safeId, "| Тип:", p.type);
+            console.log("[3D-Viewer] Обработка объекта parcels[" + index + "]:", safeId, "| Тип:", p.type);
             
             var isLine = p.type === 'Line';
             var isArbitrary = isLine || !safeId.includes(':') || safeId.includes('объект') || safeId.includes('полигон') || safeId.includes('линия');
@@ -1696,14 +1696,14 @@ data.parcels.forEach(function(p,index){
             
             p.polygons.forEach(function(poly, polyIdx){
                 if(!poly || !poly[0]) return;
-                console.log(`[3D-Viewer] --> Отрисовка контура ${polyIdx} для`, safeId);
+                console.log("[3D-Viewer] --> Отрисовка контура " + polyIdx + " для", safeId);
                 
                 var pGrp = new THREE.Group();
                 
                 if (isLine) {
                     var vp = poly[0].map(function(pt){return new THREE.Vector3(pt.x, yOff, -pt.y);});
                     if(vp.length > 1){
-                        // Исправление: используем прямые отрезки, чтобы линия была ломаной (зигзагом), а не овальной сплайн-кривой
+                        // Используем прямые отрезки, чтобы линия была строгим зигзагом
                         var path = new THREE.CurvePath();
                         for (var i = 0; i < vp.length - 1; i++) {
                             path.add(new THREE.LineCurve3(vp[i], vp[i+1]));
@@ -1722,7 +1722,7 @@ data.parcels.forEach(function(p,index){
                         
                         var midPt = vp[Math.floor(vp.length/2)];
                         addLabel(new THREE.Vector3(midPt.x, yOff + 2, midPt.z), 6, "Объект", labelText, p.meta, "#818cf8", pGrp);
-                        console.log(`[3D-Viewer] Успешно отрисована линия`, safeId);
+                        console.log("[3D-Viewer] Успешно отрисована линия", safeId);
                     }
                 } else {
                     var shape = createShape(poly);
@@ -1734,7 +1734,6 @@ data.parcels.forEach(function(p,index){
                             depthWrite: false, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1
                         });
                         
-                        // Создание 3D-геометрии (именно здесь Three.js может "споткнуться" при самопересекающихся контурах)
                         var extrudeGeo = new THREE.ExtrudeGeometry(shape, {depth: depth, bevelEnabled: false});
                         var mesh = new THREE.Mesh(extrudeGeo, mat);
                         
@@ -1761,15 +1760,14 @@ data.parcels.forEach(function(p,index){
                         sceneGroups.parcels.add(pGrp);
                         
                         var c = getCentroid(poly[0]); c.y = yOff + depth + 1;
-                        var shortTitle = isArbitrary ? (p.meta.name && p.meta.name !== 'Объект' ? p.meta.name : "Площадной объект") : getShortCad(p.meta.id);
+                        var shortTitle = isArbitrary ? ((p.meta.name && p.meta.name !== 'Объект') ? p.meta.name : "Площадной объект") : getShortCad(p.meta.id);
                         addLabel(c, isArbitrary ? 6 : 5, isArbitrary ? "Объект" : "ЗУ", shortTitle, p.meta, "#" + pColor.getHexString(), pGrp);
-                        console.log(`[3D-Viewer] Успешно отрисован полигон`, safeId);
+                        console.log("[3D-Viewer] Успешно отрисован полигон", safeId);
                     }
                 }
             });
         } catch (err) {
-            // Если объект вызывает ошибку (например, сломанные координаты), он отбрасывается, но 3D загрузится!
-            console.error(`[3D-Viewer] КРИТИЧЕСКАЯ ОШИБКА при обработке объекта ${p.meta.id}:`, err);
+            console.error("[3D-Viewer] КРИТИЧЕСКАЯ ОШИБКА при обработке объекта " + (p.meta && p.meta.id ? p.meta.id : "unknown") + ":", err);
         }
     });
 
