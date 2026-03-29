@@ -1682,95 +1682,77 @@ let currentGroundColor = "${savedGroundColor}";
     });
 
 data.parcels.forEach(function(p,index){
-        try {
-            var safeId = String(p.meta.id || '').toLowerCase();
-            console.log(`[3D-Viewer] Обработка объекта parcels[${index}]:`, safeId, "| Тип:", p.type);
+        var isLine = p.type === 'Line';
+        // Безопасное приведение к строке, чтобы избежать ошибок с числовыми ID
+        var safeId = String(p.meta.id || '').toLowerCase();
+        
+        // Считаем объект произвольным, если это линия ИЛИ в его ID нет двоеточия (не КН), ИЛИ в ID есть ключевые слова
+        var isArbitrary = isLine || !safeId.includes(':') || safeId.includes('объект') || safeId.includes('полигон') || safeId.includes('линия');
+        
+        var yOff = 0.3 + (index * 0.01); var depth = 0.1;
+        var pHex = isArbitrary ? 0x818cf8 : PARCEL_PALETTE[index%PARCEL_PALETTE.length]; // 0x818cf8 - Светлый Indigo
+        var pColor = new THREE.Color(pHex);
+        var eColor = darken(pHex);
+        
+        p.polygons.forEach(function(poly){
+            if(!poly || !poly[0]) return;
+            var pGrp = new THREE.Group();
             
-            var isLine = p.type === 'Line';
-            var isArbitrary = isLine || !safeId.includes(':') || safeId.includes('объект') || safeId.includes('полигон') || safeId.includes('линия');
-            
-            var yOff = 0.3 + (index * 0.01); var depth = 0.1;
-            var pHex = isArbitrary ? 0x818cf8 : PARCEL_PALETTE[index%PARCEL_PALETTE.length]; // 0x818cf8 - Светлый Indigo
-            var pColor = new THREE.Color(pHex);
-            var eColor = darken(pHex);
-            
-            p.polygons.forEach(function(poly, polyIdx){
-                if(!poly || !poly[0]) return;
-                console.log(`[3D-Viewer] --> Отрисовка контура ${polyIdx} для`, safeId);
-                
-                var pGrp = new THREE.Group();
-                
-                if (isLine) {
-                    var vp = poly[0].map(function(pt){return new THREE.Vector3(pt.x, yOff, -pt.y);});
-                    if(vp.length > 1){
-                        // Исправление: используем прямые отрезки, чтобы линия была ломаной (зигзагом), а не овальной сплайн-кривой
-                        var path = new THREE.CurvePath();
-                        for (var i = 0; i < vp.length - 1; i++) {
-                            path.add(new THREE.LineCurve3(vp[i], vp[i+1]));
-                        }
-                        
-                        var tube = new THREE.Mesh(new THREE.TubeGeometry(path, vp.length * 4, 0.4, 8, false), new THREE.MeshStandardMaterial({color: pColor, roughness: 0.4}));
-                        tube.castShadow = true; 
-                        pGrp.add(tube);
-                        
-                        var lenStr = p.meta.length ? (p.meta.length.toFixed(2) + " м") : "";
-                        p.meta.area = "Протяженность: " + lenStr;
-                        var labelText = (p.meta.name && p.meta.name !== 'Объект') ? p.meta.name : "Произвольная линия";
-                        
-                        attachMeta(pGrp, p.meta, "Произвольный линейный объект");
-                        sceneGroups.parcels.add(pGrp);
-                        
-                        var midPt = vp[Math.floor(vp.length/2)];
-                        addLabel(new THREE.Vector3(midPt.x, yOff + 2, midPt.z), 6, "Объект", labelText, p.meta, "#818cf8", pGrp);
-                        console.log(`[3D-Viewer] Успешно отрисована линия`, safeId);
-                    }
-                } else {
-                    var shape = createShape(poly);
-                    var pts = shape.getPoints();
+            if (isLine) {
+                var vp = poly[0].map(function(pt){return new THREE.Vector3(pt.x, yOff, -pt.y);});
+                if(vp.length > 1){
+                    var tube = new THREE.Mesh(new THREE.TubeGeometry(new THREE.CatmullRomCurve3(vp, false, "chordal"), 64, 0.4, 8, false), new THREE.MeshStandardMaterial({color: pColor, roughness: 0.4}));
+                    tube.castShadow = true; 
+                    pGrp.add(tube);
                     
-                    if(pts.length > 2){
-                        var mat = new THREE.MeshStandardMaterial({
-                            color: pColor, roughness: 0.85, metalness: 0.05, transparent: true, opacity: isArbitrary ? 0.6 : currentParcelOpacity,
-                            depthWrite: false, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1
-                        });
-                        
-                        // Создание 3D-геометрии (именно здесь Three.js может "споткнуться" при самопересекающихся контурах)
-                        var extrudeGeo = new THREE.ExtrudeGeometry(shape, {depth: depth, bevelEnabled: false});
-                        var mesh = new THREE.Mesh(extrudeGeo, mat);
-                        
-                        mesh.rotation.x = -Math.PI/2; mesh.position.y = yOff;
-                        mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color: eColor, linewidth: isArbitrary ? 2 : 1})));
-                        pGrp.add(mesh);
-                        
-                        if (!isArbitrary) seedParcelWithFlowers(poly[0], pGrp, yOff + depth);
-                        
-                        if (isArbitrary && (!p.meta.area || p.meta.area === '')) {
-                            var calcA = 0;
-                            var polyPts = poly[0];
-                            for (var i = 0; i < polyPts.length - 1; i++) {
-                                calcA += polyPts[i].x * polyPts[i+1].y - polyPts[i+1].x * polyPts[i].y;
-                            }
-                            calcA += polyPts[polyPts.length-1].x * polyPts[0].y - polyPts[0].x * polyPts[polyPts.length-1].y;
-                            calcA = Math.abs(calcA) / 2;
-                            calcA = calcA / (mercatorScale * mercatorScale);
-                            p.meta.area = "Площадь: " + Math.round(calcA).toLocaleString('ru-RU') + " м²";
-                        }
-
-                        var catName = isArbitrary ? "Произвольный площадной объект" : "Земельный участок";
-                        attachMeta(pGrp, p.meta, catName);
-                        sceneGroups.parcels.add(pGrp);
-                        
-                        var c = getCentroid(poly[0]); c.y = yOff + depth + 1;
-                        var shortTitle = isArbitrary ? (p.meta.name && p.meta.name !== 'Объект' ? p.meta.name : "Площадной объект") : getShortCad(p.meta.id);
-                        addLabel(c, isArbitrary ? 6 : 5, isArbitrary ? "Объект" : "ЗУ", shortTitle, p.meta, "#" + pColor.getHexString(), pGrp);
-                        console.log(`[3D-Viewer] Успешно отрисован полигон`, safeId);
-                    }
+                    var lenStr = p.meta.length ? (p.meta.length.toFixed(2) + " м") : "";
+                    p.meta.area = "Протяженность: " + lenStr;
+                    var labelText = (p.meta.name && p.meta.name !== 'Объект') ? p.meta.name : "Произвольная линия";
+                    
+                    attachMeta(pGrp, p.meta, "Произвольный объект");
+                    sceneGroups.parcels.add(pGrp);
+                    
+                    var midPt = vp[Math.floor(vp.length/2)];
+                    addLabel(new THREE.Vector3(midPt.x, yOff + 2, midPt.z), 6, "Объект", labelText, p.meta, "#818cf8", pGrp);
                 }
-            });
-        } catch (err) {
-            // Если объект вызывает ошибку (например, сломанные координаты), он отбрасывается, но 3D загрузится!
-            console.error(`[3D-Viewer] КРИТИЧЕСКАЯ ОШИБКА при обработке объекта ${p.meta.id}:`, err);
-        }
+            } else {
+                var shape = createShape(poly);
+                if(shape.getPoints().length > 2){
+                    var mat = new THREE.MeshStandardMaterial({
+                        color: pColor, roughness: 0.85, metalness: 0.05, transparent: true, opacity: isArbitrary ? 0.6 : currentParcelOpacity,
+                        depthWrite: false, polygonOffset: true, polygonOffsetFactor: 1, polygonOffsetUnits: 1
+                    });
+                    var mesh = new THREE.Mesh(new THREE.ExtrudeGeometry(shape,{depth:depth,bevelEnabled:false}),mat);
+                    mesh.rotation.x = -Math.PI/2; mesh.position.y = yOff;
+                    mesh.add(new THREE.LineSegments(new THREE.EdgesGeometry(mesh.geometry),new THREE.LineBasicMaterial({color: eColor, linewidth: isArbitrary ? 2 : 1})));
+                    pGrp.add(mesh);
+                    
+                    // Цветочки сеем только на настоящих земельных участках
+                    if (!isArbitrary) seedParcelWithFlowers(poly[0], pGrp, yOff + depth);
+                    
+                    // Вычисление площади для произвольных полигонов, если её нет в метаданных
+                    if (isArbitrary && (!p.meta.area || p.meta.area === '')) {
+                        var calcA = 0;
+                        var pts = poly[0];
+                        for (var i = 0; i < pts.length - 1; i++) {
+                            calcA += pts[i].x * pts[i+1].y - pts[i+1].x * pts[i].y;
+                        }
+                        calcA += pts[pts.length-1].x * pts[0].y - pts[0].x * pts[pts.length-1].y;
+                        calcA = Math.abs(calcA) / 2;
+                        calcA = calcA / (mercatorScale * mercatorScale);
+                        p.meta.area = "Площадь: " + Math.round(calcA).toLocaleString('ru-RU') + " м²";
+                    }
+
+                    var catName = isArbitrary ? "Произвольный площадной объект" : "Земельный участок";
+                    attachMeta(pGrp, p.meta, catName);
+                    sceneGroups.parcels.add(pGrp);
+                    
+                    var c = getCentroid(poly[0]); c.y = yOff + depth + 1;
+                    var shortTitle = isArbitrary ? (p.meta.name && p.meta.name !== 'Объект' ? p.meta.name : "Площадной объект") : getShortCad(p.meta.id);
+                    addLabel(c, isArbitrary ? 6 : 5, isArbitrary ? "Объект" : "ЗУ", shortTitle, p.meta, "#" + pColor.getHexString(), pGrp);
+                }
+            }
+        });
     });
 
     data.intersections.forEach(function(iObj){
