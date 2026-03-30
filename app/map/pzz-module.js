@@ -817,9 +817,11 @@ let moOffsetsCache = [];
 try {
     const cached = localStorage.getItem('moOffsetsCache');
     if (cached) moOffsetsCache = JSON.parse(cached);
-} catch(e) { console.error("Ошибка чтения кэша смещений", e); }
+} catch(e) { 
+    console.error("Ошибка чтения кэша смещений", e); 
+}
 
-// 1. Сохраняем смещения для текущего МО в БД Supabase
+// 1. Сохраняем смещения для текущего МО в БД Supabase (конвертируем в WGS84)
 async function saveOffsetsForCurrentMo(lat, lon, yaX, yaY, goX, goY) {
     if (typeof showLoader === 'function') showLoader("Определение МО для сохранения смещения...");
     
@@ -894,7 +896,88 @@ async function saveOffsetsForCurrentMo(lat, lon, yaX, yaY, goX, goY) {
     }
 }
 
-// 4. Проверка сдвига карты (> 1 км) и применение смещения (теперь всё напрямую в WGS84)
+// 2. Загрузка всех Bounding Boxes (кэша смещений) из БД
+async function loadAllMoOffsetsCache() {
+    if (typeof showLoader === 'function') showLoader("Загрузка базы смещений...");
+    
+    try {
+        const { data, error } = await supabaseClient
+            .from('municipal_offsets')
+            .select('*');
+
+        if (error) throw error;
+        
+        console.log(`[PZZ Offsets] Загружено ${data.length} записей смещений.`);
+        
+        localStorage.setItem('moOffsetsCache', JSON.stringify(data));
+        if (typeof showNotification === 'function') showNotification(`База смещений обновлена (${data.length} МО)`, 'success');
+        
+        return data;
+    } catch (err) {
+        console.error("[PZZ Offsets] Ошибка загрузки базы:", err);
+        if (typeof showNotification === 'function') showNotification(`Ошибка загрузки базы: ${err.message}`, 'error');
+        return null;
+    } finally {
+        if (typeof hideLoader === 'function') hideLoader();
+    }
+}
+
+// 3. Инициализация кнопок UI
+function initAutoOffsetUI() {
+    const wrapper = document.getElementById('offset-dropdown-wrapper');
+    const btn = document.getElementById('auto-offset-btn');
+    const menu = document.getElementById('offset-dropdown-menu');
+    const checkbox = document.getElementById('auto-offset-checkbox');
+    const saveBtn = document.getElementById('btn-save-mo-offset');
+    const loadBtn = document.getElementById('btn-load-mo-offsets');
+
+    if (!wrapper || !btn || !menu) return;
+
+    // Восстанавливаем состояние чекбокса
+    checkbox.checked = localStorage.getItem('isAutoMoOffsetEnabled') === 'true';
+
+    // Открытие/закрытие меню
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        menu.classList.toggle('show');
+    });
+
+    document.addEventListener('click', (e) => {
+        if (!wrapper.contains(e.target)) menu.classList.remove('show');
+    });
+
+    // Обработка чекбокса
+    checkbox.addEventListener('change', (e) => {
+        localStorage.setItem('isAutoMoOffsetEnabled', e.target.checked);
+        if (e.target.checked) checkMoOffset(map.getCenter(), true, true);
+    });
+
+    // Сохранение
+    saveBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        menu.classList.remove('show');
+        
+        const center = map.getCenter();
+        const yX = parseFloat(document.getElementById('mapOffsetX').value.replace(',', '.')) || 0;
+        const yY = parseFloat(document.getElementById('mapOffsetY').value.replace(',', '.')) || 0;
+        const gX = parseFloat(document.getElementById('kmlMapOffsetX').value.replace(',', '.')) || 0;
+        const gY = parseFloat(document.getElementById('kmlMapOffsetY').value.replace(',', '.')) || 0;
+
+        const success = await saveOffsetsForCurrentMo(center[0], center[1], yX, yY, gX, gY);
+        if (success) moOffsetsCache = await loadAllMoOffsetsCache() || moOffsetsCache;
+    });
+
+    // Загрузка
+    loadBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        menu.classList.remove('show');
+        moOffsetsCache = await loadAllMoOffsetsCache() || moOffsetsCache;
+        // Передаем true, true для вывода уведомления при ручном нажатии
+        checkMoOffset(map.getCenter(), true, true); 
+    });
+}
+
+// 4. Проверка сдвига карты (> 1 км) и применение смещения
 function checkMoOffset(currentCenterGeo, forceCheck = false, showForceSuccess = false) {
     if (!currentCenterGeo || !moOffsetsCache || moOffsetsCache.length === 0) {
         if (showForceSuccess && typeof showNotification === 'function') {
@@ -988,4 +1071,3 @@ function checkMoOffset(currentCenterGeo, forceCheck = false, showForceSuccess = 
         if (typeof showNotification === 'function') showNotification(`В базе нет данных о смещении для текущей локации`, 'warning');
     }
 }
-
