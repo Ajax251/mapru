@@ -882,7 +882,7 @@ async function saveOffsetsForCurrentMo(lat, lon, yaX, yaY, goX, goY) {
                     <div class="color-modal-content" style="width: 400px; max-width: 90vw;">
                         <h3 style="margin-top:0; color:#d97706;"><i class="fas fa-exclamation-triangle"></i> Обновление данных</h3>
                         <p style="font-size:0.95rem; color:#555; text-align:center; margin-bottom: 15px; line-height: 1.4;">
-                            В базе уже сохранены смещения для:<br><b style="color: #1e293b;">${targetName}</b><br>Заменить их новыми значениями?
+                            Найдены существуюшие смещения для:<br><b style="color: #1e293b;">${targetName}</b><br>Заменить их новыми значениями?
                         </p>
                         <table style="width:100%; border-collapse:collapse; font-size:0.9rem; margin-bottom:20px; text-align:center;">
                             <tr style="border-bottom: 1px solid #ccc; background: #f8fafc;">
