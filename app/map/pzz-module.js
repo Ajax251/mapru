@@ -280,7 +280,7 @@ function drawPzzPolygon(geometryGeoJSON, regNumber, moName, isFromDatabase) {
         const centerGeo = [(combinedBounds[0][0] + combinedBounds[1][0]) / 2, (combinedBounds[0][1] + combinedBounds[1][1]) / 2];
         const moTextPlacemark = new ymaps.Placemark(centerGeo, {
             iconContent: labelContent,
-            hintContent: isFromDatabase ? "ПЗЗ (Загружено из БД)" : "ПЗЗ"
+            hintContent: isFromDatabase ? "ПЗЗ " : "ПЗЗ"
         }, {
             preset: presetStyle,
             draggable: true
@@ -887,7 +887,7 @@ async function saveOffsetsForCurrentMo(lat, lon, yaX, yaY, goX, goY) {
                         <table style="width:100%; border-collapse:collapse; font-size:0.9rem; margin-bottom:20px; text-align:center;">
                             <tr style="border-bottom: 1px solid #ccc; background: #f8fafc;">
                                 <th style="padding:8px; text-align:left;">Параметр</th>
-                                <th style="padding:8px; color:#64748b;">Было в БД</th>
+                                <th style="padding:8px; color:#64748b;">Было</th>
                                 <th style="padding:8px; color:#10b981;">Станет</th>
                             </tr>
                             <tr style="border-bottom: 1px dashed #eee;">
