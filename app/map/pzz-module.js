@@ -822,6 +822,7 @@ try {
 }
 
 // 1. Сохраняем смещения для текущего МО в БД Supabase (конвертируем в WGS84)
+// 1. Сохраняем смещения для текущего МО в БД Supabase (конвертируем в WGS84) с проверкой перезаписи
 async function saveOffsetsForCurrentMo(lat, lon, yaX, yaY, goX, goY) {
     if (typeof showLoader === 'function') showLoader("Определение МО для сохранения смещения...");
     
@@ -855,7 +856,97 @@ async function saveOffsetsForCurrentMo(lat, lon, yaX, yaY, goX, goY) {
             throw new Error("Не удалось определить муниципальное образование в этой точке.");
         }
 
-        if (typeof showLoader === 'function') showLoader(`Сохранение смещений для ${targetName}...`);
+        // --- НАЧАЛО: Проверка существования записи в БД ---
+        const { data: existingData, error: checkError } = await supabaseClient
+            .from('municipal_offsets')
+            .select('ya_offset_x, ya_offset_y, go_offset_x, go_offset_y')
+            .eq('reg_number', targetRegNumber)
+            .maybeSingle(); // Возвращает данные или null, не выдает ошибку при отсутствии строк
+
+        if (checkError) {
+            console.error("Ошибка при проверке существующих данных:", checkError);
+            throw new Error("Не удалось проверить наличие данных в базе.");
+        }
+
+        if (existingData) {
+            if (typeof hideLoader === 'function') hideLoader(); // Прячем лоадер на время показа окна
+
+            // Встраиваем логику диалогового окна через Promise
+            const userConfirmed = await new Promise((resolve) => {
+                const modal = document.createElement('div');
+                modal.className = 'color-modal';
+                modal.style.display = 'flex';
+                modal.style.zIndex = '20000';
+                
+                modal.innerHTML = `
+                    <div class="color-modal-content" style="width: 400px; max-width: 90vw;">
+                        <h3 style="margin-top:0; color:#d97706;"><i class="fas fa-exclamation-triangle"></i> Обновление данных</h3>
+                        <p style="font-size:0.95rem; color:#555; text-align:center; margin-bottom: 15px; line-height: 1.4;">
+                            В базе уже сохранены смещения для:<br><b style="color: #1e293b;">${targetName}</b><br>Заменить их новыми значениями?
+                        </p>
+                        <table style="width:100%; border-collapse:collapse; font-size:0.9rem; margin-bottom:20px; text-align:center;">
+                            <tr style="border-bottom: 1px solid #ccc; background: #f8fafc;">
+                                <th style="padding:8px; text-align:left;">Параметр</th>
+                                <th style="padding:8px; color:#64748b;">Было в БД</th>
+                                <th style="padding:8px; color:#10b981;">Станет</th>
+                            </tr>
+                            <tr style="border-bottom: 1px dashed #eee;">
+                                <td style="padding:8px; text-align:left; font-weight:600;">Яндекс X</td>
+                                <td style="padding:8px; color:#64748b;">${existingData.ya_offset_x}</td>
+                                <td style="padding:8px; color:#10b981; font-weight:bold;">${yaX}</td>
+                            </tr>
+                            <tr style="border-bottom: 1px dashed #eee;">
+                                <td style="padding:8px; text-align:left; font-weight:600;">Яндекс Y</td>
+                                <td style="padding:8px; color:#64748b;">${existingData.ya_offset_y}</td>
+                                <td style="padding:8px; color:#10b981; font-weight:bold;">${yaY}</td>
+                            </tr>
+                            <tr style="border-bottom: 1px dashed #eee;">
+                                <td style="padding:8px; text-align:left; font-weight:600;">Google X</td>
+                                <td style="padding:8px; color:#64748b;">${existingData.go_offset_x}</td>
+                                <td style="padding:8px; color:#10b981; font-weight:bold;">${goX}</td>
+                            </tr>
+                            <tr>
+                                <td style="padding:8px; text-align:left; font-weight:600;">Google Y</td>
+                                <td style="padding:8px; color:#64748b;">${existingData.go_offset_y}</td>
+                                <td style="padding:8px; color:#10b981; font-weight:bold;">${goY}</td>
+                            </tr>
+                        </table>
+                        <div class="buttons" style="display:flex; justify-content:space-between; gap:10px; width: 100%;">
+                            <button id="btn-replace-ok" style="flex:1; padding:12px; border:none; border-radius:8px; background:#f59e0b; color:white; font-weight:bold; cursor:pointer; transition: 0.2s;"><i class="fas fa-save"></i> Заменить</button>
+                            <button id="btn-replace-cancel" style="flex:1; padding:12px; border:none; border-radius:8px; background:#94a3b8; color:white; font-weight:bold; cursor:pointer; transition: 0.2s;"><i class="fas fa-times"></i> Отмена</button>
+                        </div>
+                    </div>
+                `;
+                document.body.appendChild(modal);
+
+                // Ховер-эффекты для кнопок
+                const btnOk = modal.querySelector('#btn-replace-ok');
+                const btnCancel = modal.querySelector('#btn-replace-cancel');
+                btnOk.onmouseenter = () => btnOk.style.background = '#d97706';
+                btnOk.onmouseleave = () => btnOk.style.background = '#f59e0b';
+                btnCancel.onmouseenter = () => btnCancel.style.background = '#64748b';
+                btnCancel.onmouseleave = () => btnCancel.style.background = '#94a3b8';
+
+                const cleanUp = (result) => {
+                    document.body.removeChild(modal);
+                    resolve(result);
+                };
+
+                btnOk.onclick = () => cleanUp(true);
+                btnCancel.onclick = () => cleanUp(false);
+            });
+
+            if (!userConfirmed) {
+                if (typeof showNotification === 'function') showNotification('Сохранение отменено', 'info');
+                return false;
+            }
+            if (typeof showLoader === 'function') showLoader(`Сохранение смещений для ${targetName}...`);
+        }
+        // --- КОНЕЦ: Проверка существования записи в БД ---
+
+        if (!existingData && typeof showLoader === 'function') {
+            showLoader(`Сохранение смещений для ${targetName}...`);
+        }
 
         // Вычисляем Bounding Box с помощью Turf.js (в координатах API, т.е. EPSG:3857)
         const tGeom = targetGeometry.type === 'Polygon' ? turf.polygon(targetGeometry.coordinates) : turf.multiPolygon(targetGeometry.coordinates);
