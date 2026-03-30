@@ -828,7 +828,7 @@ async function saveOffsetsForCurrentMo(lat, lon, yaX, yaY, goX, goY) {
         let targetName = null;
         let targetGeometry = null;
 
-        // Ищем МО через API Яндекса/NSPD
+        // Ищем МО через API NSPD
         if (typeof queryMunicipalInfo === 'function') {
             const apiData = await queryMunicipalInfo(lat, lon);
             if (apiData && apiData.features && apiData.features.length > 0) {
@@ -855,9 +855,13 @@ async function saveOffsetsForCurrentMo(lat, lon, yaX, yaY, goX, goY) {
 
         if (typeof showLoader === 'function') showLoader(`Сохранение смещений для ${targetName}...`);
 
-        // Вычисляем Bounding Box с помощью Turf.js
+        // Вычисляем Bounding Box с помощью Turf.js (в координатах API, т.е. EPSG:3857)
         const tGeom = targetGeometry.type === 'Polygon' ? turf.polygon(targetGeometry.coordinates) : turf.multiPolygon(targetGeometry.coordinates);
-        const bbox = turf.bbox(tGeom); // Возвращает [minLon, minLat, maxLon, maxLat]
+        const bbox3857 = turf.bbox(tGeom); // Возвращает [minLon, minLat, maxLon, maxLat] в EPSG:3857
+
+        // КОНВЕРТАЦИЯ В WGS84 ПЕРЕД СОХРАНЕНИЕМ
+        const minWgs = proj4('EPSG:3857', 'EPSG:4326', [bbox3857[0], bbox3857[1]]); // [minLon, minLat] в WGS84
+        const maxWgs = proj4('EPSG:3857', 'EPSG:4326', [bbox3857[2], bbox3857[3]]); // [maxLon, maxLat] в WGS84
 
         // Отправляем данные в таблицу municipal_offsets через supabaseClient
         const { data, error } = await supabaseClient
@@ -865,10 +869,10 @@ async function saveOffsetsForCurrentMo(lat, lon, yaX, yaY, goX, goY) {
             .upsert({
                 reg_number: targetRegNumber,
                 name: targetName,
-                min_lon: bbox[0],
-                min_lat: bbox[1],
-                max_lon: bbox[2],
-                max_lat: bbox[3],
+                min_lon: minWgs[0],
+                min_lat: minWgs[1],
+                max_lon: maxWgs[0],
+                max_lat: maxWgs[1],
                 ya_offset_x: yaX,
                 ya_offset_y: yaY,
                 go_offset_x: goX,
@@ -890,89 +894,7 @@ async function saveOffsetsForCurrentMo(lat, lon, yaX, yaY, goX, goY) {
     }
 }
 
-// 2. Загрузка всех Bounding Boxes (кэша смещений) из БД
-async function loadAllMoOffsetsCache() {
-    if (typeof showLoader === 'function') showLoader("Загрузка базы смещений...");
-    
-    try {
-        const { data, error } = await supabaseClient
-            .from('municipal_offsets')
-            .select('*');
-
-        if (error) throw error;
-        
-        // Массив data уже содержит нужные поля min_lat, max_lat и т.д.
-        console.log(`[PZZ Offsets] Загружено ${data.length} записей смещений.`);
-        
-        localStorage.setItem('moOffsetsCache', JSON.stringify(data));
-        if (typeof showNotification === 'function') showNotification(`База смещений обновлена (${data.length} МО)`, 'success');
-        
-        return data;
-    } catch (err) {
-        console.error("[PZZ Offsets] Ошибка загрузки базы:", err);
-        if (typeof showNotification === 'function') showNotification(`Ошибка загрузки базы: ${err.message}`, 'error');
-        return null;
-    } finally {
-        if (typeof hideLoader === 'function') hideLoader();
-    }
-}
-
-// 3. Инициализация кнопок UI
-function initAutoOffsetUI() {
-    const wrapper = document.getElementById('offset-dropdown-wrapper');
-    const btn = document.getElementById('auto-offset-btn');
-    const menu = document.getElementById('offset-dropdown-menu');
-    const checkbox = document.getElementById('auto-offset-checkbox');
-    const saveBtn = document.getElementById('btn-save-mo-offset');
-    const loadBtn = document.getElementById('btn-load-mo-offsets');
-
-    if (!wrapper || !btn || !menu) return;
-
-    // Восстанавливаем состояние чекбокса
-    checkbox.checked = localStorage.getItem('isAutoMoOffsetEnabled') === 'true';
-
-    // Открытие/закрытие меню
-    btn.addEventListener('click', (e) => {
-        e.stopPropagation();
-        menu.classList.toggle('show');
-    });
-
-    document.addEventListener('click', (e) => {
-        if (!wrapper.contains(e.target)) menu.classList.remove('show');
-    });
-
-    // Обработка чекбокса
-    checkbox.addEventListener('change', (e) => {
-        localStorage.setItem('isAutoMoOffsetEnabled', e.target.checked);
-        if (e.target.checked) checkMoOffset(map.getCenter(), true);
-    });
-
-    // Сохранение
-    saveBtn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        menu.classList.remove('show');
-        
-        const center = map.getCenter();
-        const yX = parseFloat(document.getElementById('mapOffsetX').value.replace(',', '.')) || 0;
-        const yY = parseFloat(document.getElementById('mapOffsetY').value.replace(',', '.')) || 0;
-        const gX = parseFloat(document.getElementById('kmlMapOffsetX').value.replace(',', '.')) || 0;
-        const gY = parseFloat(document.getElementById('kmlMapOffsetY').value.replace(',', '.')) || 0;
-
-        const success = await saveOffsetsForCurrentMo(center[0], center[1], yX, yY, gX, gY);
-        if (success) moOffsetsCache = await loadAllMoOffsetsCache() || moOffsetsCache;
-    });
-
-    // Загрузка
-    loadBtn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        menu.classList.remove('show');
-        moOffsetsCache = await loadAllMoOffsetsCache() || moOffsetsCache;
-        // ВАЖНО: передаем true, true для вывода уведомления при ручном нажатии
-        checkMoOffset(map.getCenter(), true, true); 
-    });
-}
-
-// 4. Проверка сдвига карты (> 1 км) и применение смещения
+// 4. Проверка сдвига карты (> 1 км) и применение смещения (теперь всё напрямую в WGS84)
 function checkMoOffset(currentCenterGeo, forceCheck = false, showForceSuccess = false) {
     if (!currentCenterGeo || !moOffsetsCache || moOffsetsCache.length === 0) {
         if (showForceSuccess && typeof showNotification === 'function') {
@@ -981,34 +903,21 @@ function checkMoOffset(currentCenterGeo, forceCheck = false, showForceSuccess = 
         return;
     }
 
-    // Проверка перемещения на 1км (Turf работает с WGS84, тут всё ок)
+    // Проверяем, пройдена ли дистанция в 1 км
     if (!forceCheck && lastCheckedCenter) {
         try {
             const from = turf.point([lastCheckedCenter[1], lastCheckedCenter[0]]);
             const to = turf.point([currentCenterGeo[1], currentCenterGeo[0]]);
             if (turf.distance(from, to, { units: 'kilometers' }) < 1.0) return;
-        } catch(e) { console.error("Turf Error:", e); }
+        } catch(e) { console.error("Turf Error in checkMoOffset:", e); }
     }
 
     lastCheckedCenter = currentCenterGeo;
-    const [lat4326, lon4326] = currentCenterGeo;
+    
+    // Яндекс отдает центр карты напрямую в WGS84
+    const [lat, lon] = currentCenterGeo;
 
-    // --- КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ ---
-    // Конвертируем координаты центра экрана (WGS84) в EPSG:3857, так как 
-    // данные границ МО в БД сохранены именно в EPSG:3857
-    let center3857;
-    try {
-        center3857 = proj4('EPSG:4326', 'EPSG:3857', [lon4326, lat4326]);
-    } catch (e) {
-        console.error("Ошибка конвертации координат для проверки МО:", e);
-        return;
-    }
-
-    const lon3857 = center3857[0]; // X (Долгота)
-    const lat3857 = center3857[1]; // Y (Широта)
-    // ----------------------------
-
-    // Ищем в каком МО мы находимся
+    // Ищем в каком МО мы находимся (база теперь тоже в WGS84)
     let foundMo = null;
     for (const mo of moOffsetsCache) {
         const minLat = parseFloat(mo.min_lat);
@@ -1016,8 +925,8 @@ function checkMoOffset(currentCenterGeo, forceCheck = false, showForceSuccess = 
         const minLon = parseFloat(mo.min_lon);
         const maxLon = parseFloat(mo.max_lon);
         
-        // Теперь мы сравниваем правильные координаты в одной системе (EPSG:3857)
-        if (lat3857 >= minLat && lat3857 <= maxLat && lon3857 >= minLon && lon3857 <= maxLon) {
+        // Прямое сравнение без конвертаций!
+        if (lat >= minLat && lat <= maxLat && lon >= minLon && lon <= maxLon) {
             foundMo = mo;
             break;
         }
@@ -1036,7 +945,7 @@ function checkMoOffset(currentCenterGeo, forceCheck = false, showForceSuccess = 
         const targetGx = parseFloat(foundMo.go_offset_x);
         const targetGy = parseFloat(foundMo.go_offset_y);
 
-        // Применяем смещение для Яндекс.Карт
+        // Применяем смещение Яндекс
         if (!isNaN(targetYx) && !isNaN(targetYy)) {
             if (currYx !== targetYx || currYy !== targetYy) {
                 document.getElementById('mapOffsetX').value = targetYx;
@@ -1049,7 +958,7 @@ function checkMoOffset(currentCenterGeo, forceCheck = false, showForceSuccess = 
             }
         }
 
-        // Применяем смещение для Google
+        // Применяем смещение Google
         if (!isNaN(targetGx) && !isNaN(targetGy)) {
             if (currGx !== targetGx || currGy !== targetGy) {
                 if (typeof isGoogleLayerActive !== 'undefined' && isGoogleLayerActive) {
@@ -1068,14 +977,14 @@ function checkMoOffset(currentCenterGeo, forceCheck = false, showForceSuccess = 
         }
 
         if (needUpdate) {
-            if (typeof showNotification === 'function') showNotification(`Применено смещение: ${foundMo.name}`, 'info', 'crosshairs');
+            if (typeof showNotification === 'function') showNotification(`Применено автосмещение: ${foundMo.name}`, 'info', 'crosshairs');
             if (typeof findAndConvert === 'function') findAndConvert();
         } else if (showForceSuccess) {
-            // Сообщаем, если мы нажали "Загрузить базу", МО нашлось, но смещения уже правильные
+            // Уведомление при ручной загрузке
             if (typeof showNotification === 'function') showNotification(`Смещения уже актуальны для: ${foundMo.name}`, 'success');
         }
     } else if (showForceSuccess) {
-        // Сообщаем, если нажали загрузить, но для точки под курсором нет данных в БД
+        // Уведомление, если для этой зоны нет данных
         if (typeof showNotification === 'function') showNotification(`В базе нет данных о смещении для текущей локации`, 'warning');
     }
 }
