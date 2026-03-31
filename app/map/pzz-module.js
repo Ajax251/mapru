@@ -1151,7 +1151,7 @@ function checkMoOffset(currentCenterGeo, forceCheck = false, showForceSuccess = 
         }
 
         if (needUpdate) {
-            if (typeof showNotification === 'function') showNotification(`Применено автосмещение: ${foundMo.name}`, 'info', 'crosshairs');
+         //   if (typeof showNotification === 'function') showNotification(`Применено автосмещение: ${foundMo.name}`, 'info', 'crosshairs');
             if (typeof findAndConvert === 'function') findAndConvert();
         } else if (showForceSuccess) {
             // Уведомление при ручной загрузке
