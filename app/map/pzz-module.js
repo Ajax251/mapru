@@ -1001,7 +1001,7 @@ async function loadAllMoOffsetsCache() {
         console.log(`[PZZ Offsets] Загружено ${data.length} записей смещений.`);
         
         localStorage.setItem('moOffsetsCache', JSON.stringify(data));
-        if (typeof showNotification === 'function') showNotification(`База смещений обновлена (${data.length} МО)`, 'success');
+        if (typeof showNotification === 'function') showNotification(`Смещения обновлены)`, 'success');
         
         return data;
     } catch (err) {
@@ -1072,7 +1072,7 @@ function initAutoOffsetUI() {
 function checkMoOffset(currentCenterGeo, forceCheck = false, showForceSuccess = false) {
     if (!currentCenterGeo || !moOffsetsCache || moOffsetsCache.length === 0) {
         if (showForceSuccess && typeof showNotification === 'function') {
-            showNotification('База смещений пуста', 'warning');
+            showNotification('Смещений нет', 'warning');
         }
         return;
     }
