@@ -989,7 +989,7 @@ async function saveOffsetsForCurrentMo(lat, lon, yaX, yaY, goX, goY) {
 
 // 2. Загрузка всех Bounding Boxes (кэша смещений) из БД
 async function loadAllMoOffsetsCache() {
-    if (typeof showLoader === 'function') showLoader("Загрузка базы смещений...");
+    if (typeof showLoader === 'function') showLoader("Загрузка смещений...");
     
     try {
         const { data, error } = await supabaseClient
