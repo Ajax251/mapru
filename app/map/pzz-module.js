@@ -1001,7 +1001,7 @@ async function loadAllMoOffsetsCache() {
         console.log(`[PZZ Offsets] Загружено ${data.length} записей смещений.`);
         
         localStorage.setItem('moOffsetsCache', JSON.stringify(data));
-        if (typeof showNotification === 'function') showNotification(`Смещения обновлены)`, 'success');
+        if (typeof showNotification === 'function') showNotification(`Смещения обновлены`, 'success');
         
         return data;
     } catch (err) {
