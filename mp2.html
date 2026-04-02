@@ -2991,29 +2991,7 @@ async function checkOksInEgrn(oksNumbers, button) {
         </div>`;
     }
 
- // --- ДИНАМИЧЕСКОЕ ОБНОВЛЕНИЕ ЗНАЧКОВ В СПИСКЕ КАДАСТРОВЫХ НОМЕРОВ ---
-    const updateKnListIcon = (oksArray, color, iconTitle) => {
-        oksArray.forEach(oks => {
-            if (!oks.cadNumber) return;
-            const safeId = oks.cadNumber.replace(/:/g, '-');
-            const dynamicSpan = document.getElementById(`kn-dynamic-${safeId}`);
-            if (dynamicSpan) {
-                dynamicSpan.innerHTML = `<i class="fas fa-crosshairs" style="color:${color}; font-size:1em; margin-left:6px; cursor:help;" title="${iconTitle}"></i>`;
-            }
-        });
-    };
-
-    // Зеленый прицел - ОКС подтвержден на ЗУ по координатам
-    updateKnListIcon(correctOks, '#10b981', 'ЕГРН подтверждает: Объект расположен в границах данного ЗУ');
-    
-    // Оранжевый прицел (опционально) - Условная точка
-    updateKnListIcon(conditionalOks, '#f59e0b', 'ЕГРН: Объект имеет условную привязку (только точка)');
-    
-    // Красный прицел - ОКС мимо ЗУ
-    updateKnListIcon(wrongLocationOks, '#ef4444', 'ОШИБКА: По координатам ЕГРН объект НЕ располагается на данном ЗУ!');
-    // --------------------------------------------------------------------
-
-    statusDiv.innerHTML = statusHtml; 
+    statusDiv.innerHTML = statusHtml;
 
     const schemaBtn = document.getElementById('openOksSchemaBtn');
     if (schemaBtn) {
@@ -5333,106 +5311,42 @@ function runTechPlanValidation(xmlDoc, xmlText) {
         messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>Предупреждение о датах:</strong> Найдены даты за пределами допустимого диапазона (01.01.1990 - сегодня): ${dateWarnings.join(', ')}.</div>`);
     }
     
-    // --- ПАРСИНГ И РАЗДЕЛЕНИЕ КАДАСТРОВЫХ НОМЕРОВ ПО ТИПАМ ---
-    const zuNumbersSet = new Set();
-    const oksNumbersSet = new Set();
-    const linkedOksSet = new Set();
-    const coordsOksSet = new Set();
-
-    // Собираем ЗУ
-    All(xmlDoc, 'ExistParcel, ExistEZParcels, SpecifyRelatedParcel, ChangeParcel').forEach(el => { const kn = A(el, 'CadastralNumber'); if (kn && kn !== '—') zuNumbersSet.add(kn); });
-    All(xmlDoc, 'PrevCadastralNumbers > CadastralNumber, ParentCadastralNumbers > CadastralNumber, ProvidingPassCadastralNumbers > CadastralNumber').forEach(el => { zuNumbersSet.add(el.textContent.trim()); });
-    
-    // Собираем ОКС
-    All(xmlDoc, 'NewBuilding, ExistBuilding, NewConstruction, ExistConstruction, NewFlat, ExistFlat, NewRoom, ExistRoom, NewUncompleted, ExistUncompleted').forEach(el => { 
-        const kn = A(el, 'CadastralNumber'); 
-        if (kn && kn !== '—') {
-            oksNumbersSet.add(kn);
-            if (el.querySelector('EntitySpatial')) coordsOksSet.add(kn); // Есть координаты
-        } 
-    });
-    
-    // Привязанные ОКС (указанные на ЗУ)
-    All(xmlDoc, 'ObjectsRealty CadastralNumber, InnerCadastralNumbers > CadastralNumber').forEach(el => { 
-        const kn = el.textContent.trim();
-        oksNumbersSet.add(kn);
-        linkedOksSet.add(kn); // Привязан к ЗУ в XML
-    });
-
-    const knRegex = /\d{2}:\d{2}:\d{6,7}:\d+/g; 
+    // Все кадастровые номера
+    const knRegex = /\d{2}:\d{2}:\d{6,7}:\d+/g;
+    const blockRegex = /\d{2}:\d{2}:\d{6,7}/;
     let allNumbers = new Set((xmlText.match(knRegex) || []));
     All(xmlDoc, 'CadastralBlock').forEach(b => allNumbers.add(b.textContent.trim()));
-
-    // Группировка и сортировка
-    let numbersData = [];
+    const quarters = new Map();
+    
     allNumbers.forEach(num => {
-        let type = 'other';
-        let sortWeight = 3;
-        
-        if (zuNumbersSet.has(num)) { type = 'zu'; sortWeight = 1; }
-        else if (oksNumbersSet.has(num)) { type = 'oks'; sortWeight = 2; }
-        else if (num.split(':').length === 3) { type = 'quarter'; sortWeight = 4; } // Кварталы в конец
-        
-        numbersData.push({
-            num: num,
-            type: type,
-            sortWeight: sortWeight,
-            isLinked: linkedOksSet.has(num),
-            hasCoords: coordsOksSet.has(num)
+        const match = num.match(blockRegex);
+        if (match) {
+            const quarter = match[0];
+            if (!quarters.has(quarter)) quarters.set(quarter, []);
+            quarters.get(quarter).push(num);
+        }
+    });
+    
+    const colors = ['#1d4ed8', '#b91c1c', '#c2410c', '#15803d', '#86198f'];
+    let colorIndex = 0;
+    const quarterColors = new Map();
+    for (const q of quarters.keys()) {
+        quarterColors.set(q, colors[colorIndex % colors.length]);
+        colorIndex++;
+    }
+    
+    if (quarters.size > 1) {
+        messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>Предупреждение:</strong> Найдены объекты из разных кадастровых кварталов.</div>`);
+    }
+    
+    let numberListHtml = '<ul id="cadastralNumbersList">';
+    quarters.forEach((numbers, quarter) => {
+        const color = quarterColors.get(quarter);
+        numbers.sort().forEach(num => {
+           numberListHtml += `<li style="border-color:${color}; color:${color}; display: flex; justify-content: space-between; align-items: center;"><span>${num}</span><span class="xml-view-btn" data-num="${num}" title="Посмотреть в XML"> <i class="fas fa-code"></i>  </span></li>`;
         });
     });
-
-    numbersData.sort((a, b) => {
-        if (a.sortWeight !== b.sortWeight) return a.sortWeight - b.sortWeight;
-        return a.num.length - b.num.length || a.num.localeCompare(b.num);
-    });
-
-    let numberListHtml = `
-    <div style="display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; font-size: 0.85rem;">
-        <div style="display: flex; align-items: center; gap: 4px;"><span style="display:inline-block; width:12px; height:12px; background:#ecfdf5; border:1px solid #10b981; border-radius:3px;"></span> — Земельные участки</div>
-        <div style="display: flex; align-items: center; gap: 4px;"><span style="display:inline-block; width:12px; height:12px; background:#eef2ff; border:1px solid #4f46e5; border-radius:3px;"></span> — ОКС</div>
-        <div style="display: flex; align-items: center; gap: 4px;"><span style="display:inline-block; width:12px; height:12px; background:#f8fafc; border:1px solid #64748b; border-radius:3px;"></span> — Прочие</div>
-    </div>
-    <ul id="cadastralNumbersList">`;
-
-numbersData.forEach(item => {
-        let color, bgColor, icon, title;
-        
-        if (item.type === 'zu') {
-            color = '#059669'; bgColor = '#ecfdf5'; icon = 'fa-layer-group'; title = 'Земельный участок';
-        } else if (item.type === 'oks') {
-            color = '#4f46e5'; bgColor = '#eef2ff'; icon = 'fa-building'; title = 'ОКС';
-        } else {
-            color = '#475569'; bgColor = '#f8fafc'; icon = 'fa-hashtag'; title = 'Упоминается в документе';
-        }
-
-        let staticBadges = '';
-        if (item.type === 'oks' && item.isLinked) {
-            // Оставляем только статичную скрепку (ОКС прописан в XML внутри тегов ЗУ)
-            staticBadges = `<i class="fas fa-paperclip" style="color:#10b981; font-size:0.9em; margin-left:6px;" title="Привязан к ЗУ в XML"></i>`;
-        }
-
-        const safeId = item.num.replace(/:/g, '-');
-
-        numberListHtml += `<li style="border-color:${color}; color:${color}; background-color:${bgColor}; display: flex; justify-content: space-between; align-items: center; gap: 8px;" title="${title}">
-            <div style="display: flex; align-items: center; gap: 6px;">
-                <i class="fas ${icon}" style="font-size:0.8em; opacity:0.7;"></i>
-                <span style="font-weight:600; font-family:'Courier New', monospace;">${item.num}</span>
-                <span>${staticBadges}</span>
-                <span id="kn-dynamic-${safeId}"></span> <!-- Место для прицела после проверки ЕГРН -->
-            </div>
-            <span class="xml-view-btn" data-num="${item.num}" title="Посмотреть в XML" style="background:${color}; border-color:${color}; padding:2px 5px; font-size:0.65rem; margin-left:auto;">
-                <i class="fas fa-code" style="color:#fff;"></i>
-            </span>
-        </li>`; 
-    }); 
     numberListHtml += '</ul>';
-
-    const checkQuarters = new Set(numbersData.filter(i => i.num.split(':').length === 3).map(i => i.num));
-    if (checkQuarters.size > 1) { 
-        messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>Предупреждение:</strong> Найдены объекты из разных кадастровых кварталов.</div>`); 
-    }
-
     messages.push(`<div class="subsection" style="margin-top:0"><div class="subsection-title">Все кадастровые номера в документе</div>${numberListHtml}</div>`);
     
     
@@ -6392,107 +6306,12 @@ numbersData.forEach(item => {
         }
         if (dateWarnings.length > 0) { messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>Предупреждение о датах:</strong> Найдены даты за пределами допустимого диапазона (01.01.1990 - сегодня): ${dateWarnings.join(', ')}.</div>`); }
         
-     // --- ПАРСИНГ И РАЗДЕЛЕНИЕ КАДАСТРОВЫХ НОМЕРОВ ПО ТИПАМ ---
-    const zuNumbersSet = new Set();
-    const oksNumbersSet = new Set();
-    const linkedOksSet = new Set();
-    const coordsOksSet = new Set();
-
-    // Собираем ЗУ
-    All(xmlDoc, 'ExistParcel, ExistEZParcels, SpecifyRelatedParcel, ChangeParcel').forEach(el => { const kn = A(el, 'CadastralNumber'); if (kn && kn !== '—') zuNumbersSet.add(kn); });
-    All(xmlDoc, 'PrevCadastralNumbers > CadastralNumber, ParentCadastralNumbers > CadastralNumber, ProvidingPassCadastralNumbers > CadastralNumber').forEach(el => { zuNumbersSet.add(el.textContent.trim()); });
-    
-    // Собираем ОКС
-    All(xmlDoc, 'NewBuilding, ExistBuilding, NewConstruction, ExistConstruction, NewFlat, ExistFlat, NewRoom, ExistRoom, NewUncompleted, ExistUncompleted').forEach(el => { 
-        const kn = A(el, 'CadastralNumber'); 
-        if (kn && kn !== '—') {
-            oksNumbersSet.add(kn);
-            if (el.querySelector('EntitySpatial')) coordsOksSet.add(kn); // Есть координаты
-        } 
-    });
-    
-    // Привязанные ОКС (указанные на ЗУ)
-    All(xmlDoc, 'ObjectsRealty CadastralNumber, InnerCadastralNumbers > CadastralNumber').forEach(el => { 
-        const kn = el.textContent.trim();
-        oksNumbersSet.add(kn);
-        linkedOksSet.add(kn); // Привязан к ЗУ в XML
-    });
-
-    const knRegex = /\d{2}:\d{2}:\d{6,7}:\d+/g; 
-    let allNumbers = new Set((xmlText.match(knRegex) || []));
-    All(xmlDoc, 'CadastralBlock').forEach(b => allNumbers.add(b.textContent.trim()));
-
-    // Группировка и сортировка
-    let numbersData = [];
-    allNumbers.forEach(num => {
-        let type = 'other';
-        let sortWeight = 3;
+        const knRegex = /\d{2}:\d{2}:\d{6,7}:\d+/g; const blockRegex = /\d{2}:\d{2}:\d{6,7}/; let allNumbers = new Set((xmlText.match(knRegex) || [])); All(xmlDoc, 'CadastralBlock').forEach(b => allNumbers.add(b.textContent.trim())); const quarters = new Map();
+        allNumbers.forEach(num => { const match = num.match(blockRegex); if (match) { const quarter = match[0]; if (!quarters.has(quarter)) quarters.set(quarter, []); quarters.get(quarter).push(num); } });
+        const colors = ['#1d4ed8', '#b91c1c', '#c2410c', '#15803d', '#86198f']; let colorIndex = 0; const quarterColors = new Map(); for (const q of quarters.keys()) { quarterColors.set(q, colors[colorIndex % colors.length]); colorIndex++; }
+        if (quarters.size > 1) { messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>Предупреждение:</strong> Найдены объекты из разных кадастровых кварталов.</div>`); }
         
-        if (zuNumbersSet.has(num)) { type = 'zu'; sortWeight = 1; }
-        else if (oksNumbersSet.has(num)) { type = 'oks'; sortWeight = 2; }
-        else if (num.split(':').length === 3) { type = 'quarter'; sortWeight = 4; } // Кварталы в конец
-        
-        numbersData.push({
-            num: num,
-            type: type,
-            sortWeight: sortWeight,
-            isLinked: linkedOksSet.has(num),
-            hasCoords: coordsOksSet.has(num)
-        });
-    });
-
-    numbersData.sort((a, b) => {
-        if (a.sortWeight !== b.sortWeight) return a.sortWeight - b.sortWeight;
-        return a.num.length - b.num.length || a.num.localeCompare(b.num);
-    });
-
-    let numberListHtml = `
-    <div style="display: flex; gap: 12px; margin-bottom: 12px; flex-wrap: wrap; font-size: 0.85rem;">
-        <div style="display: flex; align-items: center; gap: 4px;"><span style="display:inline-block; width:12px; height:12px; background:#ecfdf5; border:1px solid #10b981; border-radius:3px;"></span> — Земельные участки</div>
-        <div style="display: flex; align-items: center; gap: 4px;"><span style="display:inline-block; width:12px; height:12px; background:#eef2ff; border:1px solid #4f46e5; border-radius:3px;"></span> — ОКС</div>
-        <div style="display: flex; align-items: center; gap: 4px;"><span style="display:inline-block; width:12px; height:12px; background:#f8fafc; border:1px solid #64748b; border-radius:3px;"></span> — Прочие</div>
-    </div>
-    <ul id="cadastralNumbersList">`;
-
-   numbersData.forEach(item => {
-        let color, bgColor, icon, title;
-        
-        if (item.type === 'zu') {
-            color = '#059669'; bgColor = '#ecfdf5'; icon = 'fa-layer-group'; title = 'Земельный участок';
-        } else if (item.type === 'oks') {
-            color = '#4f46e5'; bgColor = '#eef2ff'; icon = 'fa-building'; title = 'ОКС';
-        } else {
-            color = '#475569'; bgColor = '#f8fafc'; icon = 'fa-hashtag'; title = 'Упоминается в документе';
-        }
-
-        let staticBadges = '';
-        if (item.type === 'oks' && item.isLinked) {
-            // Оставляем только статичную скрепку (ОКС прописан в XML внутри тегов ЗУ)
-            staticBadges = `<i class="fas fa-paperclip" style="color:#10b981; font-size:0.9em; margin-left:6px;" title="Привязан к ЗУ в XML"></i>`;
-        }
-
-        const safeId = item.num.replace(/:/g, '-');
-
-        numberListHtml += `<li style="border-color:${color}; color:${color}; background-color:${bgColor}; display: flex; justify-content: space-between; align-items: center; gap: 8px;" title="${title}">
-            <div style="display: flex; align-items: center; gap: 6px;">
-                <i class="fas ${icon}" style="font-size:0.8em; opacity:0.7;"></i>
-                <span style="font-weight:600; font-family:'Courier New', monospace;">${item.num}</span>
-                <span>${staticBadges}</span>
-                <span id="kn-dynamic-${safeId}"></span> <!-- Место для прицела после проверки ЕГРН -->
-            </div>
-            <span class="xml-view-btn" data-num="${item.num}" title="Посмотреть в XML" style="background:${color}; border-color:${color}; padding:2px 5px; font-size:0.65rem; margin-left:auto;">
-                <i class="fas fa-code" style="color:#fff;"></i>
-            </span>
-        </li>`; 
-    }); 
-    numberListHtml += '</ul>';
-
-    const checkQuarters = new Set(numbersData.filter(i => i.num.split(':').length === 3).map(i => i.num));
-    if (checkQuarters.size > 1) { 
-        messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>Предупреждение:</strong> Найдены объекты из разных кадастровых кварталов.</div>`); 
-    }
-
-    messages.push(`<div class="subsection" style="margin-top:0"><div class="subsection-title">Все кадастровые номера в документе</div>${numberListHtml}</div>`);
+        let numberListHtml = '<ul id="cadastralNumbersList">'; quarters.forEach((numbers, quarter) => { const color = quarterColors.get(quarter); numbers.sort().forEach(num => {numberListHtml += `<li style="border-color:${color}; color:${color}; display: flex; justify-content: space-between; align-items: center;"><span>${num}</span><span class="xml-view-btn" data-num="${num}" title="Посмотреть в XML"> <i class="fas fa-code"></i>  </span></li>`; }); }); numberListHtml += '</ul>'; messages.push(`<div class="subsection" style="margin-top:0"><div class="subsection-title">Все кадастровые номера в документе</div>${numberListHtml}</div>`);
         
             const mainParcel = E(xmlDoc, 'NewParcel') || E(xmlDoc, 'SpecifyParcel > ExistParcel') || E(xmlDoc, 'SpecifyParcel > ExistEZ');
         if (mainParcel) {
