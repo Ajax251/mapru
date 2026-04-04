@@ -15615,126 +15615,124 @@ async function openVisibleMapIn3D(clipToScreen = true) {
             ];
         }
 
+        // Передаем не полигон, а ТОЧКУ в центре экрана
+        const virtualTargetPoint = new ymaps.Placemark(center, {
+            cadastralNumber: 'Центр экрана', // Будет написано на табличке в 3D
+        });
+        window.quickReportTargetObjects = [virtualTargetPoint];
+
         // 2. Собираем все нарисованные объекты (полигоны и линии)
         const allDrawableObjects = new Set([...polygons, ...areaObjects]);
         const objectsToProcess = Array.from(allDrawableObjects).filter(obj => 
             obj instanceof ymaps.Polygon || obj instanceof ymaps.Polyline
         );
+
+        if (objectsToProcess.length === 0) {
+            showNotification('На карте нет объектов для 3D', 'warning', 'exclamation-triangle');
+            return;
+        }
         
         showLoader(clipToScreen ? `Подготовка 3D сцены (обрезка по экрану)...` : `Подготовка 3D сцены (все объекты)...`);
 
-        const pData = [];
+        const pData =[];
         const bData = [];
         const sData = [];
-        const zData = [];
+        const zData =[];
         let processedCount = 0;
-        
-        // --- НАЧАЛО ИЗМЕНЕНИЙ ---
-        if (objectsToProcess.length === 0) {
-            // Если объектов нет, создаем виртуальную точку в центре, чтобы камера знала, куда смотреть
-            const virtualTargetPoint = new ymaps.Placemark(center, {
-                cadastralNumber: 'Центр экрана', // Будет написано на табличке в 3D
-            });
-            window.quickReportTargetObjects = [virtualTargetPoint];
-        } else {
-            // Если объекты есть, обрабатываем их как раньше
-            window.quickReportTargetObjects = objectsToProcess; // Передаем реальные объекты
-            // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
-            // 3. Обработка и обрезка
-            for (const targetObject of objectsToProcess) {
-                let turfFeature;
-                const isPolygon = targetObject instanceof ymaps.Polygon;
+        // 3. Обработка и обрезка
+        for (const targetObject of objectsToProcess) {
+            let turfFeature;
+            const isPolygon = targetObject instanceof ymaps.Polygon;
 
-                // Подготовка геометрии для Turf (визуальные координаты)
-                if (isPolygon) {
-                    const rings = targetObject.geometry.getCoordinates();
-                    const geoJsonCoords = rings.map(ring => ring.map(c => [c[1], c[0]])); // [lon, lat]
-                    turfFeature = turf.polygon(geoJsonCoords);
-                } else { // Polyline
-                    const coords = targetObject.geometry.getCoordinates();
-                    const geoJsonCoords = coords.map(c => [c[1], c[0]]);
-                    turfFeature = turf.lineString(geoJsonCoords);
-                }
+            // Подготовка геометрии для Turf (визуальные координаты)
+            if (isPolygon) {
+                const rings = targetObject.geometry.getCoordinates();
+                const geoJsonCoords = rings.map(ring => ring.map(c => [c[1], c[0]])); // [lon, lat]
+                turfFeature = turf.polygon(geoJsonCoords);
+            } else { // Polyline
+                const coords = targetObject.geometry.getCoordinates();
+                const geoJsonCoords = coords.map(c => [c[1], c[0]]);
+                turfFeature = turf.lineString(geoJsonCoords);
+            }
 
-                let geometry;
-                if (clipToScreen) {
-                    // ОБРЕЗКА (Clipping) по границам экрана
-                    const clipped = turf.bboxClip(turfFeature, screenBbox);
-                    geometry = clipped.geometry;
+            let geometry;
+            if (clipToScreen) {
+                // ОБРЕЗКА (Clipping) по границам экрана
+                const clipped = turf.bboxClip(turfFeature, screenBbox);
+                geometry = clipped.geometry;
+            } else {
+                geometry = turfFeature.geometry;
+            }
+            
+            // Если объект полностью вне экрана или пуст
+            if (!geometry || !geometry.coordinates || geometry.coordinates.length === 0) continue; 
+
+            processedCount++;
+
+            // ВОЗВРАТ КООРДИНАТ К WGS84 И EPSG:3857
+            const restoreCoordsRecursively = (coords) => {
+                if (typeof coords[0] === 'number') {
+                    const trueLat = coords[1] + (mapOffsetY * 0.000008983);
+                    const trueLon = coords[0] + (mapOffsetX * 0.000008983);
+                    return proj4("EPSG:4326", "EPSG:3857",[trueLon, trueLat]);
                 } else {
-                    geometry = turfFeature.geometry;
+                    return coords.map(restoreCoordsRecursively);
                 }
-                
-                // Если объект полностью вне экрана или пуст
-                if (!geometry || !geometry.coordinates || geometry.coordinates.length === 0) continue; 
+            };
 
-                processedCount++;
+            const restoredCoordinates = restoreCoordsRecursively(geometry.coordinates);
 
-                // ВОЗВРАТ КООРДИНАТ К WGS84 И EPSG:3857
-                const restoreCoordsRecursively = (coords) => {
-                    if (typeof coords[0] === 'number') {
-                        const trueLat = coords[1] + (mapOffsetY * 0.000008983);
-                        const trueLon = coords[0] + (mapOffsetX * 0.000008983);
-                        return proj4("EPSG:4326", "EPSG:3857",[trueLon, trueLat]);
-                    } else {
-                        return coords.map(restoreCoordsRecursively);
-                    }
-                };
+            const props = targetObject.properties.getAll();
+            const opts = targetObject.options.getAll();
+            const originalFeatureData = props.featureData || {};
+            
+            // Определяем категорию объекта
+            let categoryId = 36368; // ЗУ
+            if (props.isBuilding || props.categoryName === 'Здания') categoryId = 36369;
+            else if (props.isStructure || props.categoryName === 'Сооружения') categoryId = 36383;
+            else if (props.isZouit || (props.categoryName && props.categoryName.includes('Зоны'))) categoryId = 36940;
 
-                const restoredCoordinates = restoreCoordsRecursively(geometry.coordinates);
-
-                const props = targetObject.properties.getAll();
-                const opts = targetObject.options.getAll();
-                const originalFeatureData = props.featureData || {};
-                
-                // Определяем категорию объекта
-                let categoryId = 36368; // ЗУ
-                if (props.isBuilding || props.categoryName === 'Здания') categoryId = 36369;
-                else if (props.isStructure || props.categoryName === 'Сооружения') categoryId = 36383;
-                else if (props.isZouit || (props.categoryName && props.categoryName.includes('Зоны'))) categoryId = 36940;
-
-                let objName = 'Объект';
-                if (typeof props.hintContent === 'string') {
-                    objName = props.hintContent.replace(/<[^>]*>?/gm, '').trim();
-                } else if (props.hintContent && props.hintContent.address) {
-                    objName = props.hintContent.address;
-                } else if (props.cadastralNumber) {
-                    objName = props.cadastralNumber;
-                }
-
-                const feature3D = {
-                    type: "Feature",
-                    id: props._exportId || Math.random().toString(36),
-                    geometry: {
-                        type: geometry.type,
-                        coordinates: restoredCoordinates,
-                        crs: { type: "name", properties: { name: "EPSG:3857" } }
-                    },
-                    properties: {
-                        ...originalFeatureData.properties,
-                        descr: props.cadastralNumber || objName,
-                        category: categoryId,
-                        options: {
-                            ...(originalFeatureData.properties?.options || {}),
-                            cad_num: props.cadastralNumber,
-                            name: objName
-                        }
-                    }
-                };
-
-                if (categoryId === 36369) bData.push(feature3D);
-                else if (categoryId === 36383) sData.push(feature3D);
-                else if (categoryId === 36940) zData.push(feature3D);
-                else pData.push(feature3D);
+            let objName = 'Объект';
+            if (typeof props.hintContent === 'string') {
+                objName = props.hintContent.replace(/<[^>]*>?/gm, '').trim();
+            } else if (props.hintContent && props.hintContent.address) {
+                objName = props.hintContent.address;
+            } else if (props.cadastralNumber) {
+                objName = props.cadastralNumber;
             }
 
-            if (processedCount === 0 && objectsToProcess.length > 0) {
-                showNotification('В видимой области нет объектов для отображения', 'warning');
-                return;
-            }
+            const feature3D = {
+                type: "Feature",
+                id: props._exportId || Math.random().toString(36),
+                geometry: {
+                    type: geometry.type,
+                    coordinates: restoredCoordinates,
+                    crs: { type: "name", properties: { name: "EPSG:3857" } }
+                },
+                properties: {
+                    ...originalFeatureData.properties,
+                    descr: props.cadastralNumber || objName,
+                    category: categoryId,
+                    options: {
+                        ...(originalFeatureData.properties?.options || {}),
+                        cad_num: props.cadastralNumber,
+                        name: objName
+                    }
+                }
+            };
+
+            if (categoryId === 36369) bData.push(feature3D);
+            else if (categoryId === 36383) sData.push(feature3D);
+            else if (categoryId === 36940) zData.push(feature3D);
+            else pData.push(feature3D);
         }
-        
+
+        if (processedCount === 0) {
+            showNotification(clipToScreen ? 'В видимой области нет объектов для отображения' : 'Нет корректных объектов', 'warning');
+            return;
+        }
+
         // 4. Обновляем глобальные переменные для 3D
         window.parcelFeaturesData = pData;
         window.buildingFeaturesData = bData;
@@ -15747,8 +15745,7 @@ async function openVisibleMapIn3D(clipToScreen = true) {
 
         // 5. Запуск
         if (typeof window.open3DVisualization === 'function') {
-            const msg = processedCount > 0 ? `Подготовлено ${processedCount} объектов. Открытие 3D...` : 'Открытие 3D вида...';
-            showNotification(msg, 'success');
+            showNotification(`Подготовлено ${processedCount} объектов. Открытие 3D...`, 'success');
             window.open3DVisualization();
         } else {
             showNotification("Ошибка: Модуль 3D не загружен", "error");
