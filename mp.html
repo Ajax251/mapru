@@ -1751,7 +1751,8 @@ async function checkZuForTechPlan(zuNumbers, button) {
         nspdZuFeatures = await searchIntersectingObjects(contours, NSPD_CATEGORY_ZU, currentMskSystem);
     }
     
-    // Обрабатываем найденные ЗУ
+ 
+  // Обрабатываем найденные ЗУ
     const nspdZuList = [];
     for (const f of nspdZuFeatures) {
         const cadNum = f.properties?.options?.cad_number || f.properties?.options?.cad_num || f.properties?.descr;
@@ -1760,6 +1761,14 @@ async function checkZuForTechPlan(zuNumbers, button) {
             if (f.geometry && currentMskSystem) {
                 zuContours = await convertEgrnGeometryToMsk(f.geometry, currentMskSystem);
             }
+            
+            // Фильтруем ЗУ, которые только касаются границ, но не имеют наложения
+            if (zuContours.length > 0 && contours.length > 0) {
+                if (!isRealOverlap(contours, zuContours)) {
+                    continue; 
+                }
+            }
+
             nspdZuList.push({
                 cadNumber: cadNum,
                 address: f.properties?.options?.readable_address || f.properties?.options?.address_readable_address || '',
@@ -2549,14 +2558,72 @@ async function fetchLinkedOksFromRegistry(cadNumber, loadDetails = true) {
 
 
 
+function isRealOverlap(contoursA, contoursB) {
+    if (!contoursA || !contoursA.length || !contoursB || !contoursB.length) return true;
+
+    // Расчет площади плоского многоугольника (МСК в метрах) по координатам X, Y
+    const calcPlanarArea = (pts) => {
+        let area = 0;
+        for (let i = 0; i < pts.length - 1; i++) {
+            area += pts[i].x * pts[i + 1].y - pts[i + 1].x * pts[i].y;
+        }
+        return Math.abs(area) / 2;
+    };
+
+    // Замыкание контура и подготовка формата [x, y]
+    const prepareRing = (ring) => {
+        const arr = ring.map(p => [p.x, p.y]);
+        const first = arr[0];
+        const last = arr[arr.length - 1];
+        if (Math.abs(first[0] - last[0]) > 0.001 || Math.abs(first[1] - last[1]) > 0.001) {
+            arr.push([...first]);
+        }
+        return arr;
+    };
+
+    try {
+        for (const ringA of contoursA) {
+            const polyA = turf.polygon([prepareRing(ringA)]);
+            
+            for (const ringB of contoursB) {
+                const polyB = turf.polygon([prepareRing(ringB)]);
+                
+                const intersection = turf.intersect(turf.featureCollection([polyA, polyB]));
+                
+                if (intersection) {
+                    let totalOverlapArea = 0;
+                    const geoms = intersection.geometry.type === 'Polygon' ? 
+                        [intersection.geometry.coordinates] : 
+                        (intersection.geometry.type === 'MultiPolygon' ? intersection.geometry.coordinates : []);
+                    
+                    for (const poly of geoms) {
+                        const outerRing = poly[0].map(c => ({x: c[0], y: c[1]}));
+                        totalOverlapArea += calcPlanarArea(outerRing);
+                        
+                        // Вычитаем внутренние пустоты (дырки), если они есть
+                        for (let i = 1; i < poly.length; i++) {
+                            const holeRing = poly[i].map(c => ({x: c[0], y: c[1]}));
+                            totalOverlapArea -= calcPlanarArea(holeRing);
+                        }
+                    }
+                    
+                    // Порог: 0.001 кв.м (10 кв. см). Игнорируем простое касание границ.
+                    if (totalOverlapArea >= 0.001) {
+                        return true; 
+                    }
+                }
+            }
+        }
+        return false;
+    } catch(e) {
+        console.error('Ошибка при точном расчете площади пересечения:', e);
+        return true; 
+    }
+}
 
 
 
 
-
-
-
-// ===== ПОЛНОСТЬЮ ОБНОВЛЁННАЯ ФУНКЦИЯ: checkOksInEgrn =====
 
 async function checkOksInEgrn(oksNumbers, button) {
     const container = button.closest('.subsection');
@@ -2683,7 +2750,7 @@ async function checkOksInEgrn(oksNumbers, button) {
 
         button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Обработка...</span>';
 
-        for (const f of buildings) {
+      for (const f of buildings) {
             const cadNum = f.properties?.options?.cad_number || f.properties?.options?.cad_num;
             if (cadNum) {
                 const oksItem = {
@@ -2699,6 +2766,14 @@ async function checkOksInEgrn(oksNumbers, button) {
                     oksItem.contours = await convertEgrnGeometryToMsk(f.geometry, currentMskSystem);
                     oksItem.hasCoords = oksItem.contours && oksItem.contours.length > 0;
                 }
+                
+                // Фильтруем объекты, имеющие только общую границу (без наложения площади)
+                if (oksItem.hasCoords && parcelContours.length > 0) {
+                    if (!isRealOverlap(parcelContours, oksItem.contours)) {
+                        continue; 
+                    }
+                }
+                
                 nspdOks.push(oksItem);
             }
         }
@@ -2719,6 +2794,14 @@ async function checkOksInEgrn(oksNumbers, button) {
                     oksItem.contours = await convertEgrnGeometryToMsk(f.geometry, currentMskSystem);
                     oksItem.hasCoords = oksItem.contours && oksItem.contours.length > 0;
                 }
+                
+                // Фильтруем объекты, имеющие только общую границу (без наложения площади)
+                if (oksItem.hasCoords && parcelContours.length > 0) {
+                    if (!isRealOverlap(parcelContours, oksItem.contours)) {
+                        continue; 
+                    }
+                }
+                
                 nspdOks.push(oksItem);
             }
         }
