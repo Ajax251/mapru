@@ -201,7 +201,7 @@ canvas { display:block; width:100%; height:100%; outline:none; }
 <circle cx="50" cy="50" r="25" class="c3"></circle>
 </svg>
 </div>
-<div class="loader-text">СИНХРОНИЗАЦИЯ СИСТЕМ...</div>
+<div class="loader-text"></div>
 </div>
 
 <div class="scanline"></div>
@@ -265,6 +265,17 @@ canvas { display:block; width:100%; height:100%; outline:none; }
 <span class="status-dot"></span>
 <span>СИСТЕМЫ ОК</span>
 </div>
+
+<div class="sep" style="margin: 12px 0 8px 0;"></div>
+<div style="display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:12px; margin-bottom:6px;">
+<span style="color:var(--text-dim); text-transform:uppercase;">Восход</span>
+<span id="hud-sunrise" style="color:var(--text-main); font-weight:bold;">Ожидание...</span>
+</div>
+<div style="display:flex; justify-content:space-between; font-family:var(--font-mono); font-size:12px;">
+<span style="color:var(--text-dim); text-transform:uppercase;">Закат</span>
+<span id="hud-sunset" style="color:var(--text-main); font-weight:bold;">Ожидание...</span>
+</div>
+
 </div>
 <div id="btn-menu">
 <svg viewBox="0 0 24 24"><path d="M3 12h18M3 6h18M3 18h18" stroke-width="2" stroke-linecap="round"/></svg>
@@ -507,7 +518,7 @@ const camBack = new THREE.PerspectiveCamera(70, window.innerWidth/window.innerHe
 const camMoon = new THREE.PerspectiveCamera(10, window.innerWidth/window.innerHeight, 0.00001, 20000);
 
 const renderPass = new RenderPass(scene, camFree);
-const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 1.0, 0.4, 0.82);
+const bloom = new UnrealBloomPass(new THREE.Vector2(window.innerWidth, window.innerHeight), 0.8, 0.9, 0.85);
 const composer = new EffectComposer(renderer);
 composer.addPass(renderPass); composer.addPass(bloom);
 
@@ -527,8 +538,10 @@ scene.add(earthGroup);
 
 const earthMat = new THREE.MeshPhongMaterial({
     map: tDay, bumpMap: tBump, bumpScale: 0.1,
-    specularMap: tSpec, specular: new THREE.Color(0x333333), shininess: 15
+  
+    specularMap: tSpec, specular: new THREE.Color(0x0a0a0a), shininess: 5
 });
+
 const earth = new THREE.Mesh(new THREE.SphereGeometry(R_EARTH, 80, 80), earthMat);
 earthGroup.add(earth);
 
@@ -537,17 +550,19 @@ const atmoMat = new THREE.ShaderMaterial({
     vertexShader: `varying vec3 vN; varying vec3 vPos; void main(){vN=normalize(normalMatrix*normal);vPos=position;gl_Position=projectionMatrix*modelViewMatrix*vec4(position,1.0);}`,
     fragmentShader: `uniform vec3 sunDirection; varying vec3 vN; varying vec3 vPos;
     void main(){
-        float i = pow(0.5 - dot(vN, vec3(0,0,1)), 3.0);
+        // Более резкий градиент и смещение к краю планеты
+        float i = pow(0.65 - dot(vN, vec3(0,0,1)), 5.0);
         float sunDot = dot(normalize(vPos), sunDirection);
-        vec3 dayColor = vec3(0.4, 0.7, 1.0);
+        vec3 dayColor = vec3(0.3, 0.6, 1.0);
         vec3 sunsetColor = vec3(1.0, 0.3, 0.1);
         vec3 nightColor = vec3(0.0, 0.01, 0.03);
         vec3 color = mix(nightColor, mix(sunsetColor, dayColor, smoothstep(-0.1, 0.3, sunDot)), smoothstep(-0.2, 0.1, sunDot));
-        gl_FragColor = vec4(color, i * 1.8 * smoothstep(-0.25, 0.15, sunDot));
+          gl_FragColor = vec4(color, i * 0.7 * smoothstep(-0.25, 0.15, sunDot));
     }`,
     blending: THREE.AdditiveBlending, side: THREE.BackSide, transparent: true, depthWrite: false
 });
-const atmosphere = new THREE.Mesh(new THREE.SphereGeometry(R_EARTH + 1.2, 80, 80), atmoMat);
+
+const atmosphere = new THREE.Mesh(new THREE.SphereGeometry(R_EARTH + 0.25, 80, 80), atmoMat);
 scene.add(atmosphere);
 
 const milkyWay = new THREE.Mesh(new THREE.SphereGeometry(9500, 64, 64), new THREE.MeshBasicMaterial({ map:tMW, side:THREE.BackSide, transparent:true, opacity:0.6, depthWrite:false }));
@@ -1046,6 +1061,68 @@ let activeCam = camFree;
 let lastFrameTime = Date.now();
 const astromonyObserver = new Astronomy.Observer(0,0,0);
 
+let lastSunCalcTime = 0;
+let lastTimerDOMUpdate = 0;
+let nextSunriseMs = 0;
+let nextSunsetMs = 0;
+
+function updateSunTimers() {
+    const now = Date.now();
+    
+    // Пересчет орбит на будущее: раз в 30 секунд
+    if (now - lastSunCalcTime > 30000 && apiLoaded) {
+        lastSunCalcTime = now;
+        let foundSunrise = false, foundSunset = false;
+        
+        // Симулируем следующие 100 минут с шагом в 30 секунд
+        for (let i = 0; i < 200; i++) {
+            const t = new Date(now + i * 30000);
+            let issPosVec;
+            if (satrec) {
+                const pv = satellite.propagate(satrec, t);
+                const posGd = satellite.eciToGeodetic(pv.position, satellite.gstime(t));
+                issPosVec = getVector(satellite.degreesLat(posGd.latitude), satellite.degreesLong(posGd.longitude), posGd.height, getGMST(getJD(t)));
+            } else {
+                const dtS = i * 30;
+                issPosVec = getVector((virtualLat||issData.lat) + latSpeed*dtS, (virtualLon||issData.lon) + lonSpeed*dtS, issData.alt, getGMST(getJD(t)));
+            }
+
+            const eqSun = Astronomy.Equator('Sun', t, astromonyObserver, false, true);
+            const sunPos = new THREE.Vector3(
+                6000 * Math.cos(eqSun.dec*DEG_TO_RAD) * Math.cos(eqSun.ra*15*DEG_TO_RAD),
+                6000 * Math.sin(eqSun.dec*DEG_TO_RAD),
+                -6000 * Math.cos(eqSun.dec*DEG_TO_RAD) * Math.sin(eqSun.ra*15*DEG_TO_RAD)
+            );
+
+            const angleDeg = Math.acos(issPosVec.normalize().dot(sunPos.normalize())) * (180 / Math.PI);
+            const isDay = angleDeg < 100; // Порог света
+
+            if (i === 0) {
+                if (isDay) foundSunrise = true; else foundSunset = true;
+            } else {
+                if (!foundSunrise && isDay) { nextSunriseMs = t.getTime(); foundSunrise = true; }
+                if (!foundSunset && !isDay) { nextSunsetMs = t.getTime(); foundSunset = true; }
+            }
+            if (foundSunrise && foundSunset) break; // Нашли оба события
+        }
+    }
+
+    // Обновление таймера в интерфейсе: раз в секунду
+    if (now - lastTimerDOMUpdate > 1000) {
+        lastTimerDOMUpdate = now;
+        const formatTime = (ms) => {
+            if (!ms) return 'Ожидание...';
+            const diff = Math.round((ms - now) / 1000);
+            if (diff <= 0) { lastSunCalcTime = 0; return 'Сейчас'; } // Триггерим пересчет
+            const d = new Date(ms);
+            const hm = d.toLocaleTimeString('ru-RU', {hour: '2-digit', minute:'2-digit'});
+            return `${hm} (через ${diff} сек)`;
+        };
+        document.getElementById('hud-sunrise').textContent = formatTime(nextSunriseMs);
+        document.getElementById('hud-sunset').textContent = formatTime(nextSunsetMs);
+    }
+}
+
 function animate() {
     requestAnimationFrame(animate);
 
@@ -1053,7 +1130,7 @@ function animate() {
     const dt = (nowFrame - lastFrameTime) / 1000;
     lastFrameTime = nowFrame;
 
-bT += dt;
+    bT += dt;
     const bOn = (bT % 2.5) < 0.15;
     beacon.intensity = 0; 
     bMesh.material.color.setHex(bOn ? 0xff8800 : 0x441100); 
@@ -1151,50 +1228,26 @@ bT += dt;
     const targetQuat = new THREE.Quaternion().setFromRotationMatrix(m);
     iss.quaternion.slerp(targetQuat, 0.05);
 
-   if (currentCam === 'free') {
+    if (currentCam === 'free') {
         if (isIntroActive) {
             controls.enabled = false;
-            const introDur = 7500; // 7.5 секунд эпичного пролета
+            const introDur = 4000;
             let t = (Date.now() - introStartTime) / introDur;
             if (t > 1) t = 1;
 
             if (!window.introParamsSet) {
                 window.introParamsSet = true;
-                // Располагаем камеру на ночной стороне Земли (так чтобы в центре светило Солнце)
-                const toSun = sunPos.clone().normalize();
-                const awayFromSun = toSun.clone().negate();
-                // Смещаем на ~25 градусов, чтобы Земля полностью не закрывала Солнце (эффект гало)
-                const startDir = awayFromSun.applyAxisAngle(new THREE.Vector3(0, 1, 0), Math.PI / 7).normalize();
-                // Дистанция 180 (радиус Земли ~64)
-                window.introStartPos = startDir.multiplyScalar(180); 
+                const issUp = iss.position.clone().normalize();
+                window.introStartPos = iss.position.clone().add(issUp.multiplyScalar(40)); 
             }
 
-            // Плавное ускорение и замедление (easeInOutCubic)
-            const easeT = t < 0.5 ? 4 * t * t * t : 1 - Math.pow(-2 * t + 2, 3) / 2;
+            const easeT = 1 - Math.pow(1 - t, 3);
+            const issUp = iss.position.clone().normalize();
+            const endPos = iss.position.clone().add(issUp.multiplyScalar(targetZoomDist));
 
-            const startPos = window.introStartPos;
-            const startDir = startPos.clone().normalize();
-            const startRad = startPos.length();
+            camFree.position.copy(window.introStartPos).lerp(endPos, easeT);
+            camFree.lookAt(iss.position);
 
-            // Конечная позиция - дистанция фокуса (1км) от МКС, глядя на планету
-            const issN = iss.position.clone().normalize();
-            const endPos = iss.position.clone().add(issN.multiplyScalar(targetZoomDist)); 
-            const endDir = endPos.clone().normalize();
-            const endRad = endPos.length();
-
-            // Исправленная строка: используем lerp + normalize для векторов
-            const curDir = startDir.clone().lerp(endDir, easeT).normalize();
-            const curRad = startRad + (endRad - startRad) * easeT;
-
-            camFree.position.copy(curDir.multiplyScalar(curRad));
-
-            // Плавный перевод взгляда от Солнца к МКС
-            const lookStart = sunPos.clone();
-            const lookEnd = iss.position.clone();
-            const curLook = lookStart.clone().lerp(lookEnd, easeT);
-            camFree.lookAt(curLook);
-
-            // Передача управления по завершению
             if (t === 1) {
                 isIntroActive = false;
                 controls.enabled = true;
@@ -1236,7 +1289,8 @@ bT += dt;
         camMoon.lookAt(moon.position);
         activeCam = camMoon;
     }
-renderPass.camera = activeCam;
+
+    renderPass.camera = activeCam;
 
     if (sunOn) {
         const issN = iss.position.clone().normalize();
@@ -1277,7 +1331,7 @@ renderPass.camera = activeCam;
         moonLabel.style.opacity = '1';
         moonLabel.style.transform = `translate(-50%, -100%) translate(${tempV.x * halfW + halfW}px, ${-tempV.y * halfH + halfH - 20}px)`;
     }
-
+updateSunTimers();
     composer.render();
 }
 
