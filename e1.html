@@ -875,6 +875,28 @@
 }
 
 
+.fias-copy-btn {
+            background: #f1f5f9;
+            border: 1px solid #cbd5e1;
+            border-radius: 6px;
+            padding: 4px 10px;
+            font-family: 'Courier New', monospace;
+            font-size: 0.85rem;
+            font-weight: 600;
+            color: #334155;
+            cursor: pointer;
+            transition: all 0.2s ease;
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
+        }
+        .fias-copy-btn:hover {
+            background: #e2e8f0;
+            border-color: #94a3b8;
+            transform: translateY(-1px);
+        }
+        
+
         @media (max-width: 1024px) { #resultsContainer { grid-template-columns: 1fr; } }
         @media (max-width: 768px) {
             .container { margin: 0; border-radius: 0; }
@@ -1329,6 +1351,44 @@ document.addEventListener('DOMContentLoaded', () => {
     };
     
     
+    const getAddressHtml = (addrEl) => {
+        if (!addrEl) return '';
+        
+        // Определение вида адреса
+        let addrTypeStr = '';
+        const typeAttr = addrEl.getAttribute('AddressOrLocation');
+        if (typeAttr === '0') {
+            addrTypeStr = '<div style="font-size: 0.85em; color: var(--warning-color); margin-bottom: 6px; font-weight: 600;"><i class="fas fa-map-marker-alt"></i> Описание местоположения</div>';
+        } else if (typeAttr === '1') {
+            addrTypeStr = '<div style="font-size: 0.85em; color: var(--success-color); margin-bottom: 6px; font-weight: 600;"><i class="fas fa-check-circle"></i> Присвоенный в установленном порядке адрес</div>';
+        }
+
+        const fullAddr = getFullAddress(addrEl);
+        const fias = T(addrEl, 'FIAS');
+        let fiasHtml = '';
+        
+        // Кнопка ФИАС (ГАР)
+        if (fias && fias !== '—') {
+            fiasHtml = `
+                <div style="margin-top: 12px; padding-top: 10px; border-top: 1px dashed #bae6fd; display: flex; align-items: center; flex-wrap: wrap; gap: 8px;">
+                    <span style="font-size: 0.85em; color: var(--text-secondary); font-weight: 600;">Уникальный номер ГАР (ФИАС):</span>
+                    <button class="fias-copy-btn" data-fias="${fias}" title="Скопировать и открыть сайт ФИАС">
+                        <i class="fas fa-copy"></i> ${fias}
+                    </button>
+                </div>
+            `;
+        }
+
+        return `
+            <div class="address-display">
+                ${addrTypeStr}
+                <div style="font-size: 1.05em;">${fullAddr}</div>
+                ${fiasHtml}
+            </div>
+        `;
+    };
+    
+    
     function delay(ms) {
     return new Promise(resolve => setTimeout(resolve, ms));
 }
@@ -1751,7 +1811,8 @@ async function checkZuForTechPlan(zuNumbers, button) {
         nspdZuFeatures = await searchIntersectingObjects(contours, NSPD_CATEGORY_ZU, currentMskSystem);
     }
     
-    // Обрабатываем найденные ЗУ
+ 
+  // Обрабатываем найденные ЗУ
     const nspdZuList = [];
     for (const f of nspdZuFeatures) {
         const cadNum = f.properties?.options?.cad_number || f.properties?.options?.cad_num || f.properties?.descr;
@@ -1760,6 +1821,14 @@ async function checkZuForTechPlan(zuNumbers, button) {
             if (f.geometry && currentMskSystem) {
                 zuContours = await convertEgrnGeometryToMsk(f.geometry, currentMskSystem);
             }
+            
+            // Фильтруем ЗУ, которые только касаются границ, но не имеют наложения
+            if (zuContours.length > 0 && contours.length > 0) {
+                if (!isRealOverlap(contours, zuContours)) {
+                    continue; 
+                }
+            }
+
             nspdZuList.push({
                 cadNumber: cadNum,
                 address: f.properties?.options?.readable_address || f.properties?.options?.address_readable_address || '',
@@ -2549,55 +2618,66 @@ async function fetchLinkedOksFromRegistry(cadNumber, loadDetails = true) {
 
 
 
-function isRealOverlap(contoursA, contoursB, mskSystem) {
-    if (!contoursA || !contoursA.length || !contoursB || !contoursB.length) return true; // Если нет координат, доверяем API
+function isRealOverlap(contoursA, contoursB) {
+    if (!contoursA || !contoursA.length || !contoursB || !contoursB.length) return true;
+
+    // Расчет площади плоского многоугольника (МСК в метрах) по координатам X, Y
+    const calcPlanarArea = (pts) => {
+        let area = 0;
+        for (let i = 0; i < pts.length - 1; i++) {
+            area += pts[i].x * pts[i + 1].y - pts[i + 1].x * pts[i].y;
+        }
+        return Math.abs(area) / 2;
+    };
+
+    // Замыкание контура и подготовка формата [x, y]
+    const prepareRing = (ring) => {
+        const arr = ring.map(p => [p.x, p.y]);
+        const first = arr[0];
+        const last = arr[arr.length - 1];
+        if (Math.abs(first[0] - last[0]) > 0.001 || Math.abs(first[1] - last[1]) > 0.001) {
+            arr.push([...first]);
+        }
+        return arr;
+    };
 
     try {
-        const toWgsPolyRings = (contours) => {
-            const rings = [];
-            contours.forEach(ring => {
-                const wgsRing = [];
-                ring.forEach(pt => {
-                    const pt3857 = convertMskTo3857(pt, mskSystem);
-                    if (pt3857) {
-                        const wgs = proj4('EPSG:3857', 'EPSG:4326', pt3857);
-                        wgsRing.push([wgs[0], wgs[1]]);
-                    }
-                });
-                if (wgsRing.length >= 3) {
-                    // Замыкаем контур для Turf.js
-                    const first = wgsRing[0];
-                    const last = wgsRing[wgsRing.length - 1];
-                    if (Math.abs(first[0] - last[0]) > 0.000001 || Math.abs(first[1] - last[1]) > 0.000001) {
-                        wgsRing.push([...first]);
-                    }
-                    rings.push(wgsRing);
-                }
-            });
-            return rings;
-        };
-
-        const ringsA = toWgsPolyRings(contoursA);
-        const ringsB = toWgsPolyRings(contoursB);
-
-        if (!ringsA.length || !ringsB.length) return true;
-
-        // Проверяем каждую пару колец на пересечение
-        for (const rA of ringsA) {
-            const polyA = turf.polygon([rA]);
-            for (const rB of ringsB) {
-                const polyB = turf.polygon([rB]);
+        for (const ringA of contoursA) {
+            const polyA = turf.polygon([prepareRing(ringA)]);
+            
+            for (const ringB of contoursB) {
+                const polyB = turf.polygon([prepareRing(ringB)]);
+                
                 const intersection = turf.intersect(turf.featureCollection([polyA, polyB]));
+                
                 if (intersection) {
-                    const area = turf.area(intersection);
-                    if (area > 0.05) return true; // Если площадь наложения больше 0.05 кв.м. - это реальный ОКС
+                    let totalOverlapArea = 0;
+                    const geoms = intersection.geometry.type === 'Polygon' ? 
+                        [intersection.geometry.coordinates] : 
+                        (intersection.geometry.type === 'MultiPolygon' ? intersection.geometry.coordinates : []);
+                    
+                    for (const poly of geoms) {
+                        const outerRing = poly[0].map(c => ({x: c[0], y: c[1]}));
+                        totalOverlapArea += calcPlanarArea(outerRing);
+                        
+                        // Вычитаем внутренние пустоты (дырки), если они есть
+                        for (let i = 1; i < poly.length; i++) {
+                            const holeRing = poly[i].map(c => ({x: c[0], y: c[1]}));
+                            totalOverlapArea -= calcPlanarArea(holeRing);
+                        }
+                    }
+                    
+                    // Порог: 0.001 кв.м (10 кв. см). Игнорируем простое касание границ.
+                    if (totalOverlapArea >= 0.001) {
+                        return true; 
+                    }
                 }
             }
         }
-        return false; // Нет реального наложения площадей (только общая граница)
+        return false;
     } catch(e) {
-        console.error('Ошибка при расчете площади пересечения ОКС и ЗУ:', e);
-        return true; // При ошибке оставляем объект
+        console.error('Ошибка при точном расчете площади пересечения:', e);
+        return true; 
     }
 }
 
@@ -2730,7 +2810,7 @@ async function checkOksInEgrn(oksNumbers, button) {
 
         button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Обработка...</span>';
 
-       for (const f of buildings) {
+      for (const f of buildings) {
             const cadNum = f.properties?.options?.cad_number || f.properties?.options?.cad_num;
             if (cadNum) {
                 const oksItem = {
@@ -2749,7 +2829,7 @@ async function checkOksInEgrn(oksNumbers, button) {
                 
                 // Фильтруем объекты, имеющие только общую границу (без наложения площади)
                 if (oksItem.hasCoords && parcelContours.length > 0) {
-                    if (!isRealOverlap(parcelContours, oksItem.contours, currentMskSystem)) {
+                    if (!isRealOverlap(parcelContours, oksItem.contours)) {
                         continue; 
                     }
                 }
@@ -2777,7 +2857,7 @@ async function checkOksInEgrn(oksNumbers, button) {
                 
                 // Фильтруем объекты, имеющие только общую границу (без наложения площади)
                 if (oksItem.hasCoords && parcelContours.length > 0) {
-                    if (!isRealOverlap(parcelContours, oksItem.contours, currentMskSystem)) {
+                    if (!isRealOverlap(parcelContours, oksItem.contours)) {
                         continue; 
                     }
                 }
@@ -4608,6 +4688,36 @@ window.addEventListener('resize', () => {
                 openXmlViewModal(xmlViewBtn.dataset.num);
                 return;
             }
+            
+            
+            const fiasCopyBtn = event.target.closest('.fias-copy-btn');
+            if (fiasCopyBtn) {
+                event.preventDefault();
+                const fiasCode = fiasCopyBtn.dataset.fias;
+                if (navigator.clipboard) {
+                    navigator.clipboard.writeText(fiasCode).then(() => {
+                        const originalHtml = fiasCopyBtn.innerHTML;
+                        fiasCopyBtn.innerHTML = '<i class="fas fa-check"></i> Скопировано';
+                        fiasCopyBtn.style.background = '#10b981';
+                        fiasCopyBtn.style.color = '#fff';
+                        fiasCopyBtn.style.borderColor = '#059669';
+                        
+                        setTimeout(() => {
+                            fiasCopyBtn.innerHTML = originalHtml;
+                            fiasCopyBtn.style.background = '';
+                            fiasCopyBtn.style.color = '';
+                            fiasCopyBtn.style.borderColor = '';
+                            window.open('https://fias.nalog.ru/Search/Extended', '_blank');
+                        }, 800);
+                    }).catch(err => {
+                        console.error('Ошибка копирования:', err);
+                        alert('Не удалось скопировать номер ФИАС.');
+                    });
+                } else {
+                    alert('Ваш браузер не поддерживает копирование в буфер обмена.');
+                }
+                return;
+            }
 
             // Закрытие окна просмотра XML
             if (event.target.id === 'xmlViewModalClose' || event.target.id === 'xmlViewModal') {
@@ -5131,16 +5241,13 @@ function doContoursMatch(contoursA, contoursB) {
     
     mainInfoHtml += `</div>`;
     
-    // Адрес
+   
+   // Адрес
     const addressEl = E(mainObject, 'Address, ObjectAddress');
     if (addressEl) {
-        mainInfoHtml += `<div class="subsection"><div class="subsection-title">Адрес</div><div class="address-display">${getFullAddress(addressEl)}</div>`;
-        const fias = T(addressEl, 'FIAS');
-        if (fias && fias !== '—') {
-            mainInfoHtml += `<div class="info-grid" style="margin-top: 12px;"><div class="info-card"><div class="info-label">FIAS</div><div class="info-value">${fias}</div></div></div>`;
-        }
-        mainInfoHtml += `</div>`;
+        mainInfoHtml += `<div class="subsection"><div class="subsection-title">Адрес</div>${getAddressHtml(addressEl)}</div>`;
     }
+      
     
     // Земельные участки (ParentCadastralNumbers)
     const parentCadNumbers = Array.from(All(mainObject, 'ParentCadastralNumbers CadastralNumber')).map(n => n.textContent.trim());
@@ -5901,9 +6008,10 @@ function runTechPlanValidation(xmlDoc, xmlText) {
             <div class="oks-check-status" style="margin-top:12px;"></div>
         </div>`;
 
-        // Адрес и координаты
+
+       // Адрес и координаты
         if (E(newParcel, 'Address')) {
-            sectionContent += `<div class="subsection"><div class="subsection-title">Адрес</div><div class="address-display">${getFullAddress(E(newParcel, 'Address'))}</div></div>`;
+            sectionContent += `<div class="subsection"><div class="subsection-title">Адрес</div>${getAddressHtml(E(newParcel, 'Address'))}</div>`;
         }
         const entitySpatial = E(newParcel, 'EntitySpatial');
         if (entitySpatial) {
