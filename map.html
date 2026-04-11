@@ -5441,12 +5441,15 @@ function findAndConvert() {
     }
 
     try {
-        // --- НАЧАЛО ИСПРАВЛЕНИЯ: Удаляем старые полигоны от предыдущей конвертации ---
+        // --- НАЧАЛО ИСПРАВЛЕНИЯ: Отключено удаление старых полигонов ---
+        // Теперь при вставке новых координат старые объекты остаются на карте
+        /*
         const objectsToRemove = polygons.filter(obj => obj.properties && obj.properties.get('isFromCoordInput'));
         objectsToRemove.forEach(obj => {
             map.geoObjects.remove(obj);
             polygons = polygons.filter(p => p !== obj);
         });
+        */
         // --- КОНЕЦ ИСПРАВЛЕНИЯ ---
 
         const coordsText = coordsInput.value.trim();
@@ -5460,8 +5463,7 @@ function findAndConvert() {
         const detectedMskSystem = findMskSystemByTemplate(coordsText);
 
         if (detectedMskSystem) {
-            // Эта часть кода для автоопределения по шаблону, она уже работает с учетом смещений,
-            // поэтому оставляем ее как есть.
+            // Автоопределение по шаблону
             const sourceSc = detectedMskSystem;
             console.log(`Применяется СК, найденная по шаблону: ${sourceSc}`);
             const sourceDef = COORDINATE_SYSTEMS.find(s => s.value === sourceSc)?.def;
@@ -5483,7 +5485,6 @@ function findAndConvert() {
             });
         
         } else {
-            // --- ОСНОВНАЯ ЛОГИКА И ИСПРАВЛЕНИЯ ЗДЕСЬ ---
             console.log("Шаблоны не сработали, используется стандартное определение СК.");
             const firstCoord = coordGroups[0][0];
             const x = firstCoord[0];
@@ -5514,7 +5515,6 @@ function findAndConvert() {
                 });
             }
             else {
-                // --- НАЧАЛО ИСПРАВЛЕНИЙ ---
                 const sourceSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
                 console.log(`Определена система: МСК (по умолчанию из localStorage), используется ${sourceSc}`);
 
@@ -5530,40 +5530,26 @@ function findAndConvert() {
                 if (isAutoLoadEnabled) {
                     mskOffsetX = destSystem.offsetX || 0;
                     mskOffsetY = destSystem.offsetY || 0;
-                    console.log(`[findAndConvert] Автозагрузка смещения: включена. Смещения из sk.js для ${sourceSc}: X=${mskOffsetX}, Y=${mskOffsetY}`);
                 } else {
                     const offsetXRaw = localStorage.getItem('savedMskOffsetX') || '0';
                     const offsetYRaw = localStorage.getItem('savedMskOffsetY') || '0';
                     mskOffsetX = parseFloat(offsetXRaw.replace(',', '.')) || 0;
                     mskOffsetY = parseFloat(offsetYRaw.replace(',', '.')) || 0;
-                    console.log(`[findAndConvert] Автозагрузка смещения: выключена. Используются сохраненные вручную смещения: X=${mskOffsetX}, Y=${mskOffsetY}`);
                 }
                 
                 const sourceDef = destSystem.def;
                 proj4.defs(sourceSc, sourceDef);
-                // --- КОНЕЦ ИСПРАВЛЕНИЙ ---
 
                 geoGroups = coordGroups.map(group => {
                     return group.map(coord => {
                         const x_input_msk = coord[0]; 
                         const y_input_msk = coord[1];
 
-                        console.log(`--- [findAndConvert] Начало конвертации точки ---`);
-                        console.log(`Шаг 1: Исходные МСК: X=${x_input_msk.toFixed(4)}, Y=${y_input_msk.toFixed(4)}`);
-                        console.log(`Шаг 2: Загруженное смещение: mskOffsetX = ${mskOffsetX}, mskOffsetY = ${mskOffsetY}`);
-
                         const corrected_x_msk = x_input_msk - mskOffsetX;
                         const corrected_y_msk = y_input_msk - mskOffsetY;
 
-                        console.log(`Шаг 3: Скорректированные МСК (X-mskOffsetX, Y-mskOffsetY): X=${corrected_x_msk.toFixed(4)}, Y=${corrected_y_msk.toFixed(4)}`);
-
                         const point3857 = proj4(sourceSc, "EPSG:3857", [corrected_y_msk, corrected_x_msk]);
-                        
-                        console.log(`Шаг 4: Промежуточный результат в EPSG:3857: X=${point3857[0].toFixed(4)}, Y=${point3857[1].toFixed(4)}`);
-
                         const finalWgs84 = proj4("EPSG:3857", "EPSG:4326", point3857);
-                        console.log(`Шаг 5: Финальный результат в WGS84 (для карты): lat=${finalWgs84[1].toFixed(8)}, lon=${finalWgs84[0].toFixed(8)}`);
-                        console.log(`--- [findAndConvert] Конец конвертации точки ---`);
                         
                         return [finalWgs84[1], finalWgs84[0]]; // [lat, lon]
                     });
@@ -9274,19 +9260,36 @@ if (event.target.id === 'change-color-menu-item') {
 
             // 1. Сначала пытаемся найти объекты конкретно в точке клика
             let candidateObjects = [];
-            const allDrawableObjects = [...polygons, ...areaObjects];
+            
+            // Исключаем технические объекты (рамки квартала, линии рулетки, области поиска)
+            const allDrawableObjects = [...polygons, ...areaObjects].filter(obj => 
+                !obj.properties?.get('isMeasureTool') && 
+                !obj.properties?.get('isSearchShape') &&
+                obj.options?.get('strokeStyle') !== 'dash'
+            );
 
             for (const obj of allDrawableObjects) {
                 // Проверка Полигонов
                 if (obj instanceof ymaps.Polygon) {
                     try {
                         const coords = obj.geometry.getCoordinates()[0];
-                        if (coords.length < 4) continue;
-                        const turfPolygon = turf.polygon([coords.map(coord => [coord[1], coord[0]])]);
+                        if (!coords || coords.length < 3) continue; // Полигон должен иметь минимум 3 точки
+                        
+                        // Гарантируем замыкание полигона для корректной работы Turf.js
+                        let turfCoords = coords.map(coord => [coord[1], coord[0]]);
+                        const first = turfCoords[0];
+                        const last = turfCoords[turfCoords.length - 1];
+                        // Если первая и последняя точки не совпадают, дублируем первую в конец
+                        if (Math.abs(first[0] - last[0]) > 1e-9 || Math.abs(first[1] - last[1]) > 1e-9) {
+                            turfCoords.push([...first]);
+                        }
+                        
+                        const turfPolygon = turf.polygon([turfCoords]);
                         if (turf.booleanPointInPolygon(clickPoint, turfPolygon)) {
                             candidateObjects.push(obj);
                         }
                     } catch (turfError) {
+                        // Резервный метод API Яндекса, если Turf всё же выдал ошибку
                         if (obj.geometry.contains([lat, lon])) {
                             candidateObjects.push(obj);
                         }
@@ -9310,13 +9313,8 @@ if (event.target.id === 'change-color-menu-item') {
             if (candidateObjects.length === 0) {
                 candidateObjects = allDrawableObjects.filter(obj => 
                     obj instanceof ymaps.Polygon || 
-                    (obj instanceof ymaps.Polyline && (obj.properties.get('isDrawableLine') || obj.properties.get('cadastralNumber'))) // Фильтруем технические линии измерений
+                    (obj instanceof ymaps.Polyline && (obj.properties.get('isDrawableLine') || obj.properties.get('cadastralNumber')))
                 );
-                
-                if (candidateObjects.length > 0) {
-                    // Опционально: можно уведомить пользователя, что показан общий список
-                    // showNotification('В точке клика пусто. Показан список всех объектов.', 'info');
-                }
             }
 
             // 3. Действия в зависимости от количества найденных кандидатов
