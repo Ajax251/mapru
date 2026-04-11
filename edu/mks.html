@@ -261,6 +261,7 @@ canvas { display:block; width:100%; height:100%; outline:none; }
 <div class="loc-name" id="hud-loc">Ожидание...</div>
 <div class="sys-status-row">
 <span id="illum-status">ЗАГРУЗКА...</span>
+<span id="hud-temp" style="font-family: var(--font-mono); font-size: 11px; font-weight: bold; margin-left: 8px;">T: --°C</span>
 <div style="flex:1"></div>
 <span class="status-dot"></span>
 <span>СИСТЕМЫ ОК</span>
@@ -350,8 +351,9 @@ import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
 const DATA_SOURCE = 1; 
 
 const LS = 'iss_cmd_v13_stable_zoom';
-let cfg = JSON.parse(localStorage.getItem(LS)) || { cam:'free', galaxy:true, mapLayer:'google-hybrid', sunOn:true, starsOn:true };
+let cfg = JSON.parse(localStorage.getItem(LS)) || { cam:'free', galaxy:true, mapLayer:'google-hybrid', sunOn:true, starsOn:true, trackOn:true };
 if (cfg.starsOn === undefined) cfg.starsOn = true;
+if (cfg.trackOn === undefined) cfg.trackOn = true;
 const save = () => localStorage.setItem(LS, JSON.stringify(cfg));
 
 const DEG_TO_RAD = Math.PI / 180;
@@ -470,7 +472,8 @@ function updateMapFovText() {
 function initLeaflet() {
     leafMap = L.map('leaflet-map', { center:[0,0], zoom:5, zoomControl:true, attributionControl:false });
     leafTile = L.tileLayer(TILES[cfg.mapLayer], { maxZoom:19 }).addTo(leafMap);
-    trackLineLeaflet = L.polyline([], { color:'#00d2ff', weight:3, opacity:0.8 }).addTo(leafMap);
+    trackLineLeaflet = L.polyline([], { color:'#00d2ff', weight:3, opacity:0.8 });
+    if (cfg.trackOn) trackLineLeaflet.addTo(leafMap);
 
     leafMap.on('movestart', () => { if (!isProgrammaticZoom) setFovUnsynced(); });
     leafMap.on('zoomstart', () => { if (!isProgrammaticZoom) setFovUnsynced(); });
@@ -1235,32 +1238,85 @@ function updateISS() {
     }
 }
 
-let lastGeoT = 0, locStr = 'ОКЕАН / ОТКРЫТАЯ ВОДА';
+let lastGeoT = 0, locStr = 'ОЖИДАНИЕ...';
+
+// Функция для определения океана по координатам (грубая, но быстрая модель)
+function getOceanName(lat, lon) {
+    if (lat < -60) return "Южный океан";
+    if (lat > 65) return "Северный Ледовитый океан";
+
+    if (lon >= 20 && lon <= 145 && lat < 30) return "Индийский океан";
+    
+    // Динамическая граница между Атлантикой и Тихим океаном (огибает Америку)
+    let atlanticPacificBoundary = -70; // Для Южной Америки
+    if (lat > 15) atlanticPacificBoundary = -85; // Для Центральной
+    if (lat > 30) atlanticPacificBoundary = -100; // Для Северной (США/Канада)
+
+    if (lon >= atlanticPacificBoundary && lon < 20) return "Атлантический океан";
+    if ((lon > 145 && lon <= 180) || (lon >= -180 && lon < atlanticPacificBoundary)) return "Тихий океан";
+    
+    return "Открытая вода";
+}
+
 async function fetchLoc(lat, lon) {
-    const now = Date.now(); if (now-lastGeoT < 10000) return; lastGeoT = now;
+    const now = Date.now(); if (now - lastGeoT < 10000) return; lastGeoT = now;
     try {
         const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=10&accept-language=ru`);
         const d = await r.json();
-        if (d.error) { locStr = 'ОКЕАН / ОТКРЫТАЯ ВОДА'; }
-        else { const a = d.address; const n = a.city||a.town||a.village||a.state||''; locStr = n ? `${n}, ${a.country||''}` : (a.country||'ОТКРЫТАЯ ВОДА'); }
-    } catch(e) { locStr = 'НЕТ ДАННЫХ'; }
-    document.getElementById('hud-loc').textContent = locStr; document.getElementById('map-loc').textContent = locStr;
+        if (d.error) { 
+            locStr = getOceanName(lat, lon); 
+        } else { 
+            const a = d.address; 
+            const n = a.city || a.town || a.village || a.state || ''; 
+            // Если API нашло объект без страны (например, мелкие острова или заливы), берем океан
+            locStr = n ? `${n}, ${a.country || ''}` : (a.country || getOceanName(lat, lon)); 
+        }
+    } catch(e) { 
+        locStr = getOceanName(lat, lon); 
+    }
+    
+    const finalStr = locStr.replace(/,\s*$/, '').toUpperCase(); // Убираем запятую в конце, если страны нет
+    document.getElementById('hud-loc').textContent = finalStr; 
+    document.getElementById('map-loc').textContent = finalStr;
 }
 
 let isFetchingTLE = false;
 
-document.getElementById('btn-toggle-track').addEventListener('click', function() {
-    trailLine.visible = !trailLine.visible;
-    if (trailLine.visible) {
-        this.style.background = 'var(--accent-dim)';
-        this.style.borderColor = 'var(--accent)';
-        this.style.color = 'var(--accent)';
-    } else {
-        this.style.background = 'rgba(255,255,255,0.05)';
-        this.style.borderColor = 'rgba(255,255,255,0.2)';
-        this.style.color = 'var(--text-dim)';
+function applyTrackState() {
+    const btn = document.getElementById('btn-toggle-track');
+    
+    // Переключение в 3D сцене
+    if (typeof trailLine !== 'undefined') trailLine.visible = cfg.trackOn;
+    
+    // Переключение на 2D карте
+    if (leafMap && trackLineLeaflet) {
+        if (cfg.trackOn) {
+            if (!leafMap.hasLayer(trackLineLeaflet)) leafMap.addLayer(trackLineLeaflet);
+        } else {
+            if (leafMap.hasLayer(trackLineLeaflet)) leafMap.removeLayer(trackLineLeaflet);
+        }
     }
+
+    // Визуал самой кнопки
+    if (cfg.trackOn) {
+        btn.style.background = 'var(--accent-dim)';
+        btn.style.borderColor = 'var(--accent)';
+        btn.style.color = 'var(--accent)';
+    } else {
+        btn.style.background = 'rgba(255,255,255,0.05)';
+        btn.style.borderColor = 'rgba(255,255,255,0.2)';
+        btn.style.color = 'var(--text-dim)';
+    }
+}
+
+document.getElementById('btn-toggle-track').addEventListener('click', function() {
+    cfg.trackOn = !cfg.trackOn;
+    save();
+    applyTrackState();
 });
+
+// Применяем стартовое состояние из localStorage (вызываем асинхронно после создания сцены)
+setTimeout(applyTrackState, 100);
 
 async function fetchISS() {
     if (DATA_SOURCE === 1 && satrec) return; 
@@ -1552,22 +1608,44 @@ function animate() {
 
     renderPass.camera = activeCam;
 
+  const hudTemp = document.getElementById('hud-temp');
     if (sunOn) {
         const issN = iss.position.clone().normalize();
         const sunN = sunPos.clone().normalize();
         const angleDeg = Math.acos(issN.dot(sunN)) * (180 / Math.PI);
-        if (angleDeg < 85) { illumSpan.textContent = "☀️ НА СОЛНЦЕ"; illumSpan.style.color = "var(--amber)"; }
-        else if (angleDeg <= 112) { illumSpan.textContent = "🌅 ТЕРМИНАТОР"; illumSpan.style.color = "#ff7f50"; }
-        else { illumSpan.textContent = "🌑 В ТЕНИ"; illumSpan.style.color = "var(--text-dim)"; }
+        
+        let temp = 0;
+        if (angleDeg < 85) { 
+            illumSpan.textContent = "☀️ НА СОЛНЦЕ"; illumSpan.style.color = "var(--amber)"; 
+            temp = 121; // Температура на открытом солнце ~ +121°C
+        }
+        else if (angleDeg <= 112) { 
+            illumSpan.textContent = "🌅 ТЕРМИНАТОР"; illumSpan.style.color = "#ff7f50"; 
+            // Плавное падение температуры в зоне терминатора от +121°C до -157°C
+            const t = (angleDeg - 85) / (112 - 85);
+            temp = 121 - t * (121 - (-157));
+        }
+        else { 
+            illumSpan.textContent = "🌑 В ТЕНИ"; illumSpan.style.color = "var(--text-dim)"; 
+            temp = -157; // Температура в полной тени ~ -157°C
+        }
+
+        if (hudTemp) {
+            hudTemp.textContent = `T: ${temp > 0 ? '+' : ''}${Math.round(temp)}°C`;
+            hudTemp.style.color = temp > 0 ? "var(--amber)" : "#88ccff";
+        }
 
         const sfi = sunPos.clone().sub(iss.position).normalize();
-        // Вращаем панели процедурной модели (если она ещё активна на сцене)
         if (proceduralISS.parent) {
             panels.forEach(p => { p.rotation.x = THREE.MathUtils.lerp(p.rotation.x, Math.atan2(sfi.y, sfi.z), 0.01); });
         }
     } else {
         sunLight.position.copy(activeCam.position);
         illumSpan.textContent = "🌕 ПОЛНАЯ ОСВЕЩЕННОСТЬ"; illumSpan.style.color = "var(--accent)";
+        if (hudTemp) {
+            hudTemp.textContent = "T: +121°C";
+            hudTemp.style.color = "var(--amber)";
+        }
     }
 
     const secs = Math.floor((Date.now() - appStart) / 1000);
