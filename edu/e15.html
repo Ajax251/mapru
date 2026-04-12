@@ -641,6 +641,13 @@ const earthMat = new THREE.MeshPhongMaterial({
 const earth = new THREE.Mesh(new THREE.SphereGeometry(R_EARTH, 80, 80), earthMat);
 earthGroup.add(earth);
 
+const occluder = new THREE.Mesh(
+    new THREE.SphereGeometry(R_EARTH - 0.05, 80, 80),
+    new THREE.MeshBasicMaterial({ color: 0x000000, depthWrite: true })
+);
+occluder.renderOrder = -1;
+earthGroup.add(occluder);
+
 const atmoMat = new THREE.ShaderMaterial({
     uniforms: { sunDirection: { value: new THREE.Vector3(1, 0, 0) } },
     vertexShader: `
@@ -671,12 +678,13 @@ const atmoMat = new THREE.ShaderMaterial({
         }
     `,
     blending: THREE.AdditiveBlending, 
-    side: THREE.FrontSide, 
+    side: THREE.BackSide,
     transparent: true, 
     depthWrite: false
 });
 
 const atmosphere = new THREE.Mesh(new THREE.SphereGeometry(R_EARTH + 0.6, 80, 80), atmoMat);
+atmosphere.renderOrder = 1;
 scene.add(atmosphere);
 
 const milkyWay = new THREE.Mesh(new THREE.SphereGeometry(9500, 64, 64), new THREE.MeshBasicMaterial({ map:tMW, side:THREE.BackSide, transparent:true, opacity:0.6, depthWrite:false }));
@@ -996,7 +1004,7 @@ controls.enableDamping = true;
 controls.enableZoom = false; 
 controls.enablePan = false;
 controls.minDistance = 0.00005; 
-controls.maxDistance = 150;
+controls.maxDistance = 500;
 controls.mouseButtons = { LEFT: THREE.MOUSE.ROTATE, MIDDLE: THREE.MOUSE.DOLLY, RIGHT: THREE.MOUSE.ROTATE };
 
 let targetZoomDist = 0.01;
@@ -1006,8 +1014,8 @@ const zoomSlider = document.getElementById('zoom-slider');
 
 function updateZoomSlider() {
     const minLog = Math.log(0.00005);
-    const maxLog = Math.log(150);
-    const clampedDist = THREE.MathUtils.clamp(targetZoomDist, 0.00005, 150);
+    const maxLog = Math.log(500);
+    const clampedDist = THREE.MathUtils.clamp(targetZoomDist, 0.00005, 500);
     const currentLog = Math.log(clampedDist);
     zoomSlider.value = ((currentLog - minLog) / (maxLog - minLog)) * 100;
 }
@@ -1036,7 +1044,7 @@ controls.addEventListener('end', () => { isOrbitDragging = false; showRangefinde
 zoomSlider.addEventListener('input', e => {
     if (currentCam !== 'free' || isIntroActive) return;
     const minLog = Math.log(0.00005);
-    const maxLog = Math.log(150);
+    const maxLog = Math.log(500);
     const valLog = minLog + (e.target.value / 100) * (maxLog - minLog);
     targetZoomDist = Math.exp(valLog);
     showRangefinder();
@@ -1057,7 +1065,7 @@ window.addEventListener('wheel', e => {
         e.preventDefault();
         const sign = Math.sign(e.deltaY);
         targetZoomDist *= (sign > 0 ? 1.2 : 0.8);
-        targetZoomDist = THREE.MathUtils.clamp(targetZoomDist, 0.00005, 150);
+        targetZoomDist = THREE.MathUtils.clamp(targetZoomDist, 0.00005, 500);
         updateZoomSlider();
         showRangefinder();
     } else if (currentCam === 'moon') {
@@ -1090,7 +1098,7 @@ renderer.domElement.addEventListener('touchmove', e => {
         if (initialPinchDist > 0) {
             const scale = initialPinchDist / dist;
             targetZoomDist = initialTargetZoom * scale;
-            targetZoomDist = THREE.MathUtils.clamp(targetZoomDist, 0.00005, 150);
+            targetZoomDist = THREE.MathUtils.clamp(targetZoomDist, 0.00005, 500);
             updateZoomSlider();
             showRangefinder(true);
         }
@@ -1238,16 +1246,46 @@ function updateISS() {
     }
 }
 
-let lastGeoT = 0, locStr = 'ОКЕАН / ОТКРЫТАЯ ВОДА';
+let lastGeoT = 0, locStr = 'ОЖИДАНИЕ...';
+
+// Функция для определения океана по координатам (грубая, но быстрая модель)
+function getOceanName(lat, lon) {
+    if (lat < -60) return "Южный океан";
+    if (lat > 65) return "Северный Ледовитый океан";
+
+    if (lon >= 20 && lon <= 145 && lat < 30) return "Индийский океан";
+    
+    // Динамическая граница между Атлантикой и Тихим океаном (огибает Америку)
+    let atlanticPacificBoundary = -70; // Для Южной Америки
+    if (lat > 15) atlanticPacificBoundary = -85; // Для Центральной
+    if (lat > 30) atlanticPacificBoundary = -100; // Для Северной (США/Канада)
+
+    if (lon >= atlanticPacificBoundary && lon < 20) return "Атлантический океан";
+    if ((lon > 145 && lon <= 180) || (lon >= -180 && lon < atlanticPacificBoundary)) return "Тихий океан";
+    
+    return "Открытая вода";
+}
+
 async function fetchLoc(lat, lon) {
-    const now = Date.now(); if (now-lastGeoT < 10000) return; lastGeoT = now;
+    const now = Date.now(); if (now - lastGeoT < 10000) return; lastGeoT = now;
     try {
         const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=10&accept-language=ru`);
         const d = await r.json();
-        if (d.error) { locStr = 'ОКЕАН / ОТКРЫТАЯ ВОДА'; }
-        else { const a = d.address; const n = a.city||a.town||a.village||a.state||''; locStr = n ? `${n}, ${a.country||''}` : (a.country||'ОТКРЫТАЯ ВОДА'); }
-    } catch(e) { locStr = 'НЕТ ДАННЫХ'; }
-    document.getElementById('hud-loc').textContent = locStr; document.getElementById('map-loc').textContent = locStr;
+        if (d.error) { 
+            locStr = getOceanName(lat, lon); 
+        } else { 
+            const a = d.address; 
+            const n = a.city || a.town || a.village || a.state || ''; 
+            // Если API нашло объект без страны (например, мелкие острова или заливы), берем океан
+            locStr = n ? `${n}, ${a.country || ''}` : (a.country || getOceanName(lat, lon)); 
+        }
+    } catch(e) { 
+        locStr = getOceanName(lat, lon); 
+    }
+    
+    const finalStr = locStr.replace(/,\s*$/, '').toUpperCase(); // Убираем запятую в конце, если страны нет
+    document.getElementById('hud-loc').textContent = finalStr; 
+    document.getElementById('map-loc').textContent = finalStr;
 }
 
 let isFetchingTLE = false;
