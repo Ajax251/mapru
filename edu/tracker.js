@@ -14,7 +14,7 @@ const R_EARTH = 63.71;
 
 // ====== ЛОГИКА СПУТНИКОВ ======
 let topSatellites = [];
-const SATS_TARGETS = ['TIANGONG', 'HUBBLE', 'TERRA', 'AQUA', 'SUOMI NPP', 'NOAA 20', 'LANDSAT 8', 'METEOR-M', 'STARLINK'];
+const SATS_TARGETS = ['TIANGONG', 'HUBBLE', 'TERRA', 'AQUA', 'SUOMI NPP', 'NOAA 20', 'LANDSAT', 'METEOR', 'STARLINK'];
 
 async function fetchTopSatellites() {
     if (topSatellites.length > 0) return;
@@ -23,17 +23,31 @@ async function fetchTopSatellites() {
             fetch('https://celestrak.org/NORAD/elements/stations.txt').then(r => r.text()),
             fetch('https://celestrak.org/NORAD/elements/science.txt').then(r => r.text())
         ]);
-        const lines = (st + '\n' + sc).split('\n');
-        for (let i = 0; i < lines.length; i += 3) {
-            const name = lines[i]?.trim();
-            if (name && SATS_TARGETS.some(t => name.includes(t)) && !name.includes('ISS')) {
-                const rec = satellite.twoline2satrec(lines[i+1].trim(), lines[i+2].trim());
-                topSatellites.push({ id: 'sat_' + i, name: name, rec: rec });
+        
+        // Надежное разбиение строк с учетом и Windows, и Linux форматов
+        const lines = (st + '\n' + sc).split(/\r?\n/); 
+        
+        for (let i = 0; i < lines.length; i++) {
+            const name = lines[i].trim();
+            if (name.length > 2 && SATS_TARGETS.some(t => name.toUpperCase().includes(t)) && !name.toUpperCase().includes('ISS')) {
+                try {
+                    // Берем следующие две строки для этого спутника
+                    const tle1 = lines[i+1].trim();
+                    const tle2 = lines[i+2].trim();
+                    const rec = satellite.twoline2satrec(tle1, tle2);
+                    
+                    // Избегаем дубликатов
+                    if (!topSatellites.find(s => s.name === name)) {
+                        topSatellites.push({ id: 'sat_' + i, name: name, rec: rec });
+                    }
+                } catch(e) {
+                    // Если конкретный TLE битый, просто пропускаем
+                }
             }
         }
-        console.log(`Загружено ${topSatellites.length} спутников.`);
+        console.log(`[Трейкер] Загружено ${topSatellites.length} орбитальных аппаратов.`);
     } catch(e) { 
-        console.warn("Ошибка загрузки TLE спутников"); 
+        console.warn("[Трейкер] Ошибка загрузки TLE спутников", e); 
     }
 }
 
@@ -47,15 +61,23 @@ async function fetchPlanes() {
     const lon = window.MKS_STATE.lon;
     if (!lat || !lon) return;
 
-    // Квадрат видимости ~800-1000км от МКС (чтобы не тянуть весь мир)
+    // Квадрат видимости ~800км от МКС
     const bounds = 8; 
+    
+    // Формируем URL к OpenSky
+    const apiUrl = `https://opensky-network.org/api/states/all?lamin=${lat-bounds}&lomin=${lon-bounds}&lamax=${lat+bounds}&lomax=${lon+bounds}&_t=${Date.now()}`;
+    
+    // Обход CORS блокировок через публичный прокси
+    const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(apiUrl)}`;
+
     try {
-        const res = await fetch(`https://opensky-network.org/api/states/all?lamin=${lat-bounds}&lomin=${lon-bounds}&lamax=${lat+bounds}&lomax=${lon+bounds}`);
+        const res = await fetch(proxyUrl);
         const data = await res.json();
         const now = Date.now();
+        
         if (data && data.states) {
             data.states.forEach(s => {
-                // s[0] icao24, s[1] callsign, s[5] lon, s[6] lat, s[7] baro_altitude, s[9] velocity (m/s), s[10] true_track (deg)
+                // s[0] icao, s[1] callsign, s[5] lon, s[6] lat, s[7] baro_alt, s[9] vel, s[10] head
                 if (s[5] !== null && s[6] !== null && s[9] !== null) { 
                     livePlanes[s[0]] = { 
                         callsign: (s[1]||'UNK').trim(), 
@@ -66,13 +88,15 @@ async function fetchPlanes() {
                     };
                 }
             });
+            console.log(`[Трейкер] Авиатрафик обновлен. Видимых бортов: ${Object.keys(livePlanes).length}`);
         }
-        // Очистка старых самолетов, которые давно не обновлялись
+        
+        // Удаляем самолеты, которые пропали с радаров более минуты назад
         Object.keys(livePlanes).forEach(id => { 
-            if (now - livePlanes[id].lastTime > 60000) delete livePlanes[id]; 
+            if (now - livePlanes[id].lastTime > 65000) delete livePlanes[id]; 
         });
     } catch(e) {
-        // Игнорируем ошибки сети/лимитов OpenSky
+        console.warn("[Трейкер] Не удалось обновить самолеты (возможно лимит API)", e);
     }
 }
 
@@ -92,14 +116,14 @@ btnSat.addEventListener('click', () => {
 if (tCfg.planesOn) { 
     btnPlane.classList.add('active'); 
     fetchPlanes(); 
-    planesFetchInterval = setInterval(fetchPlanes, 15000); 
+    planesFetchInterval = setInterval(fetchPlanes, 30000); // 30 сек чтобы не получить бан по IP
 }
 btnPlane.addEventListener('click', () => {
     tCfg.planesOn = !tCfg.planesOn; saveTrackerCfg();
     if (tCfg.planesOn) { 
         btnPlane.classList.add('active'); 
         fetchPlanes(); 
-        planesFetchInterval = setInterval(fetchPlanes, 15000); 
+        planesFetchInterval = setInterval(fetchPlanes, 30000); 
     } else { 
         btnPlane.classList.remove('active'); 
         clearInterval(planesFetchInterval);
@@ -108,7 +132,6 @@ btnPlane.addEventListener('click', () => {
 });
 
 // ====== ПОМОЩНИКИ РЕНДЕРИНГА ======
-
 function getDomLabel(id, text, typeClass) {
     if (!activeDomLabels[id]) {
         const el = document.createElement('div');
@@ -128,7 +151,6 @@ function clearLabels(typeClass) {
     });
 }
 
-// Математика Three.js для позиций (копия логики из основного скрипта)
 function getVector3(lat, lon, altKm, gmstRad) {
     const THREE = window.MKS_STATE.THREE;
     const lonRad = (lon * DEG_TO_RAD) + gmstRad; 
@@ -141,32 +163,29 @@ function getVector3(lat, lon, altKm, gmstRad) {
     );
 }
 
-// Проверка перекрытия объекта планетой (чтобы не рисовать метку сквозь Землю)
+// Математика проверки нахождения за горизонтом (Окклюзия Землей)
 function isOccludedByEarth(posWorld, cameraPos) {
     const THREE = window.MKS_STATE.THREE;
     const dir = new THREE.Vector3().subVectors(posWorld, cameraPos);
     const distToObj = dir.length();
     dir.normalize();
     
-    // Пересекается ли вектор взгляда со сферой Земли (радиус R_EARTH)
     const b = 2 * cameraPos.dot(dir);
     const c = cameraPos.lengthSq() - (R_EARTH * R_EARTH);
     const delta = b*b - 4*c;
     
     if (delta > 0) {
         const t = (-b - Math.sqrt(delta)) / 2;
-        if (t > 0 && t < distToObj) return true; // Перекрыто Землей
+        if (t > 0 && t < distToObj) return true;
     }
     return false;
 }
 
-// ====== ГЛАВНЫЙ ЦИКЛ ОБНОВЛЕНИЯ (Вызывается из requestAnimationFrame) ======
-
+// ====== ГЛАВНЫЙ ЦИКЛ ОБНОВЛЕНИЯ (Вызывается из основного файла 60 раз в секунду) ======
 window.MKS_TrackerUpdate = function() {
     const STATE = window.MKS_STATE;
     if (!STATE || !STATE.camera || !STATE.THREE) return;
 
-    // Показываем метки только в режиме свободной камеры
     if (STATE.currentCam !== 'free') {
         Object.values(activeDomLabels).forEach(el => el.style.opacity = '0');
         return;
@@ -178,7 +197,7 @@ window.MKS_TrackerUpdate = function() {
     
     const currentFrameIds = new Set(); 
 
-    // 1. ОТРИСОВКА СПУТНИКОВ
+    // 1. СПУТНИКИ
     if (tCfg.satOn) {
         topSatellites.forEach(sat => {
             const pv = satellite.propagate(sat.rec, STATE.date);
@@ -192,16 +211,15 @@ window.MKS_TrackerUpdate = function() {
         });
     }
 
-    // 2. ОТРИСОВКА САМОЛЕТОВ (с экстраполяцией движения)
+    // 2. САМОЛЕТЫ
     if (tCfg.planesOn) {
         const now = Date.now();
         Object.keys(livePlanes).forEach(id => {
             const p = livePlanes[id];
             
-            // Экстраполируем координаты по курсу и скорости (самолеты движутся плавно каждый кадр)
+            // Плавная экстраполяция координат по скорости (вектор движения)
             const dtS = (now - p.lastTime) / 1000;
             const bearing = p.head * DEG_TO_RAD;
-            // 111320 метров = ~1 градус широты
             const latSpeed = (p.vel * Math.cos(bearing)) / 111320;
             const lonSpeed = (p.vel * Math.sin(bearing)) / (111320 * Math.cos(p.lat * DEG_TO_RAD));
             
@@ -210,15 +228,15 @@ window.MKS_TrackerUpdate = function() {
             
             const pos = getVector3(curLat, curLon, p.alt, STATE.gmstRad);
             
-            // Если самолет слишком далеко от МКС (более 2500км), не рисуем
-            if (camPos.distanceTo(pos) < 250) { 
+            // Если борт далеко (больше ~2000 км от камеры), не рисуем его
+            if (camPos.distanceTo(pos) < 200) { 
                 currentFrameIds.add(id);
                 updateLabelPosition(id, `✈ ${p.callsign}`, 'type-plane', pos, camPos, STATE.camera, halfW, halfH);
             }
         });
     }
 
-    // Скрываем метки, которых нет в текущем кадре
+    // Скрываем все метки, которые не попали в видимость текущего кадра
     Object.keys(activeDomLabels).forEach(id => {
         if (!currentFrameIds.has(id)) activeDomLabels[id].style.opacity = '0';
     });
@@ -227,16 +245,15 @@ window.MKS_TrackerUpdate = function() {
 function updateLabelPosition(id, text, typeClass, posWorld, camPos, camera, halfW, halfH) {
     const el = getDomLabel(id, text, typeClass);
     
-    // Проверка окклюзии Землей
+    // Скрываем, если спряталось за Землей
     if (isOccludedByEarth(posWorld, camPos)) {
         el.style.opacity = '0'; 
         return;
     }
     
-    // Проекция 3D в 2D экран
     const tempV = posWorld.clone().project(camera);
     
-    // Если объект за спиной камеры (z > 1.0) или сильно за пределами экрана
+    // Проверка попадания в область видимости экрана (и не сзади камеры)
     if (tempV.z > 1.0 || tempV.x < -1.1 || tempV.x > 1.1 || tempV.y < -1.1 || tempV.y > 1.1) {
         el.style.opacity = '0';
     } else {
