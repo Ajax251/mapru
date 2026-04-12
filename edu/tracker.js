@@ -64,27 +64,34 @@ async function fetchPlanes() {
     // Квадрат видимости ~800км от МКС
     const bounds = 8; 
     
-    // Формируем URL к OpenSky
-    const apiUrl = `https://opensky-network.org/api/states/all?lamin=${lat-bounds}&lomin=${lon-bounds}&lamax=${lat+bounds}&lomax=${lon+bounds}&_t=${Date.now()}`;
-    
-    // Обход CORS блокировок через публичный прокси
-    const proxyUrl = `https://api.allorigins.win/raw?url=${encodeURIComponent(apiUrl)}`;
+    // ПРЯМОЙ URL к OpenSky, БЕЗ ПРОКСИ (OpenSky поддерживает CORS)
+    const apiUrl = `https://opensky-network.org/api/states/all?lamin=${lat-bounds}&lomin=${lon-bounds}&lamax=${lat+bounds}&lomax=${lon+bounds}`;
 
     try {
-        const res = await fetch(proxyUrl);
-        const text = await res.text(); // Сначала читаем ответ как обычный текст
+        const res = await fetch(apiUrl);
+        
+        // Проверяем, не выдал ли сам OpenSky ошибку лимита (HTTP 429)
+        if (!res.ok) {
+            if (res.status === 429) {
+                console.warn("[Трейкер] Временный лимит запросов OpenSky (429). Ждем 30 сек...");
+                return;
+            }
+            throw new Error(`Ошибка сервера OpenSky: ${res.status}`);
+        }
+
+        const text = await res.text();
         
         let data;
         try {
-            data = JSON.parse(text); // Пробуем распарсить JSON
+            data = JSON.parse(text);
         } catch (parseError) {
-            // Если текст не является JSON (например, "Too many requests" или HTML-ошибка 502)
-            console.warn(`[Трейкер] Временный лимит API самолетов. Ответ сервера: ${text.substring(0, 30)}...`);
-            return; // Прерываем выполнение до следующего тика (через 30 секунд)
+            console.warn(`[Трейкер] Ответ сервера не JSON: ${text.substring(0, 30)}...`);
+            return;
         }
         
         const now = Date.now();
         
+        // OpenSky возвращает states: null, если над этой зоной (например, океаном) нет самолетов
         if (data && data.states) {
             data.states.forEach(s => {
                 // s[0] icao, s[1] callsign, s[5] lon, s[6] lat, s[7] baro_alt, s[9] vel, s[10] head
@@ -99,16 +106,21 @@ async function fetchPlanes() {
                 }
             });
             console.log(`[Трейкер] Авиатрафик обновлен. Видимых бортов: ${Object.keys(livePlanes).length}`);
+        } else {
+            console.log("[Трейкер] В текущем квадрате самолетов не обнаружено (Возможно, океан).");
         }
         
-        // Удаляем самолеты, которые пропали с радаров более минуты назад
+        // Удаляем самолеты, которые пропали с радаров более 65 секунд назад
         Object.keys(livePlanes).forEach(id => { 
             if (now - livePlanes[id].lastTime > 65000) delete livePlanes[id]; 
         });
+
     } catch(e) {
         console.warn("[Трейкер] Сетевая ошибка при обновлении самолетов:", e.message);
     }
 }
+
+
 // ====== ИНИЦИАЛИЗАЦИЯ КНОПОК ======
 if (tCfg.satOn) { btnSat.classList.add('active'); fetchTopSatellites(); }
 btnSat.addEventListener('click', () => {
