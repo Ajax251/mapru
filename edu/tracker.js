@@ -72,7 +72,17 @@ async function fetchPlanes() {
 
     try {
         const res = await fetch(proxyUrl);
-        const data = await res.json();
+        const text = await res.text(); // Сначала читаем ответ как обычный текст
+        
+        let data;
+        try {
+            data = JSON.parse(text); // Пробуем распарсить JSON
+        } catch (parseError) {
+            // Если текст не является JSON (например, "Too many requests" или HTML-ошибка 502)
+            console.warn(`[Трейкер] Временный лимит API самолетов. Ответ сервера: ${text.substring(0, 30)}...`);
+            return; // Прерываем выполнение до следующего тика (через 30 секунд)
+        }
+        
         const now = Date.now();
         
         if (data && data.states) {
@@ -96,10 +106,9 @@ async function fetchPlanes() {
             if (now - livePlanes[id].lastTime > 65000) delete livePlanes[id]; 
         });
     } catch(e) {
-        console.warn("[Трейкер] Не удалось обновить самолеты (возможно лимит API)", e);
+        console.warn("[Трейкер] Сетевая ошибка при обновлении самолетов:", e.message);
     }
 }
-
 // ====== ИНИЦИАЛИЗАЦИЯ КНОПОК ======
 if (tCfg.satOn) { btnSat.classList.add('active'); fetchTopSatellites(); }
 btnSat.addEventListener('click', () => {
