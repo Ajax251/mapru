@@ -4459,12 +4459,16 @@ function applyLandCategoryFilter() {
         });
         
         
-
+        // Универсальная функция возврата координат к истинным WGS84 с учетом всех смещений
 function getTrueWgs84Coords(mapLat, mapLon) {
     let lat = mapLat;
     let lon = mapLon;
     
-    // Влияние Google УДАЛЕНО. Остается только техническая поправка Яндекса.
+    if (isGoogleLayerActive) {
+        lat -= (kmlMapOffsetY * 0.000008983);
+        lon -= (kmlMapOffsetX * 0.000008983);
+    }
+    
     lat += (mapOffsetY * 0.000008983);
     lon += (mapOffsetX * 0.000008983);
     
@@ -4476,7 +4480,11 @@ function convertApi3857ToMapCoords(coord3857) {
     let lon = wgs[0] - (mapOffsetX * 0.000008983);
     let lat = wgs[1] - (mapOffsetY * 0.000008983);
     
-    // Влияние Google УДАЛЕНО.
+    // Если включен Google, применяем его смещение к "виртуальным" объектам из API
+    if (isGoogleLayerActive) {
+        lon += (kmlMapOffsetX * 0.000008983);
+        lat += (kmlMapOffsetY * 0.000008983);
+    }
     return [lon, lat]; // Формат [lon, lat] требуемый для Turf.js
 }
 
@@ -4831,58 +4839,29 @@ function openStyleSettings() {
     }
  
 }
-
-
-function applyGoogleOffsetCSS() {
-    if (!map) return;
-    const pane = map.panes.get('ground');
-    if (!pane) return;
-    const el = pane.getElement();
-
-    if (typeof isGoogleLayerActive !== 'undefined' && isGoogleLayerActive) {
-        const zoom = map.getZoom();
-        const center = map.getCenter();
-        const proj = map.options.get('projection');
         
-        const centerPx = proj.toGlobalPixels(center, zoom);
-        
-        // Рассчитываем смещение в градусах
-        const dLat = (typeof kmlMapOffsetY !== 'undefined' ? kmlMapOffsetY : 0) * 0.000008983;
-        const dLon = (typeof kmlMapOffsetX !== 'undefined' ? kmlMapOffsetX : 0) * 0.000008983;
-        
-        const shiftedCenter = [center[0] - dLat, center[1] - dLon];
-        const shiftedPx = proj.toGlobalPixels(shiftedCenter, zoom);
-        
-        // Вычисляем разницу в пикселях для текущего масштаба
-        const shiftX = centerPx[0] - shiftedPx[0];
-        const shiftY = centerPx[1] - shiftedPx[1];
-        
-        // Сдвигаем слой тайлов с помощью margin, это не сломает встроенный drag карты
-        el.style.marginLeft = `${shiftX}px`;
-        el.style.marginTop = `${shiftY}px`;
-    } else {
-        // Если активен Яндекс или OSM — сбрасываем смещение растра
-        el.style.marginLeft = '0px';
-        el.style.marginTop = '0px';
-    }
-}
-
-
 function updateKmlMapOffset() {
-    const kmlOffsetXValue = document.getElementById('kmlMapOffsetX').value.replace(',', '.');
-    const kmlOffsetYValue = document.getElementById('kmlMapOffsetY').value.replace(',', '.');
+            // Запоминаем старые значения
+            const oldOffsetX = kmlMapOffsetX;
+            const oldOffsetY = kmlMapOffsetY;
+            
+            const kmlOffsetXValue = document.getElementById('kmlMapOffsetX').value.replace(',', '.');
+            const kmlOffsetYValue = document.getElementById('kmlMapOffsetY').value.replace(',', '.');
 
-    kmlMapOffsetX = parseFloat(kmlOffsetXValue) || 0;
-    kmlMapOffsetY = parseFloat(kmlOffsetYValue) || 0;
-    
-    localStorage.setItem('kmlMapOffsetX', kmlMapOffsetX);
-    localStorage.setItem('kmlMapOffsetY', kmlMapOffsetY);
+            kmlMapOffsetX = parseFloat(kmlOffsetXValue) || 0;
+            kmlMapOffsetY = parseFloat(kmlOffsetYValue) || 0;
+            
+            localStorage.setItem('kmlMapOffsetX', kmlMapOffsetX);
+            localStorage.setItem('kmlMapOffsetY', kmlMapOffsetY);
 
-    console.log(`[GoogleOffset] Установлено смещение растра X=${kmlMapOffsetX}, Y=${kmlMapOffsetY}`);
+            // Если ПРЯМО СЕЙЧАС включен спутник Google, сразу двигаем полигоны на разницу!
+            if (isGoogleLayerActive) {
+                const deltaX = kmlMapOffsetX - oldOffsetX; // Долгота
+                const deltaY = kmlMapOffsetY - oldOffsetY; // Широта
+                shiftAllMapObjects(deltaY, deltaX); 
+            }
+        }
 
-    // Применяем CSS сдвиг вместо перезагрузки слоя
-    applyGoogleOffsetCSS();
-}
         // START: New function to update Google Earth setting
         function updateGoogleEarthSetting() {
             const checkbox = document.getElementById('toggleOpenGoogleEarth');
@@ -5115,7 +5094,9 @@ function updateMapOffset() {
     localStorage.setItem('mapOffsetX', mapOffsetX);
     localStorage.setItem('mapOffsetY', mapOffsetY);
 
-    // 4. Сдвигаем ВСЕ УЖЕ ОТРИСОВАННЫЕ объекты на карте на разницу
+    // 4. Сдвигаем ВСЕ УЖЕ ОТРИСОВАННЫЕ объекты на карте.
+    // Так как при первоначальной отрисовке мы ВЫЧИТАЕМ offset 
+    // (coord[0] - mapOffsetY * ...), то дельта сдвига равна (старое - новое).
     const deltaX = oldOffsetX - mapOffsetX;
     const deltaY = oldOffsetY - mapOffsetY;
 
@@ -5123,7 +5104,11 @@ function updateMapOffset() {
         shiftAllMapObjects(deltaY, deltaX);
     }
 
-    // ВЫЗОВ findAndConvert() УДАЛЕН для предотвращения создания дубликатов
+    // 5. Если у пользователя вбиты координаты в ручное окно ввода - пересчитываем их
+    const coordsInput = document.getElementById('coords-input');
+    if (coordsInput && coordsInput.value.trim() !== '') {
+        findAndConvert();
+    }
 }
         
            function shiftAllMapObjects(deltaLat, deltaLon) {
@@ -5269,8 +5254,14 @@ function generateKmlForSinglePolygon(polygonObject, placemarkNameOverride = null
         return [trueLat, trueLon];
     });
 
-    const kmlCoordsArray = istinnyeWGS84Coords.map(coord => `${coord[1]},${coord[0]},0`);
-    
+    const kmlAdjustedWGS84Coords = istinnyeWGS84Coords.map(coord => {
+        return [
+            coord[0] + (kmlMapOffsetY * 0.000008983), 
+            coord[1] + (kmlMapOffsetX * 0.000008983)  
+        ];
+    });
+
+    const kmlCoordsArray = kmlAdjustedWGS84Coords.map(coord => `${coord[1]},${coord[0]},0`);
 
     if (kmlCoordsArray.length > 0 &&
         (kmlAdjustedWGS84Coords[0][0] !== kmlAdjustedWGS84Coords[kmlAdjustedWGS84Coords.length - 1][0] ||
@@ -6214,38 +6205,42 @@ if (landCategoryLegendList) {
 
 
 // --- РЕГИСТРАЦИЯ СТОРОННИХ СЛОЕВ (Google, OSM) ---
-                
-                // 0. Google Схема
-                ymaps.layer.storage.add('google#map', function () { return new ymaps.Layer('https://mt1.google.com/vt?lyrs=m&x=%x&y=%y&z=%z&hl=ru', { projection: ymaps.projection.sphericalMercator }); });
-                ymaps.mapType.storage.add('google#map', new ymaps.MapType('Google Схема', ['google#map']));
 
-                // 0_SV. Google Схема + Панорамы
-                ymaps.layer.storage.add('google#map_sv', function () { return new ymaps.Layer('https://mt1.google.com/vt?lyrs=m,svv&x=%x&y=%y&z=%z&hl=ru', { projection: ymaps.projection.sphericalMercator }); });
-                ymaps.mapType.storage.add('google#map_sv', new ymaps.MapType('Google Схема (Панорамы)', ['google#map_sv']));
 
-                // 1. Google Спутник
-                ymaps.layer.storage.add('google#satellite', function () { return new ymaps.Layer('https://mt1.google.com/vt?lyrs=s&x=%x&y=%y&z=%z&hl=ru', { projection: ymaps.projection.sphericalMercator }); });
-                ymaps.mapType.storage.add('google#satellite', new ymaps.MapType('Google Спутник', ['google#satellite']));
 
-                // 1_SV. Google Спутник + Панорамы
-                ymaps.layer.storage.add('google#satellite_sv', function () { return new ymaps.Layer('https://mt1.google.com/vt?lyrs=s,svv&x=%x&y=%y&z=%z&hl=ru', { projection: ymaps.projection.sphericalMercator }); });
-                ymaps.mapType.storage.add('google#satellite_sv', new ymaps.MapType('Google Спутник (Панорамы)', ['google#satellite_sv']));
+// 0. Google Схема
+ymaps.layer.storage.add('google#map', function () { return new ymaps.Layer('https://mt1.google.com/vt?lyrs=m&x=%x&y=%y&z=%z&hl=ru', { projection: ymaps.projection.sphericalMercator }); });
+ymaps.mapType.storage.add('google#map', new ymaps.MapType('Google Схема', ['google#map']));
 
-                // 2. Google Гибрид
-                ymaps.layer.storage.add('google#hybrid', function () { return new ymaps.Layer('https://mt1.google.com/vt?lyrs=y&x=%x&y=%y&z=%z&hl=ru', { projection: ymaps.projection.sphericalMercator }); });
-                ymaps.mapType.storage.add('google#hybrid', new ymaps.MapType('Google Гибрид', ['google#hybrid']));
+// 0_SV. Google Схема + Панорамы
+ymaps.layer.storage.add('google#map_sv', function () { return new ymaps.Layer('https://mt1.google.com/vt?lyrs=m,svv&x=%x&y=%y&z=%z&hl=ru', { projection: ymaps.projection.sphericalMercator }); });
+ymaps.mapType.storage.add('google#map_sv', new ymaps.MapType('Google Схема (Панорамы)', ['google#map_sv']));
 
-                // 2_SV. Google Гибрид + Панорамы
-                ymaps.layer.storage.add('google#hybrid_sv', function () { return new ymaps.Layer('https://mt1.google.com/vt?lyrs=y,svv&x=%x&y=%y&z=%z&hl=ru', { projection: ymaps.projection.sphericalMercator }); });
-                ymaps.mapType.storage.add('google#hybrid_sv', new ymaps.MapType('Google Гибрид (Панорамы)', ['google#hybrid_sv']));
+// 1. Google Спутник
+ymaps.layer.storage.add('google#satellite', function () { return new ymaps.Layer('https://mt1.google.com/vt?lyrs=s&x=%x&y=%y&z=%z&hl=ru', { projection: ymaps.projection.sphericalMercator }); });
+ymaps.mapType.storage.add('google#satellite', new ymaps.MapType('Google Спутник', ['google#satellite']));
+
+// 1_SV. Google Спутник + Панорамы
+ymaps.layer.storage.add('google#satellite_sv', function () { return new ymaps.Layer('https://mt1.google.com/vt?lyrs=s,svv&x=%x&y=%y&z=%z&hl=ru', { projection: ymaps.projection.sphericalMercator }); });
+ymaps.mapType.storage.add('google#satellite_sv', new ymaps.MapType('Google Спутник (Панорамы)', ['google#satellite_sv']));
+
+// 2. Google Гибрид
+ymaps.layer.storage.add('google#hybrid', function () { return new ymaps.Layer('https://mt1.google.com/vt?lyrs=y&x=%x&y=%y&z=%z&hl=ru', { projection: ymaps.projection.sphericalMercator }); });
+ymaps.mapType.storage.add('google#hybrid', new ymaps.MapType('Google Гибрид', ['google#hybrid']));
+
+// 2_SV. Google Гибрид + Панорамы
+ymaps.layer.storage.add('google#hybrid_sv', function () { return new ymaps.Layer('https://mt1.google.com/vt?lyrs=y,svv&x=%x&y=%y&z=%z&hl=ru', { projection: ymaps.projection.sphericalMercator }); });
+ymaps.mapType.storage.add('google#hybrid_sv', new ymaps.MapType('Google Гибрид (Панорамы)', ['google#hybrid_sv']));
+
 
                 // 3. OpenStreetMap
-                const osmLayer = function () { return new ymaps.Layer('https://tile.openstreetmap.org/%z/%x/%y.png', { projection: ymaps.projection.sphericalMercator }); };
+                const osmLayer = function () {
+                    return new ymaps.Layer('https://tile.openstreetmap.org/%z/%x/%y.png', {
+                        projection: ymaps.projection.sphericalMercator
+                    });
+                };
                 ymaps.layer.storage.add('osm#map', osmLayer);
                 ymaps.mapType.storage.add('osm#map', new ymaps.MapType('OSM', ['osm#map']));
-                // --- КОНЕЦ РЕГИСТРАЦИИ СТОРОННИХ СЛОЕВ ---
-
-
                 
 
 
@@ -7678,13 +7673,14 @@ function initAutoOffsetUI() {
 function checkMoOffset(currentCenterGeo, forceCheck = false, showForceSuccess = false) {
     if (!currentCenterGeo || !moOffsetsCache || moOffsetsCache.length === 0) return;
 
+    // Проверяем, пройдена ли дистанция в 1 км (с защитой от ошибок)
     if (!forceCheck && lastCheckedCenter) {
         try {
             const from = turf.point([lastCheckedCenter[1], lastCheckedCenter[0]]);
             const to = turf.point([currentCenterGeo[1], currentCenterGeo[0]]);
             const dist = turf.distance(from, to, { units: 'kilometers' });
             if (dist < 1.0) return;
-        } catch(e) {}
+        } catch(e) { console.error("Turf Error in checkMoOffset:", e); }
     }
 
     lastCheckedCenter = currentCenterGeo;
@@ -7692,8 +7688,11 @@ function checkMoOffset(currentCenterGeo, forceCheck = false, showForceSuccess = 
 
     let foundMo = null;
     for (const mo of moOffsetsCache) {
-        const minLat = parseFloat(mo.min_lat); const maxLat = parseFloat(mo.max_lat);
-        const minLon = parseFloat(mo.min_lon); const maxLon = parseFloat(mo.max_lon);
+        // Надежное сравнение, даже если из БД пришли строки
+        const minLat = parseFloat(mo.min_lat);
+        const maxLat = parseFloat(mo.max_lat);
+        const minLon = parseFloat(mo.min_lon);
+        const maxLon = parseFloat(mo.max_lon);
         
         if (lat >= minLat && lat <= maxLat && lon >= minLon && lon <= maxLon) {
             foundMo = mo;
@@ -7709,6 +7708,7 @@ function checkMoOffset(currentCenterGeo, forceCheck = false, showForceSuccess = 
         const currGx = parseFloat(document.getElementById('kmlMapOffsetX').value.replace(',', '.')) || 0;
         const currGy = parseFloat(document.getElementById('kmlMapOffsetY').value.replace(',', '.')) || 0;
 
+        // Получаем целевые значения из кэша
         const targetYx = parseFloat(foundMo.ya_offset_x);
         const targetYy = parseFloat(foundMo.ya_offset_y);
         const targetGx = parseFloat(foundMo.go_offset_x);
@@ -7717,46 +7717,53 @@ function checkMoOffset(currentCenterGeo, forceCheck = false, showForceSuccess = 
         // Применяем смещение Яндекс
         if (!isNaN(targetYx) && !isNaN(targetYy)) {
             if (currYx !== targetYx || currYy !== targetYy) {
-                // Яндекс сдвигает ВЕКТОРЫ
-                const deltaX = currYx - targetYx; 
-                const deltaY = currYy - targetYy;
-                if (typeof shiftAllMapObjects === 'function') shiftAllMapObjects(deltaY, deltaX);
-
-                document.getElementById('mapOffsetX').value = targetYx; document.getElementById('mapOffsetY').value = targetYy;
-                mapOffsetX = targetYx; mapOffsetY = targetYy;
-                localStorage.setItem('mapOffsetX', mapOffsetX); localStorage.setItem('mapOffsetY', mapOffsetY);
+                document.getElementById('mapOffsetX').value = targetYx;
+                document.getElementById('mapOffsetY').value = targetYy;
+                mapOffsetX = targetYx;
+                mapOffsetY = targetYy;
+                localStorage.setItem('mapOffsetX', mapOffsetX);
+                localStorage.setItem('mapOffsetY', mapOffsetY);
                 needUpdate = true;
             }
         }
 
         // Применяем смещение Google
-     if (!isNaN(targetGx) && !isNaN(targetGy)) {
+        if (!isNaN(targetGx) && !isNaN(targetGy)) {
             if (currGx !== targetGx || currGy !== targetGy) {
+                if (typeof isGoogleLayerActive !== 'undefined' && isGoogleLayerActive) {
+                    const deltaX = targetGx - currGx;
+                    const deltaY = targetGy - currGy;
+                    if (typeof shiftAllMapObjects === 'function') shiftAllMapObjects(deltaY, deltaX); 
+                }
                 document.getElementById('kmlMapOffsetX').value = targetGx;
                 document.getElementById('kmlMapOffsetY').value = targetGy;
                 kmlMapOffsetX = targetGx;
                 kmlMapOffsetY = targetGy;
                 localStorage.setItem('kmlMapOffsetX', kmlMapOffsetX);
                 localStorage.setItem('kmlMapOffsetY', kmlMapOffsetY);
-                
-                // Применяем CSS сдвиг немедленно
-                applyGoogleOffsetCSS();
                 needUpdate = true;
             }
         }
 
-        if (needUpdate) {
+      if (needUpdate) {
+            // Вспышка кнопки автосмещения
             const btn = document.getElementById('auto-offset-btn');
             if (btn) {
                 btn.classList.remove('offset-flash-active');
-                void btn.offsetWidth;
+                void btn.offsetWidth; // Триггер reflow для перезапуска анимации
                 btn.classList.add('offset-flash-active');
+                
+                // Удаляем класс после завершения анимации (0.8s)
                 setTimeout(() => btn.classList.remove('offset-flash-active'), 800);
             }
+
+            if (typeof findAndConvert === 'function') findAndConvert();
         } else if (showForceSuccess) {
+            // Уведомление при ручной загрузке, если смещения уже совпадают
             if (typeof showNotification === 'function') showNotification(`Текущие смещения уже актуальны для: ${foundMo.name}`, 'success');
         }
     } else if (showForceSuccess) {
+        // Уведомление, если для этой зоны нет данных
         if (typeof showNotification === 'function') showNotification(`В базе нет данных о смещении для текущей локации`, 'warning');
     }
 }
@@ -7791,7 +7798,6 @@ function initMap() {
     map.behaviors.enable(['scrollZoom', 'drag', 'multiTouch']);
 
  // ЕДИНЫЙ обработчик события boundschange
-// ЕДИНЫЙ обработчик события boundschange
     map.events.add('boundschange', function (e) {
         clearTimeout(debounceTimer);
         debounceTimer = setTimeout(() => {
@@ -7814,17 +7820,47 @@ function initMap() {
         if (isCameraHeightLabelVisible) {
             updateCameraHeightLabel();
         }
-        
-        // Применяем CSS сдвиг при изменении позиции и масштаба
-        applyGoogleOffsetCSS();
     });
     
-
+    // АВТО-СДВИГ новых объектов, если включен слой Google
+    map.geoObjects.events.add('add', function (e) {
+        if (!isGoogleLayerActive) return;
+        const target = e.get('child');
+        
+        // Защита от двойного сдвига
+        if (target.properties && target.properties.get('_googleShifted')) return; 
+        
+        if (target.geometry && typeof target.geometry.setCoordinates === 'function') {
+            const dLat = kmlMapOffsetY * 0.000008983;
+            const dLon = kmlMapOffsetX * 0.000008983;
+            
+            const shiftCoords = (coords) => {
+                if (typeof coords[0] === 'number') return [coords[0] + dLat, coords[1] + dLon];
+                return coords.map(shiftCoords);
+            };
+            
+            target.geometry.setCoordinates(shiftCoords(target.geometry.getCoordinates()));
+            if (!target.properties) target.properties = new ymaps.data.Manager();
+            target.properties.set('_googleShifted', true);
+        }
+    });
     
 
 numberedPointSize = parseInt(localStorage.getItem('numberedPointSize'), 10) || 14;
   numberedDotSize = parseInt(localStorage.getItem('numberedDotSize'), 10) || 10;
 
+    // Обновляем метки при добавлении на карту
+    map.geoObjects.events.add('add', function (e) {
+        const target = e.get('child');
+        if (target instanceof ymaps.Placemark && target.options.get('iconLayout') === customPlacemarkLayout) {
+            target.events.add('mapchange', function () {
+                const layout = target.getOverlaySync()?.getLayoutSync();
+                if (layout) {
+                    layout.onMapChange();
+                }
+            });
+        }
+    });
 
 map.events.add('click', function (e) {
         if (selectedPlacemark) {
@@ -9433,8 +9469,10 @@ function stopLineDrawing() {
 
 function setMapMode(mode) {
     if (!map) return;
-    const mapElement = document.getElementById('map'); 
+    const mapElement = document.getElementById('map'); // Получаем элемент карты
 
+ 
+// --- ПОКАЗ/СКРЫТИЕ КНОПКИ ПАНОРАМ GOOGLE И АВТОСМЕЩЕНИЯ ---
     const isGoogleMode = ['google-map', 'google-sat', 'google-hyb'].includes(mode);
     const svBtn = document.getElementById('google-sv-btn');
     const offsetWrapper = document.getElementById('offset-dropdown-wrapper');
@@ -9442,23 +9480,39 @@ function setMapMode(mode) {
     if (svBtn) {
         if (isGoogleMode) {
             svBtn.style.display = 'flex'; 
-            if (offsetWrapper) offsetWrapper.style.display = 'block'; 
+            if (offsetWrapper) offsetWrapper.style.display = 'block'; // Показываем обертку меню автосмещения
             if (window.isStreetViewActive) svBtn.classList.add('active');
         } else {
             svBtn.style.display = 'none'; 
-            if (offsetWrapper) offsetWrapper.style.display = 'none'; 
+            if (offsetWrapper) offsetWrapper.style.display = 'none'; // Скрываем обертку
         }
     }
+  
+    
+    // --- КОНЕЦ БЛОКА ---
 
     const isGoogleOrOsm = ['google-map', 'google-sat', 'google-hyb', 'osm'].includes(mode);
+    
+    // --- НАЧАЛО ИЗМЕНЕНИЯ: Логика скрытия элементов Яндекса ---
     if (isGoogleOrOsm) {
         mapElement.classList.add('hide-yandex-controls');
     } else {
         mapElement.classList.remove('hide-yandex-controls');
     }
+    // --- КОНЕЦ ИЗМЕНЕНИЯ ---
             
-    isGoogleLayerActive = isGoogleMode;
+    // Если переключаемся с Яндекса на Google -> Сдвигаем НА величину KML смещения
+    if (isGoogleOrOsm && !isGoogleLayerActive) {
+        isGoogleLayerActive = true;
+        shiftAllMapObjects(kmlMapOffsetY, kmlMapOffsetX);
+    } 
+    // Если переключаемся с Google обратно на Яндекс -> Сдвигаем ОБРАТНО
+    else if (!isGoogleOrOsm && isGoogleLayerActive) {
+        isGoogleLayerActive = false;
+        shiftAllMapObjects(-kmlMapOffsetY, -kmlMapOffsetX);
+    }
 
+    // --- УМНОЕ ПЕРЕКЛЮЧЕНИЕ СЛОЕВ (С УЧЕТОМ ПАНОРАМ) ---
     let finalMapType = 'yandex#map';
     switch (mode) {
         case 'map': finalMapType = 'yandex#map'; break;
@@ -9473,9 +9527,7 @@ function setMapMode(mode) {
     }
     
     map.setType(finalMapType);
-    
-    // ДОБАВЛЕН ВЫЗОВ: Применяем/убираем смещение в момент смены слоя
-    applyGoogleOffsetCSS();
+    // --- КОНЕЦ УМНОГО ПЕРЕКЛЮЧЕНИЯ ---
 
     localStorage.setItem('mapMode', mode);
 
