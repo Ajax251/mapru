@@ -792,8 +792,8 @@
                         <div class="drop-zone-icon">
                             <i class="fas fa-cloud-arrow-up"></i>
                         </div>
-                        <h4>Перетащите файлы сюда</h4>
-                        <p>или нажмите для выбора</p>
+                 <h4>Перетащите файлы сюда</h4>
+                        <p>или нажмите для выбора<br><small style="color: var(--primary);">(для добавления подписи перетащите исходник и его .sig файл)</small></p>
                         <input type="file" id="signFilesInput" style="display:none" multiple onchange="handleSignFilesSelect(this.files)">
                     </div>
                     <div id="signFileList" class="file-list"></div>
@@ -1149,7 +1149,7 @@ function switchMode(mode) {
         reader.onerror = reject;
     });
 
-    async function processSigning() {
+async function processSigning() {
         const certIdx = document.getElementById('certSelect').value;
         const cert = globalCertificates[certIdx];
         const useZip = document.getElementById('zipCheckbox').checked;
@@ -1168,20 +1168,56 @@ function switchMode(mode) {
             const oSigner = await cadesplugin.CreateObjectAsync("CAdESCOM.CPSigner");
             await oSigner.propset_Certificate(cert);
 
-            for (let i = 0; i < filesToSign.length; i++) {
-                const file = filesToSign[i];
-                addLog(logList, `Подписание: ${file.name}...`, 'info');
-                
+            // Группируем файлы (для поиска пар: документ + существующая подпись)
+            const pairs = {};
+            filesToSign.forEach(f => {
+                const name = f.name.toLowerCase();
+                if (name.endsWith('.sig') || name.endsWith('.sgn')) {
+                    const originalName = f.name.substring(0, f.name.lastIndexOf('.'));
+                    if (!pairs[originalName]) pairs[originalName] = {};
+                    pairs[originalName].sig = f;
+                } else {
+                    if (!pairs[f.name]) pairs[f.name] = {};
+                    pairs[f.name].original = f;
+                }
+            });
+
+            // Подписываем только те файлы, где есть исходник
+            const itemsToSign = Object.values(pairs).filter(p => p.original);
+            let processedCount = 0;
+
+            if (itemsToSign.length === 0) {
+                addLog(logList, `✗ Ошибка: Нет исходных документов (загружены только файлы подписей)`, 'error');
+                return;
+            }
+
+            for (const pair of itemsToSign) {
+                const file = pair.original;
+                const existingSigFile = pair.sig;
+
+                addLog(logList, `Обработка: ${file.name}...`, 'info');
                 const fileBase64 = await fileToBase64(file);
                 
                 const oSignedData = await cadesplugin.CreateObjectAsync("CAdESCOM.CadesSignedData");
                 await oSignedData.propset_ContentEncoding(cadesplugin.CADESCOM_BASE64_TO_BINARY);
                 await oSignedData.propset_Content(fileBase64);
                 
-                const signature = await oSignedData.SignCades(oSigner, cadesplugin.CADESCOM_CADES_BES, true);
+                let signature;
+
+                if (existingSigFile) {
+                    addLog(logList, `Найдена старая подпись, выполняется соподписание...`, 'info');
+                    const existingSigText = await fileToText(existingSigFile);
+                    // Сначала загружаем и проверяем старую подпись
+                    await oSignedData.VerifyCades(existingSigText, cadesplugin.CADESCOM_CADES_BES, true);
+                    // Добавляем новую подпись к объекту
+                    signature = await oSignedData.CoSignCades(oSigner, cadesplugin.CADESCOM_CADES_BES);
+                } else {
+                    // Создаем обычную новую подпись
+                    signature = await oSignedData.SignCades(oSigner, cadesplugin.CADESCOM_CADES_BES, true);
+                }
                 
                 const sigFileName = file.name + ".sig";
-                addLog(logList, `✓ Создана подпись: ${sigFileName}`, 'success');
+                addLog(logList, `✓ Подпись ${existingSigFile ? 'добавлена' : 'создана'}: ${sigFileName}`, 'success');
 
                 if (useZip) {
                     zip.file(file.name, file);
@@ -1191,7 +1227,8 @@ function switchMode(mode) {
                     saveAs(blob, sigFileName);
                 }
 
-                progressBar.style.width = `${((i + 1) / filesToSign.length) * 100}%`;
+                processedCount++;
+                progressBar.style.width = `${(processedCount / itemsToSign.length) * 100}%`;
             }
 
             if (useZip) {
@@ -1330,7 +1367,7 @@ function switchMode(mode) {
             if (pair.original && pair.sig) {
                 await verifyPair(pair.original, pair.sig, resultsList);
             } else if (pair.sig && !pair.original) {
-                appendResult(resultsList, pair.sigName || name + '.sig', 'warning', 'Не найден исходный файл', '', '');
+                appendResult(resultsList, pair.sigName || name + '.sig', 'warning', 'Не найден исходный файл', []);
             } else if (pair.original && !pair.sig) {
                  // Для одиночных файлов без подписи можно просто пропустить или вывести warning
                  // appendResult(resultsList, pair.original.name, 'warning', 'Не найден файл подписи (.sig)', '', '');
@@ -1456,74 +1493,114 @@ async function verifyPair(fileOrig, fileSig, container) {
         await oSignedData.propset_ContentEncoding(cadesplugin.CADESCOM_BASE64_TO_BINARY);
         await oSignedData.propset_Content(dataBase64);
         
+        let signersData = [];
+
         try {
             await oSignedData.VerifyCades(sigText, cadesplugin.CADESCOM_CADES_BES, true);
-            
             const signers = await oSignedData.Signers;
             const count = await signers.Count;
-            let signerName = 'Неизвестно';
-            let signDate = '—';
 
-            if (count > 0) {
-                const signer = await signers.Item(1);
-                const cert = await signer.Certificate;
-                const subject = await cert.SubjectName;
-                
-                const cnMatch = subject.match(/CN=([^,]+)/);
-                if (cnMatch) signerName = cnMatch[1];
-                
-                const date = await signer.SigningTime;
-                signDate = new Date(date).toLocaleString('ru-RU');
-            }
-
-            appendResult(container, fileOrig.name, 'valid', 'Подпись действительна', signerName, signDate);
-
-        } catch (verErr) {
-            console.error(verErr);
-            
-            // Попытка извлечь информацию о подписанте даже при недействительной подписи
-            let signerName = 'Неизвестно';
-            let signDate = '—';
-            
-            try {
-                const signers = await oSignedData.Signers;
-                const count = await signers.Count;
-                
-                if (count > 0) {
-                    const signer = await signers.Item(1);
+            // Извлекаем все подписи (их может быть несколько)
+            for (let i = 1; i <= count; i++) {
+                let signerName = 'Неизвестно';
+                let signDate = '—';
+                try {
+                    const signer = await signers.Item(i);
                     const cert = await signer.Certificate;
                     const subject = await cert.SubjectName;
                     
                     const cnMatch = subject.match(/CN=([^,]+)/);
                     if (cnMatch) signerName = cnMatch[1];
                     
+                    const date = await signer.SigningTime;
+                    signDate = new Date(date).toLocaleString('ru-RU');
+                } catch (e) {}
+                
+                signersData.push({ name: signerName, date: signDate });
+            }
+
+            appendResult(container, fileOrig.name, 'valid', 'Все подписи действительны', signersData);
+
+        } catch (verErr) {
+            console.error(verErr);
+            
+            // Попытка извлечь информацию о подписантах даже если статус недействителен
+            try {
+                const signers = await oSignedData.Signers;
+                const count = await signers.Count;
+                
+                for (let i = 1; i <= count; i++) {
+                    let signerName = 'Неизвестно';
+                    let signDate = '—';
                     try {
+                        const signer = await signers.Item(i);
+                        const cert = await signer.Certificate;
+                        const subject = await cert.SubjectName;
+                        
+                        const cnMatch = subject.match(/CN=([^,]+)/);
+                        if (cnMatch) signerName = cnMatch[1];
+                        
                         const date = await signer.SigningTime;
                         signDate = new Date(date).toLocaleString('ru-RU');
-                    } catch (e) {
-                        // Если дата не доступна, оставляем "—"
-                    }
+                    } catch (e) {}
+                    
+                    signersData.push({ name: signerName, date: signDate });
                 }
             } catch (signerError) {
-                console.warn('Не удалось извлечь информацию о подписанте:', signerError);
+                console.warn('Не удалось извлечь информацию:', signerError);
             }
             
-            appendResult(container, fileOrig.name, 'invalid', 'Подпись недействительна', signerName, signDate);
+            if (signersData.length === 0) signersData.push({ name: 'Неизвестно', date: '—' });
+            
+            appendResult(container, fileOrig.name, 'invalid', 'Подпись недействительна или файл изменен', signersData);
         }
 
     } catch (err) {
         console.error(err);
-        appendResult(container, fileOrig.name, 'warning', 'Ошибка: ' + err.message, '', '');
+        appendResult(container, fileOrig.name, 'warning', 'Ошибка: ' + err.message, []);
     }
 }
 
-    function appendResult(container, fileName, status, message, signer, date) {
+   function appendResult(container, fileName, status, message, signersData = []) {
         const card = document.createElement('div');
         card.className = `result-card ${status} fade-in`;
         
         let badgeIcon = status === 'valid' ? 'check' : status === 'invalid' ? 'times' : 'exclamation';
         let badgeText = status === 'valid' ? 'Верна' : status === 'invalid' ? 'Неверна' : 'Ошибка';
         
+        // Обработка старого формата вызова на всякий случай
+        if (typeof signersData === 'string') {
+            signersData = [{ name: arguments[4], date: arguments[5] }];
+        }
+
+        let signersHtml = '';
+        if (Array.isArray(signersData) && signersData.length > 0) {
+            signersHtml = `<div style="margin-top: 15px; display:flex; flex-direction:column; gap:10px;">`;
+            
+            signersData.forEach((signer, idx) => {
+                let title = signersData.length > 1 ? `Подписант ${idx + 1}` : 'Подписант';
+                signersHtml += `
+                <div style="background: white; padding: 12px 15px; border-radius: 8px; border-left: 3px solid var(--gray-300);">
+                    <div style="display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 10px;">
+                        <div>
+                            <div class="result-detail-label">${title}</div>
+                            <div class="result-detail-value">${signer.name || 'Неизвестно'}</div>
+                        </div>
+                        <div>
+                            <div class="result-detail-label">Дата подписи</div>
+                            <div class="result-detail-value">${signer.date || '—'}</div>
+                        </div>
+                    </div>
+                </div>`;
+            });
+            signersHtml += `</div>`;
+        }
+
+        // Бейджик, показывающий количество подписей
+        let countBadge = Array.isArray(signersData) && signersData.length > 1 
+            ? `<span style="background: rgba(255,255,255,0.25); padding: 2px 6px; border-radius: 10px; margin-left: 6px; font-size: 0.8rem;">${signersData.length}</span>` 
+            : '';
+
         card.innerHTML = `
             <div class="result-header">
                 <div class="result-file">
@@ -1534,27 +1611,16 @@ async function verifyPair(fileOrig, fileSig, container) {
                 </div>
                 <div class="result-badge ${status}">
                     <i class="fas fa-${badgeIcon}"></i>
-                    ${badgeText}
+                    ${badgeText} ${countBadge}
                 </div>
             </div>
             <div class="result-details">
-                <div class="result-detail">
-                    <div class="result-detail-label">Статус</div>
+                <div class="result-detail" style="width: 100%;">
+                    <div class="result-detail-label">Статус проверки</div>
                     <div class="result-detail-value">${message}</div>
                 </div>
-                ${signer ? `
-                <div class="result-detail">
-                    <div class="result-detail-label">Подписант</div>
-                    <div class="result-detail-value">${signer}</div>
-                </div>
-                ` : ''}
-                ${date ? `
-                <div class="result-detail">
-                    <div class="result-detail-label">Дата подписи</div>
-                    <div class="result-detail-value">${date}</div>
-                </div>
-                ` : ''}
             </div>
+            ${signersHtml}
         `;
         
         container.appendChild(card);
