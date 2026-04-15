@@ -1,82 +1,201 @@
 import * as THREE from 'three';
+import { Lensflare, LensflareElement } from 'three/addons/objects/Lensflare.js';
 
 const R_EARTH_M = 6378137;
 
 export class PilotSimulator {
     constructor(containerId) {
+        this.containerId = containerId;
         this.container = document.getElementById(containerId);
         this.isActive = false;
         
-        // Настройки карты
-        this.mapZoom = 11; // Начальный зум (баланс между деталями и горизонтом)
-        this.gridRange = 4; // Сетка 9x9 тайлов вокруг самолета
+        this.mapZoom = 11;
+        this.gridRange = 4;
+        this.mapType = 'y'; 
+        this.timeMode = 'real'; 
+        this.cameraDir = 1; 
+        this.hudEnabled = true; // Отслеживаем состояние HUD для ПНВ
         
-        // Сцена, камера, рендерер
         this.scene = new THREE.Scene();
-        const skyColor = new THREE.Color(0x7ec0ee); // Цвет ясного неба
-        this.scene.background = skyColor;
-        this.scene.fog = new THREE.Fog(skyColor, 10000, 50000); // Динамический туман
-        
         this.camera = new THREE.PerspectiveCamera(60, 1, 0.1, 500000);
         
-        this.renderer = new THREE.WebGLRenderer({ antialias: true });
+        this.renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        this.maxAnisotropy = this.renderer.capabilities.getMaxAnisotropy();
         this.container.appendChild(this.renderer.domElement);
         
-        const hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.2);
-        this.scene.add(hemiLight);
+        // --- ОСВЕЩЕНИЕ ---
+        this.hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
+        this.scene.add(this.hemiLight);
+        this.sunLight = new THREE.DirectionalLight(0xffffff, 3.0);
+        this.scene.add(this.sunLight);
 
-        // Переменные для обзора из кабины
-        this.lookYaw = 0;
-        this.lookPitch = 0;
-        this.isDragging = false;
-        
-        this.currentRoll = 0;
-        this.targetRoll = 0;
-        this.lastHdg = null;
+        // Линзовые блики Солнца
+        const lensflare = new Lensflare();
+        lensflare.addElement(new LensflareElement(this.createFlareTexture(), 600, 0, new THREE.Color(0xffffff)));
+        this.sunLight.add(lensflare);
 
-        // Менеджер тайлов земли
+        this.scene.fog = new THREE.Fog(0x7ec0ee, 10000, 45000);
+
+        // --- ДИНАМИЧЕСКОЕ НЕБО (SKYDOME) ---
+        this.createSky();
+
+        // --- УЛУЧШЕННЫЕ ЗВЕЗДЫ ---
+        this.starsGroup = new THREE.Group();
+        this.createStars();
+        this.scene.add(this.starsGroup);
+
+        // --- ЛУНА ---
+        const textureLoader = new THREE.TextureLoader();
+        textureLoader.setCrossOrigin('anonymous');
+        const tMoon = textureLoader.load('https://raw.githubusercontent.com/mrdoob/three.js/master/examples/textures/planets/moon_1024.jpg');
+        this.moon = new THREE.Mesh(
+            new THREE.SphereGeometry(1500, 32, 32),
+            new THREE.MeshStandardMaterial({ map: tMoon, roughness: 1.0, metalness: 0.0 })
+        );
+        this.scene.add(this.moon);
+
+        // Переменные
+        this.lookYaw = 0; this.lookPitch = 0; this.isDragging = false;
+        this.currentRoll = 0; this.targetRoll = 0; this.lastHdg = null;
+
         this.tiles = {};
         this.tileGroup = new THREE.Group();
         this.scene.add(this.tileGroup);
-        this.textureLoader = new THREE.TextureLoader();
-        this.textureLoader.setCrossOrigin('anonymous');
+        this.textureLoader = textureLoader;
 
         this.setupControls();
         window.addEventListener('resize', () => { if(this.isActive) this.resize(); });
     }
 
-    setupControls() {
-        // Управление обзором (мышь)
-        this.container.addEventListener('mousedown', () => this.isDragging = true);
-        window.addEventListener('mouseup', () => {
-            this.isDragging = false;
-            this.lookYaw = 0; this.lookPitch = 0;
+    setHudState(isEnabled) {
+        this.hudEnabled = isEnabled;
+    }
+
+    createFlareTexture() {
+        const c = document.createElement('canvas'); c.width = 512; c.height = 512; const ctx = c.getContext('2d');
+        const g = ctx.createRadialGradient(256,256,0,256,256,256);
+        g.addColorStop(0,'rgba(255,255,255,1)'); g.addColorStop(0.1,'rgba(255,240,200,0.8)');
+        g.addColorStop(0.4,'rgba(255,140,40,0.1)'); g.addColorStop(1,'rgba(0,0,0,0)');
+        ctx.fillStyle = g; ctx.fillRect(0,0,512,512); return new THREE.CanvasTexture(c);
+    }
+
+    createSky() {
+        // Шейдер для реалистичных градиентов неба
+        this.skyUniforms = {
+            topColor: { value: new THREE.Color(0x0077ff) },
+            bottomColor: { value: new THREE.Color(0xffffff) },
+            sunPosition: { value: new THREE.Vector3() },
+            sunsetIntensity: { value: 0.0 }
+        };
+
+        const skyGeo = new THREE.SphereGeometry(200000, 32, 15);
+        const skyMat = new THREE.ShaderMaterial({
+            uniforms: this.skyUniforms,
+            vertexShader: `
+                varying vec3 vWorldPosition;
+                void main() {
+                    vec4 worldPosition = modelMatrix * vec4(position, 1.0);
+                    vWorldPosition = worldPosition.xyz;
+                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
+                }
+            `,
+            fragmentShader: `
+                uniform vec3 topColor;
+                uniform vec3 bottomColor;
+                uniform vec3 sunPosition;
+                uniform float sunsetIntensity;
+                varying vec3 vWorldPosition;
+                
+                void main() {
+                    vec3 viewDir = normalize(vWorldPosition);
+                    vec3 sunDir = normalize(sunPosition);
+                    
+                    // Высота взгляда (0 = горизонт, 1 = зенит)
+                    float h = max(0.0, viewDir.y);
+                    
+                    // Базовый градиент от горизонта к зениту
+                    vec3 skyColor = mix(bottomColor, topColor, pow(h, 0.6));
+                    
+                    // Свечение солнца на горизонте (закаты/рассветы)
+                    float sunDot = dot(viewDir, sunDir);
+                    float glow = smoothstep(0.5, 1.0, sunDot) * sunsetIntensity;
+                    
+                    // Добавляем оранжево-красный градиент у горизонта
+                    vec3 sunsetGlow = vec3(1.0, 0.4, 0.1) * glow * (1.0 - h);
+                    skyColor += sunsetGlow;
+
+                    gl_FragColor = vec4(skyColor, 1.0);
+                }
+            `,
+            side: THREE.BackSide,
+            depthWrite: false
         });
+
+        this.skyDome = new THREE.Mesh(skyGeo, skyMat);
+        this.scene.add(this.skyDome);
+    }
+
+    createStars() {
+        // Делаем в 3 раза больше звезд (6000) разных размеров для глубины ночного неба
+        const bgStarsGeo = new THREE.BufferGeometry();
+        const bgStarsPos = [];
+        const bgStarsColors = [];
+        for (let i = 0; i < 6000; i++) {
+            const raRad = Math.random() * Math.PI * 2;
+            const decRad = Math.asin((Math.random() * 2) - 1);
+            // Звезды распределяем на сфере позади тумана
+            const r = 100000 + Math.random() * 10000;
+            bgStarsPos.push(r * Math.cos(decRad) * Math.cos(raRad), r * Math.sin(decRad), -r * Math.cos(decRad) * Math.sin(raRad));
+            // Цвет: от белого до слегка голубого/желтоватого
+            const c = 0.6 + Math.random() * 0.4;
+            bgStarsColors.push(c, c, c + (Math.random() * 0.3 - 0.1));
+        }
+        bgStarsGeo.setAttribute('position', new THREE.Float32BufferAttribute(bgStarsPos, 3));
+        bgStarsGeo.setAttribute('color', new THREE.Float32BufferAttribute(bgStarsColors, 3));
+        
+        // Звезды стали крупнее и ярче
+        const bgStarsMat = new THREE.PointsMaterial({ 
+            size: 150, vertexColors: true, transparent: true, opacity: 1.0, 
+            sizeAttenuation: true, depthWrite: false, blending: THREE.AdditiveBlending 
+        });
+        this.starsGroup.add(new THREE.Points(bgStarsGeo, bgStarsMat));
+    }
+
+    setupControls() {
+        this.container.addEventListener('mousedown', (e) => {
+            if (e.button === 0) this.isDragging = true;
+            if (e.button === 1 || e.detail === 2) { this.lookYaw = 0; this.lookPitch = 0; }
+        });
+        window.addEventListener('mouseup', () => this.isDragging = false);
         window.addEventListener('mousemove', (e) => {
             if (!this.isDragging || !this.isActive) return;
             this.lookYaw -= e.movementX * 0.003;
             this.lookPitch -= e.movementY * 0.003;
-            this.lookPitch = Math.max(-Math.PI/2, Math.min(Math.PI/2, this.lookPitch));
+            this.lookPitch = Math.max(-Math.PI/1.5, Math.min(Math.PI/1.5, this.lookPitch));
         });
 
-        // Управление ЗУМОМ карты (колесико мыши)
         this.container.addEventListener('wheel', (e) => {
             if (!this.isActive) return;
-            // Крутим вниз - отдаляем (меньше зум), Крутим вверх - приближаем (больше зум = больше скорость)
             const zoomDelta = e.deltaY > 0 ? -1 : 1;
-            this.mapZoom = Math.max(9, Math.min(14, this.mapZoom + zoomDelta));
-            
-            // Принудительно очищаем старые тайлы, чтобы они мгновенно перерисовались в новом зуме
-            for (let key in this.tiles) {
-                this.tileGroup.remove(this.tiles[key].mesh);
-                if (this.tiles[key].mesh.material.map) this.tiles[key].mesh.material.map.dispose();
-                this.tiles[key].mesh.material.dispose();
-                this.tiles[key].mesh.geometry.dispose();
-            }
-            this.tiles = {};
+            this.mapZoom = Math.max(8, Math.min(14, this.mapZoom + zoomDelta));
+            this.clearTiles();
         });
     }
+
+    clearTiles() {
+        for (let key in this.tiles) {
+            this.tileGroup.remove(this.tiles[key].mesh);
+            if (this.tiles[key].mesh.material.map) this.tiles[key].mesh.material.map.dispose();
+            this.tiles[key].mesh.material.dispose();
+            this.tiles[key].mesh.geometry.dispose();
+        }
+        this.tiles = {};
+    }
+
+    setMapType(type) { this.mapType = type; this.clearTiles(); }
+    setTimeMode(mode) { this.timeMode = mode; }
+    setCameraDirection(dir) { this.cameraDir = dir; this.lookYaw = 0; this.lookPitch = 0; }
 
     latLonToMercator(lat, lon) {
         const x = R_EARTH_M * lon * Math.PI / 180;
@@ -92,8 +211,109 @@ export class PilotSimulator {
         return { tx: x, ty: y };
     }
 
+    updateEnvironment(lat, lon) {
+        let date = new Date();
+        if (this.timeMode === 'day') date = new Date("2024-06-21T12:00:00Z");
+        if (this.timeMode === 'night') date = new Date("2024-12-21T00:00:00Z");
+
+        if (window.Astronomy) {
+            const obs = new window.Astronomy.Observer(lat, lon, 0);
+            
+            // СОЛНЦЕ
+            const sunEq = window.Astronomy.Equator('Sun', date, obs, true, true);
+            const sunHor = window.Astronomy.Horizon(date, obs, sunEq.ra, sunEq.dec, 'normal');
+            
+            const sunAlt = sunHor.altitude * (Math.PI / 180);
+            const sunAz = (-sunHor.azimuth + 180) * (Math.PI / 180);
+            const sunDist = 150000;
+
+            this.sunLight.position.set(
+                sunDist * Math.cos(sunAlt) * Math.sin(sunAz),
+                sunDist * Math.sin(sunAlt),
+                sunDist * Math.cos(sunAlt) * Math.cos(sunAz)
+            );
+            this.skyUniforms.sunPosition.value.copy(this.sunLight.position);
+
+            // ЛУНА
+            const moonEq = window.Astronomy.Equator('Moon', date, obs, true, true);
+            const moonHor = window.Astronomy.Horizon(date, obs, moonEq.ra, moonEq.dec, 'normal');
+            
+            const moonAlt = moonHor.altitude * (Math.PI / 180);
+            const moonAz = (-moonHor.azimuth + 180) * (Math.PI / 180);
+            const moonDist = 80000;
+
+            this.moon.position.set(
+                moonDist * Math.cos(moonAlt) * Math.sin(moonAz),
+                moonDist * Math.sin(moonAlt),
+                moonDist * Math.cos(moonAlt) * Math.cos(moonAz)
+            );
+            this.moon.lookAt(0,0,0);
+
+            // РАСЧЕТ ЦВЕТОВ (День / Закат / Ночь)
+            // t = 1 (Зенит), t = 0 (Горизонт/Закат), t < 0 (Ночь)
+            const t = Math.max(-1, Math.min(1, sunAlt / 0.2)); 
+            const isNight = t < -0.2;
+
+            let topColor, bottomColor, fogColor;
+            let sunsetIntensity = 0.0;
+
+            if (t > 0) { // День -> Закат
+                topColor = new THREE.Color().lerpColors(new THREE.Color(0x1a457b), new THREE.Color(0x0077ff), t);
+                bottomColor = new THREE.Color().lerpColors(new THREE.Color(0xffaa66), new THREE.Color(0x88ccff), t);
+                fogColor = bottomColor.clone();
+                sunsetIntensity = 1.0 - t; // На закате интенсивность свечения = 1
+            } else { // Закат -> Ночь (Делаем ночное небо темно-синим, а не черным)
+                const nightFactor = Math.abs(t); // 0 (закат) -> 1 (глубокая ночь)
+                topColor = new THREE.Color().lerpColors(new THREE.Color(0x1a457b), new THREE.Color(0x020510), nightFactor);
+                bottomColor = new THREE.Color().lerpColors(new THREE.Color(0xffaa66), new THREE.Color(0x051020), nightFactor);
+                fogColor = bottomColor.clone();
+                sunsetIntensity = 1.0 - nightFactor;
+            }
+
+            // --- ПРИБОР НОЧНОГО ВИДЕНИЯ (ПНВ) ---
+            if (isNight && this.hudEnabled) {
+                // Включаем зеленое освещение
+                this.hemiLight.color.setHex(0x33ff55);
+                this.hemiLight.groundColor.setHex(0x003300);
+                this.hemiLight.intensity = 1.5;
+                
+                this.sunLight.intensity = 0.0;
+                
+                // Зеленая дымка
+                fogColor = new THREE.Color(0x052205);
+                bottomColor = fogColor;
+                topColor = new THREE.Color(0x021102);
+
+                // Добавляем CSS эффект шума
+                this.container.classList.add('night-vision');
+            } else {
+                // Стандартное освещение
+                this.hemiLight.color.setHex(0xffffff);
+                this.hemiLight.groundColor.setHex(0x444444);
+                this.hemiLight.intensity = 0.1 + (Math.max(0, t) * 0.5);
+                this.sunLight.intensity = Math.max(0.1, t * 3.0); // 0.1 ночью для света от звезд/луны
+                this.container.classList.remove('night-vision');
+            }
+
+            // Применяем цвета в шейдер и туман
+            this.skyUniforms.topColor.value.copy(topColor);
+            this.skyUniforms.bottomColor.value.copy(bottomColor);
+            this.skyUniforms.sunsetIntensity.value = sunsetIntensity;
+            this.scene.fog.color.copy(fogColor);
+
+            // Звезды плавно зажигаются по мере наступления ночи
+            this.starsGroup.traverse((child) => {
+                if (child.isPoints) {
+                    child.material.opacity = Math.max(0, -t * 1.5); // 0 днем, 1.0 ночью
+                }
+            });
+        }
+    }
+
     updateData(lat, lon, alt, head, vel, vrate) {
         if (!this.isActive) return;
+
+        this.updateEnvironment(lat, lon);
 
         const planeMerc = this.latLonToMercator(lat, lon);
         const { tx, ty } = this.getTileCoords(lat, lon, this.mapZoom);
@@ -101,26 +321,26 @@ export class PilotSimulator {
         const currentTiles = new Set();
         const tileSizeMercator = (2 * Math.PI * R_EARTH_M) / Math.pow(2, this.mapZoom);
 
-        // Генерация сетки земли вокруг самолета
         for (let ix = -this.gridRange; ix <= this.gridRange; ix++) {
             for (let iy = -this.gridRange; iy <= this.gridRange; iy++) {
                 const cx = tx + ix;
                 const cy = ty + iy;
-                const key = `${this.mapZoom}_${cx}_${cy}`;
+                const key = `${this.mapZoom}_${this.mapType}_${cx}_${cy}`;
                 currentTiles.add(key);
 
                 if (!this.tiles[key]) {
                     const geo = new THREE.PlaneGeometry(tileSizeMercator, tileSizeMercator);
-                    const mat = new THREE.MeshBasicMaterial({ color: 0x555555 }); // Серый фон пока грузится
+                    const mat = new THREE.MeshLambertMaterial({ color: 0x333333 });
                     const mesh = new THREE.Mesh(geo, mat);
                     mesh.rotation.x = -Math.PI / 2;
                     
                     this.tileGroup.add(mesh);
                     this.tiles[key] = { mesh };
 
-                    const url = `https://mt1.google.com/vt/lyrs=s,h&hl=ru&x=${cx}&y=${cy}&z=${this.mapZoom}`;
+                    const url = `https://mt1.google.com/vt/lyrs=${this.mapType}&hl=ru&x=${cx}&y=${cy}&z=${this.mapZoom}`;
                     this.textureLoader.load(url, (tex) => {
                         tex.colorSpace = THREE.SRGBColorSpace;
+                        tex.anisotropy = this.maxAnisotropy;
                         mat.map = tex;
                         mat.color.set(0xffffff);
                         mat.needsUpdate = true;
@@ -134,7 +354,6 @@ export class PilotSimulator {
             }
         }
 
-        // Удаление старых тайлов
         for (let key in this.tiles) {
             if (!currentTiles.has(key)) {
                 this.tileGroup.remove(this.tiles[key].mesh);
@@ -145,19 +364,14 @@ export class PilotSimulator {
             }
         }
 
-        // --- МАГИЯ ВИЗУАЛА: ТУМАН И ВЫСОТА ---
-        // 1. Настраиваем туман так, чтобы он всегда скрывал края карты при любом зуме
         const visibleEdge = this.gridRange * tileSizeMercator;
-        this.scene.fog.near = visibleEdge * 0.4; // Туман начинается с середины сетки
-        this.scene.fog.far = visibleEdge * 0.95; // И полностью скрывает землю на краю
+        this.scene.fog.near = visibleEdge * 0.3;
+        this.scene.fog.far = visibleEdge * 0.9;
 
-        // 2. Иллюзия скорости от Зума (Чем больше зум, тем "ближе" мы к земле визуально)
-        // Если лететь на 10км в реальности, земля еле ползет. Сжимаем высоту для симулятора.
-        const zoomSpeedFactor = Math.pow(2, this.mapZoom - 10); // Чем выше зум, тем больше делитель
+        const zoomSpeedFactor = Math.pow(2, this.mapZoom - 10);
         const visualAlt = Math.max(200, alt / zoomSpeedFactor); 
         this.camera.position.set(0, visualAlt, 0);
 
-        // --- ФИЗИКА КАМЕРЫ (Крен и Тангаж) ---
         if (this.lastHdg !== null) {
             let deltaHdg = head - this.lastHdg;
             if (deltaHdg > 180) deltaHdg -= 360;
@@ -167,22 +381,24 @@ export class PilotSimulator {
         this.lastHdg = head;
         this.currentRoll = THREE.MathUtils.lerp(this.currentRoll, this.targetRoll, 0.05);
 
+        const isRear = this.cameraDir === -1;
+        const rawPlaneYaw = -head * (Math.PI / 180);
+        const planeYaw = isRear ? rawPlaneYaw + Math.PI : rawPlaneYaw;
+        
         const pitchRaw = Math.atan2(vrate, vel / 3.6);
         const pitch = THREE.MathUtils.lerp(0, pitchRaw, 0.1);
 
-        const planeYaw = -head * (Math.PI / 180);
-
         this.camera.rotation.order = 'YXZ';
-        if (!this.isDragging) {
-            this.lookYaw = THREE.MathUtils.lerp(this.lookYaw, 0, 0.05);
-            this.lookPitch = THREE.MathUtils.lerp(this.lookPitch, 0, 0.05);
-        }
-        
+        const basePitchOffset = -0.15; 
+
         this.camera.rotation.set(
-            pitch + this.lookPitch, 
+            (isRear ? -pitch : pitch) + basePitchOffset + this.lookPitch, 
             planeYaw + this.lookYaw, 
-            this.currentRoll
+            isRear ? -this.currentRoll : this.currentRoll
         );
+
+        // Центрируем купол неба на камере, чтобы до него нельзя было долететь
+        this.skyDome.position.copy(this.camera.position);
 
         this.renderer.render(this.scene, this.camera);
     }
