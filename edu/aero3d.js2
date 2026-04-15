@@ -5,42 +5,39 @@ const R_EARTH_M = 6378137;
 
 export class PilotSimulator {
     constructor(containerId) {
-        this.containerId = containerId;
         this.container = document.getElementById(containerId);
         this.isActive = false;
         
         this.mapZoom = 11;
-        this.gridRange = 4;
-        this.mapType = 'y'; 
-        this.timeMode = 'real'; 
-        this.cameraDir = 1; 
-        this.hudEnabled = true; // Отслеживаем состояние HUD для ПНВ
+        this.gridRange = 4; // 9x9 тайлов
+        this.mapType = 'y'; // Спутник, гибрид, схема
+        this.timeMode = 'real'; // real, day, night
+        this.cameraDir = 1; // 1 = Вперед, -1 = Назад
         
         this.scene = new THREE.Scene();
         this.camera = new THREE.PerspectiveCamera(60, 1, 0.1, 500000);
         
         this.renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true });
         this.renderer.setPixelRatio(Math.min(window.devicePixelRatio, 2));
+        // Для четкости текстур на расстоянии получаем макс. анизотропию
         this.maxAnisotropy = this.renderer.capabilities.getMaxAnisotropy();
         this.container.appendChild(this.renderer.domElement);
         
-        // --- ОСВЕЩЕНИЕ ---
+        // --- ОСВЕЩЕНИЕ И АТМОСФЕРА ---
         this.hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 0.6);
         this.scene.add(this.hemiLight);
+        
         this.sunLight = new THREE.DirectionalLight(0xffffff, 3.0);
         this.scene.add(this.sunLight);
 
         // Линзовые блики Солнца
         const lensflare = new Lensflare();
-        lensflare.addElement(new LensflareElement(this.createFlareTexture(), 600, 0, new THREE.Color(0xffffff)));
+        lensflare.addElement(new LensflareElement(this.createFlareTexture(), 500, 0, new THREE.Color(0xffffff)));
         this.sunLight.add(lensflare);
 
         this.scene.fog = new THREE.Fog(0x7ec0ee, 10000, 45000);
 
-        // --- ДИНАМИЧЕСКОЕ НЕБО (SKYDOME) ---
-        this.createSky();
-
-        // --- УЛУЧШЕННЫЕ ЗВЕЗДЫ ---
+        // --- ЗВЕЗДЫ ---
         this.starsGroup = new THREE.Group();
         this.createStars();
         this.scene.add(this.starsGroup);
@@ -55,10 +52,16 @@ export class PilotSimulator {
         );
         this.scene.add(this.moon);
 
-        // Переменные
-        this.lookYaw = 0; this.lookPitch = 0; this.isDragging = false;
-        this.currentRoll = 0; this.targetRoll = 0; this.lastHdg = null;
+        // Переменные для обзора из кабины
+        this.lookYaw = 0;
+        this.lookPitch = 0;
+        this.isDragging = false;
+        
+        this.currentRoll = 0;
+        this.targetRoll = 0;
+        this.lastHdg = null;
 
+        // Менеджер тайлов земли
         this.tiles = {};
         this.tileGroup = new THREE.Group();
         this.scene.add(this.tileGroup);
@@ -66,10 +69,6 @@ export class PilotSimulator {
 
         this.setupControls();
         window.addEventListener('resize', () => { if(this.isActive) this.resize(); });
-    }
-
-    setHudState(isEnabled) {
-        this.hudEnabled = isEnabled;
     }
 
     createFlareTexture() {
@@ -80,96 +79,36 @@ export class PilotSimulator {
         ctx.fillStyle = g; ctx.fillRect(0,0,512,512); return new THREE.CanvasTexture(c);
     }
 
-    createSky() {
-        // Шейдер для реалистичных градиентов неба
-        this.skyUniforms = {
-            topColor: { value: new THREE.Color(0x0077ff) },
-            bottomColor: { value: new THREE.Color(0xffffff) },
-            sunPosition: { value: new THREE.Vector3() },
-            sunsetIntensity: { value: 0.0 }
-        };
-
-        const skyGeo = new THREE.SphereGeometry(200000, 32, 15);
-        const skyMat = new THREE.ShaderMaterial({
-            uniforms: this.skyUniforms,
-            vertexShader: `
-                varying vec3 vWorldPosition;
-                void main() {
-                    vec4 worldPosition = modelMatrix * vec4(position, 1.0);
-                    vWorldPosition = worldPosition.xyz;
-                    gl_Position = projectionMatrix * modelViewMatrix * vec4(position, 1.0);
-                }
-            `,
-            fragmentShader: `
-                uniform vec3 topColor;
-                uniform vec3 bottomColor;
-                uniform vec3 sunPosition;
-                uniform float sunsetIntensity;
-                varying vec3 vWorldPosition;
-                
-                void main() {
-                    vec3 viewDir = normalize(vWorldPosition);
-                    vec3 sunDir = normalize(sunPosition);
-                    
-                    // Высота взгляда (0 = горизонт, 1 = зенит)
-                    float h = max(0.0, viewDir.y);
-                    
-                    // Базовый градиент от горизонта к зениту
-                    vec3 skyColor = mix(bottomColor, topColor, pow(h, 0.6));
-                    
-                    // Свечение солнца на горизонте (закаты/рассветы)
-                    float sunDot = dot(viewDir, sunDir);
-                    float glow = smoothstep(0.5, 1.0, sunDot) * sunsetIntensity;
-                    
-                    // Добавляем оранжево-красный градиент у горизонта
-                    vec3 sunsetGlow = vec3(1.0, 0.4, 0.1) * glow * (1.0 - h);
-                    skyColor += sunsetGlow;
-
-                    gl_FragColor = vec4(skyColor, 1.0);
-                }
-            `,
-            side: THREE.BackSide,
-            depthWrite: false
-        });
-
-        this.skyDome = new THREE.Mesh(skyGeo, skyMat);
-        this.scene.add(this.skyDome);
-    }
-
     createStars() {
-        // Делаем в 3 раза больше звезд (6000) разных размеров для глубины ночного неба
         const bgStarsGeo = new THREE.BufferGeometry();
         const bgStarsPos = [];
         const bgStarsColors = [];
-        for (let i = 0; i < 6000; i++) {
+        for (let i = 0; i < 2000; i++) {
             const raRad = Math.random() * Math.PI * 2;
             const decRad = Math.asin((Math.random() * 2) - 1);
-            // Звезды распределяем на сфере позади тумана
-            const r = 100000 + Math.random() * 10000;
+            const r = 40000 + Math.random() * 5000;
             bgStarsPos.push(r * Math.cos(decRad) * Math.cos(raRad), r * Math.sin(decRad), -r * Math.cos(decRad) * Math.sin(raRad));
-            // Цвет: от белого до слегка голубого/желтоватого
-            const c = 0.6 + Math.random() * 0.4;
-            bgStarsColors.push(c, c, c + (Math.random() * 0.3 - 0.1));
+            const c = 0.5 + Math.random() * 0.5;
+            bgStarsColors.push(c, c, c + Math.random() * 0.2);
         }
         bgStarsGeo.setAttribute('position', new THREE.Float32BufferAttribute(bgStarsPos, 3));
         bgStarsGeo.setAttribute('color', new THREE.Float32BufferAttribute(bgStarsColors, 3));
-        
-        // Звезды стали крупнее и ярче
-        const bgStarsMat = new THREE.PointsMaterial({ 
-            size: 150, vertexColors: true, transparent: true, opacity: 1.0, 
-            sizeAttenuation: true, depthWrite: false, blending: THREE.AdditiveBlending 
-        });
+        const bgStarsMat = new THREE.PointsMaterial({ size: 60, vertexColors: true, transparent: true, opacity: 0.8, sizeAttenuation: true, depthWrite: false });
         this.starsGroup.add(new THREE.Points(bgStarsGeo, bgStarsMat));
     }
 
     setupControls() {
         this.container.addEventListener('mousedown', (e) => {
             if (e.button === 0) this.isDragging = true;
-            if (e.button === 1 || e.detail === 2) { this.lookYaw = 0; this.lookPitch = 0; }
+            // Двойной клик или клик на колесико - сброс взгляда в центр
+            if (e.button === 1 || e.detail === 2) {
+                this.lookYaw = 0; this.lookPitch = 0;
+            }
         });
         window.addEventListener('mouseup', () => this.isDragging = false);
         window.addEventListener('mousemove', (e) => {
             if (!this.isDragging || !this.isActive) return;
+            // Взгляд остается на месте, не возвращается в ноль
             this.lookYaw -= e.movementX * 0.003;
             this.lookPitch -= e.movementY * 0.003;
             this.lookPitch = Math.max(-Math.PI/1.5, Math.min(Math.PI/1.5, this.lookPitch));
@@ -193,9 +132,19 @@ export class PilotSimulator {
         this.tiles = {};
     }
 
-    setMapType(type) { this.mapType = type; this.clearTiles(); }
-    setTimeMode(mode) { this.timeMode = mode; }
-    setCameraDirection(dir) { this.cameraDir = dir; this.lookYaw = 0; this.lookPitch = 0; }
+    setMapType(type) {
+        this.mapType = type;
+        this.clearTiles();
+    }
+
+    setTimeMode(mode) {
+        this.timeMode = mode;
+    }
+
+    setCameraDirection(dir) {
+        this.cameraDir = dir;
+        this.lookYaw = 0; this.lookPitch = 0; // Сброс взгляда при смене камеры
+    }
 
     latLonToMercator(lat, lon) {
         const x = R_EARTH_M * lon * Math.PI / 180;
@@ -213,34 +162,33 @@ export class PilotSimulator {
 
     updateEnvironment(lat, lon) {
         let date = new Date();
-        if (this.timeMode === 'day') date = new Date("2024-06-21T12:00:00Z");
-        if (this.timeMode === 'night') date = new Date("2024-12-21T00:00:00Z");
+        if (this.timeMode === 'day') date = new Date("2024-06-21T12:00:00Z"); // Имитация зенита
+        if (this.timeMode === 'night') date = new Date("2024-12-21T00:00:00Z"); // Имитация полуночи
 
         if (window.Astronomy) {
             const obs = new window.Astronomy.Observer(lat, lon, 0);
             
-            // СОЛНЦЕ
+            // Расчет Солнца
             const sunEq = window.Astronomy.Equator('Sun', date, obs, true, true);
             const sunHor = window.Astronomy.Horizon(date, obs, sunEq.ra, sunEq.dec, 'normal');
             
             const sunAlt = sunHor.altitude * (Math.PI / 180);
-            const sunAz = (-sunHor.azimuth + 180) * (Math.PI / 180);
-            const sunDist = 150000;
+            const sunAz = (-sunHor.azimuth + 180) * (Math.PI / 180); // Корректировка азимута для 3D
+            const sunDist = 30000;
 
             this.sunLight.position.set(
                 sunDist * Math.cos(sunAlt) * Math.sin(sunAz),
                 sunDist * Math.sin(sunAlt),
                 sunDist * Math.cos(sunAlt) * Math.cos(sunAz)
             );
-            this.skyUniforms.sunPosition.value.copy(this.sunLight.position);
 
-            // ЛУНА
+            // Расчет Луны
             const moonEq = window.Astronomy.Equator('Moon', date, obs, true, true);
             const moonHor = window.Astronomy.Horizon(date, obs, moonEq.ra, moonEq.dec, 'normal');
             
             const moonAlt = moonHor.altitude * (Math.PI / 180);
             const moonAz = (-moonHor.azimuth + 180) * (Math.PI / 180);
-            const moonDist = 80000;
+            const moonDist = 25000;
 
             this.moon.position.set(
                 moonDist * Math.cos(moonAlt) * Math.sin(moonAz),
@@ -249,64 +197,18 @@ export class PilotSimulator {
             );
             this.moon.lookAt(0,0,0);
 
-            // РАСЧЕТ ЦВЕТОВ (День / Закат / Ночь)
-            // t = 1 (Зенит), t = 0 (Горизонт/Закат), t < 0 (Ночь)
-            const t = Math.max(-1, Math.min(1, sunAlt / 0.2)); 
-            const isNight = t < -0.2;
+            // Смена цвета неба (День/Закат/Ночь)
+            const t = Math.max(0, Math.min(1, (sunAlt + 0.1) / 0.3)); 
+            const skyColor = new THREE.Color().lerpColors(new THREE.Color(0x02040a), new THREE.Color(0x7ec0ee), t);
+            // Добавляем рыжий оттенок на закате
+            if (t > 0 && t < 1) skyColor.lerp(new THREE.Color(0xff8844), 1 - Math.abs(t - 0.5)*2);
 
-            let topColor, bottomColor, fogColor;
-            let sunsetIntensity = 0.0;
-
-            if (t > 0) { // День -> Закат
-                topColor = new THREE.Color().lerpColors(new THREE.Color(0x1a457b), new THREE.Color(0x0077ff), t);
-                bottomColor = new THREE.Color().lerpColors(new THREE.Color(0xffaa66), new THREE.Color(0x88ccff), t);
-                fogColor = bottomColor.clone();
-                sunsetIntensity = 1.0 - t; // На закате интенсивность свечения = 1
-            } else { // Закат -> Ночь (Делаем ночное небо темно-синим, а не черным)
-                const nightFactor = Math.abs(t); // 0 (закат) -> 1 (глубокая ночь)
-                topColor = new THREE.Color().lerpColors(new THREE.Color(0x1a457b), new THREE.Color(0x020510), nightFactor);
-                bottomColor = new THREE.Color().lerpColors(new THREE.Color(0xffaa66), new THREE.Color(0x051020), nightFactor);
-                fogColor = bottomColor.clone();
-                sunsetIntensity = 1.0 - nightFactor;
-            }
-
-            // --- ПРИБОР НОЧНОГО ВИДЕНИЯ (ПНВ) ---
-            if (isNight && this.hudEnabled) {
-                // Включаем зеленое освещение
-                this.hemiLight.color.setHex(0x33ff55);
-                this.hemiLight.groundColor.setHex(0x003300);
-                this.hemiLight.intensity = 1.5;
-                
-                this.sunLight.intensity = 0.0;
-                
-                // Зеленая дымка
-                fogColor = new THREE.Color(0x052205);
-                bottomColor = fogColor;
-                topColor = new THREE.Color(0x021102);
-
-                // Добавляем CSS эффект шума
-                this.container.classList.add('night-vision');
-            } else {
-                // Стандартное освещение
-                this.hemiLight.color.setHex(0xffffff);
-                this.hemiLight.groundColor.setHex(0x444444);
-                this.hemiLight.intensity = 0.1 + (Math.max(0, t) * 0.5);
-                this.sunLight.intensity = Math.max(0.1, t * 3.0); // 0.1 ночью для света от звезд/луны
-                this.container.classList.remove('night-vision');
-            }
-
-            // Применяем цвета в шейдер и туман
-            this.skyUniforms.topColor.value.copy(topColor);
-            this.skyUniforms.bottomColor.value.copy(bottomColor);
-            this.skyUniforms.sunsetIntensity.value = sunsetIntensity;
-            this.scene.fog.color.copy(fogColor);
-
-            // Звезды плавно зажигаются по мере наступления ночи
-            this.starsGroup.traverse((child) => {
-                if (child.isPoints) {
-                    child.material.opacity = Math.max(0, -t * 1.5); // 0 днем, 1.0 ночью
-                }
-            });
+            this.scene.background = skyColor;
+            this.scene.fog.color = skyColor;
+            
+            this.hemiLight.intensity = 0.1 + (t * 0.5);
+            this.sunLight.intensity = Math.max(0, t * 3.0);
+            this.starsGroup.visible = t < 0.5;
         }
     }
 
@@ -340,7 +242,7 @@ export class PilotSimulator {
                     const url = `https://mt1.google.com/vt/lyrs=${this.mapType}&hl=ru&x=${cx}&y=${cy}&z=${this.mapZoom}`;
                     this.textureLoader.load(url, (tex) => {
                         tex.colorSpace = THREE.SRGBColorSpace;
-                        tex.anisotropy = this.maxAnisotropy;
+                        tex.anisotropy = this.maxAnisotropy; // Делает карту четкой вдаль!
                         mat.map = tex;
                         mat.color.set(0xffffff);
                         mat.needsUpdate = true;
@@ -381,6 +283,7 @@ export class PilotSimulator {
         this.lastHdg = head;
         this.currentRoll = THREE.MathUtils.lerp(this.currentRoll, this.targetRoll, 0.05);
 
+        // Расчет направления
         const isRear = this.cameraDir === -1;
         const rawPlaneYaw = -head * (Math.PI / 180);
         const planeYaw = isRear ? rawPlaneYaw + Math.PI : rawPlaneYaw;
@@ -389,16 +292,15 @@ export class PilotSimulator {
         const pitch = THREE.MathUtils.lerp(0, pitchRaw, 0.1);
 
         this.camera.rotation.order = 'YXZ';
-        const basePitchOffset = -0.15; 
+        
+        // Базовый наклон камеры немного вниз (Меньше неба)
+        const basePitchOffset = -0.15; // примерно -8.5 градусов
 
         this.camera.rotation.set(
             (isRear ? -pitch : pitch) + basePitchOffset + this.lookPitch, 
             planeYaw + this.lookYaw, 
             isRear ? -this.currentRoll : this.currentRoll
         );
-
-        // Центрируем купол неба на камере, чтобы до него нельзя было долететь
-        this.skyDome.position.copy(this.camera.position);
 
         this.renderer.render(this.scene, this.camera);
     }
