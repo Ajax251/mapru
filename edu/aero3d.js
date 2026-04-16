@@ -43,6 +43,7 @@ export class PilotSimulator {
         this.renderer = new THREE.WebGLRenderer({ antialias: true, logarithmicDepthBuffer: true, powerPreference: 'high-performance' });
         const isMobile = window.innerWidth <= 768;
         this.renderer.setPixelRatio(isMobile ? Math.min(window.devicePixelRatio, 1.2) : Math.min(window.devicePixelRatio, 2.0));
+        this.renderer.outputColorSpace = THREE.SRGBColorSpace;
         this.renderer.toneMapping = THREE.ACESFilmicToneMapping;
         this.renderer.toneMappingExposure = 1.25;
         this.maxAnisotropy = this.renderer.capabilities.getMaxAnisotropy();
@@ -71,9 +72,11 @@ export class PilotSimulator {
 
         this.scene.fog = new THREE.FogExp2(0x8ab4d4, 0.000012);
         this._createSky();
+        this._createSunGlow();
         
         this.starsGroup = new THREE.Group(); this._createStars(); this.scene.add(this.starsGroup);
         this._createClouds();
+        this._createCityLights();
         this._initWeather3D();
 
         const tl = new THREE.TextureLoader(); tl.setCrossOrigin('anonymous');
@@ -85,6 +88,7 @@ export class PilotSimulator {
         this.lookYaw = 0; this.lookPitch = 0; this.isDragging = false;
         this.currentRoll = 0; this.targetRoll = 0; this.lastHdg = null;
         this.smoothLat = null; this.smoothLon = null; this.smoothAlt = null;
+        this.cameraBob = 0;
 
         this.tiles = {};
         this.tileGroup = new THREE.Group(); this.scene.add(this.tileGroup);
@@ -135,11 +139,38 @@ export class PilotSimulator {
         const skyMat = new THREE.ShaderMaterial({
             uniforms: this.skyUniforms,
             vertexShader: `varying vec3 vWP; void main() { vWP = (modelMatrix * vec4(position,1.0)).xyz; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
-          fragmentShader: `uniform vec3 topColor; uniform vec3 midColor; uniform vec3 bottomColor; uniform vec3 sunPosition; uniform float sunsetIntensity; varying vec3 vWP; void main() { vec3 vd = normalize(vWP); vec3 sd = normalize(sunPosition); float h = vd.y; vec3 sc = h > 0.0 ? mix(midColor, topColor, pow(h, 0.5)) : mix(midColor, bottomColor, pow(-h*2.0, 0.4)); float sDot = max(0.0, dot(vd, sd)); sc += vec3(1.0, 0.45, 0.1) * pow(sDot, 64.0) * 0.6 * sunsetIntensity; sc += vec3(1.0, 0.9, 0.7) * pow(sDot, 600.0) * 2.0; gl_FragColor = vec4(sc, 1.0); }`,
+          fragmentShader: `uniform vec3 topColor; uniform vec3 midColor; uniform vec3 bottomColor; uniform vec3 sunPosition; uniform float sunsetIntensity; varying vec3 vWP; void main() { vec3 vd = normalize(vWP); vec3 sd = normalize(sunPosition); float h = vd.y; float hMix = smoothstep(-0.35, 0.7, h); vec3 sc = mix(bottomColor, midColor, hMix); sc = mix(sc, topColor, smoothstep(0.02, 0.95, max(h, 0.0))); float sDot = max(0.0, dot(vd, sd)); float horizonGlow = pow(1.0 - min(1.0, abs(h) * 1.7), 4.0); sc += vec3(0.28, 0.46, 0.8) * horizonGlow * 0.18; sc += vec3(1.0, 0.45, 0.1) * pow(sDot, 64.0) * 0.7 * sunsetIntensity; sc += vec3(1.0, 0.72, 0.36) * pow(sDot, 16.0) * (0.18 + sunsetIntensity * 0.1); sc += vec3(1.0, 0.94, 0.8) * pow(sDot, 700.0) * 2.6; gl_FragColor = vec4(sc, 1.0); }`,
             side: THREE.BackSide, depthWrite: false
         });
         this.skyDome = new THREE.Mesh(new THREE.SphereGeometry(250000, 32, 20), skyMat);
         this.scene.add(this.skyDome);
+    }
+
+    _createSunGlow() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 512; canvas.height = 512;
+        const ctx = canvas.getContext('2d');
+        const grad = ctx.createRadialGradient(256, 256, 0, 256, 256, 256);
+        grad.addColorStop(0, 'rgba(255,255,235,1)');
+        grad.addColorStop(0.08, 'rgba(255,248,218,0.85)');
+        grad.addColorStop(0.28, 'rgba(255,210,130,0.28)');
+        grad.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, 512, 512);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.generateMipmaps = false;
+        tex.minFilter = THREE.LinearFilter;
+
+        this.sunGlow = new THREE.Sprite(new THREE.SpriteMaterial({
+            map: tex,
+            transparent: true,
+            blending: THREE.AdditiveBlending,
+            depthWrite: false,
+            color: 0xfff2cf,
+            opacity: 0.9
+        }));
+        this.sunGlow.scale.setScalar(22000);
+        this.scene.add(this.sunGlow);
     }
 
     _createStars() {
@@ -150,7 +181,8 @@ export class PilotSimulator {
             const c = 0.6+Math.random()*0.4; colors.push(c, c, c+0.2);
         }
         geo.setAttribute('position', new THREE.Float32BufferAttribute(pos,3)); geo.setAttribute('color', new THREE.Float32BufferAttribute(colors,3));
-        this.starsGroup.add(new THREE.Points(geo, new THREE.PointsMaterial({size: 150, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending})));
+        this.starMaterial = new THREE.PointsMaterial({size: 150, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending, opacity: 0.9});
+        this.starsGroup.add(new THREE.Points(geo, this.starMaterial));
     }
 
     _createClouds() {
@@ -168,20 +200,61 @@ export class PilotSimulator {
         const tex = new THREE.CanvasTexture(c); 
         tex.generateMipmaps = false; tex.minFilter = THREE.LinearFilter;
 
-        this.cloudMat = new THREE.MeshBasicMaterial({map: tex, transparent: true, opacity: 0.0, depthWrite: false, side: THREE.DoubleSide, blending: THREE.NormalBlending});
+        this.cloudMat = new THREE.MeshBasicMaterial({map: tex, transparent: true, opacity: 0.0, depthWrite: false, side: THREE.DoubleSide, blending: THREE.NormalBlending, color: 0xf5fbff});
         
         // Уменьшили размер самих облаков
         const geo = new THREE.PlaneGeometry(3000, 1800); 
 
-        for(let i=0; i<20; i++) {
+        for(let i=0; i<28; i++) {
             const m = new THREE.Mesh(geo, this.cloudMat);
             const a = Math.random()*Math.PI*2, d = 3000+Math.random()*20000;
-            m.position.set(Math.cos(a)*d, 500+Math.random()*1000, Math.sin(a)*d); 
+            const scale = 0.75 + Math.random() * 1.6;
+            m.position.set(Math.cos(a)*d, 450+Math.random()*1400, Math.sin(a)*d); 
+            m.scale.set(scale, scale * (0.75 + Math.random() * 0.4), 1);
+            m.userData.drift = 0.00006 + Math.random() * 0.00018;
             m.lookAt(0,m.position.y,0);
             this.cloudGroup.add(m);
             this.cloudsList.push(m);
         }
         this.scene.add(this.cloudGroup);
+    }
+
+    _createCityLights() {
+        const canvas = document.createElement('canvas');
+        canvas.width = 128; canvas.height = 128;
+        const ctx = canvas.getContext('2d');
+        const grad = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+        grad.addColorStop(0, 'rgba(255,250,220,1)');
+        grad.addColorStop(0.18, 'rgba(255,210,125,0.85)');
+        grad.addColorStop(0.48, 'rgba(255,150,70,0.18)');
+        grad.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = grad;
+        ctx.fillRect(0, 0, 128, 128);
+        const tex = new THREE.CanvasTexture(canvas);
+        tex.generateMipmaps = false;
+        tex.minFilter = THREE.LinearFilter;
+
+        this.cityLights = new THREE.Group();
+        this.cityLightsSprites = [];
+        for (let i = 0; i < 180; i++) {
+            const sprite = new THREE.Sprite(new THREE.SpriteMaterial({
+                map: tex,
+                color: i % 4 === 0 ? 0xffcf90 : 0xfff0d0,
+                transparent: true,
+                opacity: 0,
+                blending: THREE.AdditiveBlending,
+                depthWrite: false
+            }));
+            const angle = Math.random() * Math.PI * 2;
+            const dist = 3000 + Math.random() * 26000;
+            sprite.position.set(Math.cos(angle) * dist, 30 + Math.random() * 180, Math.sin(angle) * dist);
+            const scale = 80 + Math.random() * 200;
+            sprite.scale.set(scale, scale, 1);
+            sprite.userData.baseOpacity = 0.1 + Math.random() * 0.28;
+            this.cityLights.add(sprite);
+            this.cityLightsSprites.push(sprite);
+        }
+        this.scene.add(this.cityLights);
     }
 
     _initWeather3D() {
@@ -269,6 +342,7 @@ export class PilotSimulator {
             const sunAlt = sunHor.altitude * DEG_TO_RAD; const sunAz = (-sunHor.azimuth+180) * DEG_TO_RAD;
             const sd = 160000; this.sunLight.position.set(sd*Math.cos(sunAlt)*Math.sin(sunAz), sd*Math.sin(sunAlt), sd*Math.cos(sunAlt)*Math.cos(sunAz));
             this.skyUniforms.sunPosition.value.copy(this.sunLight.position);
+            this.sunGlow.position.copy(this.sunLight.position.clone().setLength(145000));
 
             const mEq = window.Astronomy.Equator('Moon', date, obs, true, true);
             const mHor = window.Astronomy.Horizon(date, obs, mEq.ra, mEq.dec, 'normal');
@@ -296,6 +370,7 @@ export class PilotSimulator {
                 fogC = new THREE.Color().lerpColors(new THREE.Color(0xcc8855), new THREE.Color(0x8ab4d4), t);
                 sInt = 1.0 - t; 
                 this.cloudMat.opacity = Math.min(1.0, cloudFactor * t); // Облака видны днем если они есть
+                this.sunGlow.material.opacity = 0.55 + t * 0.35;
             } else {
                 const nf = Math.min(1, Math.abs(t)*1.5);
                 topC = new THREE.Color().lerpColors(new THREE.Color(0x0a1a50), new THREE.Color(0x02040e), nf);
@@ -304,6 +379,7 @@ export class PilotSimulator {
                 fogC = new THREE.Color().lerpColors(new THREE.Color(0x334466), new THREE.Color(0x050a18), nf);
                 sInt = 1.0 - nf; 
                 this.cloudMat.opacity = 0; // Ночью облака прячем
+                this.sunGlow.material.opacity = Math.max(0.08, 0.28 - nf * 0.18);
             }
 
             let baseFogDensity = 0.000012;
@@ -327,6 +403,14 @@ export class PilotSimulator {
                 this.container.classList.remove('night-vision');
             }
 
+            this.starMaterial.opacity = isNight ? 0.95 : Math.max(0.05, 0.45 - t * 0.35);
+            this.starsGroup.rotation.y += 0.00008;
+            this.cityLights.position.copy(this.camera.position);
+            for (let i = 0; i < this.cityLightsSprites.length; i++) {
+                const sprite = this.cityLightsSprites[i];
+                sprite.material.opacity = isNight ? sprite.userData.baseOpacity : 0;
+            }
+
             this.skyUniforms.topColor.value.copy(topC); this.skyUniforms.midColor.value.copy(midC); this.skyUniforms.bottomColor.value.copy(botC);
             this.skyUniforms.sunsetIntensity.value = sInt; 
             this.scene.fog.color.copy(fogC);
@@ -345,7 +429,7 @@ export class PilotSimulator {
         
         if (!isRain && !isSnow) { this.weatherMat3D.opacity = 0; return; }
 
-        this.weatherMat3D.opacity = 0.6;
+        this.weatherMat3D.opacity = 0.68;
         this.weatherMat3D.size = isSnow ? 15 : 4;
         this.weatherPoints3D.position.copy(this.camera.position);
         this.weatherPoints3D.rotation.copy(this.camera.rotation);
@@ -422,11 +506,19 @@ export class PilotSimulator {
         const isR = this.cameraDir === -1;
         const pY = isR ? -head*DEG_TO_RAD+Math.PI : -head*DEG_TO_RAD;
         const pR = Math.atan2(vrate, vel/3.6); const pitch = THREE.MathUtils.lerp(0, pR, 0.08);
+        this.cameraBob += 0.02 + Math.min(0.06, vel / 40000);
+        const bobY = Math.sin(this.cameraBob) * Math.min(28, Math.max(6, vel / 55));
+        const bobX = Math.cos(this.cameraBob * 0.5) * Math.min(16, Math.max(2, vel / 110));
 
         this.camera.rotation.order = 'YXZ';
         this.camera.rotation.set((isR?-pitch:pitch)-0.12+this.lookPitch, pY+this.lookYaw, isR?-this.currentRoll:this.currentRoll);
+        this.camera.position.x = bobX;
+        this.camera.position.y += bobY;
         this.skyDome.position.copy(this.camera.position); this.cloudGroup.position.copy(this.camera.position);
         this.cloudGroup.rotation.y += 0.0002;
+        for (let i = 0; i < this.cloudsList.length; i++) {
+            this.cloudsList[i].rotation.z = Math.sin(this.cameraBob + i) * 0.015;
+        }
 
         this._updateWeatherVFX(vel);
         this.composer.render();
