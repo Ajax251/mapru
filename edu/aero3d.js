@@ -54,9 +54,19 @@ export class PilotSimulator {
         this.hemiLight = new THREE.HemisphereLight(0xffffff, 0x444444, 1.0); this.scene.add(this.hemiLight);
         this.sunLight = new THREE.DirectionalLight(0xffffff, 4.0); this.scene.add(this.sunLight);
 
-        const lensflare = new Lensflare();
-        // Уменьшили солнце с 800 до 400
-        lensflare.addElement(new LensflareElement(this._createFlareCore(), 400, 0, new THREE.Color(1.0, 0.98, 0.9)));
+  const lensflare = new Lensflare();
+        const texCore = this._createFlareCore();
+        const texGhost = this._createFlareGhost(); // Добавляем блики для поворота камеры
+        
+        // Возвращаем размер 800 для красивого свечения, но само белое ядро мы уменьшим в функции ниже
+        lensflare.addElement(new LensflareElement(texCore, 800, 0, new THREE.Color(1.0, 0.98, 0.9)));
+        
+        // Добавляем цветные кружки бликов линзы, скользящие по экрану при повороте камеры
+        lensflare.addElement(new LensflareElement(texGhost, 70, 0.6, new THREE.Color(0.2, 0.6, 1.0)));
+        lensflare.addElement(new LensflareElement(texGhost, 140, 0.75, new THREE.Color(0.3, 1.0, 0.5)));
+        lensflare.addElement(new LensflareElement(texGhost, 220, 0.9, new THREE.Color(1.0, 0.5, 0.2)));
+        lensflare.addElement(new LensflareElement(texGhost, 60, 1.0, new THREE.Color(0.4, 0.4, 0.8)));
+        
         this.sunLight.add(lensflare);
 
         this.scene.fog = new THREE.FogExp2(0x8ab4d4, 0.000012);
@@ -96,9 +106,25 @@ export class PilotSimulator {
     _createFlareCore() {
         const c = document.createElement('canvas'); c.width = 512; c.height = 512; const ctx = c.getContext('2d');
         const g = ctx.createRadialGradient(256, 256, 0, 256, 256, 256);
-        g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.1, 'rgba(255,240,200,0.9)'); g.addColorStop(1, 'rgba(0,0,0,0)');
+        g.addColorStop(0, 'rgba(255,255,255,1)');
+        g.addColorStop(0.04, 'rgba(255,245,220,0.8)'); // Раньше было 0.1, теперь белый шар в 1.5+ раза меньше
+        g.addColorStop(0.2, 'rgba(255,230,180,0.3)');  // Плавный переход для красивого свечения
+        g.addColorStop(1, 'rgba(0,0,0,0)');
         ctx.fillStyle = g; ctx.fillRect(0,0,512,512); 
         
+        const tex = new THREE.CanvasTexture(c); 
+        tex.generateMipmaps = false; tex.minFilter = THREE.LinearFilter; 
+        return tex;
+    }
+
+    _createFlareGhost() {
+        const c = document.createElement('canvas'); c.width = 128; c.height = 128; const ctx = c.getContext('2d');
+        const g = ctx.createRadialGradient(64, 64, 0, 64, 64, 64);
+        g.addColorStop(0, 'rgba(255,255,255,0.02)');
+        g.addColorStop(0.7, 'rgba(255,255,255,0.1)');
+        g.addColorStop(0.9, 'rgba(255,255,255,0.3)'); // Кольцевой эффект блика объектива
+        g.addColorStop(1, 'rgba(0,0,0,0)');
+        ctx.fillStyle = g; ctx.fillRect(0,0,128,128); 
         const tex = new THREE.CanvasTexture(c); 
         tex.generateMipmaps = false; tex.minFilter = THREE.LinearFilter; 
         return tex;
@@ -109,7 +135,7 @@ export class PilotSimulator {
         const skyMat = new THREE.ShaderMaterial({
             uniforms: this.skyUniforms,
             vertexShader: `varying vec3 vWP; void main() { vWP = (modelMatrix * vec4(position,1.0)).xyz; gl_Position = projectionMatrix * modelViewMatrix * vec4(position,1.0); }`,
-            fragmentShader: `uniform vec3 topColor; uniform vec3 midColor; uniform vec3 bottomColor; uniform vec3 sunPosition; uniform float sunsetIntensity; varying vec3 vWP; void main() { vec3 vd = normalize(vWP); vec3 sd = normalize(sunPosition); float h = vd.y; vec3 sc = h > 0.0 ? mix(midColor, topColor, pow(h, 0.5)) : mix(midColor, bottomColor, pow(-h*2.0, 0.4)); float sDot = max(0.0, dot(vd, sd)); sc += vec3(1.0, 0.45, 0.1) * pow(sDot, 32.0) * 0.6 * sunsetIntensity; sc += vec3(1.0, 0.9, 0.7) * pow(sDot, 200.0) * 2.0; gl_FragColor = vec4(sc, 1.0); }`,
+          fragmentShader: `uniform vec3 topColor; uniform vec3 midColor; uniform vec3 bottomColor; uniform vec3 sunPosition; uniform float sunsetIntensity; varying vec3 vWP; void main() { vec3 vd = normalize(vWP); vec3 sd = normalize(sunPosition); float h = vd.y; vec3 sc = h > 0.0 ? mix(midColor, topColor, pow(h, 0.5)) : mix(midColor, bottomColor, pow(-h*2.0, 0.4)); float sDot = max(0.0, dot(vd, sd)); sc += vec3(1.0, 0.45, 0.1) * pow(sDot, 64.0) * 0.6 * sunsetIntensity; sc += vec3(1.0, 0.9, 0.7) * pow(sDot, 600.0) * 2.0; gl_FragColor = vec4(sc, 1.0); }`,
             side: THREE.BackSide, depthWrite: false
         });
         this.skyDome = new THREE.Mesh(new THREE.SphereGeometry(250000, 32, 20), skyMat);
