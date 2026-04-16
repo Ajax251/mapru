@@ -6135,8 +6135,6 @@ function fillAuxiliaryTextareas(originalCoordGroups, geoGroups) {
 let customPlacemarkLayout;
 let numberedPointLayout; 
 let redDotLayout; 
-let advDotLayout;
-let advTextLayout;
 
 document.addEventListener('DOMContentLoaded', async () => {
     
@@ -6410,17 +6408,9 @@ if (svBtn) {
                     '<div class="numbered-point-label" style="font-size: $[properties.fontSize]px;">$[properties.iconContent]</div>'
                 );
 
-redDotLayout = ymaps.templateLayoutFactory.createClass(
+  redDotLayout = ymaps.templateLayoutFactory.createClass(
                     // <-- ИЗМЕНЕНО: Добавляем инлайновые стили для ширины и высоты
                     '<div class="custom-red-dot" style="width: $[properties.dotSize]px; height: $[properties.dotSize]px;"></div>'
-                );
-
-  advDotLayout = ymaps.templateLayoutFactory.createClass(
-                    '<div style="width:$[properties.advDotSize]px; height:$[properties.advDotSize]px; background-color:$[properties.advDotColor]; border-radius:50%; border:1px solid rgba(0,0,0,0.6); box-sizing:border-box;"></div>'
-                );
-
-  advTextLayout = ymaps.templateLayoutFactory.createClass(
-                    '<div style="font-size:$[properties.advTextSize]px; color:$[properties.advTextColor]; font-weight:bold; font-family:Arial,sans-serif; text-shadow:-1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff; user-select:none; pointer-events:none; white-space:nowrap;">$[properties.iconContent]</div>'
                 );
                 
                 // Кастомный макет для подсказки (без изменений)
@@ -16450,7 +16440,309 @@ async function exportMapToJson() {
     }
 }
 
+function handleMapJsonImport(event) {
+    const file = event.target.files[0];
+    if (!file) return;
 
+    const reader = new FileReader();
+    reader.readAsArrayBuffer(file);
+
+    reader.onload = async (e) => {
+        try {
+            showLoader('Импорт карты...');
+            const arrayBuffer = e.target.result;
+            let jsonContent;
+
+            try {
+                const zip = await JSZip.loadAsync(arrayBuffer);
+                let jsonFile = zip.file("map_data.json");
+                if (!jsonFile) {
+                    const files = Object.keys(zip.files);
+                    const anyJson = files.find(name => name.endsWith('.json'));
+                    if (anyJson) jsonFile = zip.file(anyJson);
+                }
+                if (jsonFile) {
+                    jsonContent = await jsonFile.async("string");
+                } else {
+                    throw new Error("В файле .map не найден JSON с данными");
+                }
+            } catch (zipError) {
+                const decoder = new TextDecoder("utf-8");
+                jsonContent = decoder.decode(arrayBuffer);
+                if (!jsonContent.trim().startsWith('{')) {
+                    throw new Error("Файл поврежден или имеет неверный формат");
+                }
+            }
+
+            const parsedData = JSON.parse(jsonContent);
+
+            if (parsedData.type === 'FeatureCollection' || parsedData.type === 'Feature' || (parsedData.data && parsedData.data.features)) {
+                
+                clearMapAndResetTheme();
+                
+                let featuresToImport =[];
+                if (parsedData.type === 'Feature') {
+                    featuresToImport = [parsedData];
+                } else if (parsedData.type === 'FeatureCollection') {
+                    featuresToImport = parsedData.features;
+                } else if (parsedData.data && Array.isArray(parsedData.data.features)) {
+                    featuresToImport = parsedData.data.features;
+                }
+
+                if (!featuresToImport || featuresToImport.length === 0) {
+                    throw new Error("JSON файл не содержит объектов (features).");
+                }
+
+                const parcels = [];
+                const buildings =[];
+                const structures = [];
+                const zouits = [];
+
+                featuresToImport.forEach(f => {
+                    const props = f.properties || {};
+                    const opts = props.options || {};
+                    const cat = props.category;
+                    const catName = props.categoryName;
+
+                    const isBuilding = cat === 36369 || catName === 'Здания' || opts.build_record_area || (opts.cad_num && opts.purpose);
+                    const isStructure = cat === 36383 || catName === 'Сооружения' || (opts.cad_number && opts.params_extension);
+                    const isZouit = cat === 36940 || catName?.includes('Зоны') || opts.content_restrict_encumbrances || (opts.reg_numb_border && !opts.type_zone);
+                    const isTerrZone = cat === 36315 || catName === 'Территориальные зоны' || opts.type_zone;
+
+                    if (isBuilding) buildings.push(f);
+                    else if (isStructure) structures.push(f);
+                    else if (isZouit || isTerrZone) zouits.push(f);
+                    else parcels.push(f);
+                });
+
+                parcelFeaturesData = parcels;
+                buildingFeaturesData = buildings;
+                structureFeaturesData = structures;
+                zouitFeaturesData = zouits;
+
+                if (parcels.length > 0) await processAndDrawParcels(parcels, 'quarter');
+                if (buildings.length > 0) await processAndDrawBuildings(buildings);
+                if (structures.length > 0) await processAndDrawStructures(structures);
+                if (zouits.length > 0) await processAndDrawZouits(zouits);
+
+                const importDate = new Date().toLocaleDateString('ru-RU');
+                if (parcels.length > 0) populateSidebarWithParcels(parcels, `Импорт (${importDate})`);
+                else if (buildings.length > 0) await populateSidebarWithFoundObjects(buildings, 'Здания (Импорт)');
+                else if (zouits.length > 0) await populateSidebarWithFoundObjects(zouits, 'ЗОУИТ (Импорт)');
+
+                let allBounds = null;
+                polygons.forEach(obj => {
+                    if (obj instanceof ymaps.Polygon) {
+                        const bounds = obj.geometry.getBounds();
+                        if (bounds) {
+                            if (!allBounds) allBounds = bounds;
+                            else {
+                                allBounds = [
+                                    [Math.min(allBounds[0][0], bounds[0][0]), Math.min(allBounds[0][1], bounds[0][1])],
+                                    [Math.max(allBounds[1][0], bounds[1][0]), Math.max(allBounds[1][1], bounds[1][1])]
+                                ];
+                            }
+                        }
+                    }
+                });
+
+                if (allBounds) map.setBounds(allBounds, { checkZoomRange: true, duration: 300 });
+                showNotification(`Импортировано: ЗУ: ${parcels.length}, ОКС: ${buildings.length + structures.length}, Зон: ${zouits.length}`, 'success', 'file-import');
+            } 
+            else if (parsedData.type === 'MapData') {
+                const mapData = parsedData;
+                clearMapAndResetTheme();
+
+                let importedCount = 0;
+                const restoredParcelsData =[];
+                const restoredBuildingsData = [];
+                const restoredStructuresData = [];
+                const restoredZouitsData =[];
+                const pendingVertexPoints = [];
+
+                const applyOffset = (coord) => [
+                    coord[0] - (mapOffsetY * 0.000008983),
+                    coord[1] - (mapOffsetX * 0.000008983)
+                ];
+
+                if (mapData.features) {
+                    mapData.features.forEach(f => {
+                        let ymapsObj;
+                        let coords = f.geometry.coordinates;
+                        let type = f.geometry.type;
+                        let props = f.properties || {};
+                        let opts = f.options || {};
+                        let flags = f.appFlags || {};
+
+                        let visualCoords;
+                        if (type === 'Point') visualCoords = applyOffset(coords);
+                        else if (type === 'LineString') visualCoords = coords.map(applyOffset);
+                        else if (type === 'Polygon') visualCoords = coords.map(ring => ring.map(applyOffset));
+
+                        if (type === 'Point') {
+                            ymapsObj = new ymaps.Placemark(visualCoords, props, opts);
+                            if (flags.isCustomLabel || (props.cadastralNumber && !flags.isVertexPoint)) {
+                                ymapsObj.options.set('iconLayout', customPlacemarkLayout);
+                            }
+                            if (flags.isVertexPoint) {
+                                if (props.isCoordLabel) ymapsObj.options.set('iconLayout', coordinateLabelLayout);
+                                else if (props.dotSize) ymapsObj.options.set('iconLayout', redDotLayout);
+                                else if (props.fontSize) ymapsObj.options.set('iconLayout', numberedPointLayout);
+                                
+                                pendingVertexPoints.push({ 
+                                    placemark: ymapsObj, 
+                                    parentCn: flags.relatedPolygonCadastralNumber,
+                                    parentId: flags.relatedPolygonId
+                                });
+                            }
+                        } else if (type === 'LineString') {
+                            ymapsObj = new ymaps.Polyline(visualCoords, props, opts);
+                        } else if (type === 'Polygon') {
+                            ymapsObj = new ymaps.Polygon(visualCoords, props, opts);
+                            if (props.hintContent && typeof props.hintContent === 'object') {
+                                ymapsObj.options.set('hintLayout', customHintLayout);
+                            }
+                        }
+
+                        if (ymapsObj) {
+                            Object.keys(flags).forEach(key => {
+                                if (key !== 'relatedPolygonCadastralNumber' && key !== 'relatedPolygonId') ymapsObj.properties.set(key, flags[key]);
+                            });
+
+                            map.geoObjects.add(ymapsObj);
+                            if (flags.isAreaMeasurement) areaObjects.push(ymapsObj);
+                            else polygons.push(ymapsObj);
+
+                            if (type === 'Point' && flags.isCustomLabel) {
+                                const parentPoly = polygons.find(p => p instanceof ymaps.Polygon && p.properties.get('cadastralNumber') === props.cadastralNumber);
+                                if (parentPoly) ymapsObj.polygon = parentPoly;
+                                parcelPlacemarks.push(ymapsObj);
+                            }
+
+                            let featureData = props.featureData;
+
+                            // --- ВОССТАНОВЛЕНИЕ ДАННЫХ ОТ СТАРОГО БАГА ЭКСПОРТА ---
+                            // Восстанавливаем данные из hintContent, если они не сохранились в featureData.properties.options
+                            if (props.hintContent && typeof props.hintContent === 'object') {
+                                if (!featureData) featureData = { type: "Feature", properties: { options: {} } };
+                                else if (!featureData.properties) featureData.properties = { options: {} };
+                                else if (!featureData.properties.options) featureData.properties.options = {};
+                                
+                                const hd = props.hintContent;
+                                const fOpts = featureData.properties.options;
+                                
+                                if (!fOpts.cad_num && !fOpts.cad_number && hd.cadastralNumber) fOpts.cad_num = hd.cadastralNumber;
+                                if (!fOpts.readable_address && hd.address) fOpts.readable_address = hd.address;
+                                if (!fOpts.permitted_use_established_by_document && hd.vri) fOpts.permitted_use_established_by_document = hd.vri;
+                                if (!fOpts.cost_value && hd.cost) fOpts.cost_value = hd.cost.replace(/\s/g, '').replace(',', '.');
+                                if (!fOpts.ownership_type && hd.ownershipType) fOpts.ownership_type = hd.ownershipType;
+                                if (!fOpts.right_type && hd.rightType) fOpts.right_type = hd.rightType;
+                                
+                                if (hd.area && !fOpts.specified_area && !fOpts.declared_area) {
+                                    const match = hd.area.match(/([\d\s ]+)\s*м²\s*\((.*?)\)/);
+                                    if (match) {
+                                        const val = match[1].replace(/[\s ]/g, '');
+                                        if (match[2].includes('уточн')) fOpts.specified_area = val;
+                                        else fOpts.declared_area = val;
+                                    }
+                                }
+                                ymapsObj.properties.set('featureData', featureData);
+                            }
+                            // --- КОНЕЦ ВОССТАНОВЛЕНИЯ ---
+
+                            if ((!featureData || !featureData.properties) && (props.cadastralNumber)) {
+                                featureData = { 
+                                    type: "Feature", 
+                                    geometry: f.geometry, 
+                                    properties: { 
+                                        descr: props.cadastralNumber, 
+                                        options: { 
+                                            cad_num: props.cadastralNumber, 
+                                            readable_address: props.address,
+                                            reg_numb_border: props.cadastralNumber
+                                        } 
+                                    } 
+                                };
+                                ymapsObj.properties.set('featureData', featureData);
+                            }
+
+                            if (featureData) {
+                                if (flags.isParcelInQuarter || flags.isFoundInArea) restoredParcelsData.push(featureData);
+                                else if (flags.isBuilding) restoredBuildingsData.push(featureData);
+                                else if (flags.isStructure) restoredStructuresData.push(featureData);
+                                else if (flags.isZouit) restoredZouitsData.push(featureData);
+                                else if (featureData.properties?.categoryName === 'Здания') restoredBuildingsData.push(featureData);
+                                else if (featureData.properties?.categoryName === 'Сооружения') restoredStructuresData.push(featureData);
+                                else if (featureData.properties?.categoryName?.includes('Зоны')) restoredZouitsData.push(featureData);
+                                else restoredParcelsData.push(featureData);
+                            }
+                            importedCount++;
+                        }
+                    });
+
+                    pendingVertexPoints.forEach(item => {
+                        let parentPolygon = null;
+                        if (item.parentId) {
+                            parentPolygon = polygons.find(p => p.properties.get('_exportId') === item.parentId) || 
+                                            areaObjects.find(p => p.properties.get('_exportId') === item.parentId);
+                        } 
+                        if (!parentPolygon && item.parentCn) {
+                            parentPolygon = polygons.find(p => p instanceof ymaps.Polygon && p.properties.get('cadastralNumber') === item.parentCn);
+                        }
+
+                        if (parentPolygon) {
+                            item.placemark.properties.set('relatedPolygon', parentPolygon);
+                            if (item.placemark.properties.get('isCoordLabel')) parentPolygon.properties.set('coordsPointsVisible', true);
+                            else parentPolygon.properties.set('numberedPointsVisible', true);
+                        }
+                    });
+                }
+
+                if (mapData.texts) {
+                    mapData.texts.forEach(t => {
+                        const visualPos = applyOffset(t.position);
+                        const px = map.options.get('projection').toGlobalPixels(visualPos, map.getZoom());
+                        const pagePx = map.converter.globalToPage(px);
+                        createDraggableText(t.content, {x: pagePx[0], y: pagePx[1]});
+                        const newTextEl = draggableTexts[draggableTexts.length - 1];
+                        if (newTextEl) {
+                            newTextEl.dataset.rotation = t.rotation;
+                            newTextEl.style.transform = `rotate(${t.rotation}deg)`;
+                            const span = newTextEl.querySelector('span');
+                            if (span && t.style) {
+                                span.style.color = t.style.color;
+                                span.style.fontSize = t.style.fontSize;
+                                if (t.style.backgroundVisible === 'false') {
+                                    const eyeBtn = newTextEl.querySelector('button i.fa-eye-slash')?.parentNode;
+                                    if (eyeBtn) eyeBtn.click();
+                                }
+                            }
+                        }
+                        importedCount++;
+                    });
+                }
+
+                parcelFeaturesData = restoredParcelsData;
+                buildingFeaturesData = restoredBuildingsData;
+                structureFeaturesData = restoredStructuresData;
+                zouitFeaturesData = restoredZouitsData;
+
+                if (restoredParcelsData.length > 0) populateSidebarWithParcels(parcelFeaturesData, "Импорт MapData");
+                else if (restoredBuildingsData.length > 0) populateSidebarWithFoundObjects(restoredBuildingsData, 'Здания');
+
+                applyCurrentTheme();
+                showNotification(`Карта восстановлена. Объектов: ${importedCount}`, 'success', 'check-circle');
+            }
+
+        } catch (error) {
+            console.error("Ошибка импорта:", error);
+            showNotification("Ошибка: " + error.message, 'error');
+        } finally {
+            hideLoader();
+            event.target.value = '';
+        }
+    };
+}
 
 
 
@@ -16902,10 +17194,8 @@ function handleMapJsonImport(event) {
                             if (flags.isCustomLabel || (props.cadastralNumber && !flags.isVertexPoint)) {
                                 ymapsObj.options.set('iconLayout', customPlacemarkLayout);
                             }
-                    if (flags.isVertexPoint) {
+                            if (flags.isVertexPoint) {
                                 if (props.isCoordLabel) ymapsObj.options.set('iconLayout', coordinateLabelLayout);
-                                else if (props.isAdvDot) ymapsObj.options.set('iconLayout', advDotLayout);
-                                else if (props.isAdvText) ymapsObj.options.set('iconLayout', advTextLayout);
                                 else if (props.dotSize) ymapsObj.options.set('iconLayout', redDotLayout);
                                 else if (props.fontSize) ymapsObj.options.set('iconLayout', numberedPointLayout);
                                 
@@ -21612,7 +21902,15 @@ modal.querySelector('#show-points-btn').addEventListener('click', async () => {
                 return;
             }
 
-      let totalPointsDrawn = 0;
+            // Динамические макеты для заданных стилей
+            const customDotLayout = ymaps.templateLayoutFactory.createClass(
+                `<div style="width:${dotSize}px; height:${dotSize}px; background-color:${dotColor}; border-radius:50%; border:1px solid rgba(0,0,0,0.6);"></div>`
+            );
+            const customTextLayout = ymaps.templateLayoutFactory.createClass(
+                `<div style="font-size:${textSize}px; color:${textColor}; font-weight:bold; font-family:Arial,sans-serif; text-shadow:-1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff; user-select:none; pointer-events:none; white-space:nowrap;">$[properties.iconContent]</div>`
+            );
+
+            let totalPointsDrawn = 0;
 
             targetObjects.forEach(tObj => {
                 // 1. Очистка старых точек для этого объекта
@@ -21665,36 +21963,24 @@ modal.querySelector('#show-points-btn').addEventListener('click', async () => {
                     const finalOffset = [Math.round(finalDir[0] * offsetDist), Math.round(finalDir[1] * offsetDist)];
 
                     // Метка-Точка
-                   // Метка-Точка
-                    const dotPlacemark = new ymaps.Placemark(currentCoord, { 
-                        _googleShifted: true,
-                        isVertexPoint: true, 
-                        relatedPolygon: tObj,
-                        isAdvDot: true,           // Маркер для экспорта
-                        advDotSize: dotSize,      // Сохраняем размер в свойствах
-                        advDotColor: dotColor     // Сохраняем цвет в свойствах
-                    }, {
-                        iconLayout: advDotLayout, // Используем глобальный макет
+                    const dotPlacemark = new ymaps.Placemark(currentCoord, { _googleShifted: true }, {
+                        iconLayout: customDotLayout,
                         iconOffset: [-dotSize/2, -dotSize/2],
                         zIndex: 1140
                     });
+                    dotPlacemark.properties.set({ 'isVertexPoint': true, 'relatedPolygon': tObj });
                     map.geoObjects.add(dotPlacemark);
                     polygons.push(dotPlacemark);
                     
                     // Метка-Текст
                     const textPlacemark = new ymaps.Placemark(currentCoord, {
-                        iconContent: `н${localCounter}`, 
-                        _googleShifted: true,
-                        isVertexPoint: true, 
-                        relatedPolygon: tObj,
-                        isAdvText: true,          // Маркер для экспорта
-                        advTextSize: textSize,    // Сохраняем размер в свойствах
-                        advTextColor: textColor   // Сохраняем цвет в свойствах
+                        iconContent: `н${localCounter}`, _googleShifted: true
                     }, {
-                        iconLayout: advTextLayout, // Используем глобальный макет
+                        iconLayout: customTextLayout,
                         iconOffset: finalOffset,
                         zIndex: 1150
                     });
+                    textPlacemark.properties.set({ 'isVertexPoint': true, 'relatedPolygon': tObj });
                     map.geoObjects.add(textPlacemark);
                     polygons.push(textPlacemark);
 
