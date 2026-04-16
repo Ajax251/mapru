@@ -38,12 +38,23 @@ export class PilotSimulator {
         this.engineSoundEnabled = false;
         this.audioCtx = null;
         this.engineMasterGain = null;
+        this.engineBusGain = null;
         this.engineLowOsc = null;
-        this.engineHighOsc = null;
-        this.engineLowFilter = null;
-        this.engineHighFilter = null;
+        this.engineMidOsc = null;
+        this.engineBuzzOsc = null;
+        this.engineLowGain = null;
+        this.engineMidGain = null;
+        this.engineBuzzGain = null;
+        this.engineNoiseSource = null;
+        this.engineNoiseGain = null;
+        this.engineAirFilter = null;
+        this.engineToneFilter = null;
+        this.enginePresenceFilter = null;
+        this.engineCompressor = null;
         this.engineLfo = null;
         this.engineLfoGain = null;
+        this.engineNoiseLfo = null;
+        this.engineNoiseLfoGain = null;
 
         this.scene = new THREE.Scene();
         this.camera = new THREE.PerspectiveCamera(65, 1, 1, 600000);
@@ -260,44 +271,106 @@ export class PilotSimulator {
 
             this.engineMasterGain = this.audioCtx.createGain();
             this.engineMasterGain.gain.value = 0;
+            this.engineBusGain = this.audioCtx.createGain();
+            this.engineBusGain.gain.value = 0.9;
 
             this.engineLowOsc = this.audioCtx.createOscillator();
             this.engineLowOsc.type = 'sawtooth';
-            this.engineLowOsc.frequency.value = 72;
+            this.engineLowOsc.frequency.value = 62;
 
-            this.engineHighOsc = this.audioCtx.createOscillator();
-            this.engineHighOsc.type = 'triangle';
-            this.engineHighOsc.frequency.value = 144;
+            this.engineMidOsc = this.audioCtx.createOscillator();
+            this.engineMidOsc.type = 'sawtooth';
+            this.engineMidOsc.frequency.value = 124;
 
-            this.engineLowFilter = this.audioCtx.createBiquadFilter();
-            this.engineLowFilter.type = 'lowpass';
-            this.engineLowFilter.frequency.value = 320;
-            this.engineLowFilter.Q.value = 0.7;
+            this.engineBuzzOsc = this.audioCtx.createOscillator();
+            this.engineBuzzOsc.type = 'triangle';
+            this.engineBuzzOsc.frequency.value = 248;
 
-            this.engineHighFilter = this.audioCtx.createBiquadFilter();
-            this.engineHighFilter.type = 'bandpass';
-            this.engineHighFilter.frequency.value = 220;
-            this.engineHighFilter.Q.value = 1.1;
+            this.engineLowGain = this.audioCtx.createGain();
+            this.engineLowGain.gain.value = 0.42;
+
+            this.engineMidGain = this.audioCtx.createGain();
+            this.engineMidGain.gain.value = 0.18;
+
+            this.engineBuzzGain = this.audioCtx.createGain();
+            this.engineBuzzGain.gain.value = 0.08;
+
+            this.engineToneFilter = this.audioCtx.createBiquadFilter();
+            this.engineToneFilter.type = 'lowpass';
+            this.engineToneFilter.frequency.value = 520;
+            this.engineToneFilter.Q.value = 0.6;
+
+            this.enginePresenceFilter = this.audioCtx.createBiquadFilter();
+            this.enginePresenceFilter.type = 'bandpass';
+            this.enginePresenceFilter.frequency.value = 950;
+            this.enginePresenceFilter.Q.value = 0.9;
+
+            this.engineAirFilter = this.audioCtx.createBiquadFilter();
+            this.engineAirFilter.type = 'bandpass';
+            this.engineAirFilter.frequency.value = 700;
+            this.engineAirFilter.Q.value = 0.45;
+
+            this.engineNoiseGain = this.audioCtx.createGain();
+            this.engineNoiseGain.gain.value = 0.05;
+
+            this.engineCompressor = this.audioCtx.createDynamicsCompressor();
+            this.engineCompressor.threshold.value = -20;
+            this.engineCompressor.knee.value = 14;
+            this.engineCompressor.ratio.value = 3.5;
+            this.engineCompressor.attack.value = 0.01;
+            this.engineCompressor.release.value = 0.18;
 
             this.engineLfo = this.audioCtx.createOscillator();
             this.engineLfo.type = 'sine';
-            this.engineLfo.frequency.value = 9;
+            this.engineLfo.frequency.value = 5.5;
 
             this.engineLfoGain = this.audioCtx.createGain();
-            this.engineLfoGain.gain.value = 3;
+            this.engineLfoGain.gain.value = 8;
+
+            this.engineNoiseLfo = this.audioCtx.createOscillator();
+            this.engineNoiseLfo.type = 'sine';
+            this.engineNoiseLfo.frequency.value = 0.65;
+
+            this.engineNoiseLfoGain = this.audioCtx.createGain();
+            this.engineNoiseLfoGain.gain.value = 0.018;
+
+            const noiseBuffer = this.audioCtx.createBuffer(1, this.audioCtx.sampleRate * 2, this.audioCtx.sampleRate);
+            const noiseData = noiseBuffer.getChannelData(0);
+            for (let i = 0; i < noiseData.length; i++) {
+                noiseData[i] = (Math.random() * 2 - 1) * 0.9;
+            }
+            this.engineNoiseSource = this.audioCtx.createBufferSource();
+            this.engineNoiseSource.buffer = noiseBuffer;
+            this.engineNoiseSource.loop = true;
 
             this.engineLfo.connect(this.engineLfoGain);
-            this.engineLfoGain.connect(this.engineHighOsc.detune);
+            this.engineLfoGain.connect(this.engineMidOsc.detune);
+            this.engineLfoGain.connect(this.engineBuzzOsc.detune);
 
-            this.engineLowOsc.connect(this.engineLowFilter);
-            this.engineHighOsc.connect(this.engineHighFilter);
-            this.engineLowFilter.connect(this.engineMasterGain);
-            this.engineHighFilter.connect(this.engineMasterGain);
+            this.engineNoiseLfo.connect(this.engineNoiseLfoGain);
+            this.engineNoiseLfoGain.connect(this.engineNoiseGain.gain);
+
+            this.engineLowOsc.connect(this.engineLowGain);
+            this.engineMidOsc.connect(this.engineMidGain);
+            this.engineBuzzOsc.connect(this.engineBuzzGain);
+            this.engineLowGain.connect(this.engineToneFilter);
+            this.engineMidGain.connect(this.engineToneFilter);
+            this.engineBuzzGain.connect(this.enginePresenceFilter);
+            this.engineNoiseSource.connect(this.engineAirFilter);
+            this.engineAirFilter.connect(this.engineNoiseGain);
+            this.engineToneFilter.connect(this.engineBusGain);
+            this.enginePresenceFilter.connect(this.engineBusGain);
+            this.engineNoiseGain.connect(this.engineBusGain);
+            this.engineBusGain.connect(this.engineCompressor);
+            this.engineCompressor.connect(this.engineMasterGain);
             this.engineMasterGain.connect(this.audioCtx.destination);
 
             this.engineLowOsc.start();
-            this.engineHighOsc.start();
+            this.engineMidOsc.start();
+            this.engineBuzzOsc.start();
             this.engineLfo.start();
+            this.engineNoiseLfo.start();
+            this.engineNoiseSource.start();
         }
         if (this.audioCtx.state === 'suspended') {
             await this.audioCtx.resume();
@@ -319,24 +392,39 @@ export class PilotSimulator {
             this.engineSoundEnabled = false;
             return;
         }
-        this.engineMasterGain.gain.setTargetAtTime(0.035, this.audioCtx.currentTime, 0.2);
+        this.engineMasterGain.gain.setTargetAtTime(0.001, this.audioCtx.currentTime, 0.18);
     }
 
     _updateEngineSound(speed, verticalRate) {
-        if (!this.engineSoundEnabled || !this.audioCtx || !this.engineMasterGain || !this.engineLowOsc || !this.engineHighOsc) return;
+        if (!this.engineSoundEnabled || !this.audioCtx || !this.engineMasterGain || !this.engineLowOsc || !this.engineMidOsc || !this.engineBuzzOsc) return;
         const now = this.audioCtx.currentTime;
-        const speedFactor = Math.max(0, Math.min(1.4, speed / 900));
-        const climbFactor = Math.max(-1, Math.min(1, verticalRate / 12));
-        const lowFreq = 58 + speedFactor * 34;
-        const highFreq = 118 + speedFactor * 82;
-        const gain = this.isActive ? 0.026 + speedFactor * 0.022 : 0;
+        const speedFactor = Math.max(0, Math.min(1.35, speed / 860));
+        const climbFactor = Math.max(-1, Math.min(1, verticalRate / 14));
+        const thrustFactor = Math.max(0.75, Math.min(1.45, speedFactor + Math.max(0, climbFactor) * 0.18));
+        const lowFreq = 54 + thrustFactor * 18;
+        const midFreq = 108 + thrustFactor * 42;
+        const buzzFreq = 235 + thrustFactor * 95;
+        const toneCutoff = 340 + thrustFactor * 240;
+        const presenceFreq = 820 + thrustFactor * 300;
+        const airFreq = 520 + thrustFactor * 520;
+        const airGain = 0.016 + speedFactor * 0.02;
+        const gain = this.isActive ? 0.03 + thrustFactor * 0.026 : 0;
 
-        this.engineLowOsc.frequency.setTargetAtTime(lowFreq, now, 0.22);
-        this.engineHighOsc.frequency.setTargetAtTime(highFreq, now, 0.18);
-        this.engineLowFilter.frequency.setTargetAtTime(260 + speedFactor * 180, now, 0.24);
-        this.engineHighFilter.frequency.setTargetAtTime(180 + speedFactor * 140 + climbFactor * 24, now, 0.2);
-        this.engineLfo.frequency.setTargetAtTime(7 + speedFactor * 5, now, 0.25);
-        this.engineMasterGain.gain.setTargetAtTime(gain, now, 0.22);
+        this.engineLowOsc.frequency.setTargetAtTime(lowFreq, now, 0.24);
+        this.engineMidOsc.frequency.setTargetAtTime(midFreq, now, 0.22);
+        this.engineBuzzOsc.frequency.setTargetAtTime(buzzFreq, now, 0.18);
+        this.engineToneFilter.frequency.setTargetAtTime(toneCutoff, now, 0.26);
+        this.enginePresenceFilter.frequency.setTargetAtTime(presenceFreq, now, 0.2);
+        this.engineAirFilter.frequency.setTargetAtTime(airFreq, now, 0.18);
+        this.engineLowGain.gain.setTargetAtTime(0.34 + thrustFactor * 0.08, now, 0.3);
+        this.engineMidGain.gain.setTargetAtTime(0.13 + thrustFactor * 0.05, now, 0.24);
+        this.engineBuzzGain.gain.setTargetAtTime(0.04 + thrustFactor * 0.028, now, 0.18);
+        this.engineNoiseGain.gain.setTargetAtTime(airGain, now, 0.16);
+        this.engineLfo.frequency.setTargetAtTime(4.2 + thrustFactor * 1.8, now, 0.28);
+        this.engineLfoGain.gain.setTargetAtTime(5 + thrustFactor * 6, now, 0.28);
+        this.engineNoiseLfo.frequency.setTargetAtTime(0.45 + speedFactor * 0.55, now, 0.35);
+        this.engineNoiseLfoGain.gain.setTargetAtTime(0.008 + speedFactor * 0.012, now, 0.3);
+        this.engineMasterGain.gain.setTargetAtTime(gain, now, 0.24);
     }
 
     setHudState(v) { this.hudEnabled = v; }
