@@ -92,11 +92,12 @@ export class PilotSimulator {
         this.composer.addPass(this.bloomPass);
     }
 
-    _createFlareCore() {
+ _createFlareCore() {
         const c = document.createElement('canvas'); c.width = 512; c.height = 512; const ctx = c.getContext('2d');
         const g = ctx.createRadialGradient(256, 256, 0, 256, 256, 256);
         g.addColorStop(0, 'rgba(255,255,255,1)'); g.addColorStop(0.1, 'rgba(255,240,200,0.9)'); g.addColorStop(1, 'rgba(0,0,0,0)');
-        ctx.fillStyle = g; ctx.fillRect(0,0,512,512); return new THREE.CanvasTexture(c);
+        ctx.fillStyle = g; ctx.fillRect(0,0,512,512); 
+        const tex = new THREE.CanvasTexture(c); tex.generateMipmaps = false; tex.minFilter = THREE.LinearFilter; return tex;
     }
 
     _createSky() {
@@ -122,12 +123,13 @@ export class PilotSimulator {
         this.starsGroup.add(new THREE.Points(geo, new THREE.PointsMaterial({size: 150, vertexColors: true, transparent: true, depthWrite: false, blending: THREE.AdditiveBlending})));
     }
 
-    _createClouds() {
+_createClouds() {
         this.cloudGroup = new THREE.Group();
         const c = document.createElement('canvas'); c.width=256; c.height=256; const ctx = c.getContext('2d');
         const g = ctx.createRadialGradient(128,128,0,128,128,128); g.addColorStop(0,'rgba(255,255,255,0.8)'); g.addColorStop(1,'rgba(255,255,255,0)');
         ctx.fillStyle=g; ctx.beginPath(); ctx.arc(128,128,128,0,Math.PI*2); ctx.fill();
-        this.cloudMat = new THREE.MeshBasicMaterial({map: new THREE.CanvasTexture(c), transparent: true, opacity: 0.6, depthWrite: false, side: THREE.DoubleSide, blending: THREE.NormalBlending});
+        const tex = new THREE.CanvasTexture(c); tex.generateMipmaps = false; tex.minFilter = THREE.LinearFilter;
+        this.cloudMat = new THREE.MeshBasicMaterial({map: tex, transparent: true, opacity: 0.6, depthWrite: false, side: THREE.DoubleSide, blending: THREE.NormalBlending});
         for(let i=0; i<20; i++) {
             const m = new THREE.Mesh(new THREE.PlaneGeometry(6000,4000), this.cloudMat);
             const a = Math.random()*Math.PI*2, d = 3000+Math.random()*20000;
