@@ -5506,20 +5506,15 @@ async function handleContextMenu(e) {
 
 
 
-    function handleUnionSelection(point) {
+ function handleUnionSelection(point) {
         let clickedIdx = -1;
-        let minArea = Infinity;
-
         for (let i = userObjects.length - 1; i >= 0; i--) {
             const obj = userObjects[i];
-            if (obj && obj.visible !== false && obj.type === 'polygon' && obj.contours) {
+            if (obj && obj.type === 'polygon' && obj.contours) {
                 const hits = obj.contours.some(c => isPointInPolygon(point, c));
                 if (hits) {
-                    const area = (obj.area !== undefined && isFinite(obj.area)) ? obj.area : Infinity;
-                    if (area < minArea) {
-                        minArea = area;
-                        clickedIdx = i;
-                    }
+                    clickedIdx = i;
+                    break;
                 }
             }
         }
@@ -5543,139 +5538,118 @@ async function handleContextMenu(e) {
             toggleUnionTool();
         }
     }
-    
-
 
  function executeUnionOperation(idx1, idx2) {
-    const obj1 = userObjects[idx1];
-    const obj2 = userObjects[idx2];
-    if (!obj1 || !obj2) return;
+        const obj1 = userObjects[idx1];
+        const obj2 = userObjects[idx2];
+        if (!obj1 || !obj2) return;
 
-    if (editingObjectIndex !== idx1) editingObjectIndex = idx1;
-    saveGeometryStateForUndo(idx1);
+        if (editingObjectIndex !== idx1) editingObjectIndex = idx1;
+        saveGeometryStateForUndo(idx1);
 
-    try {
-        ensureClosed(obj1.contours);
-        ensureClosed(obj2.contours);
+        try {
+            ensureClosed(obj1.contours);
+            ensureClosed(obj2.contours);
 
-        // 1. Группируем контуры каждого объекта на внешние и внутренние (дырки)
-        const cons1 = consolidateContoursIntoObjects(deepCloneContours(obj1.contours));
-        const cons2 = consolidateContoursIntoObjects(deepCloneContours(obj2.contours));
+            // 1. Приводим к единой ориентации (по часовой стрелке)
+            forceClockwise(obj1.contours);
+            forceClockwise(obj2.contours);
 
-        let outers1 = [], holes1 = [];
-        cons1.forEach(group => {
-            if (group.length > 0) {
-                outers1.push(group[0]);
-                holes1.push(...group.slice(1));
-            }
-        });
+            // Работаем с копиями
+            let currentUnionList = deepCloneContours(obj1.contours);
+            const poly2 = deepCloneContours(obj2.contours);
 
-        let outers2 = [], holes2 = [];
-        cons2.forEach(group => {
-            if (group.length > 0) {
-                outers2.push(group[0]);
-                holes2.push(...group.slice(1));
-            }
-        });
+            // ШАГ 1: Вливаем второй объект (или его части) в список контуров первого объекта
+            poly2.forEach(ring2 => {
+                if (ring2.length < 3) return;
+                
+                // Добавляем контур второго объекта в общий список
+                currentUnionList.push(ring2);
+            });
 
-        forceClockwise(outers1); forceClockwise(holes1);
-        forceClockwise(outers2); forceClockwise(holes2);
+            // ШАГ 2: Рекурсивное самообъединение (SELF-UNION / MERGE)
+            // Мы "трясем" список контуров, пока они перестанут слипаться друг с другом.
+            // Это решает проблему "моста", когда добавленный кусок соединяет два ранее разрозненных контура.
+            let changed = true;
+            let iterations = 0;
+            const MAX_ITERATIONS = 50; // Защита от вечного цикла
 
-        // 2. Объединяем внешние контуры объектов
-        let allOuters = [...outers1, ...outers2];
-        let changed = true;
-        let iterations = 0;
-        const MAX_ITERATIONS = 50;
+            while (changed && iterations < MAX_ITERATIONS) {
+                changed = false;
+                iterations++;
 
-        while (changed && iterations < MAX_ITERATIONS) {
-            changed = false;
-            iterations++;
+                for (let i = 0; i < currentUnionList.length; i++) {
+                    for (let j = i + 1; j < currentUnionList.length; j++) {
+                        const c1 = currentUnionList[i];
+                        const c2 = currentUnionList[j];
 
-            for (let i = 0; i < allOuters.length; i++) {
-                for (let j = i + 1; j < allOuters.length; j++) {
-                    const c1 = allOuters[i];
-                    const c2 = allOuters[j];
-
-                    const isIntersecting = findIntersectionsRobust(c1, c2).length > 0 || 
-                                           isPointInPolygonRobust(c1[0], c2, true) || 
-                                           isPointInPolygonRobust(c2[0], c1, true);
-
-                    if (isIntersecting) {
+                        // Пробуем объединить пару
                         const unionRes = computeUnion(c1, c2);
-                        allOuters.splice(j, 1);
-                        allOuters.splice(i, 1);
-                        allOuters.push(...unionRes);
-                        changed = true;
-                        break;
+
+                        // Если результат - ОДИН контур, значит произошло слияние
+                        if (unionRes.length === 1) {
+                            // Заменяем c1 на результат объединения
+                            currentUnionList[i] = unionRes[0];
+                            // Удаляем c2 из списка
+                            currentUnionList.splice(j, 1);
+                            
+                            changed = true;
+                            // Прерываем внутренний цикл, чтобы начать проход заново с новым контуром
+                            break; 
+                        }
+                    }
+                    if (changed) break; // Прерываем внешний цикл, начинаем заново while
+                }
+            }
+
+            // ШАГ 3: Финальная очистка (удаление вложенных мусорных контуров)
+            const finalCleanedList = [];
+            // Сортируем по площади (от больших к меньшим)
+            currentUnionList.sort((a, b) => calculatePolygonArea(b) - calculatePolygonArea(a));
+            
+            currentUnionList.forEach((contour, idx) => {
+                let isInsideLarger = false;
+                for (let i = 0; i < idx; i++) {
+                    // Если контур полностью внутри другого большего контура (и они уже одной ориентации)
+                    // значит это артефакт слияния, который не стал дыркой, а остался внутри.
+                    if (isPointInPolygonRobust(contour[0], currentUnionList[i], true)) {
+                        // Дополнительная проверка: проверяем середину контура, чтобы исключить ложные срабатывания на границах
+                        const midIdx = Math.floor(contour.length / 2);
+                        if (isPointInPolygonRobust(contour[midIdx], currentUnionList[i], true)) {
+                            isInsideLarger = true;
+                            break;
+                        }
                     }
                 }
-                if (changed) break;
+                if (!isInsideLarger) {
+                    finalCleanedList.push(contour);
+                }
+            });
+
+          obj1.contours = finalCleanedList;
+            // Вызываем очистку только если функция существует
+            if (typeof cleanObjectContours === 'function') {
+                cleanObjectContours(obj1);
             }
+            updateObjectMetrics(obj1);
+
+            // Удаляем второй объект
+            userObjects.splice(idx2, 1);
+            if (editingObjectIndex > idx2) editingObjectIndex--;
+            
+            showNotification("Объекты объединены в единый контур.", "success", "object-group");
+            
+            displayObjectInfo(editingObjectIndex);
+            updateObjectList();
+            redraw(true);
+
+        } catch (e) {
+            console.error("UNION ERROR:", e);
+            showNotification("Ошибка объединения: " + e.message, "error");
         }
-
-        // 3. Обрабатываем дырки: 
-        // Важно: дырки первого объекта могут быть перекрыты ТОЛЬКО внешними контурами второго, и наоборот.
-        let processedHoles = [];
-        
-        holes1.forEach(hole => {
-            let currentHolePieces = [hole];
-            outers2.forEach(outer2 => {
-                let nextPieces = [];
-                currentHolePieces.forEach(hp => {
-                    const diff = computeDifference(hp, outer2);
-                    nextPieces.push(...diff);
-                });
-                currentHolePieces = nextPieces;
-            });
-            processedHoles.push(...currentHolePieces);
-        });
-
-        holes2.forEach(hole => {
-            let currentHolePieces = [hole];
-            outers1.forEach(outer1 => {
-                let nextPieces = [];
-                currentHolePieces.forEach(hp => {
-                    const diff = computeDifference(hp, outer1);
-                    nextPieces.push(...diff);
-                });
-                currentHolePieces = nextPieces;
-            });
-            processedHoles.push(...currentHolePieces);
-        });
-
-        // 4. Собираем всё вместе
-        let finalContours = [...allOuters, ...processedHoles];
-        finalContours = finalContours.filter(c => c && c.length >= 3);
-
-        // 5. Очистка мусора и пересчёт вложенности
-        const finalCons = consolidateContoursIntoObjects(finalContours);
-        let cleanedFlat = [];
-        finalCons.forEach(group => {
-            cleanedFlat.push(...group);
-        });
-
-        obj1.contours = cleanedFlat;
-
-        if (typeof cleanObjectContours === 'function') {
-            cleanObjectContours(obj1);
-        }
-        updateObjectMetrics(obj1);
-
-        // Удаляем второй объект
-        userObjects.splice(idx2, 1);
-        if (editingObjectIndex > idx2) editingObjectIndex--;
-        
-        showNotification("Объекты объединены в единый контур.", "success", "object-group");
-        
-        displayObjectInfo(editingObjectIndex);
-        updateObjectList();
-        redraw(true);
-
-    } catch (e) {
-        console.error("UNION ERROR:", e);
-        showNotification("Ошибка объединения: " + e.message, "error");
     }
-}
+
+
 
 
     function comparePolygons(p1, p2) {
@@ -5799,21 +5773,18 @@ async function handleContextMenu(e) {
         }
     }
     
-  function handleCutSelection(point) {
+      function handleCutSelection(point) {
+        // Ищем объект под курсором
         let clickedIdx = -1;
-        let minArea = Infinity;
-
-        // Ищем все объекты под курсором и выбираем наименьший по площади
+        // Проходим в обратном порядке (сверху вниз)
         for (let i = userObjects.length - 1; i >= 0; i--) {
             const obj = userObjects[i];
-            if (obj && obj.visible !== false && obj.type === 'polygon' && obj.contours) {
+            if (obj && obj.type === 'polygon' && obj.contours) {
+                // Проверяем попадание в любой из контуров
                 const hits = obj.contours.some(c => isPointInPolygon(point, c));
                 if (hits) {
-                    const area = (obj.area !== undefined && isFinite(obj.area)) ? obj.area : Infinity;
-                    if (area < minArea) {
-                        minArea = area;
-                        clickedIdx = i;
-                    }
+                    clickedIdx = i;
+                    break;
                 }
             }
         }
@@ -5825,6 +5796,7 @@ async function handleContextMenu(e) {
             cutTargetIndex = clickedIdx;
             const objName = userObjects[clickedIdx].name || `Объект ${userObjects[clickedIdx].id}`;
             showNotification(`Рассекаемый: "${objName}". Теперь двойной клик по РЕЗАКУ.`, "warning", "crosshairs");
+            // Можно добавить визуальное выделение, но пока ограничимся перерисовкой (если добавите логику отрисовки)
         } else {
             // ШАГ 2: Выбор Резака
             if (clickedIdx === cutTargetIndex) {
@@ -5841,6 +5813,16 @@ async function handleContextMenu(e) {
             toggleCutTool(); 
         }
     }
+    
+    
+
+    
+    
+    
+    
+    
+    
+    
     
     
 
@@ -7986,20 +7968,14 @@ async function handleImportFromCadNumbers(cadNumbers) {
     }
 
 
-   function handleIntersectSelection(point) {
+    function handleIntersectSelection(point) {
         let clickedIdx = -1;
-        let minArea = Infinity;
-
         // Ищем объект под курсором
         for (let i = userObjects.length - 1; i >= 0; i--) {
             const obj = userObjects[i];
-            if (obj && obj.visible !== false && obj.contours) {
+            if (obj && obj.contours) {
                 if (obj.type === 'polygon' && obj.contours.some(c => isPointInPolygonRobust(point, c))) {
-                    const area = (obj.area !== undefined && isFinite(obj.area)) ? obj.area : Infinity;
-                    if (area < minArea) {
-                        minArea = area;
-                        clickedIdx = i;
-                    }
+                    clickedIdx = i; break;
                 }
             }
         }
@@ -8024,7 +8000,7 @@ async function handleImportFromCadNumbers(cadNumbers) {
         }
     }
 
-    
+    // НОВАЯ ФУНКЦИЯ: Расчет точек и открытие диалога
     function prepareIntersectionOptions(idx1, idx2) {
         const points = calculateIntersectionCoordinates(idx1, idx2);
         
