@@ -5802,29 +5802,15 @@ async function handleContextMenu(e) {
   function handleCutSelection(point) {
         let clickedIdx = -1;
         let minArea = Infinity;
-        const thresholdSq = (10 / scale) ** 2;
 
-        // Ищем объекты под курсором (с приоритетом выбора линий)
+        // Ищем все объекты под курсором и выбираем наименьший по площади
         for (let i = userObjects.length - 1; i >= 0; i--) {
             const obj = userObjects[i];
-            if (obj && obj.visible !== false && obj.contours) {
-                let hits = false;
-                for (const c of obj.contours) {
-                    if (!c || c.length < 2) continue;
-                    if (obj.type === 'polygon' && c.length >= 3 && isPointInPolygon(point, c)) {
-                        hits = true; break;
-                    } else if (obj.type === 'line') {
-                        for (let j = 0; j < c.length - 1; j++) {
-                            if (pointLineDistSq(point.x, point.y, c[j].x, c[j].y, c[j+1].x, c[j+1].y) < thresholdSq) {
-                                hits = true; break;
-                            }
-                        }
-                    }
-                }
-
+            if (obj && obj.visible !== false && obj.type === 'polygon' && obj.contours) {
+                const hits = obj.contours.some(c => isPointInPolygon(point, c));
                 if (hits) {
-                    const area = obj.type === 'line' ? 0 : ((obj.area !== undefined && isFinite(obj.area)) ? obj.area : Infinity);
-                    if (area <= minArea) {
+                    const area = (obj.area !== undefined && isFinite(obj.area)) ? obj.area : Infinity;
+                    if (area < minArea) {
                         minArea = area;
                         clickedIdx = i;
                     }
@@ -5860,33 +5846,22 @@ async function handleContextMenu(e) {
 
 function selectObjectByPoint(dataClickPoint) {
         let clickedIdx = -1; let minArea = Infinity;
-        const thresholdSq = (10 / scale) ** 2; // Порог клика для линий (10 пикселей экрана)
-
         userObjects.forEach((obj, index) => {
             if (!obj || !obj.contours) return;
+
+            // --- НОВОЕ: Игнорируем скрытые объекты при клике ---
             if (obj.visible === false) return;
+            // --------------------------------------------------
 
             let containsPoint = false;
             for (const contour of obj.contours) {
-                if (!contour || contour.length < 2) continue;
-
-                if (obj.type === 'polygon' && contour.length >= 3 && isPointInPolygon(dataClickPoint, contour)) {
+                if (obj.type === 'polygon' && contour && contour.length >= 3 && isPointInPolygon(dataClickPoint, contour)) {
                     containsPoint = true; break;
-                } else if (obj.type === 'line') {
-                    // Проверка попадания клика рядом с отрезком линии
-                    for (let i = 0; i < contour.length - 1; i++) {
-                        const distSq = pointLineDistSq(dataClickPoint.x, dataClickPoint.y, contour[i].x, contour[i].y, contour[i+1].x, contour[i+1].y);
-                        if (distSq < thresholdSq) {
-                            containsPoint = true; break;
-                        }
-                    }
                 }
             }
-            
             if (containsPoint) {
-                // Линии имеют условную площадь 0, поэтому у них приоритет перед полигонами при клике
-                const area = obj.type === 'line' ? 0 : ((obj.area !== undefined && isFinite(obj.area)) ? obj.area : Infinity);
-                if (area <= minArea) { minArea = area; clickedIdx = index; }
+                const area = (obj.area !== undefined && isFinite(obj.area)) ? obj.area : Infinity;
+                if (area < minArea) { minArea = area; clickedIdx = index; }
             }
         })
         if (clickedIdx !== -1) {
@@ -8309,311 +8284,6 @@ function closeIntersectionDialog() {
     
     //Split
     
-function subtractPolygonsLogic(targetContours, cutterPoly) {
-    if (!targetContours || targetContours.length === 0 || !cutterPoly || cutterPoly.length < 3) return targetContours;
-
-    forceClockwise([targetContours[0]]);
-    forceClockwise([cutterPoly]);
-
-    const subjectOuter = targetContours[0]; 
-    const subjectHoles = targetContours.slice(1);
-    let activeCutter = [...cutterPoly];
-    
-    const remainingHoles = [];
-    for (let i = 0; i < subjectHoles.length; i++) {
-        const hole = subjectHoles[i];
-        if (!hole || hole.length < 3) continue;
-        
-        const intersections = findIntersectionsRobust(hole, activeCutter);
-        if (intersections.length > 0) {
-            const holeReversed = reverseContour(hole);
-            const merged = computeUnion(activeCutter, holeReversed);
-            if (merged && merged.length > 0) {
-                let bestPoly = merged[0];
-                let bestArea = Math.abs(calculatePolygonArea(merged[0]));
-                for (let j = 1; j < merged.length; j++) {
-                    const area = Math.abs(calculatePolygonArea(merged[j]));
-                    if (area > bestArea) { bestArea = area; bestPoly = merged[j]; }
-                }
-                activeCutter = bestPoly;
-            }
-        } else {
-            if (!isPointInPolygonRobust(hole[0], activeCutter)) {
-                remainingHoles.push(hole);
-            }
-        }
-    }
-
-    const diffPolygons = computeDifference(subjectOuter, activeCutter);
-    let finalCandidates = [...diffPolygons];
-
-    remainingHoles.forEach((hole) => {
-        for (const poly of diffPolygons) {
-            if (isPointInPolygonRobust(hole[0], poly)) {
-                finalCandidates.push(hole);
-                break;
-            }
-        }
-    });
-
-    return finalCandidates;
-}
-
-// Новая математически точная функция разбиения линии и внедрения точек
-function splitLineIntoArcs(line, intersections) {
-    let newPts = [];
-    for (let i = 0; i < line.length - 1; i++) {
-        newPts.push({x: line[i].x, y: line[i].y, isInt: false});
-        let intsOnSeg = intersections.filter(it => it.cIdx === i);
-        intsOnSeg.sort((a,b) => ((a.p.x - line[i].x)**2 + (a.p.y - line[i].y)**2) - ((b.p.x - line[i].x)**2 + (b.p.y - line[i].y)**2));
-        
-        intsOnSeg.forEach(it => {
-            const last = newPts[newPts.length - 1];
-            if (Math.abs(last.x - it.p.x) > 0.001 || Math.abs(last.y - it.p.y) > 0.001) {
-                newPts.push({x: it.p.x, y: it.p.y, isInt: true});
-            }
-        });
-    }
-    newPts.push({x: line[line.length - 1].x, y: line[line.length - 1].y, isInt: false});
-
-    let arcs = [];
-    let currentArc = [{x: newPts[0].x, y: newPts[0].y}];
-    for (let i = 1; i < newPts.length; i++) {
-        currentArc.push({x: newPts[i].x, y: newPts[i].y});
-        if (newPts[i].isInt && i < newPts.length - 1) {
-            arcs.push(currentArc);
-            currentArc = [{x: newPts[i].x, y: newPts[i].y}];
-        }
-    }
-    if (currentArc.length > 1) arcs.push(currentArc);
-    return arcs;
-}
-
-// Новая умная функция сшивания для рассечения линией, которая не дает полигону свернуться в "восьмерку"
-function stitchSplitArcs(arcs) {
-    const polygons = [];
-    const used = new Array(arcs.length).fill(false);
-    const toleranceSq = 0.0001;
-
-    while (true) {
-        // Начинаем всегда с границы (boundary)
-        const startIdx = arcs.findIndex((a, i) => !used[i] && a.type === 'boundary');
-        if (startIdx === -1) break;
-
-        let poly = [];
-        let currIdx = startIdx;
-        let watchdog = 0;
-        let startPoint = null;
-
-        while (currIdx !== -1 && !used[currIdx] && watchdog < arcs.length * 2) {
-            used[currIdx] = true;
-            const arc = arcs[currIdx];
-            watchdog++;
-
-            if (!startPoint && arc.length > 0) {
-                startPoint = { x: arc[0].x, y: arc[0].y };
-            }
-
-            poly.push(...arc.slice(0, arc.length - 1));
-            const tail = arc[arc.length - 1];
-
-            // Как только контур вернулся в стартовую точку, текущий полигон собран.
-            if (startPoint && (tail.x - startPoint.x) ** 2 + (tail.y - startPoint.y) ** 2 < toleranceSq) {
-                poly.push({ x: startPoint.x, y: startPoint.y });
-                currIdx = -1;
-                break;
-            }
-
-            let nextIdx = -1;
-            let minDist = Infinity;
-            
-            // Если мы пришли по границе, мы ХОТИМ уйти по линии разреза (chord). И наоборот.
-            const preferredType = arc.type === 'boundary' ? 'chord' : 'boundary';
-
-            // Проход 1: Ищем дугу ПРЕДПОЧТИТЕЛЬНОГО типа, начинающуюся в нашей точке
-            for (let i = 0; i < arcs.length; i++) {
-                if (!used[i] && arcs[i].type === preferredType) {
-                    const head = arcs[i][0];
-                    const dist = (head.x - tail.x)**2 + (head.y - tail.y)**2;
-                    if (dist < toleranceSq && dist < minDist) {
-                        minDist = dist;
-                        nextIdx = i;
-                    }
-                }
-            }
-
-            // Проход 2: Если не нашли нужный тип, берем любую (fallback)
-            if (nextIdx === -1) {
-                minDist = Infinity;
-                for (let i = 0; i < arcs.length; i++) {
-                    if (!used[i]) {
-                        const head = arcs[i][0];
-                        const dist = (head.x - tail.x)**2 + (head.y - tail.y)**2;
-                        if (dist < toleranceSq && dist < minDist) {
-                            minDist = dist;
-                            nextIdx = i;
-                        }
-                    }
-                }
-            }
-
-            if (nextIdx !== -1) {
-                currIdx = nextIdx;
-            } else {
-                poly.push(tail);
-                currIdx = -1;
-            }
-        }
-
-        if (poly.length >= 3) {
-            // Очистка дубликатов подряд
-            const cleanPoly = [];
-            for (let i = 0; i < poly.length; i++) {
-                if (cleanPoly.length > 0) {
-                    const prev = cleanPoly[cleanPoly.length - 1];
-                    if (Math.abs(poly[i].x - prev.x) < 0.001 && Math.abs(poly[i].y - prev.y) < 0.001) {
-                        continue;
-                    }
-                }
-                cleanPoly.push(poly[i]);
-            }
-            poly = cleanPoly;
-
-            // Замыкание
-            const first = poly[0];
-            const last = poly[poly.length - 1];
-            if ((first.x - last.x)**2 + (first.y - last.y)**2 > toleranceSq) {
-                 poly.push({x: first.x, y: first.y});
-            }
-            polygons.push(poly);
-        }
-    }
-    return polygons;
-}
-
-function splitPolygonByLineStrict(targetContours, cutterLine) {
-    const subjectOuter = targetContours[0]; 
-    const holes = targetContours.slice(1);
-    
-    let poly = [...subjectOuter];
-    if (getSignedArea(poly) < 0) poly = reverseContour(poly);
-
-    const intersections = findIntersectionsRobust(poly, cutterLine);
-    if (intersections.length < 2) return [targetContours]; // Линия не прорезает насквозь
-
-    const subjWithInt = insertPointsAndMark(poly, intersections, true);
-    const subjArcs = splitByIntersections(subjWithInt);
-    subjArcs.forEach(a => a.type = 'boundary'); // Помечаем дуги границ
-
-    const lineArcsRaw = splitLineIntoArcs(cutterLine, intersections);
-    const chords = [];
-    
-    lineArcsRaw.forEach(arc => {
-        const mid = getArcMidpoint(arc);
-        if (isPointInPolygonRobust(mid, poly, false)) {
-            // Линия разреза работает в обе стороны для формирования полигонов
-            let forward = [...arc]; forward.type = 'chord';
-            let backward = [...arc].reverse(); backward.type = 'chord';
-            chords.push(forward, backward);
-        }
-    });
-
-    if (chords.length === 0) return [targetContours];
-
-    const allArcs = [...subjArcs, ...chords];
-    const newOuterPolygons = stitchSplitArcs(allArcs); // <-- ИСПОЛЬЗУЕТСЯ НОВЫЙ СШИВАТЕЛЬ
-    
-    const finalGroups = [];
-    newOuterPolygons.forEach(newOuter => {
-        const group = [newOuter];
-        holes.forEach(hole => {
-            if (isPointInPolygonRobust(hole[0], newOuter, true)) {
-                group.push(hole);
-            }
-        });
-        finalGroups.push(group);
-    });
-
-    return finalGroups;
-}
-
-function splitLineByCutter(lineContours, cutterObj) {
-    let resultContours = [];
-    
-    lineContours.forEach(line => {
-        if (!line || line.length < 2) return;
-        
-        let intersections = [];
-        cutterObj.contours.forEach(cutterContour => {
-            if (!cutterContour || cutterContour.length < 2) return;
-            let isCutterClosed = cutterObj.type === 'polygon';
-            let segments = isCutterClosed ? cutterContour.length : cutterContour.length - 1;
-            
-            for (let i = 0; i < line.length - 1; i++) {
-                for (let j = 0; j < segments; j++) {
-                    let pt = getSegmentIntersection(
-                        line[i], line[i+1], 
-                        cutterContour[j], cutterContour[(j+1) % cutterContour.length]
-                    );
-                    if (pt) intersections.push({ pt: pt, segIdx: i });
-                }
-            }
-        });
-
-        let newPts = [];
-        for (let i = 0; i < line.length - 1; i++) {
-            newPts.push({x: line[i].x, y: line[i].y});
-            let intsOnSeg = intersections.filter(it => it.segIdx === i);
-            intsOnSeg.sort((a,b) => ((a.pt.x - line[i].x)**2 + (a.pt.y - line[i].y)**2) - ((b.pt.x - line[i].x)**2 + (b.pt.y - line[i].y)**2));
-            
-            intsOnSeg.forEach(it => {
-                const last = newPts[newPts.length - 1];
-                if (Math.abs(last.x - it.pt.x) > 0.001 || Math.abs(last.y - it.pt.y) > 0.001) {
-                    newPts.push({x: it.pt.x, y: it.pt.y});
-                }
-            });
-        }
-        newPts.push({x: line[line.length - 1].x, y: line[line.length - 1].y});
-
-        let currentLine = [];
-        for (let i = 0; i < newPts.length - 1; i++) {
-            let p1 = newPts[i];
-            let p2 = newPts[i+1];
-            let mid = { x: (p1.x + p2.x)/2, y: (p1.y + p2.y)/2 };
-            
-            if (cutterObj.type === 'polygon') {
-                let isInside = isPointInPolygonRobust(mid, cutterObj.contours[0], false);
-                let insideHole = false;
-                for (let k = 1; k < cutterObj.contours.length; k++) {
-                    if (isPointInPolygonRobust(mid, cutterObj.contours[k], false)) {
-                        insideHole = true; break;
-                    }
-                }
-                
-                if (isInside && !insideHole) {
-                    if (currentLine.length > 1) resultContours.push([...currentLine]);
-                    currentLine = [];
-                } else {
-                    if (currentLine.length === 0) currentLine.push(p1);
-                    currentLine.push(p2);
-                }
-            } else {
-                if (currentLine.length === 0) currentLine.push(p1);
-                currentLine.push(p2);
-                
-                let isP2Intersection = intersections.some(it => Math.abs(it.pt.x - p2.x) < 0.001 && Math.abs(it.pt.y - p2.y) < 0.001);
-                if (isP2Intersection && i < newPts.length - 2) {
-                    if (currentLine.length > 1) resultContours.push([...currentLine]);
-                    currentLine = []; 
-                }
-            }
-        }
-        if (currentLine.length > 1) resultContours.push([...currentLine]);
-    });
-    
-    return resultContours;
-}
-
 function executeCutOperation(targetIdx, cutterIdx) {
     const targetObj = userObjects[targetIdx];
     const cutterObj = userObjects[cutterIdx];
@@ -8624,92 +8294,123 @@ function executeCutOperation(targetIdx, cutterIdx) {
     saveGeometryStateForUndo(targetIdx);
 
     try {
-        let finalConsolidatedGroups = [];
+        ensureClosed(targetObj.contours);
+        ensureClosed(cutterObj.contours);
 
-        if (targetObj.type === 'polygon' && cutterObj.type === 'polygon') {
-            ensureClosed(targetObj.contours);
-            ensureClosed(cutterObj.contours);
+        const subjectOuter = deepCloneContours(targetObj.contours)[0]; 
+        const subjectHoles = deepCloneContours(targetObj.contours).slice(1);
+        let cutterPoly = deepCloneContours(cutterObj.contours)[0];
 
-            const consTarget = consolidateContoursIntoObjects(deepCloneContours(targetObj.contours));
-            const consCutter = consolidateContoursIntoObjects(deepCloneContours(cutterObj.contours));
+        if (!subjectOuter || !cutterPoly) return;
 
-            consTarget.forEach(targetGroup => {
-                let currentPieces = [targetGroup];
+        console.log("=== CUT OPERATION START ===");
+        console.log("Subject outer points:", subjectOuter.length);
+        console.log("Subject holes count:", subjectHoles.length);
+        console.log("Cutter points:", cutterPoly.length);
 
-                consCutter.forEach(cutterGroup => {
-                    let nextPieces = [];
-                    currentPieces.forEach(piece => {
-                        let cutterPoly = cutterGroup[0]; 
-                        if (!cutterPoly || cutterPoly.length < 3) {
-                            nextPieces.push(piece);
-                            return;
+        const remainingHoles = [];
+        
+        for (let i = 0; i < subjectHoles.length; i++) {
+            const hole = subjectHoles[i];
+            if (!hole || hole.length < 3) continue;
+            
+            console.log(`\n--- Processing hole ${i} (${hole.length} points) ---`);
+            
+            const intersections = findIntersectionsRobust(hole, cutterPoly);
+            console.log(`Intersections with cutter: ${intersections.length}`);
+            
+            if (intersections.length > 0) {
+                const holeReversed = reverseContour(hole);
+                
+                console.log("Calling computeUnion...");
+                const merged = computeUnion(cutterPoly, holeReversed);
+                
+                console.log(`computeUnion returned ${merged ? merged.length : 0} polygon(s)`);
+                
+                if (merged && merged.length > 0) {
+                    // === ИСПРАВЛЕНИЕ: берём САМЫЙ БОЛЬШОЙ полигон ===
+                    let bestPoly = merged[0];
+                    let bestArea = Math.abs(calculatePolygonArea(merged[0]));
+                    
+                    for (let j = 1; j < merged.length; j++) {
+                        const area = Math.abs(calculatePolygonArea(merged[j]));
+                        if (area > bestArea) {
+                            bestArea = area;
+                            bestPoly = merged[j];
                         }
-                        const resultFlat = subtractPolygonsLogic(piece, cutterPoly);
-                        const resultCons = consolidateContoursIntoObjects(resultFlat);
-                        nextPieces.push(...resultCons);
-                    });
-                    currentPieces = nextPieces;
-                });
+                    }
+                    
+                    console.log(`Selected polygon with ${bestPoly.length} points (area: ${bestArea.toFixed(2)})`);
+                    cutterPoly = bestPoly;
+                } else {
+                    console.log("ERROR: computeUnion returned empty!");
+                }
+            } else {
+                const holeInCutter = isPointInPolygonRobust(hole[0], cutterPoly);
+                const cutterInHole = isPointInPolygonRobust(cutterPoly[0], hole);
                 
-                finalConsolidatedGroups.push(...currentPieces);
-            });
-
-        } else if (targetObj.type === 'polygon' && cutterObj.type === 'line') {
-            ensureClosed(targetObj.contours);
-            let consTarget = consolidateContoursIntoObjects(deepCloneContours(targetObj.contours));
-            
-            cutterObj.contours.forEach(lineContour => {
-                if (!lineContour || lineContour.length < 2) return;
+                console.log(`No intersections. Hole[0] in cutter: ${holeInCutter}, Cutter[0] in hole: ${cutterInHole}`);
                 
-                let nextTarget = [];
-                consTarget.forEach(targetGroup => {
-                    // Используем ТОЧНЫЙ разрез (без буферов)
-                    const splitGroups = splitPolygonByLineStrict(targetGroup, lineContour);
-                    nextTarget.push(...splitGroups);
-                });
-                consTarget = nextTarget;
-            });
-            
-            finalConsolidatedGroups = consTarget;
-
-        } else if (targetObj.type === 'line') {
-            const splitLines = splitLineByCutter(targetObj.contours, cutterObj);
-            finalConsolidatedGroups = splitLines.map(l => [l]);
-        }
-
-        finalConsolidatedGroups = finalConsolidatedGroups.filter(g => g && g.length > 0 && g[0].length >= (targetObj.type === 'polygon' ? 3 : 2));
-
-        if (finalConsolidatedGroups.length === 0) {
-            userObjects.splice(targetIdx, 1);
-            showNotification("Объект был полностью удален разрезом.", "info", "trash");
-            selectedObjectIndex = -1;
-            editingObjectIndex = -1;
-        } else {
-            const baseName = targetObj.name || `Объект ${targetObj.id}`;
-            const isSplit = finalConsolidatedGroups.length > 1;
-
-            targetObj.contours = finalConsolidatedGroups[0];
-            if (isSplit) targetObj.name = `${baseName} (1)`;
-            if (typeof cleanObjectContours === 'function') cleanObjectContours(targetObj);
-            updateObjectMetrics(targetObj);
-
-            for (let i = 1; i < finalConsolidatedGroups.length; i++) {
-                const newName = `${baseName} (${i + 1})`;
-                const newObj = addObjectInternal(finalConsolidatedGroups[i], newName, targetObj.type, true, null, targetObj.color);
-                if (typeof cleanObjectContours === 'function' && newObj) cleanObjectContours(newObj);
+                if (holeInCutter) {
+                    console.log("Hole completely inside cutter - will be removed");
+                } else if (cutterInHole) {
+                    console.log("Cutter inside hole - hole remains");
+                    remainingHoles.push(hole);
+                } else {
+                    console.log("No overlap - hole remains");
+                    remainingHoles.push(hole);
+                }
             }
-
-            showNotification(isSplit ? `Объект разделен на ${finalConsolidatedGroups.length} части.` : "Рассечение выполнено.", "success", "cut");
-            displayObjectInfo(targetIdx);
         }
 
+        console.log(`\n--- Final cutter has ${cutterPoly.length} points ---`);
+        console.log("Calling computeDifference...");
+        
+        const diffPolygons = computeDifference(subjectOuter, cutterPoly);
+        
+        console.log(`computeDifference returned ${diffPolygons.length} polygon(s)`);
+        diffPolygons.forEach((p, i) => console.log(`  Polygon ${i}: ${p.length} points`));
+
+        let finalCandidates = [...diffPolygons];
+        console.log(`Remaining holes to check: ${remainingHoles.length}`);
+
+        remainingHoles.forEach((hole, idx) => {
+            let added = false;
+            for (const poly of diffPolygons) {
+                if (isPointInPolygonRobust(hole[0], poly)) {
+                    finalCandidates.push(hole);
+                    added = true;
+                    break;
+                }
+            }
+            console.log(`Hole ${idx}: ${added ? 'kept' : 'discarded'}`);
+        });
+
+        console.log(`\nFinal candidates: ${finalCandidates.length}`);
+        
+        const consolidated = consolidateContoursIntoObjects(finalCandidates);
+        console.log(`After consolidation: ${consolidated.length} group(s)`);
+        consolidated.forEach((g, i) => console.log(`  Group ${i}: ${g.length} contour(s)`));
+
+        const flatContours = [];
+        consolidated.forEach(group => flatContours.push(...group));
+
+        console.log(`Final contours: ${flatContours.length}`);
+        console.log("=== CUT OPERATION END ===\n");
+
+        targetObj.contours = flatContours;
+        
+        // Вызываем очистку, если функция существует
+        if (typeof cleanObjectContours === 'function') {
+            cleanObjectContours(targetObj);
+        }
+        
+        updateObjectMetrics(targetObj);
         redraw(true);
-        updateObjectList();
 
     } catch (e) {
         console.error("CUT ERROR:", e);
         console.error(e.stack);
-        showNotification("Ошибка рассечения.", "error");
     }
 }
 
@@ -8771,9 +8472,15 @@ function calculatePolygonArea(poly) {
 function computeDifference(subject, clipper) {
     const intersections = findIntersectionsRobust(subject, clipper);
     
+    console.log("  [computeDiff] intersections found:", intersections.length);
+    
     if (intersections.length === 0) {
-        if (isPointInPolygonRobust(clipper[0], subject)) return [subject, clipper];
-        if (isPointInPolygonRobust(subject[0], clipper)) return [];
+        if (isPointInPolygonRobust(clipper[0], subject)) {
+            return [subject, clipper];
+        }
+        if (isPointInPolygonRobust(subject[0], clipper)) {
+            return [];
+        }
         return [subject];
     }
 
@@ -8783,23 +8490,36 @@ function computeDifference(subject, clipper) {
     const subjArcs = splitByIntersections(subjWithInt);
     const clipArcs = splitByIntersections(clipWithInt);
 
+    console.log(`  [computeDiff] subjArcs: ${subjArcs.length}, clipArcs: ${clipArcs.length}`);
+
     const finalArcs = [];
 
-    // Дуги исходного полигона оставляем те, что СНАРУЖИ резака
-    subjArcs.forEach((arc) => {
+    // Subject: части СНАРУЖИ clipper
+    subjArcs.forEach((arc, i) => {
         const mid = getArcMidpoint(arc);
-        if (!isPointInPolygonRobust(mid, clipper, false)) {
+        const inside = isPointInPolygonRobust(mid, clipper, false);
+        if (!inside) {
+            console.log(`    subjArc[${i}]: KEEP (outside clipper)`);
             finalArcs.push(arc);
         }
     });
 
-    // Дуги резака берем те, что ВНУТРИ исходного полигона, 
-    // и ОБЯЗАТЕЛЬНО РАЗВОРАЧИВАЕМ ИХ для корректного сшивания выреза!
-    clipArcs.forEach((arc) => {
+    // Clipper: части ВНУТРИ subject — БЕЗ РАЗВОРОТА!
+    clipArcs.forEach((arc, i) => {
         const mid = getArcMidpoint(arc);
-        if (isPointInPolygonRobust(mid, subject, true)) {
-            finalArcs.push([...arc].reverse()); 
+        const inside = isPointInPolygonRobust(mid, subject, true);
+        if (inside) {
+            console.log(`    clipArc[${i}]: KEEP as-is (inside subject)`);
+            finalArcs.push(arc);  // ← НЕТ reverse()!
         }
+    });
+
+    // Логируем финальные дуги
+    console.log(`  [computeDiff] finalArcs total: ${finalArcs.length}`);
+    finalArcs.forEach((arc, i) => {
+        const h = arc[0];
+        const t = arc[arc.length - 1];
+        console.log(`    finalArc[${i}]: (${h.x.toFixed(2)},${h.y.toFixed(2)})->(${t.x.toFixed(2)},${t.y.toFixed(2)})`);
     });
 
     return stitchArcs(finalArcs);
