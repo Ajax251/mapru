@@ -12466,6 +12466,74 @@ function getRadarLoaderHtml(activeStep) {
     return html;
 }
 
+// Универсальный фильтр для Сооружений и ЗОУИТ, возвращаемых API по BBox.
+// Исключает объекты, не пересекающие целевые полигоны, и те, что полностью лежат в "дырках".
+function filterFeaturesByTurfLogic(rawFeatures, targetTurfPolygons) {
+    const validFeatures = [];
+    
+    for (const feature of rawFeatures) {
+        if (!feature.geometry || !feature.geometry.coordinates) continue;
+
+        let featureTurfGeoms = [];
+        const processRingToMapCoords = (ring3857) => {
+            const mapped = ring3857.map(convertApi3857ToMapCoords);
+            const first = mapped[0]; const last = mapped[mapped.length - 1];
+            if (Math.abs(first[0] - last[0]) > 1e-9 || Math.abs(first[1] - last[1]) > 1e-9) mapped.push([...first]);
+            return mapped;
+        };
+
+        if (feature.geometry.type === 'Polygon') {
+            const allRings = feature.geometry.coordinates.map(processRingToMapCoords);
+            if (allRings[0].length >= 4) featureTurfGeoms.push(turf.polygon(allRings));
+        } else if (feature.geometry.type === 'MultiPolygon') {
+            feature.geometry.coordinates.forEach(poly => {
+                const allRings = poly.map(processRingToMapCoords);
+                if (allRings[0].length >= 4) featureTurfGeoms.push(turf.polygon(allRings));
+            });
+        } else if (feature.geometry.type === 'LineString') {
+            const line = feature.geometry.coordinates.map(convertApi3857ToMapCoords);
+            featureTurfGeoms.push(turf.lineString(line));
+        } else if (feature.geometry.type === 'MultiLineString') {
+            feature.geometry.coordinates.forEach(line => {
+                featureTurfGeoms.push(turf.lineString(line.map(convertApi3857ToMapCoords)));
+            });
+        } else if (feature.geometry.type === 'Point') {
+            const pt = convertApi3857ToMapCoords(feature.geometry.coordinates);
+            featureTurfGeoms.push(turf.point(pt));
+        }
+
+        let isIntersecting = false;
+
+        for (const featureTurf of featureTurfGeoms) {
+            for (const targetTurf of targetTurfPolygons) {
+                if (turf.booleanIntersects(targetTurf, featureTurf)) {
+                    isIntersecting = true;
+                    
+                    // ПРОВЕРКА НА ДЫРКИ
+                    if (targetTurf.geometry.type === 'Polygon' && targetTurf.geometry.coordinates.length > 1) {
+                        const coords = targetTurf.geometry.coordinates;
+                        for (let i = 1; i < coords.length; i++) {
+                            const holePoly = turf.polygon([coords[i]]);
+                            if (turf.booleanWithin(featureTurf, holePoly)) {
+                                isIntersecting = false;
+                                break;
+                            }
+                        }
+                    }
+                }
+                if (isIntersecting) break;
+            }
+            if (isIntersecting) break;
+        }
+
+        if (isIntersecting) {
+            validFeatures.push(feature);
+        }
+    }
+    return validFeatures;
+}
+
+
 async function executeQuickReport(targetObject) {
   if (isAreaLimitExceeded(targetObject)) return;     
 
@@ -12494,7 +12562,6 @@ async function executeQuickReport(targetObject) {
         objName = `Сборный контур (${objects.length} шт.)`;
     }
 
-    // Хелпер: Гарантирует замыкание полигона для Turf.js
     const ensureClosedRing = (ring) => {
         if (!ring || ring.length < 3) return ring;
         const first = ring[0];
@@ -12505,7 +12572,6 @@ async function executeQuickReport(targetObject) {
         return ring;
     };
 
-    // Подготовка геометрии ЦЕЛЕВОГО объекта (в "визуальных" координатах [lon, lat], как ожидает checkPreciseIntersection)
     const targetTurfGeoms = [];
     objects.forEach(obj => {
         const coords = obj.geometry.getCoordinates();
@@ -12513,12 +12579,12 @@ async function executeQuickReport(targetObject) {
             const rings = coords.map(ring => ensureClosedRing(ring.map(c => [c[1], c[0]])));
             try { 
                 targetTurfGeoms.push({ geom: turf.polygon(rings), isLine: false }); 
-            } catch (e) { console.error("Ошибка Turf при создании целевого полигона:", e); }
+            } catch (e) {}
         } else if (obj instanceof ymaps.Polyline) {
             const lineCoords = coords.map(c => [c[1], c[0]]);
             try { 
                 targetTurfGeoms.push({ geom: turf.lineString(lineCoords), isLine: true }); 
-            } catch (e) { console.error("Ошибка Turf при создании целевой линии:", e); }
+            } catch (e) {}
         }
     });
 
@@ -12535,8 +12601,7 @@ async function executeQuickReport(targetObject) {
 
         const results = { zu: [], oks:[], structure: [], zouit:[] };
 
-        // Хелпер для конвертации колец из API 3857 в визуальные координаты [lon, lat] карты
-          const processApiRing = (ring3857) => {
+        const processApiRing = (ring3857) => {
             const mappedRing = ring3857.map(convertApi3857ToMapCoords);
             return ensureClosedRing(mappedRing);
         };
@@ -12544,7 +12609,6 @@ async function executeQuickReport(targetObject) {
         // ЭТАП 0: Земельные участки
         showLoader(getRadarLoaderHtml(0));
         const rawZu = await searchFeaturesByGeometry(objects, 36368);
-        console.log(`[Анализ ЗУ] Получено от API: ${rawZu.length} участков.`);
         
         if (rawZu.length > 0) {
             for (const feature of rawZu) {
@@ -12561,21 +12625,29 @@ async function executeQuickReport(targetObject) {
                             if (rings[0].length >= 4) featureTurfPolys.push(turf.polygon(rings));
                         });
                     }
-                } catch (e) {
-                    console.error(`[Анализ ЗУ] Ошибка парсинга геометрии для ${feature.properties.descr}:`, e);
-                    continue;
-                }
+                } catch (e) { continue; }
 
                 let totalIntersectionArea = 0;
                 let featureTotalArea = 0;
 
                 for (const fPoly of featureTurfPolys) {
-                    // Используем checkPreciseIntersection для расчета истинной площади участка в МСК
                     const selfResult = checkPreciseIntersection(fPoly, fPoly, false, '[SelfArea]');
                     featureTotalArea += selfResult.area;
 
-                    // Рассчитываем площадь наложения
                     for (const target of targetTurfGeoms) {
+                        // ПРОВЕРКА НА ДЫРКИ ДЛЯ ЗУ
+                        let inHole = false;
+                        if (target.geom.geometry.type === 'Polygon' && target.geom.geometry.coordinates.length > 1) {
+                            for (let i = 1; i < target.geom.geometry.coordinates.length; i++) {
+                                const holePoly = turf.polygon([target.geom.geometry.coordinates[i]]);
+                                if (turf.booleanWithin(fPoly, holePoly)) {
+                                    inHole = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (inHole) continue; // Игнорируем объект в дырке
+
                         const result = checkPreciseIntersection(target.geom, fPoly, target.isLine, `[Intersect]`);
                         if (result.isIntersecting) {
                             totalIntersectionArea += result.area;
@@ -12583,33 +12655,24 @@ async function executeQuickReport(targetObject) {
                     }
                 }
 
-                console.log(`--- ЗУ: ${feature.properties.descr} ---`);
-                console.log(`Полная площадь (МСК): ${featureTotalArea.toFixed(4)} кв.м.`);
-                console.log(`Площадь наложения: ${totalIntersectionArea.toFixed(4)} кв.м.`);
-
-                // Порог наложения 0.001 кв.м. (10 кв. см.)
                 if (totalIntersectionArea >= 0.001) {
                     let percent = 0;
                     if (featureTotalArea > 0) {
-                        // Допуск 0.001 м² для 100%
                         if ((featureTotalArea - totalIntersectionArea) < 0.001) {
                             percent = 100;
                         } else {
                             let rawPercent = (totalIntersectionArea / featureTotalArea) * 100;
                             if (rawPercent < 10) {
-                                percent = Math.ceil(rawPercent); // До 10% округляем вверх
+                                percent = Math.ceil(rawPercent); 
                                 if (percent === 0) percent = 1;
                             } else {
-                                percent = Math.floor(rawPercent); // Свыше 10% округляем вниз
+                                percent = Math.floor(rawPercent); 
                             }
                         }
                     }
-                    console.log(`Округлённый процент: ${percent}%`);
                     if (!feature.properties) feature.properties = {};
                     feature.properties._intersectionPercent = percent;
                     results.zu.push(feature);
-                } else {
-                    console.log(`Наложение менее 0.001 кв.м., ЗУ отброшен.`);
                 }
             }
         }
@@ -12619,7 +12682,6 @@ async function executeQuickReport(targetObject) {
         // ЭТАП 1: ОКС
         showLoader(getRadarLoaderHtml(1));
         const rawOksFeatures = await searchFeaturesByGeometry(objects, 36369);
-        console.log(`[Анализ ОКС] Получено от API: ${rawOksFeatures.length} объектов.`);
         const spatialOksFeatures = [];
 
         if (rawOksFeatures.length > 0) {
@@ -12637,10 +12699,7 @@ async function executeQuickReport(targetObject) {
                             if (rings[0].length >= 4) featureTurfPolys.push(turf.polygon(rings));
                         });
                     }
-                } catch (e) {
-                    console.error(`[Анализ ОКС] Ошибка парсинга геометрии для ${feature.properties.descr}:`, e);
-                    continue;
-                }
+                } catch (e) { continue; }
 
                 let totalIntersectionArea = 0;
                 let featureTotalArea = 0;
@@ -12650,17 +12709,25 @@ async function executeQuickReport(targetObject) {
                     featureTotalArea += selfResult.area;
 
                     for (const target of targetTurfGeoms) {
+                        // ПРОВЕРКА НА ДЫРКИ ДЛЯ ОКС
+                        let inHole = false;
+                        if (target.geom.geometry.type === 'Polygon' && target.geom.geometry.coordinates.length > 1) {
+                            for (let i = 1; i < target.geom.geometry.coordinates.length; i++) {
+                                const holePoly = turf.polygon([target.geom.geometry.coordinates[i]]);
+                                if (turf.booleanWithin(fPoly, holePoly)) {
+                                    inHole = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (inHole) continue; // Игнорируем объект в дырке
+
                         const result = checkPreciseIntersection(target.geom, fPoly, target.isLine, `[Intersect]`);
                         if (result.isIntersecting) {
                             totalIntersectionArea += result.area;
                         }
                     }
                 }
-
-                const objId = feature.properties.options?.cad_num || feature.properties.descr;
-                console.log(`--- ОКС: ${objId} ---`);
-                console.log(`Полная площадь (МСК): ${featureTotalArea.toFixed(4)} кв.м.`);
-                console.log(`Площадь наложения: ${totalIntersectionArea.toFixed(4)} кв.м.`);
 
                 if (totalIntersectionArea >= 0.001) {
                     let percent = 0;
@@ -12677,12 +12744,9 @@ async function executeQuickReport(targetObject) {
                             }
                         }
                     }
-                    console.log(`Округлённый процент: ${percent}%`);
                     if (!feature.properties) feature.properties = {};
                     feature.properties._intersectionPercent = percent;
                     spatialOksFeatures.push(feature);
-                } else {
-                    console.log(`Наложение менее 0.001 кв.м., ОКС отброшен.`);
                 }
             }
         }
@@ -12722,15 +12786,16 @@ async function executeQuickReport(targetObject) {
         results.oks = Array.from(oksMap.values());
         await delay(500);
         
-        // ЭТАП 2: Сооружения
+        // ЭТАП 2: Сооружения (с фильтром Turf.js)
         showLoader(getRadarLoaderHtml(2));
-        results.structure = await searchFeaturesByGeometry(objects, 36383);
-        
+        const rawStructures = await searchFeaturesByGeometry(objects, 36383);
+        results.structure = filterFeaturesByTurfLogic(rawStructures, targetTurfGeoms.map(t => t.geom));
         await delay(500);
         
-        // ЭТАП 3: ЗОУИТ
+        // ЭТАП 3: ЗОУИТ (с фильтром Turf.js)
         showLoader(getRadarLoaderHtml(3));
-        results.zouit = await searchFeaturesByGeometry(objects, 36940);
+        const rawZouits = await searchFeaturesByGeometry(objects, 36940);
+        results.zouit = filterFeaturesByTurfLogic(rawZouits, targetTurfGeoms.map(t => t.geom));
         
         // Отрисовка
         showLoader('<div style="text-align:center;"><i class="fas fa-paint-brush fa-spin" style="font-size: 2.5rem; color: #10b981; margin-bottom: 15px;"></i><br><span style="font-size: 1.1rem; color: #10b981; font-weight: 600;">Отрисовка слоев на карте...</span></div>');
@@ -12759,26 +12824,16 @@ async function executeQuickReport(targetObject) {
             }
         });
         
-            // Делаем данные доступными для внешнего файла 3d-viewer.js
         window.quickReportTargetObjects = quickReportTargetObjects;
         window.parcelFeaturesData = parcelFeaturesData;
         window.buildingFeaturesData = buildingFeaturesData;
         window.structureFeaturesData = structureFeaturesData;
         window.zouitFeaturesData = zouitFeaturesData;
-        // Передаем настройки смещения карты
         window.mapOffsetX = typeof mapOffsetX !== 'undefined' ? mapOffsetX : -4.5;
         window.mapOffsetY = typeof mapOffsetY !== 'undefined' ? mapOffsetY : -1;
-        // Передаем библиотеку proj4
         window.proj4 = proj4;
-        // --- КОНЕЦ БЛОКА ---
+        window.isGlobalMapMode = true; 
 
-        console.log("=== БЫСТРЫЙ ОТЧЕТ ЗАВЕРШЕН УСПЕШНО ===");
-        
-        
-         let safeObjName = objName.replace(/[^a-zA-Z0-9_:]/g, '_');
-
-        
-        
         renderBottomDashboard(objName, results, targetBounds);
 
     } catch (e) {
@@ -18614,8 +18669,7 @@ async function getAllZouitsInObject(lat, lon) {
 }
 
 async function executeZouitsOnObjectSearch(targetObject) {
-      if (isAreaLimitExceeded(targetObject)) return; 
-    // Поддержка массива объектов
+    if (isAreaLimitExceeded(targetObject)) return; 
     const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
     const objType = isMulti ? 'выбранных объектах' : ((objects[0] instanceof ymaps.Polyline) ? 'линейном объекте' : 'контуре объекта');
@@ -18623,11 +18677,93 @@ async function executeZouitsOnObjectSearch(targetObject) {
     showLoader(`Поиск ЗОУИТ на ${objType}...`);
 
     try {
-        // searchFeaturesByGeometry уже умеет обрабатывать массив и отправлять одним запросом
-        const foundFeatures = await searchFeaturesByGeometry(objects, 36940);
+        const rawFeatures = await searchFeaturesByGeometry(objects, 36940);
 
-        if (!foundFeatures || foundFeatures.length === 0) {
+        if (!rawFeatures || rawFeatures.length === 0) {
             showNotification(`ЗОУИТ на ${objType} не найдены`, 'warning');
+            return;
+        }
+
+        const foundFeatures = [];
+        const targetTurfGeoms = [];
+
+        objects.forEach(obj => {
+            const targetCoords = obj.geometry.getCoordinates();
+            if (obj instanceof ymaps.Polygon) {
+                const rings = targetCoords.map(ring => {
+                    let newRing = ring.map(c => [c[1], c[0]]);
+                    const first = newRing[0]; const last = newRing[newRing.length - 1];
+                    if (Math.abs(first[0] - last[0]) > 1e-9 || Math.abs(first[1] - last[1]) > 1e-9) newRing.push([...first]);
+                    return newRing;
+                });
+                targetTurfGeoms.push(turf.polygon(rings));
+            } else if (obj instanceof ymaps.Polyline) {
+                const line = targetCoords.map(c => [c[1], c[0]]);
+                targetTurfGeoms.push(turf.lineString(line));
+            }
+        });
+
+        if (targetTurfGeoms.length > 0) {
+            for (const feature of rawFeatures) {
+                try {
+                    if (!feature.geometry || !feature.geometry.coordinates) continue;
+
+                    const featureGeometryType = feature.geometry.type;
+                    let featureTurfGeoms = [];
+
+                    const processRingToMapCoords = (ring3857) => {
+                        const mapped = ring3857.map(convertApi3857ToMapCoords);
+                        const first = mapped[0]; const last = mapped[mapped.length - 1];
+                        if (Math.abs(first[0] - last[0]) > 1e-9 || Math.abs(first[1] - last[1]) > 1e-9) mapped.push([...first]);
+                        return mapped;
+                    };
+
+                    if (featureGeometryType === 'Polygon') {
+                        const allRings = feature.geometry.coordinates.map(processRingToMapCoords);
+                        if (allRings[0].length >= 4) featureTurfGeoms.push(turf.polygon(allRings));
+                    } else if (featureGeometryType === 'MultiPolygon') {
+                        feature.geometry.coordinates.forEach(poly => {
+                            const allRings = poly.map(processRingToMapCoords);
+                            if (allRings[0].length >= 4) featureTurfGeoms.push(turf.polygon(allRings));
+                        });
+                    }
+
+                    let isIntersecting = false;
+
+                    for (const featureTurf of featureTurfGeoms) {
+                        for (const targetTurf of targetTurfGeoms) {
+                            
+                            if (turf.booleanIntersects(targetTurf, featureTurf)) {
+                                isIntersecting = true;
+                                
+                                // ПРОВЕРКА НА ДЫРКИ
+                                if (targetTurf.geometry.type === 'Polygon' && targetTurf.geometry.coordinates.length > 1) {
+                                    const coords = targetTurf.geometry.coordinates;
+                                    for (let i = 1; i < coords.length; i++) {
+                                        const holePoly = turf.polygon([coords[i]]);
+                                        if (turf.booleanWithin(featureTurf, holePoly)) {
+                                            isIntersecting = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if (isIntersecting) break;
+                        }
+                        if (isIntersecting) break;
+                    }
+
+                    if (isIntersecting) {
+                        foundFeatures.push(feature);
+                    }
+                } catch (e) {}
+            }
+        } else {
+            foundFeatures.push(...rawFeatures);
+        }
+
+        if (foundFeatures.length === 0) {
+            showNotification(`ЗОУИТ на ${objType} не найдены (исключены объекты во внутренних контурах)`, 'warning');
             return;
         }
 
@@ -18724,7 +18860,7 @@ async function getAllOksInObject(lat, lon) {
 }
 
 async function executeOksOnObjectSearch(targetObject) {
-     if (isAreaLimitExceeded(targetObject)) return;
+    if (isAreaLimitExceeded(targetObject)) return;
     const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
     const objType = isMulti ? 'выбранных объектах' : ((objects[0] instanceof ymaps.Polyline) ? 'линейном объекте' : 'контуре объекта');
@@ -18732,10 +18868,101 @@ async function executeOksOnObjectSearch(targetObject) {
     showLoader(`Поиск ОКС на ${objType}...`);
 
     try {
-        const foundFeatures = await searchFeaturesByGeometry(objects, 36369);
+        const rawFeatures = await searchFeaturesByGeometry(objects, 36369);
 
-        if (!foundFeatures || foundFeatures.length === 0) {
+        if (!rawFeatures || rawFeatures.length === 0) {
             showNotification(`ОКС на ${objType} не найдены`, 'warning');
+            return;
+        }
+
+        const foundFeatures = [];
+        const targetTurfGeoms = [];
+
+        // 1. Формируем Turf-объекты из выбранных полигонов/линий (переводим [lat, lon] -> [lon, lat])
+        objects.forEach(obj => {
+            const targetCoords = obj.geometry.getCoordinates();
+            if (obj instanceof ymaps.Polygon) {
+                const rings = targetCoords.map(ring => {
+                    let newRing = ring.map(c => [c[1], c[0]]);
+                    const first = newRing[0]; const last = newRing[newRing.length - 1];
+                    if (Math.abs(first[0] - last[0]) > 1e-9 || Math.abs(first[1] - last[1]) > 1e-9) newRing.push([...first]);
+                    return newRing;
+                });
+                targetTurfGeoms.push(turf.polygon(rings));
+            } else if (obj instanceof ymaps.Polyline) {
+                const line = targetCoords.map(c => [c[1], c[0]]);
+                targetTurfGeoms.push(turf.lineString(line));
+            }
+        });
+
+        if (targetTurfGeoms.length > 0) {
+            for (const feature of rawFeatures) {
+                try {
+                    if (!feature.geometry || !feature.geometry.coordinates) continue;
+
+                    const featureGeometryType = feature.geometry.type;
+                    let featureTurfGeoms = [];
+
+                    // Перевод координат API (3857) в WGS84 [lon, lat]
+                    const processRingToMapCoords = (ring3857) => {
+                        const mapped = ring3857.map(convertApi3857ToMapCoords);
+                        const first = mapped[0]; const last = mapped[mapped.length - 1];
+                        if (Math.abs(first[0] - last[0]) > 1e-9 || Math.abs(first[1] - last[1]) > 1e-9) mapped.push([...first]);
+                        return mapped;
+                    };
+
+                    if (featureGeometryType === 'Polygon') {
+                        const allRings = feature.geometry.coordinates.map(processRingToMapCoords);
+                        if (allRings[0].length >= 4) featureTurfGeoms.push(turf.polygon(allRings));
+                    } else if (featureGeometryType === 'MultiPolygon') {
+                        feature.geometry.coordinates.forEach(poly => {
+                            const allRings = poly.map(processRingToMapCoords);
+                            if (allRings[0].length >= 4) featureTurfGeoms.push(turf.polygon(allRings));
+                        });
+                    } else if (featureGeometryType === 'Point') {
+                        const pt = convertApi3857ToMapCoords(feature.geometry.coordinates);
+                        featureTurfGeoms.push(turf.point(pt));
+                    }
+
+                    let isIntersecting = false;
+
+                    for (const featureTurf of featureTurfGeoms) {
+                        for (const targetTurf of targetTurfGeoms) {
+                            
+                            // Базовая проверка пересечения
+                            if (turf.booleanIntersects(targetTurf, featureTurf)) {
+                                isIntersecting = true;
+                                
+                                // ПРОВЕРКА НА ДЫРКИ (если целевой объект - полигон с внутренними контурами)
+                                if (targetTurf.geometry.type === 'Polygon' && targetTurf.geometry.coordinates.length > 1) {
+                                    const coords = targetTurf.geometry.coordinates;
+                                    // Перебираем все дырки (начиная с индекса 1)
+                                    for (let i = 1; i < coords.length; i++) {
+                                        const holePoly = turf.polygon([coords[i]]);
+                                        // Если ОКС целиком находится внутри дырки, значит он не на участке
+                                        if (turf.booleanWithin(featureTurf, holePoly)) {
+                                            isIntersecting = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if (isIntersecting) break;
+                        }
+                        if (isIntersecting) break;
+                    }
+
+                    if (isIntersecting) {
+                        foundFeatures.push(feature);
+                    }
+                } catch (e) {}
+            }
+        } else {
+            foundFeatures.push(...rawFeatures);
+        }
+
+        if (foundFeatures.length === 0) {
+            showNotification(`ОКС на ${objType} не найдены (исключены объекты во внутренних контурах)`, 'warning');
             return;
         }
 
@@ -18751,6 +18978,7 @@ async function executeOksOnObjectSearch(targetObject) {
         hideLoader();
     }
 }
+
 
 async function getAllStructuresInObject(lat, lon) {
     let targetObject = selectedLine;
@@ -18792,7 +19020,7 @@ if (candidateObjects.length === 0) {
 }
 
 async function executeStructuresOnObjectSearch(targetObject) {
-     if (isAreaLimitExceeded(targetObject)) return;
+    if (isAreaLimitExceeded(targetObject)) return;
     const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
     const objType = isMulti ? 'выбранных объектах' : ((objects[0] instanceof ymaps.Polyline) ? 'линейном объекте' : 'контуре объекта');
@@ -18800,10 +19028,100 @@ async function executeStructuresOnObjectSearch(targetObject) {
     showLoader(`Поиск сооружений на ${objType}...`);
 
     try {
-        const foundFeatures = await searchFeaturesByGeometry(objects, 36383);
+        const rawFeatures = await searchFeaturesByGeometry(objects, 36383);
 
-        if (!foundFeatures || foundFeatures.length === 0) {
+        if (!rawFeatures || rawFeatures.length === 0) {
             showNotification(`Сооружения на ${objType} не найдены`, 'warning');
+            return;
+        }
+
+        const foundFeatures = [];
+        const targetTurfGeoms = [];
+
+        objects.forEach(obj => {
+            const targetCoords = obj.geometry.getCoordinates();
+            if (obj instanceof ymaps.Polygon) {
+                const rings = targetCoords.map(ring => {
+                    let newRing = ring.map(c => [c[1], c[0]]);
+                    const first = newRing[0]; const last = newRing[newRing.length - 1];
+                    if (Math.abs(first[0] - last[0]) > 1e-9 || Math.abs(first[1] - last[1]) > 1e-9) newRing.push([...first]);
+                    return newRing;
+                });
+                targetTurfGeoms.push(turf.polygon(rings));
+            } else if (obj instanceof ymaps.Polyline) {
+                const line = targetCoords.map(c => [c[1], c[0]]);
+                targetTurfGeoms.push(turf.lineString(line));
+            }
+        });
+
+        if (targetTurfGeoms.length > 0) {
+            for (const feature of rawFeatures) {
+                try {
+                    if (!feature.geometry || !feature.geometry.coordinates) continue;
+
+                    const featureGeometryType = feature.geometry.type;
+                    let featureTurfGeoms = [];
+
+                    const processRingToMapCoords = (ring3857) => {
+                        const mapped = ring3857.map(convertApi3857ToMapCoords);
+                        const first = mapped[0]; const last = mapped[mapped.length - 1];
+                        if (Math.abs(first[0] - last[0]) > 1e-9 || Math.abs(first[1] - last[1]) > 1e-9) mapped.push([...first]);
+                        return mapped;
+                    };
+
+                    if (featureGeometryType === 'Polygon') {
+                        const allRings = feature.geometry.coordinates.map(processRingToMapCoords);
+                        if (allRings[0].length >= 4) featureTurfGeoms.push(turf.polygon(allRings));
+                    } else if (featureGeometryType === 'MultiPolygon') {
+                        feature.geometry.coordinates.forEach(poly => {
+                            const allRings = poly.map(processRingToMapCoords);
+                            if (allRings[0].length >= 4) featureTurfGeoms.push(turf.polygon(allRings));
+                        });
+                    } else if (featureGeometryType === 'LineString') {
+                        const line = feature.geometry.coordinates.map(convertApi3857ToMapCoords);
+                        featureTurfGeoms.push(turf.lineString(line));
+                    } else if (featureGeometryType === 'MultiLineString') {
+                        feature.geometry.coordinates.forEach(line => {
+                             featureTurfGeoms.push(turf.lineString(line.map(convertApi3857ToMapCoords)));
+                        });
+                    }
+
+                    let isIntersecting = false;
+
+                    for (const featureTurf of featureTurfGeoms) {
+                        for (const targetTurf of targetTurfGeoms) {
+                            
+                            if (turf.booleanIntersects(targetTurf, featureTurf)) {
+                                isIntersecting = true;
+                                
+                                // ПРОВЕРКА НА ДЫРКИ
+                                if (targetTurf.geometry.type === 'Polygon' && targetTurf.geometry.coordinates.length > 1) {
+                                    const coords = targetTurf.geometry.coordinates;
+                                    for (let i = 1; i < coords.length; i++) {
+                                        const holePoly = turf.polygon([coords[i]]);
+                                        if (turf.booleanWithin(featureTurf, holePoly)) {
+                                            isIntersecting = false;
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
+                            if (isIntersecting) break;
+                        }
+                        if (isIntersecting) break;
+                    }
+
+                    if (isIntersecting) {
+                        foundFeatures.push(feature);
+                    }
+                } catch (e) {}
+            }
+        } else {
+            foundFeatures.push(...rawFeatures);
+        }
+
+        if (foundFeatures.length === 0) {
+            showNotification(`Сооружения на ${objType} не найдены (исключены объекты во внутренних контурах)`, 'warning');
             return;
         }
 
@@ -18819,6 +19137,7 @@ async function executeStructuresOnObjectSearch(targetObject) {
         hideLoader();
     }
 }
+
 
 async function getAllZouitsInQuarter(lat, lon) {
     showLoader("Поиск квартала для ЗОУИТ...");
@@ -20131,7 +20450,6 @@ async function generateConsolidatedReport(targetObject) {
             const geomStats = calculatePreciseGeometry(polygon);
             mainObjectAreaInMeters += geomStats.area;
             
-            // ИСПРАВЛЕНИЕ: Передаем все кольца (включая дырки)
             const turfPoly = turf.polygon(coordsAll.map(ring => ring.map(c => [c[1], c[0]])));
             targetTurfPolygons.push(turfPoly);
             allSearchCoords.push(...coordsAll[0]); 
@@ -20257,8 +20575,7 @@ async function generateConsolidatedReport(targetObject) {
         const centerLon = (minLon + maxLon) / 2;
 
         showLoader('Анализ данных...');
-        const bufferedBoundsForSearch = [[minLat - 0.00005, minLon - 0.00005],[maxLat + 0.00005, maxLon + 0.00005]
-        ];
+        const bufferedBoundsForSearch = [[minLat - 0.00005, minLon - 0.00005],[maxLat + 0.00005, maxLon + 0.00005]];
         const searchPolygonForApi = [
             [bufferedBoundsForSearch[0][1], bufferedBoundsForSearch[0][0]], 
             [bufferedBoundsForSearch[1][1], bufferedBoundsForSearch[0][0]],
@@ -20269,7 +20586,6 @@ async function generateConsolidatedReport(targetObject) {
 
         const fetchedCandidateFeatures = await searchParcelsByArea(searchPolygonForApi);
 
-        // Хелпер для извлечения Turf-полигонов из геометрии API
        const processRingsToTurf = (featureGeom) => {
             if (!featureGeom || !featureGeom.coordinates) return[];
             const processRing = (ring3857) => ring3857.map(convertApi3857ToMapCoords);
@@ -20294,14 +20610,27 @@ async function generateConsolidatedReport(targetObject) {
                 
                 candidateTurfPolys.forEach(candidateTurfPoly => {
                     targetTurfPolygons.forEach(searchTurfPoly => {
-                        const result = checkPreciseIntersection(searchTurfPoly, candidateTurfPoly, false, `[Report ZU ${feature.properties.descr}]`);
+                        // ПРОВЕРКА НА ДЫРКИ ДЛЯ ЗУ
+                        let inHole = false;
+                        if (searchTurfPoly.geometry.type === 'Polygon' && searchTurfPoly.geometry.coordinates.length > 1) {
+                            const coords = searchTurfPoly.geometry.coordinates;
+                            for (let i = 1; i < coords.length; i++) {
+                                const holePoly = turf.polygon([coords[i]]);
+                                if (turf.booleanWithin(candidateTurfPoly, holePoly)) {
+                                    inHole = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (inHole) return; // Пропускаем объект в дырке
+
+                        const result = checkPreciseIntersection(searchTurfPoly, candidateTurfPoly, false, `[Report ZU]`);
                         if (result.isIntersecting) {
                             totalIntersectionArea += result.area;
                         }
                     });
                 });
 
-                // ИСПРАВЛЕНИЕ ПОРОГА ЧУВСТВИТЕЛЬНОСТИ: 0.0001 (1 кв. см.)
                 if (totalIntersectionArea >= 0.0001) {
                     const percentage = (totalIntersectionArea / mainObjectAreaInMeters) * 100;
                     underlyingParcelsResults.push({ feature, intersectionArea: totalIntersectionArea, percentage });
@@ -20321,6 +20650,20 @@ async function generateConsolidatedReport(targetObject) {
                  
                  candidateTurfPolys.forEach(candidateTurfPoly => {
                      targetTurfPolygons.forEach(searchTurfPoly => {
+                        // ПРОВЕРКА НА ДЫРКИ ДЛЯ ОКС
+                        let inHole = false;
+                        if (searchTurfPoly.geometry.type === 'Polygon' && searchTurfPoly.geometry.coordinates.length > 1) {
+                            const coords = searchTurfPoly.geometry.coordinates;
+                            for (let i = 1; i < coords.length; i++) {
+                                const holePoly = turf.polygon([coords[i]]);
+                                if (turf.booleanWithin(candidateTurfPoly, holePoly)) {
+                                    inHole = true;
+                                    break;
+                                }
+                            }
+                        }
+                        if (inHole) return; // Пропускаем объект в дырке
+
                          const result = checkPreciseIntersection(searchTurfPoly, candidateTurfPoly, false, `[Report OKS]`);
                          if (result.isIntersecting) {
                              totalIntersectionArea += result.area;
@@ -20328,7 +20671,6 @@ async function generateConsolidatedReport(targetObject) {
                      });
                  });
 
-                 // ИСПРАВЛЕНИЕ ПОРОГА ЧУВСТВИТЕЛЬНОСТИ: 0.0001 (1 кв. см.)
                  if (totalIntersectionArea >= 0.0001) {
                     const percentage = (totalIntersectionArea / mainObjectAreaInMeters) * 100;
                     oksIntersectionResults.push({ feature, intersectionArea: totalIntersectionArea, percentage });
@@ -20337,9 +20679,12 @@ async function generateConsolidatedReport(targetObject) {
         }
 
         await delay(100);
-        const structuresResults = await searchFeaturesByGeometry(targetPolygons, 36383);
+        const rawStructures = await searchFeaturesByGeometry(targetPolygons, 36383);
+        const structuresResults = filterFeaturesByTurfLogic(rawStructures, targetTurfPolygons);
+        
         await delay(100);
-        const zouitResults = await searchFeaturesByGeometry(targetPolygons, 36940);
+        const rawZouits = await searchFeaturesByGeometry(targetPolygons, 36940);
+        const zouitResults = filterFeaturesByTurfLogic(rawZouits, targetTurfPolygons);
         await delay(100);
 
         const drawnZouits = [];
