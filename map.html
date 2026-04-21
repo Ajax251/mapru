@@ -17756,60 +17756,55 @@ async function executeScreenshot(scale) {
     
     const basePlacemarkSize = Math.max(10, Math.min(16, 8 + newZoom * 0.4));
 
-    // --- ИСПРАВЛЕНИЕ: Агрессивное устранение сетки-швов для сторонних тайлов (Google) ---
+    // 1. Стили ТОЛЬКО для текста и меток (работает стабильно везде)
     const style = document.createElement('style');
     style.id = 'screenshot-scale-styles';
-    
-    let cssText = `
-        /* Отключаем обрезку у контейнеров тайлов, чтобы увеличенные картинки перекрыли швы */
-        #map [class*="-ground-pane"] ymaps,
-        #map [class*="-layer-pane"] ymaps,
-        #map [class*="-layer"] {
-            overflow: visible !important;
-        }
-
-        /* Увеличиваем сами картинки-тайлы (Google, OSM, Yandex) и заставляем их наезжать друг на друга */
-        #map [class*="-ground-pane"] img,
-        #map [class*="-layer-pane"] img {
-            width: calc(100% + 2px) !important;
-            height: calc(100% + 2px) !important;
-            max-width: none !important;
-            max-height: none !important;
-            margin-top: -1px !important;
-            margin-left: -1px !important;
-            transform: scale(1.02) !important;
-            transform-origin: center center !important;
-        }
-    `;
-
     if (scale > 1) {
-        cssText += `
-            /* Кадастровые номера и текст на участках */
+        style.innerHTML = `
             .custom-placemark { 
                 font-size: ${basePlacemarkSize * scale}px !important; 
                 transform: none !important;
                 text-shadow: -${1*scale}px -${1*scale}px 0 #fff, ${1*scale}px -${1*scale}px 0 #fff, -${1*scale}px ${1*scale}px 0 #fff, ${1*scale}px ${1*scale}px 0 #fff, 0 0 ${2*scale}px #fff !important;
             }
-            /* Номера точек (н1, н2) */
-            .numbered-point-label { 
-                font-size: ${numberedPointSize * scale}px !important; 
-            }
-            /* Красные точки */
+            .numbered-point-label { font-size: ${numberedPointSize * scale}px !important; }
             .custom-red-dot { 
                 width: ${numberedDotSize * scale}px !important; 
                 height: ${numberedDotSize * scale}px !important; 
                 border-width: ${1 * scale}px !important;
             }
-            /* Координаты */
-            .coord-label-container { 
-                transform: scale(${scale}) !important; 
-                transform-origin: top left !important; 
-            }
+            .coord-label-container { transform: scale(${scale}) !important; transform-origin: top left !important; }
         `;
+        document.head.appendChild(style);
     }
-    
-    style.innerHTML = cssText;
-    document.head.appendChild(style);
+
+    // 2. ЖЕСТКОЕ ИСПРАВЛЕНИЕ СЕТКИ: Прямое изменение inline-стилей тайлов карты
+    // Находим все тайлы карты (Yandex, Google, OSM)
+    const mapTiles = mapElement.querySelectorAll('ymaps[class*="-ground-pane"] img, ymaps[class*="-layer-pane"] img');
+    const originalTileStyles = [];
+
+    mapTiles.forEach(img => {
+        // Сохраняем оригинальные стили
+        originalTileStyles.push({
+            el: img,
+            width: img.style.width,
+            height: img.style.height,
+            marginLeft: img.style.marginLeft,
+            marginTop: img.style.marginTop
+        });
+
+        // Берем текущий размер тайла (обычно 256px) и принудительно делаем его 258px
+        const currentWidth = parseFloat(img.style.width || img.width || 256);
+        const currentHeight = parseFloat(img.style.height || img.height || 256);
+
+        img.style.width = (currentWidth + 2) + 'px';
+        img.style.height = (currentHeight + 2) + 'px';
+        
+        // Сдвигаем на 1px вверх и влево, чтобы картинка осталась по центру, но перекрыла швы
+        const currentMl = parseFloat(img.style.marginLeft || 0);
+        const currentMt = parseFloat(img.style.marginTop || 0);
+        img.style.marginLeft = (currentMl - 1) + 'px';
+        img.style.marginTop = (currentMt - 1) + 'px';
+    });
 
     try {
         if (scale > 1) {
@@ -17829,7 +17824,7 @@ async function executeScreenshot(scale) {
                 }
             });
 
-            // Динамически масштабируем произвольные тексты инлайново
+            // Динамически масштабируем тексты
             document.querySelectorAll('.draggable-text span').forEach(span => {
                 span.dataset.origFontSize = span.style.fontSize;
                 span.dataset.origPadding = span.style.padding;
@@ -17841,21 +17836,38 @@ async function executeScreenshot(scale) {
                 span.style.borderWidth = `${1 * scale}px`;
             });
 
-            // Командуем Яндекс.Карте перерисоваться под новый размер
+            // Командуем Яндекс.Карте перерисоваться
             map.container.fitToViewport();
             map.setCenter(origCenter, newZoom);
 
-            // ОЖИДАНИЕ ЗАГРУЗКИ ТАЙЛОВ
+            // Ждем подгрузки новых тайлов
             await new Promise(r => setTimeout(r, 1500 + (scale * 1000)));
+
+            // ПОВТОРНАЯ обработка тайлов (так как Яндекс.Карты загрузили новые тайлы для нового масштаба)
+            const newMapTiles = mapElement.querySelectorAll('ymaps[class*="-ground-pane"] img, ymaps[class*="-layer-pane"] img');
+            newMapTiles.forEach(img => {
+                if (!originalTileStyles.find(item => item.el === img)) {
+                    originalTileStyles.push({
+                        el: img, width: img.style.width, height: img.style.height, marginLeft: img.style.marginLeft, marginTop: img.style.marginTop
+                    });
+                    const currentWidth = parseFloat(img.style.width || img.width || 256);
+                    const currentHeight = parseFloat(img.style.height || img.height || 256);
+                    img.style.width = (currentWidth + 2) + 'px';
+                    img.style.height = (currentHeight + 2) + 'px';
+                    const currentMl = parseFloat(img.style.marginLeft || 0);
+                    const currentMt = parseFloat(img.style.marginTop || 0);
+                    img.style.marginLeft = (currentMl - 1) + 'px';
+                    img.style.marginTop = (currentMt - 1) + 'px';
+                }
+            });
         } else {
-            // Даем время на применение стилей (швов тайлов) даже при масштабе х1
-            await new Promise(r => setTimeout(r, 500));
+            await new Promise(r => setTimeout(r, 300));
         }
 
-        // Делаем снимок
+        // Делаем снимок. allowTaint: false и useCORS: true обязательны для серверной работы.
         const canvas = await html2canvas(mapElement, {
             useCORS: true,
-            allowTaint: true,
+            allowTaint: false, // <-- Важно для сервера
             logging: false,
             scale: 1, 
             width: scale > 1 ? newWidth : origWidth,
@@ -17882,7 +17894,17 @@ async function executeScreenshot(scale) {
         console.error('Ошибка скриншота:', error);
         showNotification('Ошибка при создании скриншота', 'error', 'exclamation-triangle');
     } finally {
-        // ВОЗВРАЩАЕМ ВСЁ В ИСХОДНОЕ СОСТОЯНИЕ
+        // 3. ВОССТАНАВЛИВАЕМ ТАЙЛЫ
+        originalTileStyles.forEach(item => {
+            if (item.el) {
+                item.el.style.width = item.width;
+                item.el.style.height = item.height;
+                item.el.style.marginLeft = item.marginLeft;
+                item.el.style.marginTop = item.marginTop;
+            }
+        });
+
+        // 4. ВОЗВРАЩАЕМ МАСШТАБЫ КАРТЫ
         if (scale > 1) {
             mapElement.style.position = '';
             mapElement.style.top = '';
@@ -17913,11 +17935,9 @@ async function executeScreenshot(scale) {
             map.setCenter(origCenter, origZoom);
         }
         
-        // Обязательно удаляем временный стиль сетки
         const scaleStyle = document.getElementById('screenshot-scale-styles');
         if (scaleStyle) scaleStyle.remove();
         
-        // Даем карте время обновиться обратно
         if (scale > 1) await new Promise(r => setTimeout(r, 500));
 
         widgetElement.style.visibility = 'visible';
