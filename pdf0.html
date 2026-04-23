@@ -2045,7 +2045,7 @@ async function rotateThumbnail(fileIndex, pageNum, canvasElement) {
             fileReader.readAsArrayBuffer(file);
         }
 
-       async function combineAllPDFs() {
+        async function combineAllPDFs() {
             if (pdfFiles.length === 0) {
                 alert('Добавьте хотя бы один PDF файл');
                 return;
@@ -2058,11 +2058,8 @@ async function rotateThumbnail(fileIndex, pageNum, canvasElement) {
                 const pdf = await PDFLib.PDFDocument.load(pdfBytes);
                 const totalPages = pdf.getPageCount();
 
-                // ИСПРАВЛЕНИЕ: Копируем все страницы за один вызов, чтобы не дублировать ресурсы
-                const pageIndices = Array.from({ length: totalPages }, (_, i) => i);
-                const copiedPages = await mergedPdf.copyPages(pdf, pageIndices);
-                
-                for (const copiedPage of copiedPages) {
+                for (let i = 0; i < totalPages; i++) {
+                    const [copiedPage] = await mergedPdf.copyPages(pdf, [i]);
                     mergedPdf.addPage(copiedPage);
                 }
             }
@@ -2087,8 +2084,7 @@ async function rotateThumbnail(fileIndex, pageNum, canvasElement) {
             link.download = combinedFile.name;
             link.click();
         }
-        
-        
+
         document.addEventListener('keydown', function(event) {
             if (event.key === 'F8') {
                 event.preventDefault();
@@ -2398,7 +2394,7 @@ async function rotateThumbnail(fileIndex, pageNum, canvasElement) {
             document.getElementById('selected-pages-panel').style.display = 'block';
         }
 
-    async function combinePDFs(fileName) {
+        async function combinePDFs(fileName) {
             if (pdfFiles.length === 0) {
                 alert('Добавьте хотя бы один PDF файл');
                 return;
@@ -2412,16 +2408,13 @@ async function rotateThumbnail(fileIndex, pageNum, canvasElement) {
                 const totalPages = pdf.getPageCount();
                 const pageIndices = parsePageRange(pdfFile.range, totalPages);
 
-                try {
-                    // ИСПРАВЛЕНИЕ: Передаем весь массив индексов (0-based) одним вызовом
-                    const zeroBasedIndices = pageIndices.map(num => num - 1);
-                    const copiedPages = await mergedPdf.copyPages(pdf, zeroBasedIndices);
-                    
-                    for (const copiedPage of copiedPages) {
+                for (let pageNum of pageIndices) {
+                    try {
+                        const [copiedPage] = await mergedPdf.copyPages(pdf, [pageNum - 1]);
                         mergedPdf.addPage(copiedPage);
+                    } catch (error) {
+                        console.error(`Ошибка при копировании страницы ${pageNum} из файла ${pdfFile.file.name}:`, error);
                     }
-                } catch (error) {
-                    console.error(`Ошибка при копировании страниц из файла ${pdfFile.file.name}:`, error);
                 }
             }
 
@@ -2454,68 +2447,51 @@ function resetSelectedPages() {
 }
 
 async function combineSelectedPages() {
-            if (selectedPages.length === 0) {
-                alert('Выберите хотя бы одну страницу');
-                return;
-            }
+    if (selectedPages.length === 0) {
+        alert('Выберите хотя бы одну страницу');
+        return;
+    }
 
-            const mergedPdf = await PDFLib.PDFDocument.create();
+    const mergedPdf = await PDFLib.PDFDocument.create();
 
-            // ИСПРАВЛЕНИЕ: Группируем выбор по файлам, чтобы загрузить каждый файл 1 раз
-            // и скопировать его страницы 1 раз без дублирования шрифтов и картинок
-            const pagesByFile = {};
-            for (let i = 0; i < selectedPages.length; i++) {
-                const pageInfo = selectedPages[i];
-                if (!pagesByFile[pageInfo.fileIndex]) {
-                    pagesByFile[pageInfo.fileIndex] = { indices: [], order: [] };
-                }
-                pagesByFile[pageInfo.fileIndex].indices.push(pageInfo.pageNum - 1);
-                pagesByFile[pageInfo.fileIndex].order.push(i);
-            }
+    for (let pageInfo of selectedPages) {
+        const pdfFile = pdfFiles[pageInfo.fileIndex];
+        const pdfBytes = await pdfFile.file.arrayBuffer();
+        const pdf = await PDFLib.PDFDocument.load(pdfBytes);
+        const [copiedPage] = await mergedPdf.copyPages(pdf, [pageInfo.pageNum - 1]);
+        
+        // --- НАЧАЛО ИСПРАВЛЕНИЙ ---
 
-            const finalPages = new Array(selectedPages.length);
+        // 1. Получаем ИСХОДНЫЙ угол поворота скопированной страницы
+        const originalRotation = copiedPage.getRotation().angle;
 
-            for (let fileIndex in pagesByFile) {
-                const fileData = pagesByFile[fileIndex];
-                const pdfFile = pdfFiles[fileIndex];
-                const pdfBytes = await pdfFile.file.arrayBuffer();
-                const pdf = await PDFLib.PDFDocument.load(pdfBytes);
-                
-                // Копируем все нужные страницы для текущего файла за 1 вызов
-                const copiedPages = await mergedPdf.copyPages(pdf, fileData.indices);
-                
-                for (let j = 0; j < copiedPages.length; j++) {
-                    const originalIndex = fileData.order[j];
-                    const copiedPage = copiedPages[j];
-                    
-                    const pageInfo = selectedPages[originalIndex];
-                    const originalRotation = copiedPage.getRotation().angle;
-                    const pageKey = `${pageInfo.fileIndex}-${pageInfo.pageNum}`;
-                    const manualRotation = pageRotations[pageKey] || 0;
-                    
-                    const totalRotation = (originalRotation + manualRotation) % 360;
-                    copiedPage.setRotation(PDFLib.degrees(totalRotation));
-                    
-                    finalPages[originalIndex] = copiedPage;
-                }
-            }
+        // 2. Получаем РУЧНОЙ поворот, добавленный пользователем
+        const pageKey = `${pageInfo.fileIndex}-${pageInfo.pageNum}`;
+        const manualRotation = pageRotations[pageKey] || 0;
 
-            // Добавляем страницы строго в изначальном порядке
-            for (let page of finalPages) {
-                mergedPdf.addPage(page);
-            }
+        // 3. СУММИРУЕМ оба поворота для получения итогового угла
+        const totalRotation = (originalRotation + manualRotation) % 360;
 
-            const pdfBytes = await mergedPdf.save();
-            const blob = new Blob([pdfBytes], { type: 'application/pdf' });
-            const combinedFile = new File([blob], 'Выбранные_страницы.pdf', { type: 'application/pdf' });
+        // 4. Устанавливаем итоговый поворот на страницу
+        copiedPage.setRotation(PDFLib.degrees(totalRotation));
 
-            const link = document.createElement('a');
-            link.href = URL.createObjectURL(blob);
-            link.download = combinedFile.name;
-            link.click();
-            
-            resetSelectedPages(); 
-        }
+        // --- КОНЕЦ ИСПРАВЛЕНИЙ ---
+        
+        mergedPdf.addPage(copiedPage);
+    }
+
+    const pdfBytes = await mergedPdf.save();
+    const blob = new Blob([pdfBytes], { type: 'application/pdf' });
+    const combinedFile = new File([blob], 'Выбранные_страницы.pdf', { type: 'application/pdf' });
+
+    const link = document.createElement('a');
+    link.href = URL.createObjectURL(blob);
+    link.download = combinedFile.name;
+    link.click();
+    
+    // Этот вызов, как мы и исправили ранее, сбрасывает только выделение
+    resetSelectedPages(); 
+}
 
         document.addEventListener('keydown', function(event) {
             if (event.key === 'F9') {
@@ -2660,7 +2636,7 @@ async function combineSelectedPages() {
             updateSelectedPagesList();
         }
 
-async function combineAlternatingPages() {
+        async function combineAlternatingPages() {
             if (pdfFiles.length !== 2) {
                 alert('Необходимо ровно два PDF файла');
                 return;
@@ -2695,16 +2671,12 @@ async function combineAlternatingPages() {
             
             const mergedPdf = await PDFLib.PDFDocument.create();
 
-            // ИСПРАВЛЕНИЕ: Копируем нужное количество страниц массивами, чтобы не плодить ресурсы
-            const singlePageIndices = Array.from({ length: multiPageCount }, () => 0);
-            const copiedSinglePages = await mergedPdf.copyPages(singlePagePdf, singlePageIndices);
-            
-            const multiPageIndices = Array.from({ length: multiPageCount }, (_, i) => i);
-            const copiedMultiPages = await mergedPdf.copyPages(multiPagePdf, multiPageIndices);
-
             for (let i = 0; i < multiPageCount; i++) {
-                mergedPdf.addPage(copiedSinglePages[i]);
-                mergedPdf.addPage(copiedMultiPages[i]);
+                const [singlePage] = await mergedPdf.copyPages(singlePagePdf, [0]);
+                mergedPdf.addPage(singlePage);
+
+                const [multiPage] = await mergedPdf.copyPages(multiPagePdf, [i]);
+                mergedPdf.addPage(multiPage);
             }
             
             const pdfBytes = await mergedPdf.save();
@@ -2841,7 +2813,7 @@ async function combineAlternatingPages() {
             updateCombinedFilesList();
         }
 
-async function combineTwoFiles(file1, file2, index) {
+        async function combineTwoFiles(file1, file2, index) {
             try {
                 const file1Bytes = await file1.arrayBuffer();
                 const file2Bytes = await file2.arrayBuffer();
@@ -2851,14 +2823,15 @@ async function combineTwoFiles(file1, file2, index) {
                 
                 const mergedPdf = await PDFLib.PDFDocument.create();
                 
-                // ИСПРАВЛЕНИЕ: Опять же, копируем страницы за 1 раз вместо цикла
-                const indices1 = Array.from({ length: pdf1.getPageCount() }, (_, i) => i);
-                const copiedPages1 = await mergedPdf.copyPages(pdf1, indices1);
-                copiedPages1.forEach(page => mergedPdf.addPage(page));
+                for (let i = 0; i < pdf1.getPageCount(); i++) {
+                    const [page] = await mergedPdf.copyPages(pdf1, [i]);
+                    mergedPdf.addPage(page);
+                }
                 
-                const indices2 = Array.from({ length: pdf2.getPageCount() }, (_, i) => i);
-                const copiedPages2 = await mergedPdf.copyPages(pdf2, indices2);
-                copiedPages2.forEach(page => mergedPdf.addPage(page));
+                for (let i = 0; i < pdf2.getPageCount(); i++) {
+                    const [page] = await mergedPdf.copyPages(pdf2, [i]);
+                    mergedPdf.addPage(page);
+                }
                 
                 const pdfBytes = await mergedPdf.save();
                 const blob = new Blob([pdfBytes], {
@@ -2942,7 +2915,7 @@ async function combineTwoFiles(file1, file2, index) {
             });
         }
 
-async function combineToTwoPerPage() {
+        async function combineToTwoPerPage() {
             if (pdfFiles.length === 0) {
                 alert('Добавьте хотя бы один PDF файл');
                 return;
@@ -2974,11 +2947,12 @@ async function combineToTwoPerPage() {
                     for (let i = 0; i < allPages.length; i += 2) {
                         const newPage = mergedPdf.addPage([pageWidth * 2, pageHeight]);
 
-                        // ИСПРАВЛЕНИЕ: Вместо создания промежуточных PDF напрямую эмбедим страницы
-                        const sourcePage1 = allPages[i].pdfDoc.getPage(allPages[i].pageIndex);
-                        const embeddedPage1 = await mergedPdf.embedPage(sourcePage1);
+                        const page1Pdf = await PDFLib.PDFDocument.create();
+                        const [copiedPage1] = await page1Pdf.copyPages(allPages[i].pdfDoc, [allPages[i].pageIndex]);
+                        page1Pdf.addPage(copiedPage1);
+                        const page1Embeded = await mergedPdf.embedPdf(await page1Pdf.save());
 
-                        newPage.drawPage(embeddedPage1, {
+                        newPage.drawPage(page1Embeded[0], {
                             x: 0,
                             y: 0,
                             width: pageWidth,
@@ -2986,10 +2960,12 @@ async function combineToTwoPerPage() {
                         });
 
                         if (i + 1 < allPages.length) {
-                            const sourcePage2 = allPages[i + 1].pdfDoc.getPage(allPages[i + 1].pageIndex);
-                            const embeddedPage2 = await mergedPdf.embedPage(sourcePage2);
+                            const page2Pdf = await PDFLib.PDFDocument.create();
+                            const [copiedPage2] = await page2Pdf.copyPages(allPages[i + 1].pdfDoc, [allPages[i + 1].pageIndex]);
+                            page2Pdf.addPage(copiedPage2);
+                            const page2Embeded = await mergedPdf.embedPdf(await page2Pdf.save());
 
-                            newPage.drawPage(embeddedPage2, {
+                            newPage.drawPage(page2Embeded[0], {
                                 x: pageWidth,
                                 y: 0,
                                 width: pageWidth,
@@ -3032,10 +3008,12 @@ async function combineToTwoPerPage() {
 
                         for (let j = 0; j < 4; j++) {
                             if (i + j < allPages.length) {
-                                const sourcePage = allPages[i + j].pdfDoc.getPage(allPages[i + j].pageIndex);
-                                const embeddedPage = await mergedPdf.embedPage(sourcePage);
+                                const pagePdf = await PDFLib.PDFDocument.create();
+                                const [copiedPage] = await pagePdf.copyPages(allPages[i + j].pdfDoc, [allPages[i + j].pageIndex]);
+                                pagePdf.addPage(copiedPage);
+                                const pageEmbeded = await mergedPdf.embedPdf(await pagePdf.save());
 
-                                newPage.drawPage(embeddedPage, {
+                                newPage.drawPage(pageEmbeded[0], {
                                     x: positions[j].x,
                                     y: positions[j].y,
                                     width: pageWidth,
@@ -3046,14 +3024,26 @@ async function combineToTwoPerPage() {
                         
                         if (options.showBorders) {
                             newPage.drawLine({
-                                start: { x: pageWidth, y: 0 },
-                                end: { x: pageWidth, y: pageHeight * 2 },
+                                start: {
+                                    x: pageWidth,
+                                    y: 0
+                                },
+                                end: {
+                                    x: pageWidth,
+                                    y: pageHeight * 2
+                                },
                                 thickness: 1,
                                 color: PDFLib.rgb(0.7, 0.7, 0.7)
                             });
                             newPage.drawLine({
-                                start: { x: 0, y: pageHeight },
-                                end: { x: pageWidth * 2, y: pageHeight },
+                                start: {
+                                    x: 0,
+                                    y: pageHeight
+                                },
+                                end: {
+                                    x: pageWidth * 2,
+                                    y: pageHeight
+                                },
                                 thickness: 1,
                                 color: PDFLib.rgb(0.7, 0.7, 0.7)
                             });
