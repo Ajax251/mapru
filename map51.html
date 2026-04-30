@@ -21931,14 +21931,10 @@ modal.querySelector('#show-points-btn').addEventListener('click', async () => {
                         <input type="radio" name="adv_num_target" value="all" style="width: 16px; height: 16px;"> Для всех контуров
                     </label>
                     
-                   <div id="adv_num_all_options" style="display:none; flex-direction:column; gap:8px; margin-left:24px; padding-left:10px; border-left:2px solid #cbd5e1;">
+                    <div id="adv_num_all_options" style="display:none; flex-direction:column; gap:8px; margin-left:24px; padding-left:10px; border-left:2px solid #cbd5e1;">
                         <label style="cursor:pointer; font-size:0.9rem;"><input type="radio" name="adv_num_mode" value="continuous" checked> Сквозная нумерация (н1..н4, н5..)</label>
                         <label style="cursor:pointer; font-size:0.9rem;"><input type="radio" name="adv_num_mode" value="reset"> Для каждого с начала (н1..н4, н1..)</label>
                     </div>
-                    <!-- НОВЫЙ ЧЕКБОКС -->
-                    <label style="cursor:pointer; display:flex; align-items:center; gap:8px; font-weight: 500; margin-top: 5px; border-top: 1px solid #cbd5e1; padding-top: 10px;">
-                        <input type="checkbox" id="adv_num_inner_contours" checked style="width: 16px; height: 16px; accent-color: #3b82f6;"> Нумеровать внутренние контуры
-                    </label>
                 </div>
 
                 <div style="display:flex; justify-content:space-between; align-items:center;">
@@ -22030,7 +22026,6 @@ modal.querySelector('#show-points-btn').addEventListener('click', async () => {
             const textColor = advModal.querySelector('#adv_num_text_color').value;
             const dotSize = parseInt(dotSlider.value);
             const textSize = parseInt(textSlider.value);
-            const includeInnerContours = advModal.querySelector('#adv_num_inner_contours').checked;
 
             // Определяем целевые объекты
             const targetObjects = isAll 
@@ -22055,97 +22050,83 @@ modal.querySelector('#show-points-btn').addEventListener('click', async () => {
                 });
                 pointsToRemove.forEach(p => { map.geoObjects.remove(p); polygons = polygons.filter(poly => poly !== p); });
 
-                // 2. Получение координат с учетом внутренних контуров
+                // 2. Получение координат
                 const isPoly = tObj instanceof ymaps.Polygon;
-                let ringsToProcess = [];
-                
-                if (isPoly) {
-                    const allRings = tObj.geometry.getCoordinates();
-                    if (includeInnerContours) {
-                        ringsToProcess = allRings; // Берем и внешний, и все внутренние (дырки)
-                    } else {
-                        ringsToProcess = [allRings[0]]; // Только внешний контур
-                    }
-                } else {
-                    ringsToProcess = [tObj.geometry.getCoordinates()]; // Для линий всегда один массив
-                }
+                let coords = isPoly ? tObj.geometry.getCoordinates()[0] : tObj.geometry.getCoordinates();
+                if (!coords || !coords.length) return;
 
-                // Устанавливаем счетчик для текущего объекта (сбросится, если выбран режим reset)
+                const isClosed = isPoly && coords.length > 2 &&
+                    Math.abs(coords[0][0] - coords[coords.length - 1][0]) < 1e-7 &&
+                    Math.abs(coords[0][1] - coords[coords.length - 1][1]) < 1e-7;
+                
+                const numPoints = isClosed ? coords.length - 1 : coords.length;
+                if (numPoints < 1) return;
+
+                // Если выбран сброс для каждого контура
                 let localCounter = (isAll && !isContinuous) ? (parseInt(advModal.querySelector('#adv_num_start').value) || 1) : globalCounter;
 
-                // 3. Цикл по всем контурам (внешний + внутренние)
-                ringsToProcess.forEach(coords => {
-                    if (!coords || !coords.length) return;
-
-                    const isClosed = isPoly && coords.length > 2 &&
-                        Math.abs(coords[0][0] - coords[coords.length - 1][0]) < 1e-7 &&
-                        Math.abs(coords[0][1] - coords[coords.length - 1][1]) < 1e-7;
+                // 3. Отрисовка
+                for (let i = 0; i < numPoints; i++) {
+                    const currentCoord = coords[i];
+                    const prevCoord = coords[(i - 1 + numPoints) % numPoints];
+                    const nextCoord = coords[(i + 1) % numPoints];
                     
-                    const numPoints = isClosed ? coords.length - 1 : coords.length;
-                    if (numPoints < 1) return;
+                    const projection = map.options.get('projection');
+                    const zoom = map.getZoom();
+                    const currentPx = projection.toGlobalPixels(currentCoord, zoom);
+                    const prevPx = projection.toGlobalPixels(prevCoord, zoom);
+                    const nextPx = projection.toGlobalPixels(nextCoord, zoom);
+                    
+                    const v1 = [prevPx[0] - currentPx[0], prevPx[1] - currentPx[1]];
+                    const v2 = [nextPx[0] - currentPx[0], nextPx[1] - currentPx[1]];
+                    const mag1 = Math.sqrt(v1[0]*v1[0] + v1[1]*v1[1]) || 1;
+                    const mag2 = Math.sqrt(v2[0]*v2[0] + v2[1]*v2[1]) || 1;
+                    
+                    const bisector = [(v1[0]/mag1) + (v2[0]/mag2), (v1[1]/mag1) + (v2[1]/mag2)];
+                    const outwardBisector = [-bisector[0], -bisector[1]];
+                    const magOut = Math.sqrt(outwardBisector[0]*outwardBisector[0] + outwardBisector[1]*outwardBisector[1]);
+                    const finalDir = magOut > 0 ? [outwardBisector[0]/magOut, outwardBisector[1]/magOut] : [1, 0];
+                    
+                    const offsetDist = 25; 
+                    const finalOffset = [Math.round(finalDir[0] * offsetDist), Math.round(finalDir[1] * offsetDist)];
 
-                    // Отрисовка точек текущего контура
-                    for (let i = 0; i < numPoints; i++) {
-                        const currentCoord = coords[i];
-                        const prevCoord = coords[(i - 1 + numPoints) % numPoints];
-                        const nextCoord = coords[(i + 1) % numPoints];
-                        
-                        const projection = map.options.get('projection');
-                        const zoom = map.getZoom();
-                        const currentPx = projection.toGlobalPixels(currentCoord, zoom);
-                        const prevPx = projection.toGlobalPixels(prevCoord, zoom);
-                        const nextPx = projection.toGlobalPixels(nextCoord, zoom);
-                        
-                        const v1 = [prevPx[0] - currentPx[0], prevPx[1] - currentPx[1]];
-                        const v2 = [nextPx[0] - currentPx[0], nextPx[1] - currentPx[1]];
-                        const mag1 = Math.sqrt(v1[0]*v1[0] + v1[1]*v1[1]) || 1;
-                        const mag2 = Math.sqrt(v2[0]*v2[0] + v2[1]*v2[1]) || 1;
-                        
-                        const bisector = [(v1[0]/mag1) + (v2[0]/mag2), (v1[1]/mag1) + (v2[1]/mag2)];
-                        const outwardBisector = [-bisector[0], -bisector[1]];
-                        const magOut = Math.sqrt(outwardBisector[0]*outwardBisector[0] + outwardBisector[1]*outwardBisector[1]);
-                        const finalDir = magOut > 0 ? [outwardBisector[0]/magOut, outwardBisector[1]/magOut] : [1, 0];
-                        
-                        const offsetDist = 25; 
-                        const finalOffset = [Math.round(finalDir[0] * offsetDist), Math.round(finalDir[1] * offsetDist)];
+                    // Метка-Точка
+                   // Метка-Точка
+                    const dotPlacemark = new ymaps.Placemark(currentCoord, { 
+                        _googleShifted: true,
+                        isVertexPoint: true, 
+                        relatedPolygon: tObj,
+                        isAdvDot: true,           // Маркер для экспорта
+                        advDotSize: dotSize,      // Сохраняем размер в свойствах
+                        advDotColor: dotColor     // Сохраняем цвет в свойствах
+                    }, {
+                        iconLayout: advDotLayout, // Используем глобальный макет
+                        iconOffset: [-dotSize/2, -dotSize/2],
+                        zIndex: 1140
+                    });
+                    map.geoObjects.add(dotPlacemark);
+                    polygons.push(dotPlacemark);
+                    
+                    // Метка-Текст
+                    const textPlacemark = new ymaps.Placemark(currentCoord, {
+                        iconContent: `н${localCounter}`, 
+                        _googleShifted: true,
+                        isVertexPoint: true, 
+                        relatedPolygon: tObj,
+                        isAdvText: true,          // Маркер для экспорта
+                        advTextSize: textSize,    // Сохраняем размер в свойствах
+                        advTextColor: textColor   // Сохраняем цвет в свойствах
+                    }, {
+                        iconLayout: advTextLayout, // Используем глобальный макет
+                        iconOffset: finalOffset,
+                        zIndex: 1150
+                    });
+                    map.geoObjects.add(textPlacemark);
+                    polygons.push(textPlacemark);
 
-                        // Метка-Точка
-                        const dotPlacemark = new ymaps.Placemark(currentCoord, { 
-                            _googleShifted: true,
-                            isVertexPoint: true, 
-                            relatedPolygon: tObj,
-                            isAdvDot: true,           
-                            advDotSize: dotSize,      
-                            advDotColor: dotColor     
-                        }, {
-                            iconLayout: advDotLayout, 
-                            iconOffset: [-dotSize/2, -dotSize/2],
-                            zIndex: 1140
-                        });
-                        map.geoObjects.add(dotPlacemark);
-                        polygons.push(dotPlacemark);
-                        
-                        // Метка-Текст
-                        const textPlacemark = new ymaps.Placemark(currentCoord, {
-                            iconContent: `н${localCounter}`, 
-                            _googleShifted: true,
-                            isVertexPoint: true, 
-                            relatedPolygon: tObj,
-                            isAdvText: true,          
-                            advTextSize: textSize,    
-                            advTextColor: textColor   
-                        }, {
-                            iconLayout: advTextLayout, 
-                            iconOffset: finalOffset,
-                            zIndex: 1150
-                        });
-                        map.geoObjects.add(textPlacemark);
-                        polygons.push(textPlacemark);
-
-                        localCounter++;
-                        totalPointsDrawn++;
-                    }
-                });
+                    localCounter++;
+                    totalPointsDrawn++;
+                }
 
                 if (isAll && isContinuous) globalCounter = localCounter;
                 tObj.properties.set('numberedPointsVisible', true);
