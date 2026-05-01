@@ -4972,8 +4972,61 @@ const BUCKET_NAME = 'kpt';
 const supabaseUrl = 'https://vznsatvyikahngdfvqho.supabase.co'; 
 const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ6bnNhdHZ5aWthaG5nZGZ2cWhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDU0MjM3MDMsImV4cCI6MjA2MDk5OTcwM30.FJmk0lgIjqvcdV7p6C0riaxqS9QWKAuIHDZtkMYMJe4';
 
+const FORCE_SUPABASE_PROXY = 1; 
+const VERCEL_SUPABASE_PROXY = 'https://supred.vercel.app/supabase-api';
+
 const { createClient } = supabase;
-const supabaseClient = createClient(supabaseUrl, supabaseAnonKey);
+
+const fallbackFetch = async (url, options) => {
+    // 1. Если включен принудительный прокси (1) -> сразу отправляем через Vercel
+    if (FORCE_SUPABASE_PROXY === 1) {
+        const originalUrl = new URL(url);
+        const proxyUrl = `${VERCEL_SUPABASE_PROXY}${originalUrl.pathname}${originalUrl.search}`;
+        return fetch(proxyUrl, options);
+    }
+
+    // 2. Если прокси выключен (0) -> пробуем напрямую с таймаутом 5 секунд
+    const controller = new AbortController();
+    let isTimeoutTriggered = false;
+
+    // Ставим таймаут 5000 мс (5 сек)
+    const timeoutId = setTimeout(() => {
+        isTimeoutTriggered = true;
+        controller.abort(); 
+    }, 5000);
+
+    if (options && options.signal) {
+        options.signal.addEventListener('abort', () => {
+            clearTimeout(timeoutId);
+            controller.abort();
+        });
+    }
+
+    try {
+        const response = await fetch(url, { ...options, signal: controller.signal });
+        clearTimeout(timeoutId);
+        return response; 
+    } catch (error) {
+        clearTimeout(timeoutId);
+        
+        if (error.name === 'AbortError' && !isTimeoutTriggered) {
+            throw error;
+        }
+
+        console.warn(`[Supabase Proxy] Прямой запрос не удался (таймаут 5с). Переходим на Vercel...`);
+        
+        const originalUrl = new URL(url);
+        const proxyUrl = `${VERCEL_SUPABASE_PROXY}${originalUrl.pathname}${originalUrl.search}`;
+        
+        return fetch(proxyUrl, options);
+    }
+};
+
+const supabaseClient = createClient(supabaseUrl, supabaseAnonKey, {
+    global: {
+        fetch: fallbackFetch
+    }
+});
 
 // Helper function to generate the ZIP blob (extracted from export function)
 async function generateParcelDataZipBlob(features, internalJsonFilename) {
