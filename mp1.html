@@ -1235,8 +1235,7 @@
                 <div class="legend-item"><div class="legend-color" style="background:#2563eb; border: 2px solid #1e40af;"></div><span>Целевой ЗУ (XML)</span></div>
                 <div class="legend-item"><div class="legend-color" style="background:rgba(100,116,139,0.2); border: 2px dashed #64748b;"></div><span>ЕГРН (Без наложений)</span></div>
                 <div class="legend-item"><div class="legend-color" style="background:rgba(239,68,68,0.4); border: 2px solid #ef4444;"></div><span>Наложение!</span></div>
-               <div class="legend-item"><div class="legend-color" style="background:#f59e0b; height: 3px;"></div><span>Смежники (ChangeBorder из XML)</span></div>
-                <div class="legend-item"><div class="legend-color" style="background:transparent; border: 2px dashed #10b981;"></div><span>Квартал</span></div>
+                <div class="legend-item"><div class="legend-color" style="background:#f59e0b; height: 3px;"></div><span>Смежники (ChangeBorder из XML)</span></div>
             </div>
             <span class="ai-modal-close-button" id="overlapSchemaModalClose">×</span>
         </div>
@@ -4277,23 +4276,22 @@ async function performOverlapCheck(button) {
 
     try {
         // 1. Ищем нужный узел и извлекаем контуры
-   let targetNode;
+     let targetNode;
         let targetCadNum = null;
         let areaInGKN = null;
-        let parentCadNums = []; 
-        let cadastralBlock = null; // Добавлена переменная для квартала
+        let parentCadNums = []; // Массив для исходных ЗУ
 
         if (type === 'new') {
             targetNode = All(lastXmlDoc, 'NewParcel')[index];
-            cadastralBlock = T(targetNode, 'CadastralBlock');
-            currentMskSystem = detectMskSystem(cadastralBlock);
+            const block = T(targetNode, 'CadastralBlock');
+            currentMskSystem = detectMskSystem(block);
             
+            // Собираем кадастровые номера исходных участков
             const prevNodes = All(targetNode, 'PrevCadastralNumbers > CadastralNumber');
             parentCadNums = Array.from(prevNodes).map(n => n.textContent.trim().toLowerCase());
         } else {
             targetNode = All(lastXmlDoc, 'SpecifyParcel > ExistParcel')[index];
             targetCadNum = A(targetNode, 'CadastralNumber');
-            cadastralBlock = T(targetNode, 'CadastralBlock'); // Извлекаем квартал
             areaInGKN = parseFloat(T(targetNode, 'AreaInGKN'));
             currentMskSystem = detectMskSystem(targetCadNum);
         }
@@ -4349,72 +4347,12 @@ async function performOverlapCheck(button) {
         const nspdData = await response.json();
         const nspdFeatures = nspdData.features || [];
 
-       // --- ЗАПРОС КВАРТАЛА ИЗ ЕГРН ---
-        let quarterGeoJsonWgs84 = null;
-        let quarterFetchError = null;
-
-        if (cadastralBlock && cadastralBlock !== '—') {
-            try {
-                const qUrl = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=2&query=${encodeURIComponent(cadastralBlock)}`;
-                const qRes = await fetch(qUrl);
-                const qData = await qRes.json();
-                
-                if (qData?.data?.features?.[0]?.geometry) {
-                    const qGeom3857 = qData.data.features[0].geometry;
-                    const qWgsRings = [];
-                    const qCoords = qGeom3857.type === 'Polygon' ? [qGeom3857.coordinates] : qGeom3857.coordinates;
-                    
-                    qCoords.forEach(poly => {
-                        poly.forEach(ring => {
-                            const wgsRing = ring.map(c => {
-                                const wgs = proj4('EPSG:3857', 'EPSG:4326', c);
-                                return [wgs[0], wgs[1]];
-                            });
-                            qWgsRings.push(wgsRing);
-                        });
-                    });
-                    
-                    quarterGeoJsonWgs84 = { rings: qWgsRings, type: 'quarter', cadNum: cadastralBlock };
-                } else {
-                    quarterFetchError = 'Геометрия не найдена в ЕГРН';
-                }
-            } catch (e) {
-                quarterFetchError = 'Ошибка сети при запросе квартала';
-            }
-        }
-
         // 4. Математический анализ (Turf.js)
         const reportItems = [];
         const egrnPolygonsRenderData = []; // Для отрисовки
         
         // Превращаем XML контур в Turf полигон для точных проверок (на WGS84)
-        const xmlTurfPoly = turf.polygon([xmlContoursWgs[0]]); 
-
-        // --- ПРОВЕРКА ПОПАДАНИЯ В КВАРТАЛ ---
-        if (quarterGeoJsonWgs84) {
-            const qTurfPoly = turf.polygon([quarterGeoJsonWgs84.rings[0]]); // Берем внешний контур квартала
-            const intersection = turf.intersect(turf.featureCollection([xmlTurfPoly, qTurfPoly]));
-            const parcelArea = turf.area(xmlTurfPoly);
-            let overlapArea = 0;
-            
-            if (intersection) {
-                overlapArea = turf.area(intersection);
-            }
-            
-            const percentage = (overlapArea / parcelArea) * 100;
-            
-            if (percentage > 99.9) {
-                reportItems.push(`<div class="overlap-item success"><b>Квартал ${cadastralBlock}</b>. Участок полностью находится в границах заявленного кадастрового квартала.</div>`);
-            } else if (percentage > 0) {
-                reportItems.push(`<div class="overlap-item error"><b>ОШИБКА: Квартал ${cadastralBlock}</b>. Участок выходит за границы квартала! (В квартале находится лишь ${percentage.toFixed(1)}% площади участка).</div>`);
-            } else {
-                reportItems.push(`<div class="overlap-item error"><b>ОШИБКА: Квартал ${cadastralBlock}</b>. Участок <b>ПОЛНОСТЬЮ ВНЕ</b> границ заявленного кадастрового квартала!</div>`);
-            }
-            
-            egrnPolygonsRenderData.push(quarterGeoJsonWgs84); // Добавляем квартал для отрисовки на холсте
-        } else if (cadastralBlock && cadastralBlock !== '—') {
-            reportItems.push(`<div class="overlap-item warning"><b>Квартал ${cadastralBlock}</b>. Не удалось загрузить геометрию квартала (${quarterFetchError}), проверка нахождения в квартале пропущена.</div>`);
-        }
+        const xmlTurfPoly = turf.polygon([xmlContoursWgs[0]]); // Упрощенно берем первый контур для расчетов
 
         for (const feature of nspdFeatures) {
             if (!feature.geometry) continue;
@@ -4587,8 +4525,6 @@ function drawOverlapCanvas() {
             });
         });
         
-      let skipFill = false;
-
         if (ep.type === 'overlap') {
             ctx.fillStyle = 'rgba(239, 68, 68, 0.2)';
             ctx.strokeStyle = '#ef4444';
@@ -4598,27 +4534,19 @@ function drawOverlapCanvas() {
             ctx.strokeStyle = '#64748b';
             ctx.setLineDash([5, 5]);
             ctx.lineWidth = 2;
-        } else if (ep.type === 'quarter') {
-            skipFill = true; // Квартал не заливаем, чтобы не перекрывать участки
-            ctx.strokeStyle = '#10b981'; // Зеленый цвет для квартала
-            ctx.setLineDash([10, 5]);
-            ctx.lineWidth = 2;
         } else {
             ctx.fillStyle = 'transparent';
             ctx.strokeStyle = '#cbd5e1';
             ctx.lineWidth = 1;
         }
         
-        if (!skipFill) ctx.fill(); 
-        ctx.stroke(); 
-        ctx.setLineDash([]);
+        ctx.fill(); ctx.stroke(); ctx.setLineDash([]);
         
-        // Подпись КН (для квартала выводим полностью, для ЗУ - только последние цифры)
+        // Подпись КН
         const cp = toCanvas(ep.rings[0][0][0], ep.rings[0][0][1]);
-        ctx.fillStyle = ep.type === 'quarter' ? '#10b981' : '#333';
-        ctx.font = ep.type === 'quarter' ? 'bold 11px Arial' : '10px Arial';
-        const labelText = ep.type === 'quarter' ? ep.cadNum : ep.cadNum.split(':').pop();
-        ctx.fillText(labelText, cp.x, cp.y - 5);
+        ctx.fillStyle = '#333';
+        ctx.font = '10px Arial';
+        ctx.fillText(ep.cadNum.split(':').pop(), cp.x, cp.y - 5);
     });
 
     // 2. Отрисовка линий смежников (ChangeBorder из XML) поверх всего
