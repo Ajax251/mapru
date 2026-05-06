@@ -4267,6 +4267,110 @@ async function checkNewParcelBoundaries(prevCadNumber, parcelIndex, button) {
 // Глобальная переменная для хранения данных для отрисовки
 let currentOverlapRenderData = null;
 
+// Функция для точного геодезического вычисления площади пересечения в МСК (до 1 см)
+function getPreciseOverlapAreaMsk(wgsTurfPoly1, wgsTurfPoly2, mskSystem) {
+    if (!mskSystem || !wgsTurfPoly1 || !wgsTurfPoly2) return 0;
+
+    // 1. Конвертация WGS84 в точные МСК (округление до 1 см)
+    const toExactMsk = (coord) => {
+        const pt3857 = proj4('EPSG:4326', 'EPSG:3857', coord);
+        const [lon_msk, lat_msk] = proj4('EPSG:3857', mskSystem.value, pt3857);
+        
+        const x = Math.round((lat_msk + (mskSystem.offsetX || 0)) * 100) / 100;
+        const y = Math.round((lon_msk + (mskSystem.offsetY || 0)) * 100) / 100;
+        return [x, y];
+    };
+
+    const mapToMsk = (geom) => {
+        if (geom.type === 'Polygon') return { type: 'Polygon', coordinates: geom.coordinates.map(r => r.map(toExactMsk)) };
+        if (geom.type === 'MultiPolygon') return { type: 'MultiPolygon', coordinates: geom.coordinates.map(p => p.map(r => r.map(toExactMsk))) };
+        return geom;
+    };
+
+    const mskGeom1 = mapToMsk(wgsTurfPoly1.geometry);
+    const mskGeom2 = mapToMsk(wgsTurfPoly2.geometry);
+
+    // 2. Смещение к локальному нулю (чтобы избежать искажений Turf.js на больших координатах МСК)
+    let originX = null, originY = null;
+    const shiftToZero = (coord) => {
+        if (originX === null) { originX = coord[0]; originY = coord[1]; }
+        return [coord[0] - originX, coord[1] - originY];
+    };
+
+    const applyShift = (geom) => {
+        if (geom.type === 'Polygon') return { type: 'Polygon', coordinates: geom.coordinates.map(r => r.map(shiftToZero)) };
+        if (geom.type === 'MultiPolygon') return { type: 'MultiPolygon', coordinates: geom.coordinates.map(p => p.map(r => r.map(shiftToZero))) };
+        return geom;
+    };
+
+    const localGeom1 = applyShift(mskGeom1);
+    const localGeom2 = applyShift(mskGeom2);
+
+    // 3. Планарное пересечение
+    const getSolidIntersectArea = (polyCoords1, polyCoords2) => {
+        try {
+            const c1 = [...polyCoords1];
+            if (c1.length > 2 && (c1[0][0] !== c1[c1.length-1][0] || c1[0][1] !== c1[c1.length-1][1])) c1.push(c1[0]);
+            const c2 = [...polyCoords2];
+            if (c2.length > 2 && (c2[0][0] !== c2[c2.length-1][0] || c2[0][1] !== c2[c2.length-1][1])) c2.push(c2[0]);
+
+            if (c1.length < 4 || c2.length < 4) return 0;
+
+            let p1 = turf.polygon([c1]);
+            let p2 = turf.polygon([c2]);
+            p1 = turf.rewind(p1, {reverse: false}); 
+            p2 = turf.rewind(p2, {reverse: false});
+
+            const intersection = turf.intersect(turf.featureCollection([p1, p2]));
+            if (!intersection) return 0;
+            
+            // Расчет площади Гаусса
+            const calcPlanarArea = (pts) => {
+                let a = 0;
+                for (let i = 0; i < pts.length - 1; i++) a += pts[i][0] * pts[i+1][1] - pts[i+1][0] * pts[i][1];
+                return Math.abs(a) / 2;
+            };
+
+            let area = 0;
+            const geoms = intersection.geometry.type === 'Polygon' ? [intersection.geometry.coordinates]
+                        : (intersection.geometry.type === 'MultiPolygon' ? intersection.geometry.coordinates : []);
+            
+            for (const poly of geoms) {
+                area += calcPlanarArea(poly[0]);
+                for (let i = 1; i < poly.length; i++) {
+                    area -= calcPlanarArea(poly[i]);
+                }
+            }
+            return area;
+        } catch (e) { return 0; }
+    };
+
+    let totalArea = 0;
+    const polys1 = localGeom1.type === 'Polygon' ? [localGeom1.coordinates] : localGeom1.coordinates;
+    const polys2 = localGeom2.type === 'Polygon' ? [localGeom2.coordinates] : localGeom2.coordinates;
+
+    polys1.forEach(poly1 => {
+        const outer1 = poly1[0];
+        const holes1 = poly1.slice(1);
+
+        polys2.forEach(poly2 => {
+            const outer2 = poly2[0];
+            const holes2 = poly2.slice(1);
+
+            let baseArea = getSolidIntersectArea(outer1, outer2);
+
+            if (baseArea > 0.0001) {
+                holes2.forEach(hole2 => baseArea -= getSolidIntersectArea(outer1, hole2));
+                holes1.forEach(hole1 => baseArea -= getSolidIntersectArea(hole1, outer2));
+                holes1.forEach(hole1 => holes2.forEach(hole2 => baseArea += getSolidIntersectArea(hole1, hole2)));
+            }
+            totalArea += baseArea;
+        });
+    });
+
+    return Math.max(0, totalArea);
+}
+
 async function performOverlapCheck(button) {
     const type = button.dataset.type; // 'new' или 'exist'
     const index = parseInt(button.dataset.index, 10);
@@ -4390,25 +4494,23 @@ async function performOverlapCheck(button) {
         // Превращаем XML контур в Turf полигон для точных проверок (на WGS84)
         const xmlTurfPoly = turf.polygon([xmlContoursWgs[0]]); 
 
+       
         // --- ПРОВЕРКА ПОПАДАНИЯ В КВАРТАЛ ---
         if (quarterGeoJsonWgs84) {
             const qTurfPoly = turf.polygon([quarterGeoJsonWgs84.rings[0]]); // Берем внешний контур квартала
-            const intersection = turf.intersect(turf.featureCollection([xmlTurfPoly, qTurfPoly]));
-            const parcelArea = turf.area(xmlTurfPoly);
-            let overlapArea = 0;
             
-            if (intersection) {
-                overlapArea = turf.area(intersection);
-            }
+            // Используем геодезическую функцию МСК
+            const parcelArea = getPreciseOverlapAreaMsk(xmlTurfPoly, xmlTurfPoly, currentMskSystem); // Пересечение с самим собой дает точную площадь
+            const overlapArea = getPreciseOverlapAreaMsk(xmlTurfPoly, qTurfPoly, currentMskSystem);
             
             const percentage = (overlapArea / parcelArea) * 100;
             
             if (percentage > 99.9) {
-                reportItems.push(`<div class="overlap-item success"><b>Квартал ${cadastralBlock}</b> Участок полностью находится в границах указанного кадастрового квартала.</div>`);
+                reportItems.push(`<div class="overlap-item success"><b>Квартал ${cadastralBlock}</b>. Участок полностью находится в границах заявленного кадастрового квартала.</div>`);
             } else if (percentage > 0) {
                 reportItems.push(`<div class="overlap-item error"><b>ОШИБКА: Квартал ${cadastralBlock}</b>. Участок выходит за границы квартала! (В квартале находится лишь ${percentage.toFixed(1)}% площади участка).</div>`);
             } else {
-                reportItems.push(`<div class="overlap-item error"><b>ОШИБКА: Квартал ${cadastralBlock}</b> Участок <b>ПОЛНОСТЬЮ ВНЕ</b> границ указанного кадастрового квартала!</div>`);
+                reportItems.push(`<div class="overlap-item error"><b>ОШИБКА: Квартал ${cadastralBlock}</b>. Участок <b>ПОЛНОСТЬЮ ВНЕ</b> границ заявленного кадастрового квартала!</div>`);
             }
             
             egrnPolygonsRenderData.push(quarterGeoJsonWgs84); // Добавляем квартал для отрисовки на холсте
@@ -4465,22 +4567,23 @@ async function performOverlapCheck(button) {
                 continue;
             }
 
-            // Если КН другой — проверяем наложение
-            const intersection = turf.intersect(turf.featureCollection([xmlTurfPoly, egrnTurfPoly]));
-            let overlapArea = 0;
-            
-            if (intersection) {
-                // Переводим площадь из градусов в квадратные метры
-                overlapArea = turf.area(intersection);
-            }
+      // Если КН другой — проверяем наложение
+            // Сразу используем геодезическую функцию (в МСК)
+            const overlapArea = getPreciseOverlapAreaMsk(xmlTurfPoly, egrnTurfPoly, currentMskSystem);
 
-            // Порог 0.05 кв.м. для отсечения простого касания границ
-            if (overlapArea > 0.05) {
+            // Порог 0.0001 кв.м. (1 кв. см) ловит микро-наложения, игнорируя только математические микро-погрешности <= 0
+            if (overlapArea >= 0.0001) {
                 // Это реальное наложение! Проверяем, есть ли он в смежниках
                 const isRelated = relatedCadNumbers.includes(fCadNum);
                 
                 let statusClass = isRelated ? 'warning' : 'error';
-                let msg = `<b>${fCadNum}</b>. Наложение: ~${overlapArea.toFixed(2)} кв.м.`;
+                
+                // Если наложение очень мелкое (меньше 0.01 кв.м), показываем его в квадратных сантиметрах для наглядности
+                let overlapText = overlapArea < 0.01 
+                    ? `~${(overlapArea * 10000).toFixed(1)} кв.см.` 
+                    : `~${overlapArea.toFixed(2)} кв.м.`;
+
+                let msg = `<b>${fCadNum}</b>. Наложение: ${overlapText}`;
                 
                 if (isRelated) {
                     msg += `<br>Участок указан в XML как смежный (SpecifyRelatedParcel). Возможно, граница правится.`;
