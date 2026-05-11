@@ -223,7 +223,6 @@
   .bottom-btn.active { color: var(--accent); }
   .bottom-label { font-size: 10px; letter-spacing: 0.06em; text-transform: uppercase; font-weight: 500;}
 </style>
-<script src="https://cdn.jsdelivr.net/npm/@supabase/supabase-js@2"></script>
 </head>
 <body>
 <div class="app">
@@ -293,10 +292,6 @@
         <button class="data-btn" onclick="document.getElementById('importFile').click()">⬆ Загрузить</button>
       </div>
       <input type="file" id="importFile" accept=".json" style="display:none" onchange="importJSON(event)">
-      <div class="data-row" id="cloud-sync-row" style="display:none; margin-top: 12px;">
-        <button class="data-btn" onclick="saveToCloud()" style="border-color: var(--accent); color: var(--accent);">☁ В облако</button>
-        <button class="data-btn" onclick="loadFromCloud()" style="border-color: var(--green); color: var(--green);">☁ Из облака</button>
-      </div>
       <div class="data-row"><button class="data-btn danger" onclick="clearHistory()">✕ Очистить историю</button></div>
     </div>
   </div>
@@ -362,20 +357,6 @@
         </div>
       </div>
 
-
-<div class="settings-section">Облако </div>
-      <div class="card">
-        <div class="input-row" id="auth-unlogged">
-          <div><div class="input-label">Google Аккаунт</div><div class="input-sub">Для облачной синхронизации</div></div>
-          <button class="data-btn" style="width: auto; padding: 10px 16px;" onclick="loginCloud()">Войти</button>
-        </div>
-        <div class="input-row" id="auth-logged" style="display:none; border:none;">
-          <div><div class="input-label" id="cloud-user-email">User</div><div class="input-sub">Авторизован</div></div>
-          <button class="data-btn danger" style="width: auto; padding: 10px 16px;" onclick="logoutCloud()">Выйти</button>
-        </div>
-      </div>
-      
-      
       <div class="settings-section">Общие настройки</div>
       <div class="card">
         <div class="input-row">
@@ -426,129 +407,11 @@ let timerSeconds = 0;
 let timerTotal = 0;
 let audioCtx;
 
-// Конфигурация Supabase
-const SUPABASE_URL = 'https://qgycxcmxlbyrjpdikyyz.supabase.co';
-const SUPABASE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InFneWN4Y214bGJ5cmpwZGlreXl6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3NjQzOTAxNTgsImV4cCI6MjA3OTk2NjE1OH0.UtamcsWCKPpMJwH1cWJhRhh8TL7Jb_NPA0-xLpyk_YU';
-const sb = window.supabase.createClient(SUPABASE_URL, SUPABASE_KEY);
-let currentUser = null;
-
 // Helpers
 function getActiveProg() { return programs[activeProgramId]; }
 function getTodayCompleted() { return today.workouts[activeProgramId] || []; }
 function setTodayCompleted(arr) { today.workouts[activeProgramId] = arr; }
 function todayStr() { return new Date().toLocaleDateString('ru-RU', { year: 'numeric', month: '2-digit', day: '2-digit' }); }
-
-
-// ===== SUPABASE И ОБЛАКО =====
-
-async function checkAuth() {
-  const { data: { session } } = await sb.auth.getSession();
-  handleAuth(session?.user || null);
-
-  sb.auth.onAuthStateChange((event, session) => {
-    handleAuth(session?.user || null);
-  });
-}
-
-function handleAuth(user) {
-  currentUser = user;
-  const unlogged = document.getElementById('auth-unlogged');
-  const logged = document.getElementById('auth-logged');
-  const cloudSync = document.getElementById('cloud-sync-row');
-
-  if (user) {
-    if (unlogged) unlogged.style.display = 'none';
-    if (logged) logged.style.display = 'flex';
-    const emailEl = document.getElementById('cloud-user-email');
-    if (emailEl) emailEl.textContent = user.email;
-    if (cloudSync) cloudSync.style.display = 'flex';
-  } else {
-    if (unlogged) unlogged.style.display = 'flex';
-    if (logged) logged.style.display = 'none';
-    if (cloudSync) cloudSync.style.display = 'none';
-  }
-}
-
-async function loginCloud() {
-  await sb.auth.signInWithOAuth({ provider: 'google', options: { redirectTo: window.location.href } });
-}
-
-async function logoutCloud() {
-  if (!confirm('Выйти из аккаунта? Локальные данные останутся на устройстве.')) return;
-  await sb.auth.signOut();
-  showNotification('Вы вышли из аккаунта');
-}
-
-async function saveToCloud() {
-  if (!currentUser) return showNotification('Требуется авторизация!');
-  
-  // Собираем все текущие данные
-  const payload = JSON.stringify({ programs, activeProgramId, globalSettings, today, history });
-  const fileName = 'workout_sync.json';
-  const fileSize = new Blob([payload]).size;
-
-  showNotification('⏳ Сохранение в облако...');
-
-  // Проверяем, есть ли уже файл (запись в таблице files)
-  let { data: existing } = await sb.from('files')
-    .select('id')
-    .eq('user_id', currentUser.id)
-    .eq('name', fileName)
-    .eq('type', 'json');
-  
-  if (existing && existing.length > 0) {
-    // Обновляем существующую запись
-    const { error } = await sb.from('files')
-      .update({ content: payload, size: fileSize })
-      .eq('id', existing[0].id);
-    if (error) return showNotification('❌ Ошибка: ' + error.message);
-  } else {
-    // Создаем новую запись (parent_id = 'desktop' по аналогии с прошлым вашим кодом)
-    const { error } = await sb.from('files').insert({ 
-      name: fileName, type: 'json', content: payload, size: fileSize, user_id: currentUser.id, parent_id: 'desktop'
-    });
-    if (error) return showNotification('❌ Ошибка: ' + error.message);
-  }
-  showNotification('✅ Данные успешно сохранены в облаке!');
-}
-
-async function loadFromCloud() {
-  if (!currentUser) return showNotification('Требуется авторизация!');
-  if (!confirm('ВНИМАНИЕ!\nТекущие локальные данные будут перезаписаны облачными. Продолжить?')) return;
-  
-  showNotification('⏳ Загрузка из облака...');
-  
-  const { data, error } = await sb.from('files')
-    .select('content')
-    .eq('user_id', currentUser.id)
-    .eq('name', 'workout_sync.json')
-    .eq('type', 'json')
-    .order('created_at', { ascending: false });
-
-  if (error) return showNotification('❌ Ошибка: ' + error.message);
-  if (!data || data.length === 0) return showNotification('В облаке пока нет сохраненных данных');
-
-  try {
-    const parsed = JSON.parse(data[0].content);
-    
-    // Подменяем стейт облачным
-    if (parsed.programs) programs = parsed.programs;
-    if (parsed.activeProgramId) activeProgramId = parsed.activeProgramId;
-    if (parsed.globalSettings) globalSettings = parsed.globalSettings;
-    if (parsed.today) today = parsed.today;
-    if (parsed.history) history = parsed.history;
-    
-    // Сохраняем локально и обновляем интерфейс
-    saveData();
-    populateProgramSelect();
-    renderAll();
-    resetTimer();
-    showNotification('✅ Данные загружены и применены!');
-  } catch(e) {
-    showNotification('❌ Ошибка чтения формата данных из облака');
-  }
-}
-
 
 // ===== INIT =====
 function init() {
@@ -557,7 +420,6 @@ function init() {
   updateHeaderDate();
   populateProgramSelect();
   renderAll();
-   checkAuth();
 }
 
 function renderAll() {
