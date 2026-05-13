@@ -10367,30 +10367,16 @@ function showConfirmationDialog(title, message) {
 /**
  * НОВЫЙ обработчик для кнопки "Загрузить КПТ"
  */
-/**
- * НОВЫЙ обработчик для кнопки "Скачать в XML"
- */
 async function handleNspdDownloadKpt() {
     const actionButton = document.getElementById('nspdDownloadKptBtn');
     if (actionButton) actionButton.disabled = true;
 
-    // Проверяем режим: ЕЗ или Обычный
-    const isDirectEzMode = nspdLoadDialog.dataset.isDirectEz === 'true';
+    // 1. Получаем состояние галочки "Единое землепользование"
     const isEzCheckboxChecked = document.getElementById('nspdEzCheckbox').checked;
-    
-    const cadastralInput = document.getElementById('cadastralInput');
-    const identifier = cadastralInput ? cadastralInput.value.trim().replace(/:$/, '') : '';
 
     try {
-        closeNspdLoadDialog(); // Закрываем окно перед началом
-
-        if (isDirectEzMode) {
-            // Если это ЕЗ, запускаем отдельный процесс скачивания из .nspd
-            await handleEzDownloadFlow(identifier);
-            return; // Прерываем дальнейшее выполнение обычного KPT
-        }
-
-        // --- Обычный режим формирования КПТ ---
+        // 2. Передаем флаг isEzCheckboxChecked в функцию генерации
+        // Если флаг true, функция выполнит поиск в Supabase и добавит связи в XML
         const { xmlContent, filenameBase, totalObjects } = await generateNspdKptData(isEzCheckboxChecked);
 
         setStatus('Создание ZIP-архива...', true);
@@ -10405,197 +10391,6 @@ async function handleNspdDownloadKpt() {
     } finally {
         if (actionButton) actionButton.disabled = false;
     }
-}
-
-/**
- * Процесс скачивания ЕЗ из архива .nspd и формирования XML "extract_about_property_land"
- */
-async function handleEzDownloadFlow(ezNumber) {
-    setStatus(`Подготовка скачивания ЕЗ ${ezNumber}...`, true);
-    const archiveFileName = ezNumber.replace(/:/g, '_') + '.nspd';
-    
-    // Получаем .nspd архив с сервера
-    const zipBlob = await fetchZipFromLocalServer('EZ', archiveFileName);
-
-    if (!zipBlob) {
-        setStatus(''); // Очищаем статус, так как процесс скачивания остановлен
-        
-        // Формируем красивое и понятное сообщение
-        const message = `Файл единого землепользования <strong>${ezNumber}</strong> не найден в хранилище.<br><br>Сначала вам необходимо сформировать его в программе <b>«Карта»</b>, после чего вы сможете повторить попытку.<br><br>Перейти в программу «Карта» прямо сейчас?`;
-        
-        const confirmed = await showConfirmationDialog('Файл не найден', message);
-        
-        if (confirmed) {
-            try {
-                await navigator.clipboard.writeText(ezNumber);
-                showNotification(`Номер ЕЗ ${ezNumber} скопирован в буфер обмена.`, 'success', 'check-circle', 5000);
-                setTimeout(() => { window.open('map.html', '_blank'); }, 1000);
-            } catch (err) {
-                showNotification('Не удалось скопировать номер. Откройте вкладку "Карта" вручную.', 'warning', 'exclamation-triangle');
-                setTimeout(() => { window.open('map.html', '_blank'); }, 1000);
-            }
-        } else {
-            showNotification('Скачивание отменено.', 'info');
-        }
-        
-        return; // Завершаем выполнение функции без генерации красной ошибки
-    }
-
-    setStatus('Архив найден. Формирование XML...', true);
-    const { features, date } = await loadAndParseZipBlob(zipBlob);
-    
-    const nspdMskSelect = document.getElementById('nspdMskSelect');
-    const destScId = nspdMskSelect.value;
-    const destScText = nspdMskSelect.options[nspdMskSelect.selectedIndex].text;
-
-    // Генерируем специальный XML для ЕЗ
-    const xmlContent = buildEzXmlFromNspd(features, ezNumber, destScId, destScText, date);
-    
-    const filenameBase = `${ezNumber.replace(/:/g, '_')} ${date || ''} EPSG3857_EZ`.trim();
-
-    setStatus('Создание ZIP-архива ЕЗ...', true);
-    await createAndDownloadZip(xmlContent, filenameBase);
-
-    setStatus(`Готово! XML ЕЗ скачан`, false, false, true);
-    setTimeout(() => setStatus(''), 5000);
-}
-
-
-
-/**
- * Генерация XML формата <extract_about_property_land> по шаблону
- */
-function buildEzXmlFromNspd(features, ezNumber, destScId, destScText, dateStr) {
-    const targetCS_value = destScId;
-    const sourceCS_value = 'EPSG:3857';
-    
-    proj4.defs("EPSG:3857", "+proj=merc +a=6378137 +b=6378137 +lat_ts=0.0 +lon_0=0.0 +x_0=0.0 +y_0=0 +k=1.0 +units=m +nadgrids=@null +wktext +no_defs");
-    
-    const targetSystemObject = typeof COORDINATE_SYSTEMS !== 'undefined' ? COORDINATE_SYSTEMS.find(s => s.value === targetCS_value) : null;
-    const systemOffsetX = targetSystemObject ? (targetSystemObject.offsetX || 0) : 0;
-    const systemOffsetY = targetSystemObject ? (targetSystemObject.offsetY || 0) : 0;
-    if (targetSystemObject && targetSystemObject.def) proj4.defs(targetCS_value, targetSystemObject.def);
-
-    const escapeXml = (unsafe) => unsafe ? String(unsafe).replace(/[<>&'"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','\'':'&apos;','"':'&quot;'}[c])) : '';
-    const skIdTextForXml = destScText.split('(')[0].trim() || 'МСК';
-    const safeDate = dateStr || new Date().toISOString().split('T')[0];
-
-    let descendantCadNumbersXml = '';
-    let commonLandPartsXml = '';
-    let contoursXml = ''; // Сюда собираем все контуры
-    let totalArea = 0;
-
-    features.forEach((f) => {
-        const p = f.properties.options || f.properties || {};
-        const cadNum = p.cad_num || f.properties.descr;
-        
-        // Главный номер ЕЗ пропускаем, нам нужны только дочерние участки
-        if (!cadNum || cadNum === ezNumber) return; 
-
-        descendantCadNumbersXml += `        <descendant_cad_number>\n          <cad_number>${escapeXml(cadNum)}</cad_number>\n        </descendant_cad_number>\n`;
-        commonLandPartsXml += `            <included_cad_number>\n              <cad_number>${escapeXml(cadNum)}</cad_number>\n            </included_cad_number>\n`;
-
-        const areaVal = parseFloat(p.specified_area || p.land_record_area_verified || p.declared_area || p.land_record_area_declaration || p.land_record_area || 0);
-        if (!isNaN(areaVal)) totalArea += areaVal;
-
-        // Генерация контуров
-        if (f.geometry && f.geometry.coordinates) {
-            let allRings = [];
-            if (f.geometry.type === 'Polygon') allRings = f.geometry.coordinates;
-            else if (f.geometry.type === 'MultiPolygon') allRings = f.geometry.coordinates.flat(1);
-
-            allRings.forEach((ring) => {
-                if (!ring || ring.length < 1) return;
-                
-                let ordinatesXml = ring.map((point, i) => {
-                    const convertedPoint = proj4(sourceCS_value, targetCS_value, point);
-                    // Переворот X и Y для XML Росреестра
-                    const y_from_proj = convertedPoint[0] + systemOffsetY;
-                    const x_from_proj = convertedPoint[1] + systemOffsetX;
-                    return `                  <ordinate>\n                    <x>${x_from_proj.toFixed(2)}</x>\n                    <y>${y_from_proj.toFixed(2)}</y>\n                    <ord_nmb>${i + 1}</ord_nmb>\n                  </ordinate>`;
-                }).join('\n');
-
-                // ВАЖНО: Добавляем <cad_number> прямо внутрь <contour>
-                contoursXml += `    <contour>\n      <cad_number>${escapeXml(cadNum)}</cad_number>\n      <entity_spatial>\n        <sk_id>${escapeXml(skIdTextForXml)}</sk_id>\n        <spatials_elements>\n          <spatial_element>\n            <ordinates>\n${ordinatesXml}\n            </ordinates>\n          </spatial_element>\n        </spatials_elements>\n      </entity_spatial>\n    </contour>\n`;
-            });
-        }
-    });
-
-    const quarterNum = ezNumber.split(':').slice(0, 3).join(':');
-
-    return `<?xml version="1.0" encoding="UTF-8"?>
-<extract_about_property_land>
-  <details_statement>
-    <group_top_requisites>
-      <organ_registr_rights>EPSG3857-КОНВЕРТЕР</organ_registr_rights>
-      <date_formation>${safeDate}</date_formation>
-      <registration_number>КУВИ-001/КОНВЕРТЕР-ЕЗ</registration_number>
-    </group_top_requisites>
-  </details_statement>
-  <details_request>
-    <date_received_request>${safeDate}</date_received_request>
-    <date_receipt_request_reg_authority_rights>${safeDate}</date_receipt_request_reg_authority_rights>
-  </details_request>
-  <land_record>
-    <record_info>
-      <registration_date>${safeDate}T00:00:00+03:00</registration_date>
-    </record_info>
-    <object>
-      <common_data>
-        <cad_number>${escapeXml(ezNumber)}</cad_number>
-        <quarter_cad_number>${escapeXml(quarterNum)}</quarter_cad_number>
-        <type>
-          <code>002001001000</code>
-          <value>Земельный участок</value>
-        </type>
-      </common_data>
-      <subtype>
-        <code>02</code>
-        <value>Единое землепользование</value>
-      </subtype>
-    </object>
-    <cad_links>
-      <descendant_cad_numbers>
-${descendantCadNumbersXml}      </descendant_cad_numbers>
-      <common_land>
-        <common_land_parts>
-          <included_cad_numbers>
-${commonLandPartsXml}          </included_cad_numbers>
-        </common_land_parts>
-      </common_land>
-    </cad_links>
-    <params>
-      <category>
-        <type>
-          <code>003001000000</code>
-          <value>Земли сельскохозяйственного назначения</value>
-        </type>
-      </category>
-      <permitted_use>
-        <permitted_use_established>
-          <by_document>Для сельскохозяйственного производства</by_document>
-        </permitted_use_established>
-      </permitted_use>
-      <area>
-        <type>
-          <code>009</code>
-          <value>Уточненная площадь</value>
-        </type>
-        <value>${totalArea}</value>
-      </area>
-    </params>
-    <address_location>
-      <address>
-        <readable_address>Местоположение установлено относительно ориентира, расположенного в границах участка. Почтовый адрес ориентира: тер. Паевые земли, з/у ${escapeXml(ezNumber.split(':').pop())}.</readable_address>
-      </address>
-    </address_location>
-    <cost>
-      <value>0.00</value>
-    </cost>
-  <contours>
-${contoursXml}  </contours>
-  </land_record>
-</extract_about_property_land>`;
 }
 
 /**
@@ -10932,20 +10727,25 @@ async function handleEzLoadFlow(ezNumber) {
     } else {
         setStatus('');
         
-        // Единый текст сообщения с функцией скачивания
-        const message = `Файл единого землепользования <strong>${ezNumber}</strong> не найден в хранилище.<br><br>Сначала вам необходимо сформировать его в программе <b>«Карта»</b>, после чего вы сможете повторить попытку.<br><br>Перейти в программу «Карта» прямо сейчас?`;
-        
-        const confirmed = await showConfirmationDialog('Файл не найден', message);
+        const message = `Единое землепользование <strong>${ezNumber}</strong> не найдено в облаке.<br><br>Загрузить его сначала в программе "Карта"?`;
+        const confirmed = await showConfirmationDialog('Архив не найден', message);
 
         if (confirmed) {
             try {
                 await navigator.clipboard.writeText(ezNumber);
                 showNotification(`Номер ЕЗ ${ezNumber} скопирован в буфер обмена.`, 'success', 'check-circle', 5000);
-                setTimeout(() => { window.open('map.html', '_blank'); }, 1000);
+                
+                setTimeout(() => {
+                    window.open('map.html', '_blank');
+                }, 1000);
+
             } catch (err) {
                 console.error('Ошибка копирования в буфер:', err);
-                showNotification('Не удалось скопировать номер ЕЗ. Откройте программу "Карта" вручную.', 'warning', 'exclamation-triangle', 7000);
-                setTimeout(() => { window.open('map.html', '_blank'); }, 1000);
+                showNotification('Не удалось скопировать номер ЕЗ. Откройте программу "Карта" вручную.', 'error', 'exclamation-triangle', 7000);
+                
+                setTimeout(() => {
+                    window.open('map.html', '_blank');
+                }, 1000);
             }
         } else {
             showNotification('Загрузка ЕЗ отменена.', 'info');
