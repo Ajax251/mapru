@@ -10463,8 +10463,6 @@ async function handleEzDownloadFlow(ezNumber) {
 
 
 
-
-
 function buildEzXmlFromNspd(features, ezNumber, destScId, destScText, dateStr) {
     const targetCS_value = destScId;
     const sourceCS_value = 'EPSG:3857';
@@ -10477,16 +10475,10 @@ function buildEzXmlFromNspd(features, ezNumber, destScId, destScText, dateStr) {
     if (targetSystemObject && targetSystemObject.def) proj4.defs(targetCS_value, targetSystemObject.def);
 
     const escapeXml = (unsafe) => unsafe ? String(unsafe).replace(/[<>&'"]/g, c => ({'<':'&lt;','>':'&gt;','&':'&amp;','\'':'&apos;','"':'&quot;'}[c])) : '';
-    
-    // Форматируем СК строго под шаблон "МСК-XX"
-    let skIdTextForXml = 'МСК';
-    const mskMatch = destScText.match(/МСК[- ]?(\d+)/i);
-    if (mskMatch) {
-        skIdTextForXml = `МСК-${mskMatch[1]}`;
-    }
-
+    const skIdTextForXml = destScText.split('(')[0].trim() || 'МСК';
     const safeDate = dateStr || new Date().toISOString().split('T')[0];
 
+    // Функция генерации уникального GUID
     const generateGuid = () => {
         if (typeof crypto !== 'undefined' && crypto.randomUUID) return crypto.randomUUID();
         return 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, c => {
@@ -10502,7 +10494,6 @@ function buildEzXmlFromNspd(features, ezNumber, destScId, destScText, dateStr) {
     let contoursXml = ''; 
     let totalArea = 0;
     let contourCounter = 1;
-    let globalGeoPointCounter = 1; 
 
     features.forEach((f) => {
         const p = f.properties.options || f.properties || {};
@@ -10517,65 +10508,35 @@ function buildEzXmlFromNspd(features, ezNumber, destScId, destScText, dateStr) {
         if (!isNaN(areaVal)) totalArea += areaVal;
 
         if (f.geometry && f.geometry.coordinates) {
-            let polygons = [];
-            
-            if (f.geometry.type === 'Polygon') {
-                polygons.push(f.geometry.coordinates);
-            } else if (f.geometry.type === 'MultiPolygon') {
-                polygons = f.geometry.coordinates;
-            }
+            let allRings = [];
+            if (f.geometry.type === 'Polygon') allRings = f.geometry.coordinates;
+            else if (f.geometry.type === 'MultiPolygon') allRings = f.geometry.coordinates.flat(1);
 
-            polygons.forEach((polygonRings) => {
-                if (!polygonRings || polygonRings.length === 0) return;
+            allRings.forEach((ring) => {
+                if (!ring || ring.length < 1) return;
+                
+                let ordinatesXml = ring.map((point, i) => {
+                    const convertedPoint = proj4(sourceCS_value, targetCS_value, point);
+                    const y_from_proj = convertedPoint[0] + systemOffsetY;
+                    const x_from_proj = convertedPoint[1] + systemOffsetX;
+                    return `                  <ordinate>\n                    <x>${x_from_proj.toFixed(2)}</x>\n                    <y>${y_from_proj.toFixed(2)}</y>\n                    <ord_nmb>${i + 1}</ord_nmb>\n                    <num_geopoint>${i + 1}</num_geopoint>\n                    <delta_geopoint>2.50</delta_geopoint>\n                  </ordinate>`;
+                }).join('\n');
 
-                let spatialElementsXml = '';
-
-                polygonRings.forEach((ring) => {
-                    if (!ring || ring.length < 2) return;
-                    
-                    let ordinatesXml = '';
-                    let firstPointGeoNum = globalGeoPointCounter;
-
-                    for (let i = 0; i < ring.length; i++) {
-                        const point = ring[i];
-                        const convertedPoint = proj4(sourceCS_value, targetCS_value, point);
-                        const y_from_proj = convertedPoint[0] + systemOffsetY;
-                        const x_from_proj = convertedPoint[1] + systemOffsetX;
-                        
-                        let ordNmb, numGeoPoint;
-
-                        if (i > 0 && i === ring.length - 1 && Math.abs(ring[i][0] - ring[0][0]) < 1e-6 && Math.abs(ring[i][1] - ring[0][1]) < 1e-6) {
-                            ordNmb = 1;
-                            numGeoPoint = firstPointGeoNum; 
-                        } else {
-                            ordNmb = i + 1;
-                            numGeoPoint = globalGeoPointCounter++;
-                        }
-
-                        ordinatesXml += `                  <ordinate>\n                    <x>${x_from_proj.toFixed(2)}</x>\n                    <y>${y_from_proj.toFixed(2)}</y>\n                    <ord_nmb>${ordNmb}</ord_nmb>\n                    <num_geopoint>${numGeoPoint}</num_geopoint>\n                    <delta_geopoint>0.0</delta_geopoint>\n                  </ordinate>\n`;
-                    }
-
-                    spatialElementsXml += `              <spatial_element>\n                <ordinates>\n${ordinatesXml}                </ordinates>\n              </spatial_element>\n`;
-                });
-
-                if (spatialElementsXml) {
-                    // ДОБАВЛЕН <number_pp>
-                    contoursXml += `        <contour>\n          <cad_number>${escapeXml(cadNum)}</cad_number>\n          <entity_spatial>\n            <sk_id>${escapeXml(skIdTextForXml)}</sk_id>\n            <spatials_elements>\n${spatialElementsXml}            </spatials_elements>\n          </entity_spatial>\n          <number_pp>${contourCounter++}</number_pp>\n        </contour>\n`;
-                }
+                contoursXml += `        <contour>\n          <cad_number>${escapeXml(cadNum)}</cad_number>\n          <entity_spatial>\n            <sk_id>${escapeXml(skIdTextForXml)}</sk_id>\n            <spatials_elements>\n              <spatial_element>\n                <ordinates>\n${ordinatesXml}\n                </ordinates>\n              </spatial_element>\n            </spatials_elements>\n          </entity_spatial>\n          <number_pp>${contourCounter++}</number_pp>\n        </contour>\n`;
             });
         }
     });
 
     const quarterNum = ezNumber.split(':').slice(0, 3).join(':');
 
-    // УБРАН xmlns="", оставлен только guid=""
+    // Убрали xmlns, добавили guid, qr, recipient_statement и status
     return `<?xml version="1.0" encoding="UTF-8"?>
-<extract_about_property_land guid="${fileGuid}">
+<extract_about_property_land guid="${fileGuid}" qr="https://rosreestr.gov.ru/extract-check/?${fileGuid}">
   <details_statement>
     <group_top_requisites>
       <organ_registr_rights>EPSG3857</organ_registr_rights>
       <date_formation>${safeDate}</date_formation>
-      <registration_number>КОНВЕРТЕР3857-ЕЗ</registration_number>
+      <registration_number>КУВИ-001/КОНВЕРТЕР-ЕЗ</registration_number>
     </group_top_requisites>
   </details_statement>
   <details_request>
