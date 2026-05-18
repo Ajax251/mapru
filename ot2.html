@@ -4513,171 +4513,29 @@ function generatePageControls(isLastPage = true) {
 
 
     
-// --- ДОБАВЛЕНИЯ ДЛЯ НОВОГО ФУНКЦИОНАЛА ---
-
-let customPlacemarkLayout;
-let nearbyParcelsCollection = null;
-let isNearbyLoaded = false;
-
-// 1. Инициализируем кастомный макет для меток (меняет размер при зуме)
-ymaps.ready(() => {
-    customPlacemarkLayout = ymaps.templateLayoutFactory.createClass(
-        '<div class="custom-placemark" style="position: absolute; font-family: sans-serif; font-weight: bold; user-select: none; transform: translate(-50%, -50%); text-align: center; color: #000; text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff, 0 0 3px #fff;">$[properties.iconContent]</div>',
-        {
-            build: function () {
-                this.constructor.superclass.build.call(this);
-                this.updateSize();
-            },
-            onMapChange: function () {
-                this.updateSize();
-            },
-            updateSize: function () {
-                const element = this.getParentElement().querySelector('.custom-placemark');
-                const map = this.getData().options.get('map');
-                if (map && element) {
-                    const zoom = map.getZoom();
-                    // Меняем размер шрифта в зависимости от зума
-                    const fontSize = Math.max(10, Math.min(18, 8 + zoom * 0.5));
-                    element.style.fontSize = `${fontSize}px`;
-                }
-            }
-        }
-    );
-
-    // Добавляем "Пустую карту" (прозрачный слой) в хранилище Яндекса
-    ymaps.layer.storage.add('blank#map', function () {
-        return new ymaps.Layer('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=');
-    });
-    ymaps.mapType.storage.add('blank#map', new ymaps.MapType('Пустая карта', ['blank#map']));
-});
-
-// 2. Логика загрузки и отрисовки участков рядом (буфер 100м)
-async function fetchAndDrawNearbyParcels(mapInstance) {
-    if (!currentObjectGeometry) return;
-    
-    // Переводим геометрию текущего объекта в WGS84 для Turf
-    const convertToWgs84 = (coords) => {
-        if (typeof coords[0] === 'number') return proj4('EPSG:3857', 'EPSG:4326', coords);
-        return coords.map(convertToWgs84);
-    };
-    const wgs84Coords = convertToWgs84(currentObjectGeometry.coordinates);
-    
-    let turfGeom;
-    if (currentObjectGeometry.type === 'Polygon') turfGeom = turf.polygon(wgs84Coords);
-    else if (currentObjectGeometry.type === 'MultiPolygon') turfGeom = turf.multiPolygon(wgs84Coords);
-    else return;
-
-    // Строим буфер 100 метров
-    const buffered = turf.buffer(turfGeom, 100, { units: 'meters' });
-    
-    // Переводим обратно в 3857 для запроса к НСПД
-    const convertTo3857 = (coords) => {
-        if (typeof coords[0] === 'number') return proj4('EPSG:4326', 'EPSG:3857', coords);
-        return coords.map(convertTo3857);
-    };
-    const buffer3857 = convertTo3857(buffered.geometry.coordinates);
-
-    const requestBody = {
-        "geom": {
-            "type": "FeatureCollection",
-            "features": [{
-                "type": "Feature",
-                "geometry": {
-                    "crs": { "type": "name", "properties": { "name": "EPSG:3857" } },
-                    "type": buffered.geometry.type,
-                    "coordinates": buffer3857
-                },
-                "properties": {}
-            }]
-        },
-        "categories": [{"id": 36368}]
-    };
-
-    try {
-        const response = await fetch('https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestBody)
-        });
-
-        if (!response.ok) throw new Error('Сетевая ошибка запроса участков');
-        const data = await response.json();
-
-        if (data && data.features) {
-            data.features.forEach(feature => {
-                // Исключаем сам исходный объект
-                if (feature.properties.descr === originalNspdData?.common?.cadNum) return;
-
-                const opts = feature.properties.options || {};
-                const isVerified = opts.specified_area || opts.land_record_area_verified;
-                const hasDeclaredField = opts.declared_area || opts.land_record_area_declaration || opts.land_record_area;
-                const isDeclared = !isVerified && hasDeclaredField;
-                
-                // Зеленый - уточненный, Красный - декларированный
-                const strokeColor = isDeclared ? '#FF0000' : '#00FF00'; 
-
-                let polys = [];
-                if (feature.geometry.type === 'Polygon') polys = [feature.geometry.coordinates];
-                else if (feature.geometry.type === 'MultiPolygon') polys = feature.geometry.coordinates;
-
-                polys.forEach(polyCoords => {
-                    const yandexCoords = polyCoords.map(ring => ring.map(coord => {
-                        const p = proj4('EPSG:3857', 'EPSG:4326', coord);
-                        return [p[1], p[0]]; // [lat, lon] для Яндекса
-                    }));
-
-                    const polygon = new ymaps.Polygon(yandexCoords, {}, {
-                        strokeColor: strokeColor,
-                        strokeWidth: 2,
-                        fillColor: '#00000000', // Без заливки
-                        interactivityModel: 'default#transparent'
-                    });
-                    nearbyParcelsCollection.add(polygon);
-
-                    // Добавляем кадастровый номер
-                    const bounds = polygon.geometry.getBounds();
-                    if (bounds) {
-                        const center = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
-                        const cadNum = feature.properties.descr || '';
-                        const parts = cadNum.split(':');
-                        const displayNumber = parts.length > 3 ? ':' + parts.pop() : cadNum;
-
-                        const placemark = new ymaps.Placemark(center, {
-                            iconContent: displayNumber
-                        }, {
-                            iconLayout: customPlacemarkLayout,
-                            visible: mapInstance.getZoom() > 14
-                        });
-                        nearbyParcelsCollection.add(placemark);
-                    }
-                });
-            });
-        }
-    } catch (e) {
-        console.error("Ошибка при получении соседних участков:", e);
-        alert("Не удалось загрузить соседние участки");
-    }
-}
-
-// 3. ОБНОВЛЕННАЯ ФУНКЦИЯ initYandexMap
 function initYandexMap(geometry) {
     if (!geometry) return;
     
     const mapContainer = document.getElementById('map');
     if (!mapContainer) return;
     
+    // Функция конвертации координат
     const convertCoord = (coord) => proj4('EPSG:3857', 'EPSG:4326', coord);
+    
+    // Собираем все контуры (внешние и внутренние)
     let allRings = [];
     
     if (geometry.type === 'Polygon') {
+        // Polygon может иметь несколько колец: [внешнее, внутреннее1, внутреннее2, ...]
         geometry.coordinates.forEach(ring => {
             const convertedRing = ring.map(coord => {
                 const converted = convertCoord(coord);
-                return [converted[1], converted[0]]; 
+                return [converted[1], converted[0]]; // [lat, lon] для Яндекс
             });
             allRings.push(convertedRing);
         });
     } else if (geometry.type === 'MultiPolygon') {
+        // MultiPolygon: каждый полигон может иметь свои внутренние кольца
         geometry.coordinates.forEach(polygon => {
             polygon.forEach(ring => {
                 const convertedRing = ring.map(coord => {
@@ -4691,6 +4549,7 @@ function initYandexMap(geometry) {
     
     if (allRings.length === 0) return;
     
+    // Вычисляем bounds по всем точкам
     let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
     allRings.forEach(ring => {
         ring.forEach(coord => {
@@ -4707,63 +4566,10 @@ function initYandexMap(geometry) {
     yandexMap = new ymaps.Map('map', {
         center: [centerLat, centerLon],
         zoom: 16,
-        type: 'yandex#map', // Устанавливаем тип по умолчанию
-        controls: ['zoomControl', 'fullscreenControl'] // Убрали дефолтный typeSelector, добавим свой
+        controls: ['zoomControl', 'typeSelector', 'fullscreenControl']
     });
-
-    // Настраиваем Selector типов карты (Добавляем пустую карту)
-    const typeSelector = new ymaps.control.TypeSelector({
-        mapTypes: ['yandex#map', 'yandex#satellite', 'yandex#hybrid', 'blank#map']
-    });
-    yandexMap.controls.add(typeSelector);
     
-    // Создаем коллекцию для соседних участков
-    nearbyParcelsCollection = new ymaps.GeoObjectCollection();
-    isNearbyLoaded = false;
-
-    // Кнопка включения участков в буфере
-    const nearbyButton = new ymaps.control.Button({
-        data: { content: "Участки рядом" },
-        options: { selectOnClick: true, maxWidth: 150 }
-    });
-
-    nearbyButton.events.add('select', async () => {
-        if (!isNearbyLoaded) {
-            const oldText = document.getElementById('loader-text').textContent;
-            document.getElementById('loader-text').textContent = 'Поиск участков в радиусе 100м...';
-            showLoader(true);
-            await fetchAndDrawNearbyParcels(yandexMap);
-            isNearbyLoaded = true;
-            showLoader(false);
-            document.getElementById('loader-text').textContent = oldText;
-        }
-        yandexMap.geoObjects.add(nearbyParcelsCollection);
-        // Обновляем видимость номеров в зависимости от зума
-        updateNearbyLabelsVisibility(); 
-    });
-
-    nearbyButton.events.add('deselect', () => {
-        yandexMap.geoObjects.remove(nearbyParcelsCollection);
-    });
-
-    yandexMap.controls.add(nearbyButton, { float: 'right' });
-
-    // Обработчик зума для скрытия/показа номеров участков
-    yandexMap.events.add('boundschange', function (e) {
-        if (e.get('newZoom') !== e.get('oldZoom')) {
-            updateNearbyLabelsVisibility();
-        }
-    });
-
-    function updateNearbyLabelsVisibility() {
-        const zoom = yandexMap.getZoom();
-        nearbyParcelsCollection.each(obj => {
-            if (obj instanceof ymaps.Placemark) {
-                obj.options.set('visible', zoom > 14); // Показываем номера только при зуме > 14
-            }
-        });
-    }
-    
+    // Создаём полигон со всеми контурами (включая дырки)
     currentMapPolygon = new ymaps.Polygon(allRings, {}, {
         fillColor: mapPolygonColor,
         fillOpacity: mapPolygonOpacity,
@@ -4773,11 +4579,13 @@ function initYandexMap(geometry) {
     
     yandexMap.geoObjects.add(currentMapPolygon);
     
+    // Устанавливаем bounds
     yandexMap.setBounds([[minLat, minLon], [maxLat, maxLon]], { 
         checkZoomRange: true,
         zoomMargin: 30
     });
     
+    // Если контейнер был скрыт, обновляем после показа
     const mapWrapper = mapContainer.closest('.map-container');
     if (mapWrapper && !mapWrapper.classList.contains('section-hidden')) {
         setTimeout(() => {
@@ -4789,7 +4597,6 @@ function initYandexMap(geometry) {
         }, 200);
     }
 }
-
 
 
     </script>

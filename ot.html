@@ -1475,7 +1475,7 @@
             <div id="report-output"></div>
         </div>
     </div>
-  // <script src="cb.js"></script> 
+
     <script>
  let loadedKptData = { xmlString: null, fileName: null, objectList: [], title: null, skipCoordinates: false };
     let currentObjectGeometry = null; // Глобальная переменная для хранения геометрии текущего объекта в EPSG:3857
@@ -1483,6 +1483,11 @@
     let extendedReportAbortController = null;
     const sixDigitsRegions = ['02', '03', '04', '05', '08', '15', '16', '18', '19', '21', '22', '25', '26', '28', '30', '33', '34', '37', '38', '39', '40', '43', '44', '45', '46', '54', '55', '73', '75', '76', '91', '92'];
 
+let isPlanPointsVisible = localStorage.getItem('isPlanPointsVisible') === 'true';
+let currentLinkedFeatures = [];
+let currentDisplayData = null;
+let currentDisplayTitle = null;
+let currentDisplayIsKpt = false;
 
     const colorPalettes = [
     ['#667eea', '#764ba2'],
@@ -1512,6 +1517,8 @@ let currentMapPolygon = null;
 
 const iconExpand = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#10b981" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="6 9 12 15 18 9"></polyline></svg>`;
 const iconCollapse = `<svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="#ef4444" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round"><polyline points="18 15 12 9 6 15"></polyline></svg>`;
+
+
 
 function saveMergeState() {
     const merged = [];
@@ -1584,6 +1591,44 @@ function checkClipboardForCadastralNumber() {
         });
 }
 
+
+function togglePlanPoints(btn) {
+    isPlanPointsVisible = !isPlanPointsVisible;
+    localStorage.setItem('isPlanPointsVisible', isPlanPointsVisible);
+    
+    if (isPlanPointsVisible) {
+        btn.style.background = '#1a365d';
+        btn.style.color = 'white';
+    } else {
+        btn.style.background = 'transparent';
+        btn.style.color = '#4a5568';
+    }
+
+    if (currentDisplayData && currentDisplayData.coordinates) {
+        drawPlan(currentDisplayData.coordinates, 'plan-canvas', currentDisplayData.source, foundZouitFeatures, currentDisplayData.common.cadNum, currentLinkedFeatures);
+    }
+}
+
+function reverseCoordinates() {
+    if (!currentDisplayData || !currentDisplayData.coordinates) return;
+
+    currentDisplayData.coordinates.forEach(contour => {
+        contour.reverse();
+        // Заново нумеруем точки
+        contour.forEach((c, idx) => c.num = idx + 1);
+        // Если контур замкнут (первая и последняя точка совпадают)
+        if (contour.length > 2) {
+            const first = contour[0];
+            const last = contour[contour.length - 1];
+            if (Math.abs(first.x - last.x) < 0.001 && Math.abs(first.y - last.y) < 0.001) {
+                last.num = first.num; // Приравниваем номер последней точки к первой
+            }
+        }
+    });
+
+    // Перерисовываем интерфейс с новыми данными
+    displayResults(currentDisplayData, currentDisplayTitle, currentDisplayIsKpt);
+}
 
 // Функция toggle секции
 function toggleSection(btn, sectionType) {
@@ -2542,6 +2587,38 @@ async function parseNspdJson(feature, isLocal = false) {
 
 
 function displayResults(data, title, isKptFile = false) {
+    // Сохраняем текущие данные для возможности реверса/перерисовки
+    currentDisplayData = data;
+    currentDisplayTitle = title;
+    currentDisplayIsKpt = isKptFile;
+
+    // --- Автоматическая установка обхода ПО ЧАСОВОЙ стрелке (единоразово) ---
+    if (!data._directionProcessed && data.coordinates && data.coordinates.length > 0) {
+        data.coordinates.forEach(contour => {
+            let sum = 0;
+            // Формула площади Гаусса (Shoelace formula) для определения направления
+            for (let i = 0; i < contour.length - 1; i++) {
+                sum += (contour[i+1].x - contour[i].x) * (contour[i+1].y + contour[i].y);
+            }
+            // Если sum < 0, направление против часовой. Меняем на по часовой:
+            if (sum < 0) {
+                contour.reverse();
+            }
+            
+            // Исправляем нумерацию после возможного реверса
+            contour.forEach((c, idx) => c.num = idx + 1);
+            if (contour.length > 2) {
+                const first = contour[0];
+                const last = contour[contour.length - 1];
+                if (Math.abs(first.x - last.x) < 0.001 && Math.abs(first.y - last.y) < 0.001) {
+                    last.num = first.num;
+                }
+            }
+        });
+        data._directionProcessed = true; // Помечаем, чтобы не переворачивать при каждом рендере
+    }
+    // -----------------------------------------------------------------------
+
     const output = document.getElementById('report-output');
     const pages = [];
 
@@ -2549,7 +2626,7 @@ function displayResults(data, title, isKptFile = false) {
     const planHidden = localStorage.getItem('section_plan_hidden') === 'true';
     const mapHidden = localStorage.getItem('section_map_hidden') === 'true';
 
-    // Создаем копию параметров для вывода, чтобы перенести "Основание определения стоимости"
+    // Создаем копию параметров для вывода
     const renderParams = { ...data.params };
     const determinationCourse = renderParams['Основание определения стоимости'];
     delete renderParams['Основание определения стоимости'];
@@ -2623,7 +2700,7 @@ function displayResults(data, title, isKptFile = false) {
     if (data.coordinates && data.coordinates.length > 0) {
         const canvasId = 'plan-canvas';
 
-        // Исправление нумерации (1 = последняя)
+        // Исправление нумерации (первая точка = последняя)
         data.coordinates.forEach(contour => {
             if (contour.length > 2) {
                 const first = contour[0];
@@ -2639,14 +2716,13 @@ function displayResults(data, title, isKptFile = false) {
         const hasDelta = flatCoords.some(c => c.delta);
         const hasMultipleContours = data.coordinates.length > 1;
 
-        // --- НАСТРОЙКИ ПАГИНАЦИИ ---
+        // Настройки пагинации
         const rowsFirstPage = 15; 
         const rowsNextPages = 40; 
 
-        // 1. Формируем первую страницу с картой и началом таблицы
         const firstBatch = flatCoords.slice(0, rowsFirstPage);
         
-     let planPageHtml = `
+        let planPageHtml = `
     <div class="coord-header">
         <h3>Описание местоположения объекта недвижимости</h3>
     </div>
@@ -2659,9 +2735,23 @@ function displayResults(data, title, isKptFile = false) {
         ${data.coordinatesSystem ? `<tr><td>Система координат:</td><td>${data.coordinatesSystem}</td></tr>` : ''}
     </table>
     
-        <div class="section-title ${planHidden ? 'section-collapsed print-hide' : ''}">
+    <div class="section-title ${planHidden ? 'section-collapsed print-hide' : ''}">
         <span class="section-title-text">Схема расположения</span>
         <div class="section-controls">
+            <!-- КНОПКА: Сменить направление обхода -->
+            <button class="toggle-btn" onclick="reverseCoordinates()" title="Сменить направление обхода (по/против часовой)">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <polyline points="15 14 20 9 15 4"></polyline>
+                    <path d="M4 20v-7a4 4 0 0 1 4-4h12"></path>
+                </svg>
+            </button>
+            <!-- КНОПКА: Показать/Скрыть точки -->
+            <button class="toggle-btn" onclick="togglePlanPoints(this)" title="Показать/скрыть точки" style="${isPlanPointsVisible ? 'background: #1a365d; color: white;' : ''}">
+                <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2">
+                    <circle cx="12" cy="12" r="3"></circle>
+                    <path d="M19 21v-2a4 4 0 0 0-4-4H9a4 4 0 0 0-4 4v2"></path>
+                </svg>
+            </button>
             <button class="toggle-btn" onclick="toggleSection(this, 'plan')" title="${planHidden ? 'Показать' : 'Скрыть'}">
                 ${planHidden ? iconCollapse : iconExpand}
             </button>
@@ -2694,26 +2784,22 @@ function displayResults(data, title, isKptFile = false) {
         
         pages.push(planPageHtml);
 
-        // 2. Если остались точки, создаем дополнительные страницы
         if (flatCoords.length > rowsFirstPage) {
             let remaining = flatCoords.slice(rowsFirstPage);
-            
             while (remaining.length > 0) {
                 const batch = remaining.slice(0, rowsNextPages);
                 remaining = remaining.slice(rowsNextPages);
-
-                let nextPageHtml = `
+                pages.push(`
                     <div class="coord-header">
                         <h3>Сведения о точках (продолжение)</h3>
                     </div>
                     ${generateCoordsTable(batch, hasMultipleContours, hasDelta, hasZacrep)}
-                `;
-                pages.push(nextPageHtml);
+                `);
             }
         }
     }
 
-    // Вспомогательная функция для генерации HTML таблицы
+    // Таблица координат 
     function generateCoordsTable(coords, hasContour, hasDelta, hasZacrep) {
         return `
             <table class="coordinates-table">
@@ -2780,13 +2866,11 @@ function displayResults(data, title, isKptFile = false) {
                     <polyline points="13 2 13 9 20 9"></polyline>
                 </svg>
             </button>
-        </div>`;
-        finalHtml += `</div>`;
+        </div></div>`;
     });
 
     output.innerHTML = finalHtml;
 
-    // Применение стилей и логики кнопок
     const printStyleElement = document.getElementById('print-orientation-style');
     const allPages = document.querySelectorAll('#report-output .page');
     
@@ -2837,6 +2921,7 @@ function displayResults(data, title, isKptFile = false) {
     }
 
     if (data.coordinates && data.coordinates.length > 0) {
+        currentLinkedFeatures = []; 
         drawPlan(data.coordinates, 'plan-canvas', data.source, [], data.common.cadNum);
         
         if (currentObjectGeometry && typeof ymaps !== 'undefined') {
@@ -3418,12 +3503,46 @@ function drawPlan(contours, canvasId, source, zouitFeatures = [], cadNum = '', l
         ctx.closePath();
     });
 
-    ctx.fillStyle = 'rgba(0, 123, 255, 0.15)';
+ ctx.fillStyle = 'rgba(0, 123, 255, 0.15)';
     ctx.fill('evenodd');
     ctx.strokeStyle = '#007bff';
     ctx.lineWidth = 1.5;
     ctx.stroke();
 
+    // --- НАЧАЛО ОТРИСОВКИ ТОЧЕК И НУМЕРАЦИИ ---
+    if (isPlanPointsVisible) {
+        ctx.fillStyle = '#000000';
+        ctx.font = 'bold 11px Arial';
+        ctx.textAlign = 'left';
+        ctx.textBaseline = 'bottom';
+
+        contours.forEach(contour => {
+            if (contour.length === 0) return;
+            
+            // Проверка, является ли контур замкнутым (начало и конец совпадают)
+            const isClosed = contour.length > 2 && 
+                             Math.abs(contour[0].x - contour[contour.length-1].x) < 0.001 && 
+                             Math.abs(contour[0].y - contour[contour.length-1].y) < 0.001;
+            
+            // Если замкнут, последнюю точку не нумеруем (т.к. она совпадает с первой)
+            const ptsToDraw = isClosed ? contour.length - 1 : contour.length;
+
+            for (let i = 0; i < ptsToDraw; i++) {
+                const c = contour[i];
+                const { canvasX, canvasY } = toCanvasCoords(c.x, c.y);
+                
+                // Рисуем кружок
+                ctx.beginPath();
+                ctx.arc(canvasX, canvasY, 2.5, 0, 2 * Math.PI);
+                ctx.fill();
+                
+                // Добавляем номер с небольшим отступом
+                ctx.fillText(c.num || (i + 1), canvasX + 4, canvasY - 4);
+            }
+        });
+    }
+    // --- КОНЕЦ ОТРИСОВКИ ТОЧЕК ---
+  
     if (cadNum) {
         const centerX = (minX + maxX) / 2;
         const centerY = (minY + maxY) / 2;
@@ -4292,6 +4411,7 @@ function appendExtendedData(results, linkedFeatures = []) {
     setTimeout(() => {
         const canvas = document.getElementById('plan-canvas');
         if (canvas && originalNspdData && originalNspdData.coordinates) {
+              currentLinkedFeatures = linkedFeatures;
             drawPlan(originalNspdData.coordinates, 'plan-canvas', 'nspd', foundZouitFeatures, originalNspdData.common.cadNum, linkedFeatures);
         }
     }, 100);
@@ -4513,29 +4633,180 @@ function generatePageControls(isLastPage = true) {
 
 
     
+// --- ДОБАВЛЕНИЯ ДЛЯ НОВОГО ФУНКЦИОНАЛА ---
+
+let customPlacemarkLayout;
+let nearbyParcelsCollection = null;
+let isNearbyLoaded = false;
+
+// 1. Инициализируем кастомный макет для меток (меняет размер при зуме)
+ymaps.ready(() => {
+    customPlacemarkLayout = ymaps.templateLayoutFactory.createClass(
+        '<div class="custom-placemark" style="position: absolute; font-family: sans-serif; font-weight: bold; user-select: none; transform: translate(-50%, -50%); text-align: center; color: #000; text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff, 0 0 3px #fff;">$[properties.iconContent]</div>',
+        {
+            build: function () {
+                this.constructor.superclass.build.call(this);
+                this.updateSize();
+            },
+            onMapChange: function () {
+                this.updateSize();
+            },
+            updateSize: function () {
+                const element = this.getParentElement().querySelector('.custom-placemark');
+                const map = this.getData().options.get('map');
+                if (map && element) {
+                    const zoom = map.getZoom();
+                    // Меняем размер шрифта в зависимости от зума
+                    const fontSize = Math.max(10, Math.min(18, 8 + zoom * 0.5));
+                    element.style.fontSize = `${fontSize}px`;
+                }
+            }
+        }
+    );
+
+    // Добавляем "Пустую карту" (прозрачный слой) в хранилище Яндекса
+    ymaps.layer.storage.add('blank#map', function () {
+        return new ymaps.Layer('data:image/png;base64,iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mNkYAAAAAYAAjCB0C8AAAAASUVORK5CYII=');
+    });
+    ymaps.mapType.storage.add('blank#map', new ymaps.MapType('Пустая карта', ['blank#map']));
+});
+
+// 2. Логика загрузки и отрисовки участков рядом (буфер 100м)
+// 2. Логика загрузки и отрисовки участков рядом (буфер 100м)
+async function fetchAndDrawNearbyParcels(mapInstance) {
+    if (!currentObjectGeometry) return;
+    
+    // Переводим геометрию текущего объекта в WGS84 для Turf
+    const convertToWgs84 = (coords) => {
+        if (typeof coords[0] === 'number') return proj4('EPSG:3857', 'EPSG:4326', coords);
+        return coords.map(convertToWgs84);
+    };
+    const wgs84Coords = convertToWgs84(currentObjectGeometry.coordinates);
+    
+    let turfGeom;
+    if (currentObjectGeometry.type === 'Polygon') turfGeom = turf.polygon(wgs84Coords);
+    else if (currentObjectGeometry.type === 'MultiPolygon') turfGeom = turf.multiPolygon(wgs84Coords);
+    else return;
+
+    // Строим буфер 100 метров
+    const buffered = turf.buffer(turfGeom, 100, { units: 'meters' });
+    
+    // Переводим обратно в 3857 для запроса к НСПД
+    const convertTo3857 = (coords) => {
+        if (typeof coords[0] === 'number') return proj4('EPSG:4326', 'EPSG:3857', coords);
+        return coords.map(convertTo3857);
+    };
+    const buffer3857 = convertTo3857(buffered.geometry.coordinates);
+
+    const requestBody = {
+        "geom": {
+            "type": "FeatureCollection",
+            "features": [{
+                "type": "Feature",
+                "geometry": {
+                    "crs": { "type": "name", "properties": { "name": "EPSG:3857" } },
+                    "type": buffered.geometry.type,
+                    "coordinates": buffer3857
+                },
+                "properties": {}
+            }]
+        },
+        "categories": [{"id": 36368}]
+    };
+
+    try {
+        const response = await fetch('https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) throw new Error('Сетевая ошибка запроса участков');
+        const data = await response.json();
+
+        if (data && data.features) {
+            data.features.forEach(feature => {
+                // Исключаем сам исходный объект
+                if (feature.properties.descr === originalNspdData?.common?.cadNum) return;
+
+                const opts = feature.properties.options || {};
+                const isVerified = opts.specified_area || opts.land_record_area_verified;
+                const hasDeclaredField = opts.declared_area || opts.land_record_area_declaration || opts.land_record_area;
+                const isDeclared = !isVerified && hasDeclaredField;
+                
+                // Зеленый - уточненный, Красный - декларированный
+                const strokeColor = isDeclared ? '#FF0000' : '#00FF00'; 
+
+                let polys = [];
+                if (feature.geometry.type === 'Polygon') polys = [feature.geometry.coordinates];
+                else if (feature.geometry.type === 'MultiPolygon') polys = feature.geometry.coordinates;
+
+                polys.forEach(polyCoords => {
+                    const yandexCoords = polyCoords.map(ring => ring.map(coord => {
+                        const p = proj4('EPSG:3857', 'EPSG:4326', coord);
+                        return [p[1], p[0]]; // [lat, lon] для Яндекса
+                    }));
+
+                    const polygon = new ymaps.Polygon(yandexCoords, {}, {
+                        strokeColor: strokeColor,
+                        strokeWidth: 2,
+                        fillColor: '#00000000', // Без заливки
+                        interactivityModel: 'default#transparent'
+                    });
+                    nearbyParcelsCollection.add(polygon);
+
+                    // ВРУЧНУЮ считаем границы, чтобы не использовать метод Яндекса до добавления на карту
+                    let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+                    yandexCoords[0].forEach(coord => {
+                        minLat = Math.min(minLat, coord[0]);
+                        maxLat = Math.max(maxLat, coord[0]);
+                        minLon = Math.min(minLon, coord[1]);
+                        maxLon = Math.max(maxLon, coord[1]);
+                    });
+                    
+                    // Если контур корректный
+                    if (isFinite(minLat)) {
+                        const center = [(minLat + maxLat) / 2, (minLon + maxLon) / 2];
+                        const cadNum = feature.properties.descr || '';
+                        const parts = cadNum.split(':');
+                        const displayNumber = parts.length > 3 ? ':' + parts.pop() : cadNum;
+
+                        const placemark = new ymaps.Placemark(center, {
+                            iconContent: displayNumber
+                        }, {
+                            iconLayout: customPlacemarkLayout,
+                            visible: mapInstance.getZoom() > 14
+                        });
+                        nearbyParcelsCollection.add(placemark);
+                    }
+                });
+            });
+        }
+    } catch (e) {
+        console.error("Ошибка при получении соседних участков:", e);
+        alert("Не удалось загрузить соседние участки");
+    }
+}
+
+// 3. ОБНОВЛЕННАЯ ФУНКЦИЯ initYandexMap
 function initYandexMap(geometry) {
     if (!geometry) return;
     
     const mapContainer = document.getElementById('map');
     if (!mapContainer) return;
     
-    // Функция конвертации координат
     const convertCoord = (coord) => proj4('EPSG:3857', 'EPSG:4326', coord);
-    
-    // Собираем все контуры (внешние и внутренние)
     let allRings = [];
     
     if (geometry.type === 'Polygon') {
-        // Polygon может иметь несколько колец: [внешнее, внутреннее1, внутреннее2, ...]
         geometry.coordinates.forEach(ring => {
             const convertedRing = ring.map(coord => {
                 const converted = convertCoord(coord);
-                return [converted[1], converted[0]]; // [lat, lon] для Яндекс
+                return [converted[1], converted[0]]; 
             });
             allRings.push(convertedRing);
         });
     } else if (geometry.type === 'MultiPolygon') {
-        // MultiPolygon: каждый полигон может иметь свои внутренние кольца
         geometry.coordinates.forEach(polygon => {
             polygon.forEach(ring => {
                 const convertedRing = ring.map(coord => {
@@ -4549,7 +4820,6 @@ function initYandexMap(geometry) {
     
     if (allRings.length === 0) return;
     
-    // Вычисляем bounds по всем точкам
     let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
     allRings.forEach(ring => {
         ring.forEach(coord => {
@@ -4566,10 +4836,63 @@ function initYandexMap(geometry) {
     yandexMap = new ymaps.Map('map', {
         center: [centerLat, centerLon],
         zoom: 16,
-        controls: ['zoomControl', 'typeSelector', 'fullscreenControl']
+        type: 'yandex#map', // Устанавливаем тип по умолчанию
+        controls: ['zoomControl', 'fullscreenControl'] // Убрали дефолтный typeSelector, добавим свой
     });
+
+    // Настраиваем Selector типов карты (Добавляем пустую карту)
+    const typeSelector = new ymaps.control.TypeSelector({
+        mapTypes: ['yandex#map', 'yandex#satellite', 'yandex#hybrid', 'blank#map']
+    });
+    yandexMap.controls.add(typeSelector);
     
-    // Создаём полигон со всеми контурами (включая дырки)
+    // Создаем коллекцию для соседних участков
+    nearbyParcelsCollection = new ymaps.GeoObjectCollection();
+    isNearbyLoaded = false;
+
+    // Кнопка включения участков в буфере
+    const nearbyButton = new ymaps.control.Button({
+        data: { content: "Участки рядом" },
+        options: { selectOnClick: true, maxWidth: 150 }
+    });
+
+    nearbyButton.events.add('select', async () => {
+        if (!isNearbyLoaded) {
+            const oldText = document.getElementById('loader-text').textContent;
+            document.getElementById('loader-text').textContent = 'Поиск участков в радиусе 100м...';
+            showLoader(true);
+            await fetchAndDrawNearbyParcels(yandexMap);
+            isNearbyLoaded = true;
+            showLoader(false);
+            document.getElementById('loader-text').textContent = oldText;
+        }
+        yandexMap.geoObjects.add(nearbyParcelsCollection);
+        // Обновляем видимость номеров в зависимости от зума
+        updateNearbyLabelsVisibility(); 
+    });
+
+    nearbyButton.events.add('deselect', () => {
+        yandexMap.geoObjects.remove(nearbyParcelsCollection);
+    });
+
+    yandexMap.controls.add(nearbyButton, { float: 'right' });
+
+    // Обработчик зума для скрытия/показа номеров участков
+    yandexMap.events.add('boundschange', function (e) {
+        if (e.get('newZoom') !== e.get('oldZoom')) {
+            updateNearbyLabelsVisibility();
+        }
+    });
+
+    function updateNearbyLabelsVisibility() {
+        const zoom = yandexMap.getZoom();
+        nearbyParcelsCollection.each(obj => {
+            if (obj instanceof ymaps.Placemark) {
+                obj.options.set('visible', zoom > 14); // Показываем номера только при зуме > 14
+            }
+        });
+    }
+    
     currentMapPolygon = new ymaps.Polygon(allRings, {}, {
         fillColor: mapPolygonColor,
         fillOpacity: mapPolygonOpacity,
@@ -4579,13 +4902,11 @@ function initYandexMap(geometry) {
     
     yandexMap.geoObjects.add(currentMapPolygon);
     
-    // Устанавливаем bounds
     yandexMap.setBounds([[minLat, minLon], [maxLat, maxLon]], { 
         checkZoomRange: true,
         zoomMargin: 30
     });
     
-    // Если контейнер был скрыт, обновляем после показа
     const mapWrapper = mapContainer.closest('.map-container');
     if (mapWrapper && !mapWrapper.classList.contains('section-hidden')) {
         setTimeout(() => {
@@ -4597,6 +4918,7 @@ function initYandexMap(geometry) {
         }, 200);
     }
 }
+
 
 
     </script>
