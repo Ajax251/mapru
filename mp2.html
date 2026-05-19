@@ -1693,186 +1693,8 @@ function checkLineIntersectsPolygon(lineContours, polygonGeometry, mskSystem) {
     return false;
 }
 
-
-// --- ФУНКЦИЯ ПОИСКА ЗУ В НУЛЕВОМ КВАРТАЛЕ ДЛЯ ТЕХПЛАНА ---
-// --- ФУНКЦИЯ ПОИСКА ЗУ В ВЫБРАННОМ КВАРТАЛЕ ДЛЯ ТЕХПЛАНА ---
-async function performTpZeroQuarterCheck(btn) {
-    const inputEl = document.getElementById('manualQuarterInputTp');
-    const searchQuarter = inputEl ? inputEl.value.trim() : '';
-
-    if (!searchQuarter.match(/^\d{2}:\d{2}:\d{6,7}$/)) {
-        alert('Введите корректный номер квартала (например, 16:47:000000)');
-        return;
-    }
-
-    const context = window.currentTpZeroCheckContext;
-    if (!context) return;
-
-    btn.disabled = true;
-    const originalBtnContent = btn.innerHTML;
-    btn.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i><span>Поиск файлов...</span>';
-
-    try {
-        const formattedQuarter = searchQuarter.replace(/:/g, '_');
-        const STORAGE_API_URL = 'https://mapruapp.ru/storage';
-        const BUCKET_NAME = 'kpt';
-
-        const responseList = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}?search=${formattedQuarter}`);
-        if (!responseList.ok) throw new Error('Ошибка связи с хранилищем файлов');
-        const fileList = await responseList.json();
-        
-        let jsonFiles = fileList ? fileList.filter(file => file.name.startsWith(formattedQuarter) && file.name.toLowerCase().endsWith('.json.zip')) : [];
-
-        if (jsonFiles.length === 0) {
-            btn.innerHTML = '<i class="fas fa-info-circle"></i><span>В хранилище нет JSON для этого квартала</span>';
-            btn.style.backgroundColor = '#64748b';
-            setTimeout(() => { btn.disabled = false; btn.innerHTML = originalBtnContent; btn.style.backgroundColor = '#8b5cf6'; }, 3000);
-            return;
-        }
-
-        jsonFiles.sort((a, b) => b.name.localeCompare(a.name));
-        const latestFile = jsonFiles[0];
-
-        btn.innerHTML = `<i class="fas fa-download"></i><span>Скачивание...</span>`;
-        const responseFile = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}/${latestFile.name}`);
-        if (!responseFile.ok) throw new Error('Ошибка скачивания');
-        const blob = await responseFile.blob();
-        
-        btn.innerHTML = '<i class="fas fa-file-archive"></i><span>Распаковка...</span>';
-        const zip = await JSZip.loadAsync(blob);
-        let jsonEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.json') && !f.dir);
-        
-        if (!jsonEntry) throw new Error('В архиве нет JSON файла');
-
-        btn.innerHTML = '<i class="fas fa-microchip"></i><span>Анализ...</span>';
-        const jsonContent = await jsonEntry.async('string');
-        const jsonData = JSON.parse(jsonContent);
-
-        await new Promise(r => setTimeout(r, 100));
-
-        const foundZeroZu = [];
-        const alreadyRendered = context.nspdZuData.map(z => z.cadNumber);
-
-        const oksTurfPolys = [];
-        context.oksContoursMsk.forEach((ring) => {
-            const wgsRing = [];
-            ring.forEach(pt => {
-                const pt3857 = convertMskTo3857(pt, context.mskSystem);
-                if (pt3857) {
-                    const wgs = proj4('EPSG:3857', 'EPSG:4326', pt3857);
-                    wgsRing.push([wgs[0], wgs[1]]);
-                }
-            });
-            
-            if (wgsRing.length === 0) return;
-            const first = wgsRing[0];
-            const last = wgsRing[wgsRing.length - 1];
-            const isClosed = wgsRing.length > 2 && Math.abs(first[0]-last[0]) < 0.00001 && Math.abs(first[1]-last[1]) < 0.00001;
-
-            if (wgsRing.length === 1) {
-                const pt = turf.point(wgsRing[0]);
-                oksTurfPolys.push(turf.buffer(pt, 1, {units: 'meters'}));
-            } else if (isClosed) {
-                oksTurfPolys.push(turf.polygon([wgsRing]));
-            } else {
-                const line = turf.lineString(wgsRing);
-                oksTurfPolys.push(turf.buffer(line, 1, {units: 'meters'}));
-            }
-        });
-
-        if (oksTurfPolys.length === 0) throw new Error("Не удалось сформировать геометрию ОКС.");
-
-        jsonData.objects.forEach(obj => {
-            if (obj.type !== 'parcel') return;
-            if (alreadyRendered.includes(obj.id)) return;
-            if (!obj.contours || obj.contours.length === 0) return;
-
-            const wgsRings = [];
-            obj.contours.forEach(ring => {
-                const wgsRing = [];
-                ring.forEach(pt => {
-                    const pt3857 = convertMskTo3857({x: pt.x, y: pt.y}, context.mskSystem);
-                    if (pt3857) {
-                        const wgs = proj4('EPSG:3857', 'EPSG:4326', pt3857);
-                        wgsRing.push([wgs[0], wgs[1]]);
-                    }
-                });
-                if (wgsRing.length > 2) {
-                    const first = wgsRing[0];
-                    const last = wgsRing[wgsRing.length - 1];
-                    if (Math.abs(first[0]-last[0]) > 0.00001 || Math.abs(first[1]-last[1]) > 0.00001) wgsRing.push([...first]);
-                    wgsRings.push(wgsRing);
-                }
-            });
-
-            if (wgsRings.length > 0) {
-                let totalOverlapArea = 0;
-                wgsRings.forEach((objWgsRing) => {
-                    try {
-                        const objTurfPoly = turf.polygon([objWgsRing]);
-                        for (let i = 0; i < oksTurfPolys.length; i++) {
-                            try { totalOverlapArea += getPreciseOverlapAreaMsk(oksTurfPolys[i], objTurfPoly, context.mskSystem); } catch(e) {}
-                        }
-                    } catch(e) {}
-                });
-
-                if (totalOverlapArea >= 0.0001) {
-                    const mskContours = obj.contours.map(ring => ring.map(pt => ({x: pt.x, y: pt.y})));
-                    foundZeroZu.push({
-                        cadNumber: obj.id, address: `Участок (${searchQuarter})`, category: '',
-                        contours: mskContours, hasCoords: true, source: 'nspd'
-                    });
-                }
-            }
-        });
-
-        if (foundZeroZu.length > 0) {
-            currentTpZuData.nspdZu.push(...foundZeroZu); 
-
-            let html = `<div class="oks-found-in-nspd" style="background:#f5f3ff; border:1px solid #c4b5fd; margin-bottom: 10px;">
-                <div class="missing-title" style="color:#6d28d9;"><i class="fas fa-layer-group"></i> Найдено в квартале ${searchQuarter}: ${foundZeroZu.length} ЗУ</div>
-                <ul class="oks-missing-list">`;
-            
-            const xmlCadNumbers = context.xmlCadNumbers || [];
-            foundZeroZu.forEach(z => {
-                const isInXml = xmlCadNumbers.includes(z.cadNumber.toLowerCase());
-                if (isInXml) {
-                    html += `<li><i class="fas fa-check-circle" style="color:#10b981; width:16px;"></i> <strong>${z.cadNumber}</strong> <span style="color:#10b981; font-weight:600;">(Указан в XML — подтверждено)</span></li>`;
-                    const zuItem = document.querySelector(`.zu-item[data-cad-number="${z.cadNumber}"]`);
-                    if (zuItem) {
-                        const addrDiv = zuItem.querySelector('.zu-address');
-                        if (addrDiv) addrDiv.innerHTML = `<i class="fas fa-check-circle" style="color:var(--success-color);"></i> Подтверждено через файл квартала`;
-                    }
-                } else {
-                    html += `<li><i class="fas fa-exclamation-triangle" style="color:#f59e0b; width:16px;"></i> <strong>${z.cadNumber}</strong> <span style="color:#ef4444; font-weight:600;">(НЕ указан в XML)</span></li>`;
-                }
-            });
-            html += `</ul></div>`;
-            
-            // Вставляем ДО обертки инпута и кнопки
-            btn.parentElement.insertAdjacentHTML('beforebegin', html);
-            btn.innerHTML = `<i class="fas fa-check-circle"></i><span>Поиск завершен</span>`;
-            btn.style.backgroundColor = '#10b981';
-
-            const schemaModal = document.getElementById('oksSchemaModal');
-            if (schemaModal && schemaModal.style.display === 'flex') drawTpSchemaCanvas();
-        } else {
-            btn.innerHTML = `<i class="fas fa-check-circle"></i><span>В ${searchQuarter} ЗУ не найдены</span>`;
-            btn.style.backgroundColor = '#10b981';
-        }
-
-        setTimeout(() => { btn.disabled = false; btn.innerHTML = originalBtnContent; btn.style.backgroundColor = '#8b5cf6'; }, 3500);
-
-    } catch (error) {
-        btn.innerHTML = `<i class="fas fa-times"></i><span>Ошибка</span>`;
-        btn.style.backgroundColor = '#ef4444';
-        setTimeout(() => { btn.disabled = false; btn.innerHTML = originalBtnContent; btn.style.backgroundColor = '#8b5cf6'; }, 3500);
-    }
-}
-
 async function checkZuForTechPlan(zuNumbers, button) {
-    zuNumbers = zuNumbers || []; // Защита от null
-    // Убрана строка блокировки if (!zuNumbers || zuNumbers.length === 0) return;
+    if (!zuNumbers || zuNumbers.length === 0) return;
     
     const container = button.closest('.subsection');
     const statusDiv = container.querySelector('.zu-check-status');
@@ -2152,37 +1974,12 @@ async function checkZuForTechPlan(zuNumbers, button) {
         </div>`;
     }
     
-  if (nspdZuList.length === 0 && contours.length > 0) {
+    if (nspdZuList.length === 0 && contours.length > 0) {
         statusHtml += `<div class="validation-message" style="margin-top:8px; background:#f0f9ff; border:1px solid #bae6fd; color:#0369a1;">
             <i class="fas fa-info-circle"></i> Земельные участки под объектом в ЕГРН не обнаружены (возможно, объект расположен на землях неразграниченной госсобственности)
         </div>`;
     }
     
-
- if (cadBlockText && contours.length > 0) {
-        const parts = cadBlockText.split(':');
-        if (parts.length >= 3) {
-            const zeroes = '0'.repeat(parts[2].length);
-            const zeroQuarter = `${parts[0]}:${parts[1]}:${zeroes}`;
-            
-            // Сохраняем контекст
-            window.currentTpZeroCheckContext = {
-                mskSystem: currentMskSystem,
-                oksContoursMsk: contours,
-                nspdZuData: nspdZuList,
-                xmlCadNumbers: xmlCadNumbers
-            };
-
-            statusHtml += `
-            <div style="margin-top: 15px; display: flex; gap: 8px; flex-wrap: wrap;">
-                <input type="text" id="manualQuarterInputTp" value="${zeroQuarter}" placeholder="Номер квартала" style="flex: 1; min-width: 140px; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 8px; font-family: 'Courier New', monospace; font-size: 1rem; outline: none;">
-                <button id="checkTpZeroQuarterBtn" class="print-btn contradiction-btn" style="flex: 2; justify-content: center; background-color: #8b5cf6;">
-                    <i class="fas fa-cloud-download-alt"></i><span>ЗУ под объектом в XML (нулевом или другом квартале)</span>
-                </button>
-            </div>`;
-        }
-    }
-
     statusDiv.innerHTML = statusHtml;
     
     // Добавляем обработчик для кнопки схемы
@@ -4802,8 +4599,8 @@ async function performOverlapCheck(button) {
             }
         }
 
-    if (reportItems.length === 0) {
-            reportItems.push(`<div class="overlap-item success"><b>Отлично!</b> Наложений на другие участки в основном квартале не обнаружено.</div>`);
+        if (reportItems.length === 0) {
+            reportItems.push(`<div class="overlap-item success"><b>Отлично!</b> Наложений на другие участки не обнаружено.</div>`);
         }
 
         // Сохраняем данные для Canvas
@@ -4814,35 +4611,11 @@ async function performOverlapCheck(button) {
             bboxWgs: allWgsPoints
         };
 
-        // --- ДОБАВЛЕНИЕ КНОПКИ НУЛЕВОГО КВАРТАЛА ---
-      // --- ДОБАВЛЕНИЕ ПОИСКА ПО КВАРТАЛУ В ОКНО НАЛОЖЕНИЙ ---
-        let zeroQuarterBtnHtml = '';
-        if (cadastralBlock && cadastralBlock !== '—') {
-            const parts = cadastralBlock.split(':');
-            if (parts.length >= 3) {
-                const zeroes = '0'.repeat(parts[2].length);
-                const zeroQuarter = `${parts[0]}:${parts[1]}:${zeroes}`;
-
-                window.currentOverlapCheckContext = {
-                    mskSystem: currentMskSystem,
-                    xmlRingsWgs: xmlContoursWgs, 
-                    targetCadNum: targetCadNum,
-                    relatedCadNumbers: relatedCadNumbers
-                };
-
-                zeroQuarterBtnHtml = `
-                <div style="margin-top: 15px; margin-bottom: 15px; display: flex; gap: 8px; flex-wrap: wrap;">
-                    <input type="text" id="manualQuarterInputMp" value="${zeroQuarter}" placeholder="Номер квартала" style="flex: 1; min-width: 140px; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 8px; font-family: 'Courier New', monospace; font-size: 1rem; outline: none;">
-                    <button id="checkZeroQuarterBtn" class="print-btn contradiction-btn" style="flex: 2; justify-content: center; background-color: #8b5cf6;">
-                        <i class="fas fa-cloud-download-alt"></i><span>Проверить наложения в квартале</span>
-                    </button>
-                </div>`;
-            }
-        }
-
-        document.getElementById('overlapStatusPanel').innerHTML = zeroQuarterBtnHtml + reportItems.join('');
+        // Заполняем модалку
+        document.getElementById('overlapStatusPanel').innerHTML = reportItems.join('');
         document.getElementById('overlapSchemaModal').style.display = 'flex';
         
+        // Рисуем с небольшой задержкой, чтобы модалка открылась
         setTimeout(drawOverlapCanvas, 50);
 
     } catch (err) {
@@ -4852,154 +4625,6 @@ async function performOverlapCheck(button) {
         button.innerHTML = originalHtml;
     }
 }
-
-
-
-// --- ФУНКЦИЯ ПРОВЕРКИ КВАРТАЛА ИЗ MAPRUAPP (ДЛЯ ОКНА НАЛОЖЕНИЙ МП) ---
-async function performZeroQuarterCheck(btn) {
-    const inputEl = document.getElementById('manualQuarterInputMp');
-    const searchQuarter = inputEl ? inputEl.value.trim() : '';
-
-    if (!searchQuarter.match(/^\d{2}:\d{2}:\d{6,7}$/)) {
-        alert('Введите корректный номер квартала (например, 16:47:000000)');
-        return;
-    }
-
-    const context = window.currentOverlapCheckContext;
-    if (!context || !currentOverlapRenderData) return;
-
-    btn.disabled = true;
-    const originalBtnContent = btn.innerHTML;
-    btn.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i><span>Поиск файлов...</span>';
-
-    try {
-        const formattedQuarter = searchQuarter.replace(/:/g, '_');
-        const STORAGE_API_URL = 'https://mapruapp.ru/storage';
-        const BUCKET_NAME = 'kpt';
-
-        const responseList = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}?search=${formattedQuarter}`);
-        if (!responseList.ok) throw new Error('Ошибка связи с хранилищем');
-        const fileList = await responseList.json();
-        
-        let jsonFiles = fileList ? fileList.filter(file => file.name.startsWith(formattedQuarter) && file.name.toLowerCase().endsWith('.json.zip')) : [];
-
-        if (jsonFiles.length === 0) {
-            btn.innerHTML = '<i class="fas fa-info-circle"></i><span>В хранилище нет JSON для этого квартала</span>';
-            btn.style.backgroundColor = '#64748b';
-            setTimeout(() => { btn.disabled = false; btn.innerHTML = originalBtnContent; btn.style.backgroundColor = '#8b5cf6'; }, 3000);
-            return;
-        }
-
-        jsonFiles.sort((a, b) => b.name.localeCompare(a.name));
-        const latestFile = jsonFiles[0];
-
-        btn.innerHTML = `<i class="fas fa-download"></i><span>Скачивание...</span>`;
-        const responseFile = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}/${latestFile.name}`);
-        if (!responseFile.ok) throw new Error('Ошибка скачивания файла');
-        const blob = await responseFile.blob();
-        
-        btn.innerHTML = '<i class="fas fa-file-archive"></i><span>Распаковка...</span>';
-        const zip = await JSZip.loadAsync(blob);
-        let jsonEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.json') && !f.dir);
-        
-        if (!jsonEntry) throw new Error('В архиве не найден JSON файл');
-
-        btn.innerHTML = '<i class="fas fa-microchip"></i><span>Анализ...</span>';
-        const jsonContent = await jsonEntry.async('string');
-        const jsonData = JSON.parse(jsonContent);
-
-        await new Promise(r => setTimeout(r, 100));
-
-        const overlaps = [];
-        const egrnRenderData = [];
-        const alreadyRendered = currentOverlapRenderData.egrnPolygons.map(p => p.cadNum);
-
-        jsonData.objects.forEach(obj => {
-            if (obj.type !== 'parcel') return;
-            if (context.targetCadNum && obj.id === context.targetCadNum) return; 
-            if (alreadyRendered.includes(obj.id)) return; 
-            if (!obj.contours || obj.contours.length === 0) return;
-
-            const wgsRings = [];
-            obj.contours.forEach((ring) => {
-                const wgsRing = [];
-                ring.forEach(pt => {
-                    const pt3857 = convertMskTo3857({x: pt.x, y: pt.y}, context.mskSystem);
-                    if (pt3857) {
-                        const wgs = proj4('EPSG:3857', 'EPSG:4326', pt3857);
-                        wgsRing.push([wgs[0], wgs[1]]);
-                    }
-                });
-                
-                if (wgsRing.length > 2) {
-                    const first = wgsRing[0];
-                    const last = wgsRing[wgsRing.length - 1];
-                    if (Math.abs(first[0]-last[0]) > 0.00001 || Math.abs(first[1]-last[1]) > 0.00001) wgsRing.push([...first]);
-                    wgsRings.push(wgsRing);
-                }
-            });
-
-            if (wgsRings.length > 0) {
-                let totalOverlapArea = 0;
-                wgsRings.forEach((objWgsRing) => {
-                    try {
-                        const objTurfPoly = turf.polygon([objWgsRing]);
-                        context.xmlRingsWgs.forEach((xmlWgsRing) => {
-                            try {
-                                const safeXmlRing = [...xmlWgsRing];
-                                if (safeXmlRing.length > 2) {
-                                    const first = safeXmlRing[0];
-                                    const last = safeXmlRing[safeXmlRing.length - 1];
-                                    if (Math.abs(first[0]-last[0]) > 0.00001 || Math.abs(first[1]-last[1]) > 0.00001) safeXmlRing.push([...first]);
-                                }
-                                const xmlTurfPoly = turf.polygon([safeXmlRing]);
-                                totalOverlapArea += getPreciseOverlapAreaMsk(xmlTurfPoly, objTurfPoly, context.mskSystem);
-                            } catch(e) {}
-                        });
-                    } catch(e) {}
-                });
-
-                if (totalOverlapArea >= 0.0001) {
-                    overlaps.push({ id: obj.id, area: totalOverlapArea });
-                    egrnRenderData.push({ rings: wgsRings, type: 'overlap', cadNum: obj.id });
-                    wgsRings.forEach(r => r.forEach(pt => currentOverlapRenderData.bboxWgs.push(pt)));
-                }
-            }
-        });
-
-        if (overlaps.length > 0) {
-            let html = '';
-            overlaps.forEach(o => {
-                const isRelated = context.relatedCadNumbers && context.relatedCadNumbers.includes(o.id);
-                const statusClass = isRelated ? 'warning' : 'error';
-                let overlapText = o.area < 0.01 ? `~${(o.area * 10000).toFixed(1)} кв.см.` : `~${o.area.toFixed(2)} кв.м.`;
-                let msg = `<b>${o.id}</b> (Квартал ${searchQuarter}) Наложение: ${overlapText}`;
-                if (isRelated) msg += `<br>Участок указан в XML как смежный.`;
-                else msg += `<br><b>ОШИБКА:</b> Неучтенное пересечение!`;
-                
-                html += `<div class="overlap-item ${statusClass}">${msg}</div>`;
-            });
-
-            btn.parentElement.insertAdjacentHTML('afterend', html); // Вставляем ПОСЛЕ блока с инпутом
-            currentOverlapRenderData.egrnPolygons.push(...egrnRenderData);
-            drawOverlapCanvas();
-
-            btn.innerHTML = `<i class="fas fa-exclamation-triangle"></i><span>Найдено ${overlaps.length} наложений</span>`;
-            btn.style.backgroundColor = '#ef4444';
-        } else {
-            btn.innerHTML = `<i class="fas fa-check-circle"></i><span>В ${searchQuarter} наложений нет</span>`;
-            btn.style.backgroundColor = '#10b981';
-        }
-        
-        setTimeout(() => { btn.disabled = false; btn.innerHTML = originalBtnContent; btn.style.backgroundColor = '#8b5cf6'; }, 3500);
-
-    } catch (error) {
-        btn.innerHTML = `<i class="fas fa-times"></i><span>Ошибка</span>`;
-        btn.style.backgroundColor = '#ef4444';
-        setTimeout(() => { btn.disabled = false; btn.innerHTML = originalBtnContent; btn.style.backgroundColor = '#8b5cf6'; }, 3500);
-    }
-}
-
 
 function drawOverlapCanvas() {
     const canvas = document.getElementById('overlapCanvas');
@@ -5282,28 +4907,12 @@ if (event.target.id === 'overlapSchemaModalClose' || event.target.id === 'overla
 }
 
 // Клик по кнопке "Проверить наложения"
-      const checkOverlapBtn = event.target.closest('.check-overlap-btn');
-            if (checkOverlapBtn) {
-                event.preventDefault();
-                performOverlapCheck(checkOverlapBtn);
-                return;
-            }
-
-            // --- ДОБАВЛЕННЫЙ ОБРАБОТЧИК КНОПКИ НУЛЕВОГО КВАРТАЛА ---
-            const checkZeroQuarterBtn = event.target.closest('#checkZeroQuarterBtn');
-            if (checkZeroQuarterBtn) {
-                event.preventDefault();
-                performZeroQuarterCheck(checkZeroQuarterBtn);
-                return;
-            }
-            
-              const checkTpZeroQuarterBtn = event.target.closest('#checkTpZeroQuarterBtn');
-            if (checkTpZeroQuarterBtn) {
-                event.preventDefault();
-                performTpZeroQuarterCheck(checkTpZeroQuarterBtn);
-                return;
-            }
-            
+const checkOverlapBtn = event.target.closest('.check-overlap-btn');
+if (checkOverlapBtn) {
+    event.preventDefault();
+    performOverlapCheck(checkOverlapBtn);
+    return;
+}
             
             const checkNewBoundsBtn = event.target.closest('.check-new-bounds-btn');
             if (checkNewBoundsBtn) {
@@ -5815,11 +5424,9 @@ function doContoursMatch(contoursA, contoursB) {
     }
       
     
-  // Земельные участки (ParentCadastralNumbers)
+    // Земельные участки (ParentCadastralNumbers)
     const parentCadNumbers = Array.from(All(mainObject, 'ParentCadastralNumbers CadastralNumber')).map(n => n.textContent.trim());
-    const hasCoordsForZuCheck = All(mainObject, 'EntitySpatial').length > 0; // Проверяем наличие координат
-
-    if (parentCadNumbers.length > 0 || hasCoordsForZuCheck) {
+    if (parentCadNumbers.length > 0) {
         mainInfoHtml += `
             <div class="subsection">
                 <div class="subsection-title" style="display:flex; align-items:center; justify-content:space-between; flex-wrap:wrap; gap:8px;">
@@ -5830,10 +5437,7 @@ function doContoursMatch(contoursA, contoursB) {
                     </button>
                 </div>
                 <div class="info-grid zu-list-container">
-                    ${parentCadNumbers.length > 0 
-                        ? parentCadNumbers.map(kn => `<div class="info-card zu-item" data-cad-number="${kn}"><div class="info-value">${kn}</div><div class="zu-address" style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;"></div></div>`).join('')
-                        : `<div style="color:var(--text-secondary); font-style:italic; padding:8px 0; grid-column: 1/-1;"><i class="fas fa-info-circle"></i> Земельные участки не указаны в XML. Нажмите "Проверить в ЕГРН" для поиска участков по координатам объекта.</div>`
-                    }
+                    ${parentCadNumbers.map(kn => `<div class="info-card zu-item" data-cad-number="${kn}"><div class="info-value">${kn}</div><div class="zu-address" style="font-size:0.85em; color:var(--text-secondary); margin-top:4px;"></div></div>`).join('')}
                 </div>
                 <div class="zu-check-status" style="margin-top:12px;"></div>
             </div>`;
