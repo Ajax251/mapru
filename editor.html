@@ -8984,61 +8984,61 @@ function executeCreateShapesOperation(shapeType, params) {
         closeOffsetDialog();
     }
 
-   function executeOffsetOperation(distance) {
+function executeOffsetOperation(distance) {
         if (editingObjectIndex === -1) return;
         const sourceObj = userObjects[editingObjectIndex];
         
         if (!sourceObj.contours || sourceObj.contours.length === 0) return;
-        if (sourceObj.type !== 'polygon') {
-            showNotification("Буфер доступен только для полигонов.", "warning");
+        if (sourceObj.type !== 'polygon' && sourceObj.type !== 'line') {
+            showNotification("Буфер доступен только для полигонов и линий.", "warning");
             return;
         }
 
         try {
             const newContours = [];
             
-            sourceObj.contours.forEach(contour => {
-                if (!contour || contour.length < 3) return;
-                
-                // 1. Создаем копию контура
-                // Если контур замкнут (последняя == первая), убираем последнюю для расчетов
-                let points = deepCloneContours([contour])[0];
-                const isClosed = (Math.abs(points[0].x - points[points.length-1].x) < 0.001 && 
-                                  Math.abs(points[0].y - points[points.length-1].y) < 0.001);
-                if (isClosed) points.pop();
+            if (sourceObj.type === 'polygon') {
+                sourceObj.contours.forEach(contour => {
+                    if (!contour || contour.length < 3) return;
+                    
+                    // 1. Создаем копию контура
+                    let points = deepCloneContours([contour])[0];
+                    const isClosed = (Math.abs(points[0].x - points[points.length-1].x) < 0.001 && 
+                                      Math.abs(points[0].y - points[points.length-1].y) < 0.001);
+                    if (isClosed) points.pop();
 
-                // 2. Проверяем направление обхода (Площадь)
-                // В системе координат Canvas (Y вниз): Положительная площадь = По часовой стрелке (CW)
-                let area = 0;
-                for (let i = 0; i < points.length; i++) {
-                    const j = (i + 1) % points.length;
-                    area += (points[j].x - points[i].x) * (points[j].y + points[i].y);
-                    // Это формула (x2-x1)(y2+y1), знак суммы совпадает с удвоенной площадью
-                }
-                
-                // Если площадь отрицательная (против часовой), разворачиваем массив,
-                // чтобы он стал по часовой. Тогда алгоритм смещения всегда будет работать "наружу".
-                if (area < 0) {
-                    points.reverse();
-                }
+                    // 2. Проверяем направление обхода (Площадь)
+                    let area = 0;
+                    for (let i = 0; i < points.length; i++) {
+                        const j = (i + 1) % points.length;
+                        area += (points[j].x - points[i].x) * (points[j].y + points[i].y);
+                    }
+                    
+                    const isCW = area > 0;
 
-                // 3. Вычисляем смещенный контур
-                const offsetPoints = calculatePolygonOffset(points, distance);
-                
-                if (offsetPoints && offsetPoints.length >= 3) {
-                    // Замыкаем контур обратно перед созданием
-                    offsetPoints.push({ x: offsetPoints[0].x, y: offsetPoints[0].y });
-                    newContours.push(offsetPoints);
-                }
-            });
+                    // 3. Вычисляем смещенный контур
+                    const offsetPoints = calculatePolygonOffset(points, distance, isCW);
+                    
+                    if (offsetPoints && offsetPoints.length >= 3) {
+                        newContours.push(offsetPoints);
+                    }
+                });
+            } else if (sourceObj.type === 'line') {
+                sourceObj.contours.forEach(contour => {
+                    if (!contour || contour.length < 2) return;
+                    // Для линий всегда строим положительный (внешний) буфер
+                    const bufferedContour = calculateLineBuffer(contour, Math.abs(distance));
+                    if (bufferedContour && bufferedContour.length >= 3) {
+                        newContours.push(bufferedContour);
+                    }
+                });
+            }
 
             if (newContours.length > 0) {
                 const sign = distance > 0 ? '+' : '';
                 const newName = `${sourceObj.name} (Буфер ${sign}${distance}м)`;
                 
-                // 4. Создаем объект.
-                // ВАЖНО: Мы НЕ передаем sourceObj.color.
-                // Функция addObjectInternal сама выберет следующий автоматический цвет.
+                // Создаем новый площадной объект (полигон) на основе полученных буферных зон
                 const newObj = addObjectInternal(newContours, newName, 'polygon', true);
                 
                 if (newObj) {
@@ -9046,7 +9046,7 @@ function executeCreateShapesOperation(shapeType, params) {
                     showNotification(`Создан буфер ${sign}${distance}м`, "success", "expand-arrows-alt");
                 }
             } else {
-                showNotification("Не удалось построить буфер (возможно, значение слишком большое и объект схлопнулся).", "error");
+                showNotification("Не удалось построить буфер.", "error");
             }
 
         } catch (e) {
@@ -9112,76 +9112,85 @@ function executeCreateShapesOperation(shapeType, params) {
     }
 
     // Математика смещения
-    function calculatePolygonOffset(contour, distance, isClockwise) {
-        const len = contour.length;
-        // Работаем с незамкнутым массивом точек для простоты (последняя != первая)
-        // Если замкнут - убираем последнюю временно
-        let points = [...contour];
-        const isClosedInput = (Math.abs(points[0].x - points[len-1].x) < 0.001 && Math.abs(points[0].y - points[len-1].y) < 0.001);
-        if (isClosedInput) points.pop();
-        
-        const count = points.length;
-        if (count < 3) return null;
+function calculateLineBuffer(points, distance) {
+        const n = points.length;
+        if (n < 2) return null;
 
-        const offsetLines = [];
+        const leftSide = [];
+        const rightSide = [];
 
-        // Шаг 1: Вычисляем уравнения смещенных прямых для каждого сегмента
-        for (let i = 0; i < count; i++) {
-            const p1 = points[i];
-            const p2 = points[(i + 1) % count]; // Замыкаем
-
+        // Получение нормали сегмента i -> i+1
+        const getSegmentNormal = (p1, p2) => {
             let dx = p2.x - p1.x;
             let dy = p2.y - p1.y;
-            const len = Math.sqrt(dx*dx + dy*dy);
-            if (len === 0) continue; 
-            
-            dx /= len; 
-            dy /= len;
+            const len = Math.sqrt(dx * dx + dy * dy);
+            if (len === 0) return { x: 0, y: 0 };
+            return { x: -dy / len, y: dx / len }; // Левая нормаль
+        };
 
-            // Нормаль. 
-            // Если обход по Часовой (CW, экранные Y вниз): "Наружу" - это влево.
-            // Вектор (dx, dy). Левая нормаль: (dy, -dx).
-            // Если distance положительная -> идем по нормали.
-            
-            let nx, ny;
-            if (isClockwise) {
-                nx = dy; ny = -dx; // Влево
+        const segmentNormals = [];
+        for (let i = 0; i < n - 1; i++) {
+            segmentNormals.push(getSegmentNormal(points[i], points[i + 1]));
+        }
+
+        for (let i = 0; i < n; i++) {
+            if (i === 0) {
+                const norm = segmentNormals[0];
+                leftSide.push({ x: points[0].x + norm.x * distance, y: points[0].y + norm.y * distance });
+                rightSide.push({ x: points[0].x - norm.x * distance, y: points[0].y - norm.y * distance });
+            } else if (i === n - 1) {
+                const norm = segmentNormals[n - 2];
+                leftSide.push({ x: points[n - 1].x + norm.x * distance, y: points[n - 1].y + norm.y * distance });
+                rightSide.push({ x: points[n - 1].x - norm.x * distance, y: points[n - 1].y - norm.y * distance });
             } else {
-                nx = -dy; ny = dx; // Вправо (если CCW)
+                const norm1 = segmentNormals[i - 1];
+                const norm2 = segmentNormals[i];
+
+                const pPrev = points[i - 1];
+                const pCurr = points[i];
+                const pNext = points[i + 1];
+
+                // Расчет левой стороны (пересечение параллельных линий смещения)
+                const l1_start = { x: pPrev.x + norm1.x * distance, y: pPrev.y + norm1.y * distance };
+                const l1_end = { x: pCurr.x + norm1.x * distance, y: pCurr.y + norm1.y * distance };
+                const l2_start = { x: pCurr.x + norm2.x * distance, y: pCurr.y + norm2.y * distance };
+                const l2_end = { x: pNext.x + norm2.x * distance, y: pNext.y + norm2.y * distance };
+
+                const leftInt = getLineIntersectionInfinite(l1_start, l1_end, l2_start, l2_end);
+                if (leftInt && isFinite(leftInt.x) && isFinite(leftInt.y)) {
+                    leftSide.push({ x: leftInt.x, y: leftInt.y });
+                } else {
+                    leftSide.push(l1_end);
+                }
+
+                // Расчет правой стороны
+                const r1_start = { x: pPrev.x - norm1.x * distance, y: pPrev.y - norm1.y * distance };
+                const r1_end = { x: pCurr.x - norm1.x * distance, y: pCurr.y - norm1.y * distance };
+                const r2_start = { x: pCurr.x - norm2.x * distance, y: pCurr.y - norm2.y * distance };
+                const r2_end = { x: pNext.x - norm2.x * distance, y: pNext.y - norm2.y * distance };
+
+                const rightInt = getLineIntersectionInfinite(r1_start, r1_end, r2_start, r2_end);
+                if (rightInt && isFinite(rightInt.x) && isFinite(rightInt.y)) {
+                    rightSide.push({ x: rightInt.x, y: rightInt.y });
+                } else {
+                    rightSide.push(r1_end);
+                }
             }
-
-            // Сдвигаем точки на distance по нормали
-            const offX = nx * distance;
-            const offY = ny * distance;
-
-            offsetLines.push({
-                p1: { x: p1.x + offX, y: p1.y + offY },
-                p2: { x: p2.x + offX, y: p2.y + offY }
-            });
         }
 
-        // Шаг 2: Находим пересечения соседних смещенных линий
-        const newPoints = [];
-        for (let i = 0; i < offsetLines.length; i++) {
-            const lineA = offsetLines[i];
-            const lineB = offsetLines[(i + 1) % offsetLines.length];
-
-            const intersection = getLineIntersectionInfinite(lineA.p1, lineA.p2, lineB.p1, lineB.p2);
-            
-            if (intersection) {
-                newPoints.push({ x: roundCoord(intersection.x), y: roundCoord(intersection.y) });
-            } else {
-                // Линии параллельны (коллинеарны). Просто добавляем конец первой
-                newPoints.push(lineA.p2);
-            }
+        // Объединение сторон в замкнутый полигон
+        const result = [];
+        for (let i = 0; i < leftSide.length; i++) {
+            result.push({ x: roundCoord(leftSide[i].x), y: roundCoord(leftSide[i].y) });
         }
-
-        // Шаг 3: Замыкаем обратно
-        if (newPoints.length > 0) {
-            newPoints.push({ x: newPoints[0].x, y: newPoints[0].y });
+        for (let i = rightSide.length - 1; i >= 0; i--) {
+            result.push({ x: roundCoord(rightSide[i].x), y: roundCoord(rightSide[i].y) });
         }
+        
+        // Замыкающая точка совпадает с первой
+        result.push({ x: result[0].x, y: result[0].y });
 
-        return newPoints;
+        return result;
     }
 
     // Вспомогательная функция: пересечение бесконечных прямых
