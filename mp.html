@@ -1918,8 +1918,7 @@ async function performTpZeroQuarterCheck(btn) {
 
 
 async function checkZuForTechPlan(zuNumbers, button) {
-    zuNumbers = zuNumbers || []; // Защита от null
-    // Убрана строка блокировки if (!zuNumbers || zuNumbers.length === 0) return;
+    zuNumbers = zuNumbers || [];
     
     const container = button.closest('.subsection');
     const statusDiv = container.querySelector('.zu-check-status');
@@ -1929,7 +1928,6 @@ async function checkZuForTechPlan(zuNumbers, button) {
     button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Подготовка...</span>';
     statusDiv.innerHTML = '';
     
-    // Определяем МСК по кадастровому кварталу
     const cadBlock = lastXmlDoc?.querySelector('CadastralBlock');
     const cadBlockText = cadBlock?.textContent?.trim();
     if (cadBlockText) {
@@ -1943,10 +1941,13 @@ async function checkZuForTechPlan(zuNumbers, button) {
         return;
     }
     
-    // Загружаем данные указанных ЗУ из ЕГРН
     const loadedZuData = new Map();
     const notFoundZu = [];
     let successCount = 0;
+    
+    // Карты для работы со структурами Единого землепользования (ЕЗ)
+    const ezCompositionMap = new Map(); // КН ЕЗ (master) -> Set(КН обособленных)
+    const isolatedToEzMap = new Map();  // КН обособленного -> КН ЕЗ (master)
     
     for (let i = 0; i < zuNumbers.length; i++) {
         const cadNum = zuNumbers[i];
@@ -1978,7 +1979,27 @@ async function checkZuForTechPlan(zuNumbers, button) {
                 addressDiv.innerHTML = `<i class="fas fa-hourglass-half" style="color:var(--text-secondary);"></i> ${address}`;
             }
             
-            // Конвертируем геометрию ЗУ
+            // Если участок является Единым землепользованием, запрашиваем его состав
+            const isEz = options.subtype === 'Единое землепользование' || options.land_record_subtype === 'Единое землепользование';
+            if (isEz && options.registersId && feature.id) {
+                try {
+                    const compUrl = `https://nspd.gov.ru/api/geoportal/v1/tab-values-data?tabClass=compositionLand&objdocId=${feature.id}&registersId=${options.registersId}`;
+                    const compResponse = await fetch(compUrl);
+                    if (compResponse.ok) {
+                        const compData = await compResponse.json();
+                        if (compData && Array.isArray(compData.value)) {
+                            const isolatedList = compData.value.map(val => val.trim().toLowerCase());
+                            ezCompositionMap.set(cadNum.toLowerCase(), new Set(isolatedList));
+                            isolatedList.forEach(isolatedKn => {
+                                isolatedToEzMap.set(isolatedKn, cadNum.toLowerCase());
+                            });
+                        }
+                    }
+                } catch (compErr) {
+                    console.error(`Ошибка загрузки состава ЕЗ для ${cadNum}:`, compErr);
+                }
+            }
+            
             let zuContours = [];
             if (feature.geometry && currentMskSystem) {
                 zuContours = await convertEgrnGeometryToMsk(feature.geometry, currentMskSystem);
@@ -2004,14 +2025,11 @@ async function checkZuForTechPlan(zuNumbers, button) {
     
     await delay(1000);
     
-    // Извлекаем контуры ОКС из XML
     const { contours, isLinear } = extractContoursFromTechPlan();
-    
-    // Сохраняем контуры ОКС для схемы
     currentTpOksContours = contours;
     
     if (contours.length === 0) {
-        statusDiv.innerHTML = `<div class="validation-message validation-warning">${sectionIcons.warningIcon} Не удалось извлечь координаты объекта из XML для проверки расположения</div>`;
+        statusDiv.innerHTML = `<div class="validation-message validation-warning">${sectionIcons.warningIcon}  Не удалось извлечь координаты объекта из XML для проверки расположения</div>`;
         
         if (successCount > 0) {
             for (const [cadNumLower, zuData] of loadedZuData) {
@@ -2030,15 +2048,12 @@ async function checkZuForTechPlan(zuNumbers, button) {
     button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Поиск ЗУ...</span>';
     
     let nspdZuFeatures = [];
-    
     if (isLinear) {
         nspdZuFeatures = await searchZuForLinearObject(contours, currentMskSystem);
     } else {
         nspdZuFeatures = await searchIntersectingObjects(contours, NSPD_CATEGORY_ZU, currentMskSystem);
     }
     
- 
-  // Обрабатываем найденные ЗУ
     const nspdZuList = [];
     for (const f of nspdZuFeatures) {
         const cadNum = f.properties?.options?.cad_number || f.properties?.options?.cad_num || f.properties?.descr;
@@ -2048,7 +2063,6 @@ async function checkZuForTechPlan(zuNumbers, button) {
                 zuContours = await convertEgrnGeometryToMsk(f.geometry, currentMskSystem);
             }
             
-            // Фильтруем ЗУ, которые только касаются границ, но не имеют наложения
             if (zuContours.length > 0 && contours.length > 0) {
                 if (!isRealOverlap(contours, zuContours)) {
                     continue; 
@@ -2066,7 +2080,6 @@ async function checkZuForTechPlan(zuNumbers, button) {
         }
     }
     
-    // Сохраняем данные для схемы
     currentTpZuData = {
         xmlZu: Array.from(loadedZuData.values()),
         nspdZu: nspdZuList
@@ -2074,18 +2087,34 @@ async function checkZuForTechPlan(zuNumbers, button) {
     
     button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Анализ...</span>';
     
-    // Сравнение
-    const nspdCadNumbers = nspdZuList.map(z => z.cadNumber.toLowerCase());
+    const intersectedCadNumbersLower = nspdZuList.map(z => z.cadNumber.toLowerCase());
     const xmlCadNumbers = zuNumbers.map(n => n.trim().toLowerCase());
     
     const wrongLocationZu = [];
     const correctZu = [];
     
     for (const [cadNumLower, zuData] of loadedZuData) {
-        if (nspdCadNumbers.includes(cadNumLower)) {
+        const isDirectMatch = intersectedCadNumbersLower.includes(cadNumLower);
+        let isEzMatch = false;
+        
+        // Проверяем, пересекает ли ОКС входящие в состав ЕЗ обособленные участки
+        if (ezCompositionMap.has(cadNumLower)) {
+            const constituents = ezCompositionMap.get(cadNumLower);
+            for (const constituent of constituents) {
+                if (intersectedCadNumbersLower.includes(constituent)) {
+                    isEzMatch = true;
+                    break;
+                }
+            }
+        }
+        
+        if (isDirectMatch || isEzMatch) {
             correctZu.push(zuData);
             if (zuData.addressDiv) {
-                zuData.addressDiv.innerHTML = `<i class="fas fa-check-circle" style="color:var(--success-color);"></i> ${zuData.address}`;
+                const extraText = isEzMatch 
+                    ? '<br><span style="color:var(--success-color); font-size:0.85em; font-weight:600;"><i class="fas fa-link"></i> Подтверждено через обособленный участок ЕЗ</span>' 
+                    : '';
+                zuData.addressDiv.innerHTML = `<i class="fas fa-check-circle" style="color:var(--success-color);"></i> ${zuData.address}${extraText}`;
             }
         } else {
             wrongLocationZu.push(zuData);
@@ -2095,15 +2124,27 @@ async function checkZuForTechPlan(zuNumbers, button) {
         }
     }
     
-    const missingZu = nspdZuList.filter(zu => !xmlCadNumbers.includes(zu.cadNumber.toLowerCase()));
+    // Формируем список отсутствующих в XML участков, игнорируя те, которые входят в состав указанного ЕЗ
+    const missingZu = [];
+    nspdZuList.forEach(zu => {
+        const zuLower = zu.cadNumber.toLowerCase();
+        if (xmlCadNumbers.includes(zuLower)) {
+            return;
+        }
+        if (isolatedToEzMap.has(zuLower)) {
+            const masterEz = isolatedToEzMap.get(zuLower);
+            if (xmlCadNumbers.includes(masterEz)) {
+                return; // Участок входит в ЕЗ, которое заявлено в XML. Не считаем его пропущенным.
+            }
+        }
+        missingZu.push(zu);
+    });
     
     button.disabled = false;
     button.innerHTML = originalButtonHtml;
     
-    // Формируем результат
     let statusHtml = '';
     
-    // Блок: ЗУ указаны в XML, но ОКС на них не расположен
     if (wrongLocationZu.length > 0) {
         statusHtml += `<div class="validation-message validation-error" style="margin-top:8px; flex-direction:column; align-items:flex-start;">
             <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
@@ -2123,7 +2164,6 @@ async function checkZuForTechPlan(zuNumbers, button) {
         </div>`;
     }
     
-    // Блок: ЗУ не найдены в ЕГРН
     if (notFoundZu.length > 0) {
         statusHtml += `<div class="validation-message validation-error" style="margin-top:8px; flex-direction:column; align-items:flex-start;">
             <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
@@ -2136,10 +2176,8 @@ async function checkZuForTechPlan(zuNumbers, button) {
         </div>`;
     }
     
-    // Проверяем есть ли координаты для схемы
     const hasSchemaData = contours.length > 0 || nspdZuList.some(z => z.hasCoords) || Array.from(loadedZuData.values()).some(z => z.hasCoords);
     
-    // Блок: Корректно указанные ЗУ
     if (correctZu.length > 0) {
         statusHtml += `<div class="validation-message validation-success" style="margin-top:8px; flex-wrap:wrap;">
             ${sectionIcons.successIcon} Корректно указаны: ${correctZu.length} из ${zuNumbers.length} ЗУ`;
@@ -2151,7 +2189,6 @@ async function checkZuForTechPlan(zuNumbers, button) {
         }
         statusHtml += `</div>`;
     } else if (hasSchemaData && (nspdZuList.length > 0 || contours.length > 0)) {
-        // Даже если нет корректных, но есть данные - показываем кнопку схемы
         statusHtml += `<div class="validation-message" style="margin-top:8px; background:#f0f9ff; border:1px solid #bae6fd; color:#0369a1; flex-wrap:wrap;">
             <i class="fas fa-info-circle"></i> Данные загружены
             <button class="print-btn" style="padding:6px 14px; font-size:0.9rem; margin-left:12px;" id="openTpSchemaBtn">
@@ -2160,16 +2197,29 @@ async function checkZuForTechPlan(zuNumbers, button) {
         </div>`;
     }
     
-    // Блок: Фактические ЗУ под объектом
     if (nspdZuList.length > 0) {
         statusHtml += `<div class="oks-found-in-nspd">
             <div class="missing-title"><i class="fas fa-search-location"></i> Фактически ОКС расположен на (по данным ЕГРН): ${nspdZuList.length} участок(ов)</div>
             <ul class="oks-missing-list">
                 ${nspdZuList.map(z => {
-                    const isInXml = xmlCadNumbers.includes(z.cadNumber.toLowerCase());
-                    const icon = isInXml ? 'fa-check-circle' : 'fa-exclamation-circle';
-                    const iconColor = isInXml ? '#10b981' : '#f59e0b';
-                    const statusText = isInXml ? '<span style="color:#10b981;">(указан в XML)</span>' : '<span style="color:#ef4444; font-weight:600;">(НЕ указан в XML)</span>';
+                    const zLower = z.cadNumber.toLowerCase();
+                    const isInXml = xmlCadNumbers.includes(zLower);
+                    
+                    let statusText = '';
+                    let iconColor = '#f59e0b';
+                    
+                    if (isInXml) {
+                        iconColor = '#10b981';
+                        statusText = '<span style="color:#10b981;">(указан в XML)</span>';
+                    } else if (isolatedToEzMap.has(zLower)) {
+                        const masterEz = isolatedToEzMap.get(zLower);
+                        const masterEzOriginal = zuNumbers.find(n => n.trim().toLowerCase() === masterEz) || masterEz;
+                        iconColor = '#10b981';
+                        statusText = `<span style="color:#10b981; font-weight:600;">(входит в состав ЕЗ ${masterEzOriginal}, указанного в XML)</span>`;
+                    } else {
+                        statusText = '<span style="color:#ef4444; font-weight:600;">(НЕ указан в XML)</span>';
+                    }
+                    
                     return `<li>
                         <i class="fas fa-vector-square" style="color:${iconColor}; width:16px;"></i> 
                         <strong>${z.cadNumber}</strong>
@@ -2181,7 +2231,6 @@ async function checkZuForTechPlan(zuNumbers, button) {
         </div>`;
     }
     
-    // Блок: Не указаны в XML, но ОКС на них расположен
     if (missingZu.length > 0) {
         statusHtml += `<div class="oks-missing-warning">
             <div class="missing-title"><i class="fas fa-exclamation-triangle"></i> Не указаны в XML, но ОКС на них расположен (${missingZu.length}):</div>
@@ -2199,20 +2248,18 @@ async function checkZuForTechPlan(zuNumbers, button) {
         </div>`;
     }
     
-  if (nspdZuList.length === 0 && contours.length > 0) {
+    if (nspdZuList.length === 0 && contours.length > 0) {
         statusHtml += `<div class="validation-message" style="margin-top:8px; background:#f0f9ff; border:1px solid #bae6fd; color:#0369a1;">
             <i class="fas fa-info-circle"></i> Земельные участки под объектом в ЕГРН не обнаружены (возможно, объект расположен на землях неразграниченной госсобственности)
         </div>`;
     }
     
-
- if (cadBlockText && contours.length > 0) {
+    if (cadBlockText && contours.length > 0) {
         const parts = cadBlockText.split(':');
         if (parts.length >= 3) {
             const zeroes = '0'.repeat(parts[2].length);
             const zeroQuarter = `${parts[0]}:${parts[1]}:${zeroes}`;
             
-            // Сохраняем контекст
             window.currentTpZeroCheckContext = {
                 mskSystem: currentMskSystem,
                 oksContoursMsk: contours,
@@ -2223,7 +2270,7 @@ async function checkZuForTechPlan(zuNumbers, button) {
             statusHtml += `
             <div style="margin-top: 15px; display: flex; gap: 8px; flex-wrap: wrap;">
                 <input type="text" id="manualQuarterInputTp" value="${zeroQuarter}" placeholder="Номер квартала" style="flex: 1; min-width: 140px; padding: 10px 12px; border: 1px solid var(--border-color); border-radius: 8px; font-family: 'Courier New', monospace; font-size: 1rem; outline: none;">
-                <button id="checkTpZeroQuarterBtn" class="print-btn contradiction-btn"     title="Если в ЕГРН нет данных о границах, выполните дополнительную проверку по данным XML квартала" style="flex: 2; justify-content: center; background-color: #8b5cf6;">
+                <button id="checkTpZeroQuarterBtn" class="print-btn contradiction-btn" title="Если в ЕГРН нет данных о границах, выполните дополнительную проверку по данным XML квартала" style="flex: 2; justify-content: center; background-color: #8b5cf6;">
                     <i class="fas fa-cloud-download-alt"></i><span>Проверить наложения на ЗУ по данным XML</span>
                 </button>
             </div>`;
@@ -2232,7 +2279,6 @@ async function checkZuForTechPlan(zuNumbers, button) {
 
     statusDiv.innerHTML = statusHtml;
     
-    // Добавляем обработчик для кнопки схемы
     const schemaBtn = document.getElementById('openTpSchemaBtn');
     if (schemaBtn) {
         schemaBtn.addEventListener('click', () => {
