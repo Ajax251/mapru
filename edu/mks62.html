@@ -616,31 +616,21 @@ const tMW = new THREE.Texture();
 async function getTextureBlobUrl(primaryUrl, fallbackUrl) {
     return new Promise((resolve) => {
         try {
-            const dbName = 'MKS_Shared_Cache';
-            const req = indexedDB.open(dbName, 1);
-            
-            req.onupgradeneeded = (e) => {
-                const db = e.target.result;
-                if (!db.objectStoreNames.contains('textures')) db.createObjectStore('textures');
-                if (!db.objectStoreNames.contains('models')) db.createObjectStore('models');
-            };
-            
+          const req = indexedDB.open('MKS_Shared_Cache', 1);
+req.onupgradeneeded = (e) => {
+    const db = e.target.result;
+    if (!db.objectStoreNames.contains('textures')) db.createObjectStore('textures');
+    if (!db.objectStoreNames.contains('models')) db.createObjectStore('models');
+};
             req.onsuccess = (e) => {
                 const db = e.target.result;
-                
-                db.onversionchange = () => {
-                    db.close();
-                };
-                
                 const tx = db.transaction('textures', 'readonly');
                 const store = tx.objectStore('textures');
                 const getReq = store.get(primaryUrl);
 
                 getReq.onsuccess = async (eGet) => {
-                    const cachedBlob = eGet.target.result;
-                    if (cachedBlob) {
-                        db.close();
-                        resolve(URL.createObjectURL(cachedBlob));
+                    if (eGet.target.result) {
+                        resolve(URL.createObjectURL(eGet.target.result));
                     } else {
                         try {
                             let res = await fetch(primaryUrl);
@@ -648,47 +638,16 @@ async function getTextureBlobUrl(primaryUrl, fallbackUrl) {
                             if (!res.ok) throw new Error('Fetch failed');
 
                             const blob = await res.blob();
-                            const localUrl = URL.createObjectURL(blob);
-                            
-                            // Отдаем текстуру МГНОВЕННО
-                            resolve(localUrl);
-                            
-                            // Записываем в базу в фоновом режиме
-                            setTimeout(() => {
-                                try {
-                                    const writeTx = db.transaction('textures', 'readwrite');
-                                    writeTx.objectStore('textures').put(blob, primaryUrl);
-                                    writeTx.oncomplete = () => db.close();
-                                    writeTx.onerror = () => db.close();
-                                    writeTx.onabort = () => db.close();
-                                } catch (err) {
-                                    try { db.close(); } catch(ex){}
-                                }
-                            }, 50);
-                            
-                        } catch (err) {
-                            db.close();
-                            resolve(fallbackUrl || primaryUrl);
-                        }
+                            const txWrite = db.transaction('textures', 'readwrite');
+                            txWrite.objectStore('textures').put(blob, primaryUrl);
+                            resolve(URL.createObjectURL(blob));
+                        } catch (err) { resolve(fallbackUrl || primaryUrl); }
                     }
                 };
-                
-                getReq.onerror = () => {
-                    db.close();
-                    resolve(fallbackUrl || primaryUrl);
-                };
+                getReq.onerror = () => resolve(fallbackUrl || primaryUrl);
             };
-            
-            req.onerror = () => {
-                resolve(fallbackUrl || primaryUrl);
-            };
-            
-            req.onblocked = () => {
-                resolve(fallbackUrl || primaryUrl);
-            };
-        } catch (err) { 
-            resolve(fallbackUrl || primaryUrl); 
-        }
+            req.onerror = () => resolve(fallbackUrl || primaryUrl);
+        } catch (err) { resolve(fallbackUrl || primaryUrl); }
     });
 }
 
@@ -698,11 +657,7 @@ async function applyTexture(texObject, primaryUrl, fallbackUrl) {
         (loadedImage) => {
             texObject.image = loadedImage.image;
             texObject.needsUpdate = true;
-            
-            // Отзываем ссылку с задержкой, чтобы Three.js успел завершить инициализацию текстуры
-            if (blobUrl.startsWith('blob:')) {
-                setTimeout(() => URL.revokeObjectURL(blobUrl), 1000);
-            }
+            if (blobUrl.startsWith('blob:')) URL.revokeObjectURL(blobUrl);
             
             loadState.tex++;
             updateLoaderUI();
@@ -710,6 +665,7 @@ async function applyTexture(texObject, primaryUrl, fallbackUrl) {
         },
         undefined,
         (error) => {
+            // Если текстура не скачалась (например, из-за AdBlock), не даем зависнуть:
             loadState.tex++;
             updateLoaderUI();
             if (loadState.tex === 5) { texturesLoaded = true; checkHideLoader(); }
@@ -955,77 +911,131 @@ camBack.position.set(0, 0.4, -1.2); camBack.rotation.set(0, 0, 0); camBack.rotat
 // ----- АСИНХРОННАЯ ЗАГРУЗКА 3D МОДЕЛИ МКС NASA (~40MB) -----
 const ISS_GLB_URL = 'https://assets.science.nasa.gov/content/dam/science/psd/solar/2023/09/i/ISS_stationary.glb?emrc=69d917df03d24';
 
-function loadHighResISS() {
+async function loadHighResISS() {
+ //   loadState.modelText = "ПРОВЕРКА КЭША 3D МОДЕЛИ...";
+    updateLoaderUI();
+
+    const getModelUrl = () => new Promise((resolve) => {
+        try {
+            const req = indexedDB.open('ISS_ModelCache', 1);
+            req.onupgradeneeded = (e) => e.target.result.createObjectStore('models');
+            req.onsuccess = (e) => {
+                const db = e.target.result;
+                const tx = db.transaction('models', 'readonly');
+                const store = tx.objectStore('models');
+                const getReq = store.get(ISS_GLB_URL);
+
+                getReq.onsuccess = async (eGet) => {
+                    if (eGet.target.result) {
+                      //  loadState.modelText = "ЗАГРУЗКА МОДЕЛИ ИЗ КЭША...";
+                        updateLoaderUI();
+                        resolve(URL.createObjectURL(eGet.target.result));
+                    } else {
+                        try {
+                            loadState.modelText = "ПОДКЛЮЧЕНИЕ К NASA...";
+                            updateLoaderUI();
+                            
+                            const response = await fetch(ISS_GLB_URL);
+                            if (!response.ok) throw new Error('Сетевая ошибка при скачивании');
+                            
+                            const contentLength = response.headers.get('content-length');
+                            const total = contentLength ? parseInt(contentLength, 10) : 41943040; // ~40MB
+                            let loaded = 0;
+                            
+                            // Собираем бинарный файл по кусочкам для 100% целостности
+                            const reader = response.body.getReader();
+                            const chunks = [];
+                            
+                            while (true) {
+                                const { done, value } = await reader.read();
+                                if (done) break;
+                                chunks.push(value);
+                                loaded += value.byteLength;
+                                const percent = Math.min(100, Math.round((loaded / total) * 100));
+                                loadState.modelText = `ЗАГРУЗКА МОДЕЛИ МКС: ${percent}%`;
+                                updateLoaderUI();
+                            }
+                            
+                            // Создаем чистый бинарный Blob
+                            const blob = new Blob(chunks, { type: 'application/octet-stream' });
+                            
+                            loadState.modelText = "СОХРАНЕНИЕ В КЭШ...";
+                            updateLoaderUI();
+                            
+                            // Пытаемся сохранить в БД (в отдельном try/catch, чтобы при сбое памяти модель всё равно показалась)
+                            try {
+                                const txWrite = db.transaction('models', 'readwrite');
+                                txWrite.objectStore('models').put(blob, ISS_GLB_URL);
+                            } catch (dbErr) {
+                                console.warn("Не удалось сохранить модель в кэш IndexedDB", dbErr);
+                            }
+                            
+                            resolve(URL.createObjectURL(blob));
+                        } catch (err) { 
+                            console.error(err);
+                            resolve(null); 
+                        }
+                    }
+                };
+                getReq.onerror = () => resolve(null);
+            };
+            req.onerror = () => resolve(null);
+        } catch (err) { resolve(null); }
+    });
+
+    const blobUrl = await getModelUrl();
+    
+    if (!blobUrl) {
+        modelLoaded = true; // Аварийный запуск с базовой моделью
+        checkHideLoader();
+        return;
+    }
+
+//    loadState.modelText = "КОМПИЛЯЦИЯ ГЕОМЕТРИИ...";
     updateLoaderUI();
 
     const loader = new GLTFLoader();
-    
-    loader.load(
-        ISS_GLB_URL,
-        // Функция успешной загрузки
-        (gltf) => {
-            const textEl = document.querySelector('.loader-text');
-            if (textEl) textEl.textContent = "ПОДГОТОВКА СЦЕНЫ...";
-
-            const model = gltf.scene;
-            const box = new THREE.Box3().setFromObject(model);
-            const size = new THREE.Vector3();
-            box.getSize(size);
-            
-            const maxDim = Math.max(size.x, size.y, size.z);
-            if (maxDim > 0) {
-                const scale = 2.18 / maxDim;
-                model.scale.set(scale, scale, scale);
-            }
-            
-            box.setFromObject(model);
-            const center = new THREE.Vector3();
-            box.getCenter(center);
-            model.position.sub(center);
-            model.rotation.y = Math.PI / 2;
-
-            model.traverse((child) => {
-                if (child.isMesh && child.material) {
-                    child.material.metalness = 0.7;
-                    child.material.roughness = 0.3;
-                    child.material.needsUpdate = true;
-                }
-            });
-
-            // Жестко скрываем и удаляем старую модель
-            proceduralISS.visible = false;
-            iss.remove(proceduralISS);
-            iss.add(model);
-
-            modelLoaded = true;
-            checkHideLoader();
-        },
-        // Функция прогресса загрузки
-        (xhr) => {
-            const textEl = document.querySelector('.loader-text');
-            if (!textEl) return;
-            
-            if (xhr.lengthComputable) {
-                const percentComplete = Math.round((xhr.loaded / xhr.total) * 100);
-                if (percentComplete === 100) {
-                    textEl.textContent = "РАСПАКОВКА ГЕОМЕТРИИ (ПОДОЖДИТЕ)...";
-                } else {
-                    textEl.textContent = `ЗАГРУЗКА МОДЕЛИ МКС: ${percentComplete}%`;
-                }
-            } else {
-                const mb = (xhr.loaded / (1024 * 1024)).toFixed(1);
-                textEl.textContent = `ЗАГРУЗКА МОДЕЛИ МКС: ${mb} MB`;
-            }
-        },
-        // Функция ошибки
-        (error) => {
-            console.error("Ошибка парсинга 3D модели Three.js:", error);
-            modelLoaded = true; // Аварийный запуск с базовой моделью
-            checkHideLoader();
+    loader.load(blobUrl, (gltf) => {
+        const model = gltf.scene;
+        const box = new THREE.Box3().setFromObject(model);
+        const size = new THREE.Vector3();
+        box.getSize(size);
+        
+        // Защита от деления на ноль
+        const maxDim = Math.max(size.x, size.y, size.z);
+        if (maxDim > 0) {
+            const scale = 2.18 / maxDim;
+            model.scale.set(scale, scale, scale);
         }
-    );
-}
+        
+        box.setFromObject(model);
+        const center = new THREE.Vector3();
+        box.getCenter(center);
+        model.position.sub(center);
+        model.rotation.y = Math.PI / 2;
 
+        model.traverse((child) => {
+            if (child.isMesh && child.material) {
+                child.material.metalness = 0.7;
+                child.material.roughness = 0.3;
+                child.material.needsUpdate = true;
+            }
+        });
+
+        // Жестко скрываем и удаляем старую модель
+        proceduralISS.visible = false;
+        iss.remove(proceduralISS);
+        iss.add(model);
+
+        modelLoaded = true;
+        checkHideLoader();
+        
+    }, undefined, (error) => {
+        console.error("Ошибка парсинга 3D модели Three.js:", error);
+        modelLoaded = true;
+        checkHideLoader();
+    });
+}
 loadHighResISS();
 
 // ---------------------------------------------
@@ -1298,11 +1308,6 @@ function getOceanName(lat, lon) {
 }
 
 async function fetchLoc(lat, lon) {
-
-    if (lat === undefined || lon === undefined || isNaN(lat) || isNaN(lon)) {
-        return;
-    }
-    
     const now = Date.now(); if (now - lastGeoT < 10000) return; lastGeoT = now;
     try {
         const r = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&zoom=10&accept-language=ru`);
@@ -1371,9 +1376,8 @@ async function fetchISS() {
             const res = await fetch('https://celestrak.org/NORAD/elements/stations.txt');
             const text = await res.text();
             const lines = text.split('\n');
-          let idx = lines.findIndex(l => l.includes('ISS (ZARYA)'));
-           
-            if (idx !== -1 && lines[idx+1] && lines[idx+2]) {
+            let idx = lines.findIndex(l => l.includes('ISS (ZARYA)'));
+            if (idx !== -1) {
                 satrec = satellite.twoline2satrec(lines[idx+1].trim(), lines[idx+2].trim());
             }
         } catch(e) {}
@@ -1539,30 +1543,21 @@ function animate() {
     );
     moon.lookAt(0,0,0);
 
-if (DATA_SOURCE === 1 && satrec) {
+    if (DATA_SOURCE === 1 && satrec) {
         const pv = satellite.propagate(satrec, date);
         const gmstSat = satellite.gstime(date);
+        const posGd = satellite.eciToGeodetic(pv.position, gmstSat);
+        virtualLat = satellite.degreesLat(posGd.latitude);
+        virtualLon = satellite.degreesLong(posGd.longitude);
+        const v = pv.velocity;
+        const vel = Math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z) * 3600;
+        issData = { lat: virtualLat, lon: virtualLon, alt: posGd.height, vel: vel };
         
-        if (pv && pv.position) {
-            const posGd = satellite.eciToGeodetic(pv.position, gmstSat);
-            
-            if (posGd && !isNaN(posGd.latitude) && !isNaN(posGd.longitude)) {
-                virtualLat = satellite.degreesLat(posGd.latitude);
-                virtualLon = satellite.degreesLong(posGd.longitude);
-                const v = pv.velocity;
-                const vel = Math.sqrt(v.x*v.x + v.y*v.y + v.z*v.z) * 3600;
-                issData = { lat: virtualLat, lon: virtualLon, alt: posGd.height, vel: vel };
-                
-                if (nowFrame - lastIssUpdateTime > 1000) {
-                    updateHUD(issData);
-                    lastIssUpdateTime = nowFrame;
-                    updateISS(); 
-                    fetchLoc(virtualLat, virtualLon);
-                    apiLoaded = true;  
-                    updateLoaderUI(); 
-                    checkHideLoader();
-                }
-            }
+        if (nowFrame - lastIssUpdateTime > 1000) {
+            updateHUD(issData);
+            lastIssUpdateTime = nowFrame;
+            updateISS(); fetchLoc(virtualLat, virtualLon);
+            apiLoaded = true;  updateLoaderUI(); checkHideLoader();
         }
     } else {
         if (latSpeed !== 0 || lonSpeed !== 0) {
