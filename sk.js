@@ -65,7 +65,6 @@ const COORDINATE_SYSTEMS = [
     { value: "EPSG:6331501", text: "МСК 15-1 Северная Осетия - Алания", def: "+proj=tmerc +lat_0=0 +lon_0=43.98333333333 +k=1 +x_0=1300000 +y_0=-4311057.63 +ellps=krass +towgs84=23.57,-140.95,-79.8,0,0.35,0.79,-0.22 +units=m +no_defs" },
     { value: "EPSG:6331601", text: "МСК 16-1 Республика Татарстан", def: "+proj=tmerc +lat_0=0 +lon_0=49.033333333333 +k=1 +x_0=1300000 +y_0=-5709414.7 +ellps=krass +towgs84=23.92,-141.27,-80.9,-0,0.35,0.82,-0.12 +units=m +no_defs" ,offsetX: 0.01, offsetY: 0 },
 
-{ value: "EPSG:6331601", text: "МСК 16-1 Республика Татарстан", def: "+proj=tmerc +lat_0=0 +lon_0=49.033333333333 +k=1 +x_0=1300000 +y_0=-5709414.7 +ellps=krass +towgs84=23.92,-141.27,-80.9,-0,0.35,0.82,-0.12 +units=m +no_defs" ,offsetX: 0.01, offsetY: 0 },
     { value: "EPSG:633160163", text: "МСК 16-1 (СК-63) Республика Татарстан", def: "+proj=tmerc +lat_0=0 +lon_0=49.033333333333 +k=1 +x_0=1300000 +y_0=-9414.7 +ellps=krass +towgs84=23.92,-141.27,-80.9,-0,0.35,0.82,-0.12 +units=m +no_defs" ,offsetX: 0.01, offsetY: 0 },
 
     { value: "EPSG:6331602", text: "МСК 16-2 Республика Татарстан", def: "+proj=tmerc +lat_0=0 +lon_0=52.033333333333 +k=1 +x_0=2300000 +y_0=-5709414.7 +ellps=krass +towgs84=23.92,-141.27,-80.9,-0,0.35,0.82,-0.12 +units=m +no_defs", offsetX: 0.01, offsetY: 0 },
