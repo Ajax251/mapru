@@ -9585,87 +9585,100 @@ if (event.target.id === 'copy-all-epsg3857-menu-item') {
 
 
 if (event.target.id === 'change-color-menu-item') {
-            const lat = parseFloat(contextMenu.dataset.lat);
-            const lon = parseFloat(contextMenu.dataset.lon);
-            const clickPoint = turf.point([lon, lat]);
-            const toleranceMeters = 15; // Радиус захвата линии
+    const lat = parseFloat(contextMenu.dataset.lat);
+    const lon = parseFloat(contextMenu.dataset.lon);
+    const clickPoint = turf.point([lon, lat]);
+    const toleranceMeters = 15; // Радиус захвата линии
 
-            // 1. Сначала пытаемся найти объекты конкретно в точке клика
-            let candidateObjects = [];
-            
-            // Исключаем технические объекты (рамки квартала, линии рулетки, области поиска),
-            // НО РАЗРЕШАЕМ редактировать полигоны, нарисованные инструментом "Площадь"
-            const allDrawableObjects = [...polygons, ...areaObjects].filter(obj => 
-                (!obj.properties?.get('isMeasureTool') || obj.properties?.get('isAreaMeasurement')) && 
-                !obj.properties?.get('isSearchShape') &&
-                obj.options?.get('strokeStyle') !== 'dash'
-            );
+    // 1. Сначала пытаемся найти объекты конкретно в точке клика
+    let candidateObjects = [];
+    const allDrawableObjects = [];
 
-            for (const obj of allDrawableObjects) {
-                // Проверка Полигонов
-                if (obj instanceof ymaps.Polygon) {
-                    try {
-                        const coords = obj.geometry.getCoordinates()[0];
-                        if (!coords || coords.length < 3) continue; // Полигон должен иметь минимум 3 точки
-                        
-                        // Гарантируем замыкание полигона для корректной работы Turf.js
-                        let turfCoords = coords.map(coord => [coord[1], coord[0]]);
-                        const first = turfCoords[0];
-                        const last = turfCoords[turfCoords.length - 1];
-                        // Если первая и последняя точки не совпадают, дублируем первую в конец
-                        if (Math.abs(first[0] - last[0]) > 1e-9 || Math.abs(first[1] - last[1]) > 1e-9) {
-                            turfCoords.push([...first]);
-                        }
-                        
-                        const turfPolygon = turf.polygon([turfCoords]);
-                        if (turf.booleanPointInPolygon(clickPoint, turfPolygon)) {
-                            candidateObjects.push(obj);
-                        }
-                    } catch (turfError) {
-                        // Резервный метод API Яндекса, если Turf всё же выдал ошибку
-                        if (obj.geometry.contains([lat, lon])) {
-                            candidateObjects.push(obj);
-                        }
-                    }
-                } 
-                // Проверка Линий (только тех, что нарисованы пользователем или являются объектами)
-                else if (obj instanceof ymaps.Polyline) {
-                    try {
-                        const coords = obj.geometry.getCoordinates();
-                        if (coords.length < 2) continue;
-                        const turfLine = turf.lineString(coords.map(coord => [coord[1], coord[0]]));
-                        const distance = turf.pointToLineDistance(clickPoint, turfLine, { units: 'meters' });
-                        if (distance <= toleranceMeters) {
-                            candidateObjects.push(obj);
-                        }
-                    } catch (e) { console.error(e); }
+    // Рекурсивная функция для извлечения абсолютно всех объектов со всех уровней вложенности
+    function extractObjectsRecursively(collection) {
+        collection.each(function (obj) {
+            if (obj instanceof ymaps.Polygon || obj instanceof ymaps.Polyline) {
+                const isMeasureTool = obj.properties?.get('isMeasureTool');
+                const isAreaMeasurement = obj.properties?.get('isAreaMeasurement');
+                const isSearchShape = obj.properties?.get('isSearchShape');
+                const isDash = obj.options?.get('strokeStyle') === 'dash';
+                
+                // Исключаем только техническую сетку кварталов (у нее штриховка и нет свойств/метаданных)
+                const isQuarterGrid = isDash && Object.keys(obj.properties?.getAll() || {}).length === 0;
+
+                if ((!isMeasureTool || isAreaMeasurement) && !isSearchShape && !isQuarterGrid) {
+                    allDrawableObjects.push(obj);
+                }
+            } else if (obj.each && typeof obj.each === 'function') {
+                // Если это вложенная коллекция (группа объектов), заходим внутрь неё
+                extractObjectsRecursively(obj);
+            }
+        });
+    }
+
+    // Запускаем полный обход объектов на карте
+    extractObjectsRecursively(map.geoObjects);
+
+    for (const obj of allDrawableObjects) {
+        // Проверка Полигонов
+        if (obj instanceof ymaps.Polygon) {
+            try {
+                const coords = obj.geometry.getCoordinates()[0];
+                if (!coords || coords.length < 3) continue; // Полигон должен иметь минимум 3 точки
+                
+                // Гарантируем замыкание полигона для корректной работы Turf.js
+                let turfCoords = coords.map(coord => [coord[1], coord[0]]);
+                const first = turfCoords[0];
+                const last = turfCoords[turfCoords.length - 1];
+                if (Math.abs(first[0] - last[0]) > 1e-9 || Math.abs(first[1] - last[1]) > 1e-9) {
+                    turfCoords.push([...first]);
+                }
+                
+                const turfPolygon = turf.polygon([turfCoords]);
+                if (turf.booleanPointInPolygon(clickPoint, turfPolygon)) {
+                    candidateObjects.push(obj);
+                }
+            } catch (turfError) {
+                // Резервный метод API Яндекса, если Turf выдал ошибку
+                if (obj.geometry.contains([lat, lon])) {
+                    candidateObjects.push(obj);
                 }
             }
-
-            // 2. Если в точке клика ничего не найдено, собираем ВСЕ редактируемые объекты с карты
-            if (candidateObjects.length === 0) {
-                candidateObjects = allDrawableObjects.filter(obj => 
-                    obj instanceof ymaps.Polygon || 
-                    (obj instanceof ymaps.Polyline && (obj.properties.get('isDrawableLine') || obj.properties.get('cadastralNumber')))
-                );
-            }
-
-            // 3. Действия в зависимости от количества найденных кандидатов
-            if (candidateObjects.length === 0) {
-                showNotification('На карте нет объектов для изменения', 'warning', 'exclamation-triangle');
-            } else if (candidateObjects.length === 1) {
-                openColorEditorModal(candidateObjects[0]);
-            } else {
-                showPolygonSelectionModal(candidateObjects, (selectedObject) => {
-                    if (selectedObject) {
-                        openColorEditorModal(selectedObject);
-                    }
-                }, "Выберите объект для изменения");
-            }
-            
-            contextMenu.style.display = 'none';
+        } 
+        // Проверка Линий (только тех, что нарисованы пользователем или являются объектами)
+        else if (obj instanceof ymaps.Polyline) {
+            try {
+                const coords = obj.geometry.getCoordinates();
+                if (coords.length < 2) continue;
+                const turfLine = turf.lineString(coords.map(coord => [coord[1], coord[0]]));
+                const distance = turf.pointToLineDistance(clickPoint, turfLine, { units: 'meters' });
+                if (distance <= toleranceMeters) {
+                    candidateObjects.push(obj);
+                }
+            } catch (e) { console.error(e); }
         }
-        
+    }
+
+    // 2. Если в точке клика ничего не найдено, собираем ВСЕ доступные объекты с карты
+    if (candidateObjects.length === 0) {
+        candidateObjects = allDrawableObjects;
+    }
+
+    // 3. Действия в зависимости от количества найденных кандидатов
+    if (candidateObjects.length === 0) {
+        showNotification('На карте нет объектов для изменения', 'warning', 'exclamation-triangle');
+    } else if (candidateObjects.length === 1) {
+        openColorEditorModal(candidateObjects[0]);
+    } else {
+        showPolygonSelectionModal(candidateObjects, (selectedObject) => {
+            if (selectedObject) {
+                openColorEditorModal(selectedObject);
+            }
+        }, "Выберите объект для изменения");
+    }
+    
+    contextMenu.style.display = 'none';
+}
     });
 
 
