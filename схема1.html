@@ -6344,201 +6344,18 @@ function displayGeoJSONComments(comments) {
     pointsList.appendChild(wrapper);
 }
 
-const SXF_RECORD_MARKER = 0x7FFF7FFF;
-
-
-function readSXFScale(view) {
-  
-    try {
-        const mapScale = view.getUint32(0x2C, true); 
-        if (mapScale > 0) return 1.0 / mapScale;
-    } catch (_) {}
-    return 1.0;
-}
-
-function extractCoordinatesFromSXF(arrayBuffer) {
-    const view   = new DataView(arrayBuffer);
-    const length = arrayBuffer.byteLength;
- 
-    if (length < 12) return [];
- 
-    // ── 1. Проверка сигнатуры ────────────────────────────────────────────────
-    const sig = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2));
-    if (sig !== 'SXF') {
-        console.warn('SXF: некорректная сигнатура файла (ожидается "SXF").');
-        return [];
-    }
- 
-    // ── 2. Длина паспорта ────────────────────────────────────────────────────
-    const passportLength = view.getUint32(4, true);
-    if (passportLength >= length) {
-        console.warn('SXF: длина паспорта превышает размер файла.');
-        return [];
-    }
- 
-    // Масштаб (нужен для int-форматов)
-    const scale = readSXFScale(view);
- 
-    let offset      = passportLength;
-    const coordinates = [];
- 
-    // ── 3. Обход записей ─────────────────────────────────────────────────────
-    while (offset + 32 <= length) {
- 
-        // 3a. Поиск маркера записи 0x7FFF7FFF
-        if (view.getUint32(offset, true) !== SXF_RECORD_MARKER) {
-            let found = false;
-            for (let i = offset + 1; i <= length - 4; i++) {
-                if (view.getUint32(i, true) === SXF_RECORD_MARKER) {
-                    offset = i;
-                    found  = true;
-                    break;
-                }
-            }
-            if (!found) break;
-        }
- 
-        // 3b. Поля заголовка записи
-        const totalLen    = view.getUint32(offset + 4,  true); // полная длина записи
-        const metricLen   = view.getUint32(offset + 8,  true); // байт в метрике
- 
-        if (totalLen === 0) break;
- 
-        // ── КЛЮЧЕВОЕ ИСПРАВЛЕНИЕ ──
-        // Флаг метрики — байт по смещению +20 (НЕ +21!).
-        // +21 — флаг объекта, не имеет отношения к типу координат.
-        const metricFlagByte = view.getUint8(offset + 20);
-        const coordTypeBits  = metricFlagByte & 0x03;  // bits 0-1: тип координат
-        const is3D           = (metricFlagByte & 0x04) !== 0; // bit 2: есть высота
- 
-        const pointCount  = view.getUint32(offset + 24, true);
-        const metricStart = offset + 32;
- 
-        // 3c. Валидация
-        if (
-            pointCount === 0  ||
-            metricLen  === 0  ||
-            metricStart + metricLen > length
-        ) {
-            offset += totalLen;
-            continue;
-        }
- 
-        // 3d. Размер компоненты и stride
-        // stride = metricLen / pointCount — самый надёжный способ,
-        // т.к. напрямую подтверждает реальный размер точки в файле.
-        const stride = Math.floor(metricLen / pointCount);
- 
-        // 3e. Декодеры X и Y
-        let readCoords; // (pOffset: number) => [x, y] | null
- 
-        if (stride === 16) {
-            // float64, 2D
-            readCoords = (p) => [
-                view.getFloat64(p,     true),
-                view.getFloat64(p + 8, true),
-            ];
-        } else if (stride === 24) {
-            // float64, 3D (H игнорируем)
-            readCoords = (p) => [
-                view.getFloat64(p,     true),
-                view.getFloat64(p + 8, true),
-            ];
-        } else if (stride === 8) {
-            // float32, 2D
-            readCoords = (p) => [
-                view.getFloat32(p,     true),
-                view.getFloat32(p + 4, true),
-            ];
-        } else if (stride === 12) {
-            // float32, 3D (H игнорируем)
-            readCoords = (p) => [
-                view.getFloat32(p,     true),
-                view.getFloat32(p + 4, true),
-            ];
-        } else if (stride === 8 && coordTypeBits === 2) {
-            // int32, 2D + масштаб
-            readCoords = (p) => [
-                view.getInt32(p,     true) * scale,
-                view.getInt32(p + 4, true) * scale,
-            ];
-        } else if (stride === 12 && coordTypeBits === 2) {
-            // int32, 3D + масштаб
-            readCoords = (p) => [
-                view.getInt32(p,     true) * scale,
-                view.getInt32(p + 4, true) * scale,
-            ];
-        } else if (stride === 4 && coordTypeBits === 3) {
-            // int16, 2D + масштаб
-            readCoords = (p) => [
-                view.getInt16(p,     true) * scale,
-                view.getInt16(p + 2, true) * scale,
-            ];
-        } else {
-            // Неизвестный формат — пропускаем
-            console.warn(`SXF: неизвестный stride=${stride} для записи @0x${offset.toString(16)}`);
-            offset += totalLen;
-            continue;
-        }
- 
-        // 3f. Чтение точек
-        const contour = [];
-        for (let p = 0; p < pointCount; p++) {
-            const pOff   = metricStart + p * stride;
-            const coords = readCoords(pOff);
-            if (coords && isFinite(coords[0]) && isFinite(coords[1])) {
-                // X — восток (easting), Y — север (northing)
-                // Выводим в том же порядке, в котором хранятся в файле (X первый)
-                contour.push(`${coords[0].toFixed(2)}\t${coords[1].toFixed(2)}`);
-            }
-        }
- 
-        if (contour.length > 0) {
-            if (coordinates.length > 0) coordinates.push('');
-            coordinates.push(...contour);
-        }
- 
-        offset += totalLen;
-    }
- 
-    return coordinates;
-}
-
 function processFileToCoordinates(file) {
     return new Promise((resolve) => {
         const extension = file.name.split('.').pop().toLowerCase();
- 
-        // ZIP — внешний обработчик (JSZip)
+        
+        // Специальная обработка для ZIP, так как там используется JSZip
         if (extension === 'zip') {
-            parseZipToCoordinates(file)
-                .then(coords => resolve(coords ? { coordinates: coords, names: [] } : null))
-                .catch(() => resolve(null));
+            parseZipToCoordinates(file).then(coords => {
+                resolve(coords ? { coordinates: coords, names: [] } : null);
+            }).catch(() => resolve(null));
             return;
         }
- 
-        // SXF — бинарный формат
-        if (extension === 'sxf') {
-            const reader = new FileReader();
-            reader.onload = function (event) {
-                try {
-                    const buffer      = event.target.result;
-                    const coordinates = extractCoordinatesFromSXF(buffer);
-                    resolve(
-                        coordinates && coordinates.length > 0
-                            ? { coordinates, names: [] }
-                            : null
-                    );
-                } catch (e) {
-                    console.warn(`Ошибка парсинга SXF "${file.name}":`, e);
-                    resolve(null);
-                }
-            };
-            reader.onerror = () => resolve(null);
-            reader.readAsArrayBuffer(file);
-            return;
-        }
- 
-        // Остальные форматы — существующий обработчик (текст)
+
         const reader = new FileReader();
 
         reader.onload = function(event) {
@@ -6652,7 +6469,7 @@ function importFile(isAppend = false) {
     const fileInput = document.createElement('input');
     fileInput.type = 'file';
     fileInput.multiple = true; // ВКЛЮЧЕН МУЛЬТИВЫБОР
-        fileInput.accept = '.xml,.zip,.dxf,.mif,.csv,.txt,.geojson,.kml,.xyh,.sxf';
+    fileInput.accept = '.xml,.zip,.dxf,.mif,.csv,.txt,.geojson,.kml,.xyh';
 
     fileInput.onchange = async function(e) {
         const files = Array.from(e.target.files);
