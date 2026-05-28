@@ -3712,767 +3712,67 @@ async function handleImportFromTextareaCoordinates(text, color = null) {
         return objects;
     }
 
-function processParsedFileContent(content, ext, baseName, fixedColor) {
-    let rawCoords = [];
-    let parsedObjects = [];
+       function processParsedFileContent(content, ext, baseName, fixedColor) {
+        let parsedObjects = [];
 
-    if (ext === 'mif') {
-        rawCoords = extractCoordinatesFromMIF(content);
-    } else if (ext === 'dxf') {
-        rawCoords = extractCoordinatesFromDXF(content);
-    } else if (ext === 'geojson' || ext === 'json') {
-        const geojsonContours = extractCoordinatesFromGeoJSON(content);
-        if (geojsonContours && geojsonContours.length > 0) {
-            geojsonContours.forEach((c, idx) => {
-                const name = c.name || `${baseName}_${idx + 1}`;
-                const contours = convertRawCoordsToContours(c.points);
-                const added = processContoursToObjects(contours, name, 'polygon', fixedColor);
-                parsedObjects = parsedObjects.concat(added);
-            });
-            return parsedObjects; 
-        }
-    } else if (ext === 'kml') {
-        rawCoords = extractCoordinatesFromKML(content);
-    } else if (ext === 'xml') {
-        if (content.includes('interact_entry_boundaries')) {
-            rawCoords = extractCoordinatesFromInteractEntryBoundaries(content);
+        if (ext === 'mif') {
+            parsedObjects = parseMifToObjects(content);
+        } else if (ext === 'dxf') {
+            parsedObjects = parseDxfToObjects(content);
         } else {
-            rawCoords = extractCoordinatesFromXML(content);
-        }
-    } else if (ext === 'xyh' || content.trim().startsWith('XYH')) {
-        rawCoords = extractCoordinatesFromXYH(content);
-    } else if (/\[\d+\];/.test(content) || content.includes('Контур;')) {
-        rawCoords = extractCoordinatesFromTechnocadCSV(content);
-    } else {
-        rawCoords = extractCoordinatesFromText(content);
-    }
-
-    if (rawCoords && rawCoords.length > 0) {
-        const contours = convertRawCoordsToContours(rawCoords);
-        return processContoursToObjects(contours, baseName, 'polygon', fixedColor);
-    }
-
-    return parsedObjects;
-}
-
-
-function extractCoordinatesFromDXF(dxfContent) {
-    const lines = dxfContent.split('\n');
-    const coordinates = [];
-    let currentContour = [];
-    let isReadingCoords = false;
-    let isPolyline = false;
-    let isPoint = false;
-    let isClosed = false;
-    let x, y;
-
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-
-        if (line === 'POLYLINE') {
-            isReadingCoords = true;
-            isPolyline = true;
-            isPoint = false;
-            isClosed = false;
-            if (currentContour.length > 0) {
-                processDXFContour(currentContour, coordinates, isClosed);
-                currentContour = [];
-            }
-        } else if (line === 'LWPOLYLINE') {
-            isReadingCoords = true;
-            isPolyline = false;
-            isPoint = false;
-            isClosed = false;
-            if (currentContour.length > 0) {
-                processDXFContour(currentContour, coordinates, isClosed);
-                currentContour = [];
-            }
-        } else if (line === 'POINT') {
-            isReadingCoords = true;
-            isPolyline = false;
-            isPoint = true;
-            isClosed = false;
-            if (currentContour.length > 0) {
-                processDXFContour(currentContour, coordinates, isClosed);
-                currentContour = [];
-            }
-        } else if (line === 'SEQEND') {
-            isReadingCoords = false;
-            if (currentContour.length > 0) {
-                processDXFContour(currentContour, coordinates, isClosed);
-                currentContour = [];
-            }
-        } else if (isReadingCoords) {
-            if (line === '70' && !isPoint) {
-                isClosed = parseInt(lines[++i].trim()) === 1;
-            } else if (isPolyline) {
-                if (line === 'VERTEX') {
-                    x = y = undefined;
-                } else if (line === '10') {
-                    x = parseFloat(lines[++i].trim());
-                } else if (line === '20') {
-                    y = parseFloat(lines[++i].trim());
-                    if (x !== undefined && y !== undefined) {
-                        if (x !== 0 && y !== 0) { 
-                            currentContour.push([Math.min(x, y), Math.max(x, y)]);
-                        }
-                        x = y = undefined;
-                    }
-                }
-            } else {
-                if (line === '10') {
-                    x = parseFloat(lines[++i].trim());
-                } else if (line === '20') {
-                    y = parseFloat(lines[++i].trim());
-                    if (x !== undefined && y !== undefined) {
-                        if (x !== 0 && y !== 0) { 
-                           currentContour.push([Math.min(x, y), Math.max(x, y)]);
-                        }
-                        x = y = undefined;
-                        if (isPoint) {
-                            processDXFContour(currentContour, coordinates, false);
-                            currentContour = [];
-                            isReadingCoords = false;
-                        }
-                    }
+            // Логика для TXT / CSV
+            const parsedContours = parseCoordinatesFromText(content);
+            for (let i = 0; i < parsedContours.length; i++) {
+                const contour = parsedContours[i];
+                if (contour && contour.length > 0) {
+                    const isClosed = contour.length >= 3 &&
+                        Math.abs(contour[0].x - contour[contour.length - 1].x) < 0.001 &&
+                        Math.abs(contour[0].y - contour[contour.length - 1].y) < 0.001;
+                    let objectType = isClosed ? 'polygon' : (contour.length >= 2 ? 'line' : 'point');
+                    parsedObjects.push({ type: objectType, contours: [contour] });
                 }
             }
         }
+
+        let newlyAdded = [];
+        if (parsedObjects && parsedObjects.length > 0) {
+            for (let i = 0; i < parsedObjects.length; i++) {
+                const objData = parsedObjects[i];
+                const autoName = `${baseName}${parsedObjects.length > 1 ? '_' + (i + 1) : ''}`;
+                const newObj = addObjectInternal(objData.contours, autoName, objData.type, true, null, fixedColor);
+                if (newObj) newlyAdded.push(newObj);
+            }
+        }
+        return newlyAdded;
     }
 
-    if (currentContour.length > 0) {
-        processDXFContour(currentContour, coordinates, isClosed);
-    }
+    async function handleImportFromFile() {
+        const useFixedColor = document.getElementById('useFixedColor').checked;
+        const fixedColor = useFixedColor ? document.getElementById('importColorInput').value : null;
 
-    return coordinates;
-}
+        const fileInput = document.createElement('input'); 
+        fileInput.type = 'file'; 
+        fileInput.accept = '.txt,.csv,.mif,.dxf,.zip'; 
+         
+        fileInput.onchange = async (e) => {
+            const file = e.target.files[0]; 
+            if (!file) return;
+            
+            const ext = file.name.split('.').pop().toLowerCase();
+            const baseName = file.name.split('.').slice(0, -1).join('.') || `Файл ${nextObjectId}`;
 
-function processDXFContour(contour, coordinates, isClosed) {
-    if (coordinates.length > 0) {
-        coordinates.push('');
-    }
-    contour.forEach(([cx, cy]) => {
-        coordinates.push(`${cx.toFixed(2)}\t${cy.toFixed(2)}`);
-    });
-    if (isClosed && contour.length > 1) {
-        const [firstX, firstY] = contour[0];
-        const [lastX, lastY] = contour[contour.length - 1];
-        if (firstX !== lastX || firstY !== lastY) {
-            coordinates.push(`${firstX.toFixed(2)}\t${firstY.toFixed(2)}`);
-        }
-    }
-}
+            showLoader(true, "Чтение и анализ данных...");
 
-function extractCoordinatesFromMIF(mifContent) {
-    const lines = mifContent.split('\n');
-    const coordinates = [];
-    let isDataSection = false;
-    let currentContour = [];
-    let pointsInContour = 0;
-    let isRegionType = false;
+            try {
+                let allAddedObjects = [];
 
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-
-        if (line === 'Data') {
-            isDataSection = true;
-            continue;
-        }
-
-        if (!isDataSection) continue;
-
-        if (line.startsWith('Region')) {
-            isRegionType = true;
-            if (currentContour.length > 0) {
-                coordinates.push(...currentContour, '');
-                currentContour = [];
-            }
-            const numPointsMatch = line.match(/Region\s+\d+\s*(\d+)/);
-            if (numPointsMatch && numPointsMatch[1]) {
-                 pointsInContour = parseInt(numPointsMatch[1]);
-            } else {
-                 if (i + 1 < lines.length) {
-                     pointsInContour = parseInt(lines[i+1].trim());
-                     if (!isNaN(pointsInContour)) {
-                         i++;
-                     } else {
-                         pointsInContour = 0;
-                     }
-                 } else {
-                     pointsInContour = 0;
-                 }
-            }
-            continue;
-        }
-
-        if (line.startsWith('PLINE')) {
-            isRegionType = false;
-            if (currentContour.length > 0) {
-                coordinates.push(...currentContour, '');
-                currentContour = [];
-            }
-            pointsInContour = parseInt(line.split(' ')[1]);
-            continue;
-        }
-
-        const coordMatch = line.match(/^(\d+(?:[.,]\d+)?)\s*[,;\t]?\s*(\d+(?:[.,]\d+)?)$/);
-        if (coordMatch) {
-             const cx = parseFloat(coordMatch[1].replace(',', '.'));
-             const cy = parseFloat(coordMatch[2].replace(',', '.'));
-
-             if (!isNaN(cx) && !isNaN(cy)) {
-                 currentContour.push(`${Math.min(cx, cy).toFixed(2)}\t${Math.max(cx, cy).toFixed(2)}`);
-
-                 if (!isRegionType && currentContour.length === pointsInContour) {
-                     coordinates.push(...currentContour, '');
-                     currentContour = [];
-                     pointsInContour = 0;
-                 }
-             }
-        } else if (line.startsWith('Pen') || line.startsWith('PEN') || line.startsWith('Point')) {
-            continue;
-        } else if (isDataSection && line.trim() !== '') {
-             const potentialPointCount = parseInt(line.trim());
-             if (!isNaN(potentialPointCount) && isRegionType && pointsInContour === 0) {
-                 pointsInContour = potentialPointCount;
-             } else {
-                 if (currentContour.length > 0) {
-                     coordinates.push(...currentContour, '');
-                     currentContour = [];
-                     pointsInContour = 0;
-                 }
-             }
-        }
-    }
-
-    if (currentContour.length > 0) {
-        coordinates.push(...currentContour);
-    }
-
-    while (coordinates.length > 0 && coordinates[coordinates.length - 1] === '') {
-        coordinates.pop();
-    }
-
-    return coordinates;
-}
-
-
-// Перевод плоского массива строк координат формата ["X\tY", ""] во внутренние контуры ГеоРедактора
-// Перевод плоского массива строк координат во внутренние контуры с фильтрацией выбросов > 5 км
-function convertRawCoordsToContours(rawCoordsArray) {
-    const allValidPoints = [];
-    
-    // 1. Сначала собираем все валидные точки для расчета медианы
-    rawCoordsArray.forEach(line => {
-        if (typeof line === 'string') {
-            const trimmed = line.trim();
-            if (trimmed !== '') {
-                const parts = trimmed.split(/[\s\t]+/).map(Number);
-                if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-                    allValidPoints.push({ x: parts[0], y: parts[1] });
-                }
-            }
-        } else if (line && typeof line.x === 'number' && typeof line.y === 'number') {
-            allValidPoints.push({ x: line.x, y: line.y });
-        }
-    });
-
-    if (allValidPoints.length === 0) return [];
-
-    // Поиск медианы (устойчивой к экстремальным выбросам)
-    const getMedian = (arr) => {
-        if (arr.length === 0) return 0;
-        const sorted = [...arr].sort((a, b) => a - b);
-        const mid = Math.floor(sorted.length / 2);
-        return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-    };
-
-    const medX = getMedian(allValidPoints.map(p => p.x));
-    const medY = getMedian(allValidPoints.map(p => p.y));
-    const maxDistance = 5000; // 5 километров в метрах
-
-    const isPointValid = (pt) => {
-        const dx = pt.x - medX;
-        const dy = pt.y - medY;
-        const distance = Math.sqrt(dx * dx + dy * dy);
-        return distance <= maxDistance;
-    };
-
-    // 2. Группируем точки по контурам, игнорируя выбросы
-    const contours = [];
-    let currentContour = [];
-
-    rawCoordsArray.forEach(line => {
-        if (typeof line === 'string') {
-            const trimmed = line.trim();
-            if (trimmed === '') {
-                if (currentContour.length > 0) {
-                    contours.push(currentContour);
-                    currentContour = [];
-                }
-            } else {
-                const parts = trimmed.split(/[\s\t]+/).map(Number);
-                if (parts.length >= 2 && !isNaN(parts[0]) && !isNaN(parts[1])) {
-                    const pt = { x: parts[0], y: parts[1] };
-                    if (isPointValid(pt)) {
-                        currentContour.push(pt);
-                    } else {
-                        console.warn(`Пропущена точка-выброс (>5км от центра): X=${pt.x.toFixed(2)}, Y=${pt.y.toFixed(2)}`);
-                    }
-                }
-            }
-        } else if (line && typeof line.x === 'number' && typeof line.y === 'number') {
-            if (isPointValid(line)) {
-                currentContour.push({ x: line.x, y: line.y });
-            } else {
-                console.warn(`Пропущена точка-выброс (>5км от центра): X=${line.x.toFixed(2)}, Y=${line.y.toFixed(2)}`);
-            }
-        }
-    });
-
-    if (currentContour.length > 0) {
-        contours.push(currentContour);
-    }
-
-    return contours.filter(c => c.length > 0);
-}
-
-// Преобразование контуров в готовые объекты ГеоРедактора
-function processContoursToObjects(contours, baseName, defaultType, fixedColor) {
-    const addedObjects = [];
-    if (contours.length > 0) {
-        const isClosed = contours[0].length >= 3 &&
-            Math.abs(contours[0][0].x - contours[0][contours[0].length - 1].x) < 0.001 &&
-            Math.abs(contours[0][0].y - contours[0][contours[0].length - 1].y) < 0.001;
-        const objectType = isClosed ? 'polygon' : (contours[0].length >= 2 ? 'line' : 'point');
-        const newObj = addObjectInternal(contours, baseName, objectType, true, null, fixedColor);
-        if (newObj) addedObjects.push(newObj);
-    }
-    return addedObjects;
-}
-
-// --- Парсеры из утилиты "Схема по координатам" ---
-
-function readSXFScale(view) {
-    try {
-        const mapScale = view.getUint32(0x2C, true); 
-        if (mapScale > 0) return 1.0 / mapScale;
-    } catch (_) {}
-    return 1.0;
-}
-
-function extractCoordinatesFromSXF(arrayBuffer) {
-    const view = new DataView(arrayBuffer);
-    const length = arrayBuffer.byteLength;
-    if (length < 12) return [];
-    const sig = String.fromCharCode(view.getUint8(0), view.getUint8(1), view.getUint8(2));
-    if (sig !== 'SXF') return [];
-    const passportLength = view.getUint32(4, true);
-    if (passportLength >= length) return [];
-    const scale = readSXFScale(view);
-    let offset = passportLength;
-    const coordinates = [];
-    const SXF_RECORD_MARKER = 0x7FFF7FFF;
-    while (offset + 32 <= length) {
-        if (view.getUint32(offset, true) !== SXF_RECORD_MARKER) {
-            let found = false;
-            for (let i = offset + 1; i <= length - 4; i++) {
-                if (view.getUint32(i, true) === SXF_RECORD_MARKER) {
-                    offset = i;
-                    found = true;
-                    break;
-                }
-            }
-            if (!found) break;
-        }
-        const totalLen = view.getUint32(offset + 4, true);
-        const metricLen = view.getUint32(offset + 8, true);
-        if (totalLen === 0) break;
-        const metricFlagByte = view.getUint8(offset + 20);
-        const coordTypeBits = metricFlagByte & 0x03;
-        const pointCount = view.getUint32(offset + 24, true);
-        const metricStart = offset + 32;
-        if (pointCount === 0 || metricLen === 0 || metricStart + metricLen > length) {
-            offset += totalLen;
-            continue;
-        }
-        const stride = Math.floor(metricLen / pointCount);
-        let readCoords;
-        if (stride === 16) {
-            readCoords = (p) => [view.getFloat64(p, true), view.getFloat64(p + 8, true)];
-        } else if (stride === 24) {
-            readCoords = (p) => [view.getFloat64(p, true), view.getFloat64(p + 8, true)];
-        } else if (stride === 8) {
-            readCoords = (p) => [view.getFloat32(p, true), view.getFloat32(p + 4, true)];
-        } else if (stride === 12) {
-            readCoords = (p) => [view.getFloat32(p, true), view.getFloat32(p + 4, true)];
-        } else if (stride === 8 && coordTypeBits === 2) {
-            readCoords = (p) => [view.getInt32(p, true) * scale, view.getInt32(p + 4, true) * scale];
-        } else if (stride === 12 && coordTypeBits === 2) {
-            readCoords = (p) => [view.getInt32(p, true) * scale, view.getInt32(p + 4, true) * scale];
-        } else if (stride === 4 && coordTypeBits === 3) {
-            readCoords = (p) => [view.getInt16(p, true) * scale, view.getInt16(p + 2, true) * scale];
-        } else {
-            offset += totalLen;
-            continue;
-        }
-        const contour = [];
-        for (let p = 0; p < pointCount; p++) {
-            const pOff = metricStart + p * stride;
-            const coords = readCoords(pOff);
-            if (coords && isFinite(coords[0]) && isFinite(coords[1])) {
-                contour.push(`${coords[0].toFixed(2)}\t${coords[1].toFixed(2)}`);
-            }
-        }
-        if (contour.length > 0) {
-            if (coordinates.length > 0) coordinates.push('');
-            coordinates.push(...contour);
-        }
-        offset += totalLen;
-    }
-    return coordinates;
-}
-
-function extractCoordinatesFromGeoJSON(content) {
-    try {
-        const geojsonData = JSON.parse(content);
-        const contoursWithMeta = [];
-        if (!geojsonData || !Array.isArray(geojsonData.features)) return [];
-        geojsonData.features.forEach(feature => {
-            if (!feature.geometry || !feature.geometry.coordinates) return;
-            const comment = feature?.properties?.name || null;
-            const type = feature.geometry.type;
-            const coords = feature.geometry.coordinates;
-            let currentContourPoints = [];
-            const processRing = (ring) => {
-                ring.forEach(point => {
-                    if (Array.isArray(point) && point.length >= 2) {
-                        const x = Math.min(point[0], point[1]);
-                        const y = Math.max(point[0], point[1]);
-                        if (!isNaN(x) && !isNaN(y)) {
-                            currentContourPoints.push(`${x.toFixed(2)}\t${y.toFixed(2)}`);
-                        }
-                    }
-                });
-            };
-            if (type === 'MultiPolygon') {
-                coords.forEach(polygon => polygon.forEach(ring => processRing(ring)));
-            } else if (type === 'Polygon') {
-                coords.forEach(ring => processRing(ring));
-            } else if (type === 'LineString') {
-                processRing(coords);
-            }
-            if (currentContourPoints.length > 0) {
-                contoursWithMeta.push({ points: currentContourPoints, name: comment });
-            }
-        });
-        return contoursWithMeta;
-    } catch (e) {
-        return [];
-    }
-}
-
-function extractCoordinatesFromKML(content) {
-    const coordinates = [];
-    const parser = new DOMParser();
-    const xmlDoc = parser.parseFromString(content, "text/xml");
-    const coordTags = xmlDoc.getElementsByTagName("coordinates");
-    for (let i = 0; i < coordTags.length; i++) {
-        const text = coordTags[i].textContent.trim();
-        if (!text) continue;
-        const rawPoints = text.split(/\s+/);
-        let currentContour = [];
-        rawPoints.forEach(pointStr => {
-            const parts = pointStr.split(',');
-            if (parts.length >= 2) {
-                const x = parseFloat(parts[0]);
-                const y = parseFloat(parts[1]);
-                if (!isNaN(x) && !isNaN(y)) {
-                    currentContour.push(`${y.toFixed(8)}\t${x.toFixed(8)}`);
-                }
-            }
-        });
-        if (currentContour.length > 0) {
-            if (coordinates.length > 0) coordinates.push('');
-            coordinates.push(...currentContour);
-        }
-    }
-    return coordinates;
-}
-
-function extractCoordinatesFromXML(text) {
-    const allCoordinates = [];
-    const startMarker = "<contours_location>";
-    let textToProcess = text;
-    if (text.includes(startMarker)) {
-        const startIndex = text.indexOf(startMarker);
-        textToProcess = text.substring(startIndex + startMarker.length);
-    }
-    const entitySpatialBlocks = textToProcess.split('</entity_spatial>');
-    entitySpatialBlocks.forEach(block => {
-        if (block.trim() === '') return;
-        const subContourBlocks = block.split('</spatial_element>');
-        subContourBlocks.forEach(subContour => {
-            if (subContour.trim() === '') return;
-            const regex = /<x>(\d+(?:\.\d+)?)<\/x>\s*<y>(\d+(?:\.\d+)?)<\/y>/g;
-            let matches;
-            let currentContourPoints = [];
-            while ((matches = regex.exec(subContour)) !== null) {
-                const x = parseFloat(matches[1]).toFixed(2);
-                const y = parseFloat(matches[2]).toFixed(2);
-                currentContourPoints.push(`${x}\t${y}`);
-            }
-            if (currentContourPoints.length > 0) {
-                if (allCoordinates.length > 0) allCoordinates.push('');
-                allCoordinates.push(...currentContourPoints);
-            }
-        });
-    });
-    if (allCoordinates.length === 0) {
-        text = text.replace(/<SpecifyRelatedParcel[\s\S]*?<\/SpecifyRelatedParcel>/g, '');
-        const regex2 = /X="(\d+(?:\.\d+)?)"[^>]+Y="(\d+(?:\.\d+)?)"[^>]+/g;
-        const contours = text.split('</SpatialElement>');
-        contours.forEach(contour => {
-            const contourMatches = Array.from(contour.matchAll(regex2));
-            let currentContour = [];
-            contourMatches.forEach(match => {
-                const x = parseFloat(match[1]).toFixed(2);
-                const y = parseFloat(match[2]).toFixed(2);
-                currentContour.push(`${x}\t${y}`);
-            });
-            if (currentContour.length > 0) {
-                if (allCoordinates.length > 0) allCoordinates.push('');
-                allCoordinates.push(...currentContour);
-            }
-        });
-    }
-    return allCoordinates;
-}
-
-function extractCoordinatesFromInteractEntryBoundaries(text) {
-    const coordinates = [];
-    const contours = text.split('</EnSpa2:entity_spatial>');
-    contours.forEach(contour => {
-        const regex = /<EnSpa2:x>(\d+(?:\.\d+)?)<\/EnSpa2:x>\s*<EnSpa2:y>(\d+(?:\.\d+)?)<\/EnSpa2:y>/g;
-        let matches;
-        let currentContour = [];
-        while ((matches = regex.exec(contour)) !== null) {
-            const x = parseFloat(matches[1]).toFixed(2);
-            const y = parseFloat(matches[2]).toFixed(2);
-            currentContour.push(`${x}\t${y}`);
-        }
-        if (currentContour.length > 0) {
-            if (coordinates.length > 0) coordinates.push('');
-            coordinates.push(...currentContour);
-        }
-    });
-    return coordinates;
-}
-
-function extractCoordinatesFromXYH(content) {
-    const lines = content.split('\n');
-    const coordinates = [];
-    let currentContour = [];
-    let lastContourId = null;
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (!line || line === 'XYH') continue;
-        const parts = line.split(/\s+/);
-        if (parts.length >= 3) {
-            const x = parseFloat(parts[1].replace(',', '.'));
-            const y = parseFloat(parts[2].replace(',', '.'));
-            if (!isNaN(x) && !isNaN(y)) {
-                const contourId = parts.length >= 5 ? parts[4] : 'default';
-                if (lastContourId !== null && lastContourId !== contourId) {
-                    if (currentContour.length > 0) {
-                        coordinates.push(...currentContour);
-                        coordinates.push(''); 
-                        currentContour = [];
-                    }
-                }
-                lastContourId = contourId;
-                const minCoord = Math.min(x, y).toFixed(2);
-                const maxCoord = Math.max(x, y).toFixed(2);
-                currentContour.push(`${minCoord}\t${maxCoord}`);
-            }
-        }
-    }
-    if (currentContour.length > 0) coordinates.push(...currentContour);
-    while (coordinates.length > 0 && coordinates[coordinates.length - 1] === '') coordinates.pop();
-    return coordinates;
-}
-
-function extractCoordinatesFromTechnocadCSV(content) {
-    const lines = content.split('\n');
-    const coordinates = [];
-    let currentContour = [];
-    let lastContourId = null;
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (!line) continue;
-        const parts = line.split(';');
-        const contourMatch = parts[0].trim().match(/^\[([^\]]+)\]$/);
-        if (contourMatch && parts.length >= 7) {
-            const contourId = contourMatch[1];
-            let xStr = parts[5] ? parts[5].trim() : '';
-            let yStr = parts[6] ? parts[6].trim() : '';
-            if (!xStr || !yStr) {
-                xStr = parts[3] ? parts[3].trim() : '';
-                yStr = parts[4] ? parts[4].trim() : '';
-            }
-            let x = parseFloat(xStr.replace(',', '.'));
-            let y = parseFloat(yStr.replace(',', '.'));
-            if (!isNaN(x) && !isNaN(y)) {
-                if (lastContourId !== null && lastContourId !== contourId) {
-                    if (currentContour.length > 0) {
-                        coordinates.push(...currentContour);
-                        coordinates.push('');
-                        currentContour = [];
-                    }
-                }
-                lastContourId = contourId;
-                const minCoord = Math.min(x, y).toFixed(2);
-                const maxCoord = Math.max(x, y).toFixed(2);
-                currentContour.push(`${minCoord}\t${maxCoord}`);
-            }
-        }
-    }
-    if (currentContour.length > 0) coordinates.push(...currentContour);
-    while (coordinates.length > 0 && coordinates[coordinates.length - 1] === '') coordinates.pop();
-    return coordinates;
-}
-
-function extractCoordinatesFromText(content) {
-    const lines = content.split('\n');
-    const coordinates = [];
-    const numberRegex = /[-+]?[0-9]*[.,]?[0-9]+/g;
-    let lastLineHadCoordinates = false;
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        if (line === '') {
-            if (lastLineHadCoordinates && coordinates.length > 0 && coordinates[coordinates.length - 1] !== '') {
-                coordinates.push('');
-            }
-            lastLineHadCoordinates = false;
-            continue;
-        }
-        const numbers = line.match(numberRegex);
-        let potentialCoords = numbers ? numbers.map(n => parseFloat(n.replace(',', '.'))).filter(n => !isNaN(n) && Math.abs(n) >= 1) : [];
-        if (potentialCoords.length > 2) {
-            const indexedCoords = potentialCoords.map((val, idx) => ({ val, idx }));
-            indexedCoords.sort((a, b) => Math.abs(b.val) - Math.abs(a.val));
-            const topTwo = [indexedCoords[0], indexedCoords[1]];
-            topTwo.sort((a, b) => a.idx - b.idx);
-            potentialCoords = topTwo.map(item => item.val);
-        }
-        const validCoords = potentialCoords.filter(n => Math.abs(n) >= 100);
-        if (validCoords.length >= 2) {
-            const [x, y] = validCoords[0] < validCoords[1] ? [validCoords[0], validCoords[1]] : [validCoords[1], validCoords[0]];
-            coordinates.push(`${x.toFixed(2)}\t${y.toFixed(2)}`);
-            lastLineHadCoordinates = true;
-        } else {
-            if (lastLineHadCoordinates && coordinates.length > 0 && coordinates[coordinates.length - 1] !== '') {
-                coordinates.push(''); 
-            }
-            lastLineHadCoordinates = false; 
-        }
-    }
-    while (coordinates.length > 0 && coordinates[coordinates.length - 1] === '') {
-        coordinates.pop();
-    }
-    if (coordinates.some(c => c.trim() !== '')) {
-         return coordinates;
-    } else {
-         return importGeo(content);
-    }
-}
-
-function importGeo(text) {
-    const lines = text.split('\n');
-    const coordinates = [];
-    const separators = /[,;\t\s]+/;  
-    let currentContour = [];
-    let previousLineHadCoords = false;
-    for (let line of lines) {
-        line = line.trim();
-        if (!line) {
-             if (previousLineHadCoords && currentContour.length > 0) {
-                coordinates.push(...currentContour, '');
-                currentContour = [];
-            }
-            previousLineHadCoords = false;
-            continue;
-        }
-        const parts = line.split(separators);
-        let foundNumbers = [];
-        for (let part of parts) {
-            const num = parseFloat(part.replace(',', '.'));
-            if (!isNaN(num)) foundNumbers.push(num);
-        }
-        if (foundNumbers.length > 2) {
-             const indexed = foundNumbers.map((val, idx) => ({ val, idx }));
-             indexed.sort((a, b) => Math.abs(b.val) - Math.abs(a.val));
-             const topTwo = [indexed[0], indexed[1]];
-             topTwo.sort((a, b) => a.idx - b.idx);
-             foundNumbers = topTwo.map(item => item.val);
-        }
-        const validCoords = foundNumbers.filter(n => Math.abs(n) >= 100);
-        if (validCoords.length === 2) {
-            const [x, y] = validCoords[0] < validCoords[1] ? [validCoords[0], validCoords[1]] : [validCoords[1], validCoords[0]];
-            currentContour.push(`${x.toFixed(2)}\t${y.toFixed(2)}`);
-            previousLineHadCoords = true;
-        } else {
-             if (previousLineHadCoords && currentContour.length > 0) {
-                coordinates.push(...currentContour, '');
-                currentContour = [];
-            }
-            previousLineHadCoords = false;
-        }
-    }
-    if (currentContour.length > 0) coordinates.push(...currentContour);
-    while (coordinates.length > 0 && coordinates[coordinates.length - 1] === '') coordinates.pop();
-    return coordinates;
-}
-
-
-
-async function handleImportFromFile() {
-    const useFixedColor = document.getElementById('useFixedColor').checked;
-    const fixedColor = useFixedColor ? document.getElementById('importColorInput').value : null;
-
-    const fileInput = document.createElement('input'); 
-    fileInput.type = 'file'; 
-    fileInput.multiple = true; // Поддержка загрузки нескольких файлов
-    fileInput.accept = '.xml,.zip,.dxf,.mif,.csv,.txt,.geojson,.json,.kml,.xyh,.sxf'; 
-     
-    fileInput.onchange = async (e) => {
-        const files = Array.from(e.target.files); 
-        if (files.length === 0) return;
-        
-        showLoader(true, `Обработка файлов (${files.length})...`);
-
-        try {
-            let allAddedObjects = [];
-
-            for (const file of files) {
-                const ext = file.name.split('.').pop().toLowerCase();
-                const baseName = file.name.split('.').slice(0, -1).join('.') || `Файл ${nextObjectId}`;
-
-                if (ext === 'sxf') {
-                    // Обработка бинарного формата SXF
-                    const buffer = await file.arrayBuffer();
-                    const rawCoords = extractCoordinatesFromSXF(buffer);
-                    if (rawCoords && rawCoords.length > 0) {
-                        const contours = convertRawCoordsToContours(rawCoords);
-                        const added = processContoursToObjects(contours, baseName, 'polygon', fixedColor);
-                        allAddedObjects = allAddedObjects.concat(added);
-                    }
-                } else if (ext === 'zip') {
+                if (ext === 'zip') {
                     // Обработка ZIP-архива
                     const arrayBuffer = await file.arrayBuffer();
                     const zip = await JSZip.loadAsync(arrayBuffer);
-                    const validExts = ['txt', 'csv', 'mif', 'dxf', 'xml', 'geojson', 'json', 'kml', 'xyh'];
+                    const validExts = ['txt', 'csv', 'mif', 'dxf'];
 
+                    // Перебираем все файлы в архиве
                     for (const relativePath in zip.files) {
                         const zipEntry = zip.files[relativePath];
                         if (zipEntry.dir) continue;
@@ -4481,37 +3781,36 @@ async function handleImportFromFile() {
                         if (validExts.includes(fileExt)) {
                             const content = await zipEntry.async("string");
                             const entryBaseName = zipEntry.name.split('/').pop().split('.').slice(0, -1).join('.');
+                            
                             const added = processParsedFileContent(content, fileExt, entryBaseName, fixedColor);
                             allAddedObjects = allAddedObjects.concat(added);
                         }
                     }
                 } else {
-                    // Обработка одиночного текстового файла
+                    // Обработка одиночного файла
                     const content = await file.text();
-                    const added = processParsedFileContent(content, ext, baseName, fixedColor);
-                    allAddedObjects = allAddedObjects.concat(added);
+                    allAddedObjects = processParsedFileContent(content, ext, baseName, fixedColor);
                 }
+
+                closeCoordsDialog();
+
+                if (allAddedObjects.length > 0) {
+                    finalizeBatchAdd(allAddedObjects);
+                    showNotification(`Успешно импортировано объектов: ${allAddedObjects.length}`, 'success', 'file-import');
+                } else { 
+                    showNotification('Не удалось найти геометрию в файле(ах) или поддерживаемых форматов внутри ZIP.', 'error', 'exclamation-circle'); 
+                }
+
+            } catch (err) {
+                console.error("Ошибка чтения файла/архива:", err);
+                showNotification('Произошла ошибка при чтении файла или архива.', 'error', 'exclamation-circle');
+            } finally {
+                showLoader(false);
             }
-
-            closeCoordsDialog();
-
-            if (allAddedObjects.length > 0) {
-                finalizeBatchAdd(allAddedObjects);
-                showNotification(`Успешно импортировано объектов: ${allAddedObjects.length}`, 'success', 'file-import');
-            } else { 
-                showNotification('Не удалось извлечь геометрию из выбранных файлов.', 'error', 'exclamation-circle'); 
-            }
-
-        } catch (err) {
-            console.error("Ошибка чтения файлов:", err);
-            showNotification('Произошла ошибка при чтении файлов.', 'error', 'exclamation-circle');
-        } finally {
-            showLoader(false);
-        }
-    };
-    
-    fileInput.click();
-}
+        };
+        
+        fileInput.click();
+    }
 
     function parseCoordinatesFromText(text) {
         const lines = text.split('\n');
