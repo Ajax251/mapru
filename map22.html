@@ -7505,13 +7505,6 @@ async function terrZoneMenuItemHandler(contextMenu, map, polygons, polygonStyle,
 
 
 async function getAllParcelsInQuarter(lat, lon, isSearchMode = false, directQuarterNumber = null, quarterAlreadyDrawn = false) {
-    // Сброс легенды и фильтров "Форма и тип собственности" на полную перед загрузкой новых данных
-    selectedAccessCategoryFromLegend = null;
-    selectedEzFromLegend = null;
-    if (window.disabledAccessFills) {
-        window.disabledAccessFills.clear();
-    }
-
     if (!isSearchMode) {
         if (directQuarterNumber) {
             showLoader(`Загрузка ${directQuarterNumber}...`);
@@ -14618,15 +14611,9 @@ async function enrichDashboardLayer(layerType, panelElement) {
 }
 
 
+// Modify clearMapAndResetTheme to clear specific object types
 function clearMapAndResetTheme() {
     if (!map) return;
-    
-    // Сброс фильтров легенды "Форма и тип собственности" в исходное состояние
-    selectedAccessCategoryFromLegend = null;
-    selectedEzFromLegend = null;
-    if (window.disabledAccessFills) {
-        window.disabledAccessFills.clear();
-    }
     
     activePanoramaPlacemark = null;
       if (rasterOverlay) {
@@ -29781,63 +29768,30 @@ function filterParcelList() {
     
     if (!filterInput || !contentDiv || !sidebar) return;
 
+    // Приводим поисковый запрос к нижнему регистру и убираем лишние пробелы
     const filterText = filterInput.value.toLowerCase().trim();
+    // Разбиваем запрос на отдельные слова (чтобы находить и по номеру, и по улице одновременно)
     const searchTerms = filterText.split(/\s+/).filter(term => term.length > 0);
-
-    // Проверяем, активен ли фильтр легенды "Форма и тип собственности"
-    const hasAccessFilter = currentTheme === 'access' && (selectedAccessCategoryFromLegend !== null || selectedEzFromLegend !== null);
-    const visibleAccessCns = new Set();
-
-    if (hasAccessFilter) {
-        polygons.forEach(obj => {
-            if (obj instanceof ymaps.Polygon && (obj.properties?.get('isParcelInQuarter') || obj.properties?.get('isFoundInArea') || obj.properties?.get('isParcelFromSingleSearch'))) {
-                const cn = obj.properties.get('cadastralNumber');
-                if (cn) {
-                    const parentEz = obj.properties.get('uluParentCn') || zuToEzMapGlobal.get(cn);
-                    let ownership = 'Не указано';
-                    let right = 'Не указано';
-                    
-                    if (parentEz && window.fetchedEzAccessMap?.has(parentEz)) {
-                        const ezData = window.fetchedEzAccessMap.get(parentEz);
-                        ownership = ezData.ownership_type;
-                        right = ezData.right_type;
-                    } else {
-                        const fOpts = obj.properties.get('featureData')?.properties?.options || {};
-                        ownership = fOpts.ownership_type || 'Не указано';
-                        right = fOpts.right_type || 'Не указано';
-                    }
-
-                    const categoryKey = getAccessCategoryKey(ownership, right);
-                    const matchesCategory = selectedAccessCategoryFromLegend === null || categoryKey === selectedAccessCategoryFromLegend;
-                    const matchesEz = selectedEzFromLegend === null || parentEz === selectedEzFromLegend;
-
-                    if (matchesCategory && matchesEz) {
-                        visibleAccessCns.add(cn.toLowerCase());
-                    }
-                }
-            }
-        });
-    }
 
     const items = contentDiv.querySelectorAll('.sidebar-item');
     let visibleCount = 0;
 
     items.forEach(item => {
-        const itemFullText = item.innerText.toLowerCase();
-        const itemCn = (item.dataset.cadnum || '').toLowerCase();
+        // Получаем ВЕСЬ текст внутри карточки (номер, адрес, площадь и т.д.)
+        const itemFullText = item.innerText.toLowerCase(); // Используем innerText для поиска видимого текста
 
-        let isVisible = true;
+        let isVisible = false;
 
-        // 1. Фильтр поиска по тексту (поиск по КН или адресу)
-        if (searchTerms.length > 0) {
+        if (searchTerms.length === 0) {
+            // Если фильтр пустой, показываем всё
+            isVisible = true;
+        } else {
+            // Проверяем: ВСЕ ли слова из запроса есть в тексте карточки?
+            // Например, запрос "нурлат советская" найдет карточку, где есть и "нурлат", и "советская"
             isVisible = searchTerms.every(term => itemFullText.includes(term));
         }
 
-        // 2. Фильтр по активной легенде "Форма и тип собственности"
-        if (isVisible && hasAccessFilter) {
-            isVisible = visibleAccessCns.has(itemCn);
-        }
-
+        // Переключаем класс видимости
         if (isVisible) {
             item.classList.remove('filtered-out');
             visibleCount++;
@@ -29846,6 +29800,7 @@ function filterParcelList() {
         }
     });
 
+    // Обновляем заголовок с количеством
     const sidebarTitle = document.getElementById('sidebar-title');
     const totalCount = sidebar.dataset.totalCount || items.length;
     const prefix = sidebar.dataset.titlePrefix || 'Список';
@@ -31586,9 +31541,6 @@ function applyAccessTheme(ezDetailsMap = new Map(), options = {}) {
     const highlightMulti = options.highlightMulti === true;
     const multiColor = options.multiColor || '#d946ef';
     
-    // Инициализируем глобальное хранилище отключенных заливок, если его еще нет
-    window.disabledAccessFills = window.disabledAccessFills || new Set();
-
     // 1. Отрисовка базовых цветов на карте
     polygons.forEach(obj => {
         if (obj instanceof ymaps.Polygon && (obj.properties?.get('isParcelInQuarter') || obj.properties?.get('isFoundInArea') || obj.properties?.get('isParcelFromSingleSearch'))) {
@@ -31607,17 +31559,7 @@ function applyAccessTheme(ezDetailsMap = new Map(), options = {}) {
                 right = fOpts.right_type || 'Не указано';
             }
             
-            const categoryKey = getAccessCategoryKey(ownership, right);
-            let fillColor = getAccessThemeColors(ownership, right);
-
-            // --- ПРОВЕРКА НА ВЫКЛЮЧЕННУЮ ЗАЛИВКУ ДЛЯ ДАННОЙ КАТЕГОРИИ ИЛИ ЕЗ ---
-            const isCategoryDisabled = window.disabledAccessFills.has(categoryKey);
-            const isEzDisabled = parentEz && window.disabledAccessFills.has(parentEz);
-            if (isCategoryDisabled || isEzDisabled) {
-                fillColor = '#00000000'; // Делаем заливку полностью прозрачной
-            }
-            // -----------------------------------------------------------------
-
+            const fillColor = getAccessThemeColors(ownership, right);
             obj.options.set('fillColor', fillColor);
             
             let strokeColor, strokeWidth;
@@ -31655,7 +31597,7 @@ function applyAccessTheme(ezDetailsMap = new Map(), options = {}) {
         const legendList = document.getElementById('access-legend-list');
         
         if (legendList) {
-            // Сбор ЕЗ на карте
+           // Динамически собираем список Единых землепользований, присутствующих на карте
             const uniqueEzCns = new Set();
             polygons.forEach(obj => {
                 if (obj instanceof ymaps.Polygon) {
@@ -31668,70 +31610,41 @@ function applyAccessTheme(ezDetailsMap = new Map(), options = {}) {
             });
             const activeEzList = Array.from(uniqueEzCns).sort();
 
-            // Вспомогательные функции для рендера интерактивных элементов
-            const getFillToggleIcon = (key) => {
-                const isDisabled = window.disabledAccessFills.has(key);
-                const color = isDisabled ? '#cbd5e1' : '#3b82f6';
-                const opacity = isDisabled ? '0.4' : '1';
-                return `
-                    <span class="toggle-fill-btn" 
-                          onmouseenter="this.style.background='rgba(0,0,0,0.06)'" 
-                          onmouseleave="this.style.background='transparent'"
-                          style="margin-left: auto; padding: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 4px; transition: background 0.2s;" 
-                          title="${isDisabled ? 'Включить заливку' : 'Выключить заливку'}">
-                        <i class="fas fa-fill-drip" style="font-size: 11px; color: ${color}; opacity: ${opacity};"></i>
-                    </span>
-                `;
-            };
-
-            const getColorBoxStyle = (key, baseColor, borderStyle) => {
-                const isDisabled = window.disabledAccessFills.has(key);
-                return isDisabled 
-                    ? `background-color: transparent !important; ${borderStyle}` 
-                    : `background-color: ${baseColor}; ${borderStyle}`;
-            };
-
-            let listHtml = `
+  let listHtml = `
                 <li data-access-key="Municipal|Post">
-                    <span class="legend-color-box" style="${getColorBoxStyle('Municipal|Post', '#1d4ed899', 'border: 1px solid #1d4ed8;')}"></span>
-                    <span>Муниципальная (Пост. польз.)</span>
-                    ${getFillToggleIcon('Municipal|Post')}
+                    <span class="legend-color-box" style="background-color: #1d4ed899; border: 1px solid #1d4ed8;"></span>
+                    <span>Муниципальная (ПБП)</span>
                 </li>
                 <li data-access-key="Municipal|Sobstv">
-                    <span class="legend-color-box" style="${getColorBoxStyle('Municipal|Sobstv', '#3b82f64D', 'border: 1px solid #3b82f6;')}"></span>
+                    <span class="legend-color-box" style="background-color: #3b82f699; border: 1px solid #3b82f6;"></span>
                     <span>Муниципальная (Собств.)</span>
-                    ${getFillToggleIcon('Municipal|Sobstv')}
                 </li>
                 <li data-access-key="Unregistered">
-                    <span class="legend-color-box" style="${getColorBoxStyle('Unregistered', '#00bfff99', 'border: 1px solid #00bfff;')}"></span>
+                    <span class="legend-color-box" style="background-color: #00bfff99; border: 1px solid #00bfff;"></span>
                     <span>Неоформленная (Гос. земли)</span>
-                    ${getFillToggleIcon('Unregistered')}
                 </li>
                 <li data-access-key="Private|Doleva">
-                    <span class="legend-color-box" style="${getColorBoxStyle('Private|Doleva', '#dc2626a6', 'border: 1px solid #dc2626;')}"></span>
+                    <span class="legend-color-box" style="background-color: #dc2626a6; border: 1px solid #dc2626;"></span>
                     <span>Частная (Долевая/Совмест.)</span>
-                    ${getFillToggleIcon('Private|Doleva')}
                 </li>
                 <li data-access-key="Private|Sobstv">
-                    <span class="legend-color-box" style="${getColorBoxStyle('Private|Sobstv', '#ec489999', 'border: 1px solid #ec4899;')}"></span>
+                    <span class="legend-color-box" style="background-color: #ec489999; border: 1px solid #ec4899;"></span>
                     <span>Частная (Собственность)</span>
-                    ${getFillToggleIcon('Private|Sobstv')}
                 </li>
                 <li data-access-key="Other">
-                    <span class="legend-color-box" style="${getColorBoxStyle('Other', '#a855f733', 'border: 1px solid #a855f7;')}"></span>
+                    <span class="legend-color-box" style="background-color: #7c3aed99; border: 1px solid #7c3aed;"></span>
                     <span>Иные права / Аренда</span>
-                    ${getFillToggleIcon('Other')}
                 </li>
             `;
 
+            // Если найдены ЕЗ, дополняем легенду
             if (activeEzList.length > 0) {
                 listHtml += `<li class="legend-title-no-hover" style="border-top: 1px solid rgba(0,0,0,0.1); margin-top: 6px; padding-top: 6px; font-weight: bold; pointer-events: none; padding-left: 2px;">Единые землепользования:</li>`;
                 activeEzList.forEach(ez => {
                     listHtml += `
                         <li data-ez-key="${ez}">
-                            <span class="legend-color-box" style="${getColorBoxStyle(ez, 'transparent', 'border: 2.5px solid #ffa500 !important;')}"></span>
+                            <span class="legend-color-box" style="border: 2.5px solid #ffa500 !important; background: transparent !important;"></span>
                             <span style="font-size: 11px;">${ez}</span>
-                            ${getFillToggleIcon(ez)}
                         </li>
                     `;
                 });
@@ -31746,7 +31659,7 @@ function applyAccessTheme(ezDetailsMap = new Map(), options = {}) {
 
             legendList.innerHTML = listHtml;
 
-            // Навешиваем изолированные обработчики кликов
+            // Навешиваем обработчики кликов на элементы легенды
             legendList.querySelectorAll('li').forEach(li => {
                 const accessKey = li.dataset.accessKey;
                 const ezKey = li.dataset.ezKey;
@@ -31754,66 +31667,35 @@ function applyAccessTheme(ezDetailsMap = new Map(), options = {}) {
                 if (accessKey) {
                     li.style.cursor = 'pointer';
                     li.classList.toggle('legend-item-selected', selectedAccessCategoryFromLegend === accessKey);
-                    
-                    // Клик по тексту (фильтрация)
                     li.addEventListener('click', (e) => {
                         e.stopPropagation();
                         if (selectedAccessCategoryFromLegend === accessKey) {
                             selectedAccessCategoryFromLegend = null;
                         } else {
                             selectedAccessCategoryFromLegend = accessKey;
-                            selectedEzFromLegend = null;
+                            selectedEzFromLegend = null; // сбрасываем фильтр по ЕЗ во избежание конфликтов
                         }
                         applyAccessFilter();
                     });
-
-                    // Клик по кнопке заливки
-                    const fillBtn = li.querySelector('.toggle-fill-btn');
-                    if (fillBtn) {
-                        fillBtn.addEventListener('click', (e) => {
-                            e.stopPropagation(); // Не активируем фильтрацию по строке
-                            if (window.disabledAccessFills.has(accessKey)) {
-                                window.disabledAccessFills.delete(accessKey);
-                            } else {
-                                window.disabledAccessFills.add(accessKey);
-                            }
-                            applyAccessTheme(window.fetchedEzAccessMap || new Map(), window.accessThemeOptions || {});
-                        });
-                    }
                 } else if (ezKey) {
                     li.style.cursor = 'pointer';
                     li.classList.toggle('legend-item-selected', selectedEzFromLegend === ezKey);
-                    
-                    // Клик по строке ЕЗ (фильтрация)
                     li.addEventListener('click', (e) => {
                         e.stopPropagation();
                         if (selectedEzFromLegend === ezKey) {
                             selectedEzFromLegend = null;
                         } else {
                             selectedEzFromLegend = ezKey;
-                            selectedAccessCategoryFromLegend = null;
+                            selectedAccessCategoryFromLegend = null; // сбрасываем фильтр по категориям
                         }
                         applyAccessFilter();
                     });
-
-                    // Клик по кнопке заливки ЕЗ
-                    const fillBtn = li.querySelector('.toggle-fill-btn');
-                    if (fillBtn) {
-                        fillBtn.addEventListener('click', (e) => {
-                            e.stopPropagation();
-                            if (window.disabledAccessFills.has(ezKey)) {
-                                window.disabledAccessFills.delete(ezKey);
-                            } else {
-                                window.disabledAccessFills.add(ezKey);
-                            }
-                            applyAccessTheme(window.fetchedEzAccessMap || new Map(), window.accessThemeOptions || {});
-                        });
-                    }
                 }
             });
         }
     }
     updateSidebarForUluTheme();
+    // Применяем фильтр, если до этого что-то было выбрано
     applyAccessFilter();
 }
 
@@ -31829,7 +31711,7 @@ function applyAccessFilter() {
         return;
     }
 
-    // Синхронизируем выделение строк в DOM
+    // Обновляем визуальное выделение пунктов в DOM
     const legendList = document.getElementById('access-legend-list');
     if (legendList) {
         legendList.querySelectorAll('li').forEach(li => {
@@ -31866,22 +31748,14 @@ function applyAccessFilter() {
 
             const categoryKey = getAccessCategoryKey(ownership, right);
 
+            // Проверка условий фильтра
             const matchesCategory = selectedAccessCategoryFromLegend === null || categoryKey === selectedAccessCategoryFromLegend;
             const matchesEz = selectedEzFromLegend === null || parentEz === selectedEzFromLegend;
             const isVisible = matchesCategory && matchesEz;
 
             obj.options.set('visible', isVisible);
 
-            // --- НАЧАЛО: Применение прозрачности при выключенной кнопке заливки ---
-            let fillColor = getAccessThemeColors(ownership, right);
-            const isCategoryDisabled = window.disabledAccessFills.has(categoryKey);
-            const isEzDisabled = parentEz && window.disabledAccessFills.has(parentEz);
-            if (isCategoryDisabled || isEzDisabled) {
-                fillColor = '#00000000'; // Убираем заливку
-            }
-            obj.options.set('fillColor', fillColor);
-            // --- КОНЕЦ ---
-
+            // Добавление временных меток для отфильтрованных объектов
             const existingPlacemark = accessFilterPlacemarks.get(cn);
             if (isVisible && (selectedAccessCategoryFromLegend !== null || selectedEzFromLegend !== null)) {
                 cnsToShowPlacemark.add(cn);
@@ -31906,6 +31780,7 @@ function applyAccessFilter() {
         }
     });
 
+    // Очистка старых маркеров фильтра
     accessFilterPlacemarks.forEach((placemark, cn) => {
         if (!cnsToShowPlacemark.has(cn)) {
             if (map?.geoObjects.indexOf(placemark) !== -1) {
@@ -31915,8 +31790,8 @@ function applyAccessFilter() {
         }
     });
 
+    // Синхронизируем видимость стандартных текстовых надписей кадастровых номеров на карте
     updatePlacemarksVisibility();
-     filterParcelList(); 
 }
 
         </script>
