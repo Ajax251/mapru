@@ -17898,8 +17898,6 @@ async function loadAndParseZipBlob(zipBlob) {
 
 
 
-// --- MODIFIED loadAndProcessSupabaseData ---
-// Эта функция теперь правильно обрабатывает уже загруженные данные: рисует, заполняет сайдбар, применяет тему и центрирует карту.
 async function loadAndProcessSupabaseData(loadedFeatures, loadedDate) {
     if (!map) {
          console.error('Карта не инициализирована в loadAndProcessSupabaseData');
@@ -17913,8 +17911,73 @@ async function loadAndProcessSupabaseData(loadedFeatures, loadedDate) {
     document.querySelector('.loading-text').textContent = 'Отрисовка участков из архива...';
     const drawnObjects = await processAndDrawParcels(loadedFeatures, 'quarter'); // 'quarter' source
 
+    // --- НАЧАЛО ИЗМЕНЕНИЙ: Полная подгрузка связей ЕЗ для Архива КПТ ---
+    
+    // 1. Автоматически определяем номер квартала из загруженных объектов, 
+    // так как глобальный currentQuarterNumber затирается при вызове clearMapAndResetTheme()
+    const firstFeature = loadedFeatures.find(f => f.properties?.descr && f.properties.descr.includes(':'));
+    let qNum = '';
+    if (firstFeature) {
+        const parts = firstFeature.properties.descr.split(':');
+        if (parts.length >= 3) {
+            qNum = parts.slice(0, 3).join(':');
+        }
+    }
+
+    if (qNum) {
+        currentQuarterNumber = qNum; // Восстанавливаем глобальное значение для работы остальных модулей
+    }
+
+    if (qNum.startsWith('16:')) {
+        document.querySelector('.loading-text').textContent = 'Связывание участков с ЕЗ...';
+        
+        // Собираем все кадастровые номера для запроса к БД (надежнее, чем фильтрация по subtype)
+        const allParcelCNs = loadedFeatures
+            .map(f => f.properties?.descr)
+            .filter(Boolean);
+
+        if (allParcelCNs.length > 0) {
+            zuToEzMapGlobal.clear(); 
+            const uluRelations = await fetchUluRelations(allParcelCNs);
+            
+            if (uluRelations && uluRelations.length > 0) {
+                uluRelations.forEach(r => {
+                    if (r.ZU && r.EZ) {
+                        zuToEzMapGlobal.set(r.ZU, r.EZ);
+                    }
+                });
+                
+                // Обновляем полигоны и их всплывающие подсказки на карте
+                polygons.forEach(polygon => {
+                    if (polygon instanceof ymaps.Polygon) {
+                        const cn = polygon.properties.get('cadastralNumber');
+                        if (cn && zuToEzMapGlobal.has(cn)) {
+                            const ezParent = zuToEzMapGlobal.get(cn);
+                            polygon.properties.set('uluParentCn', ezParent);
+                            
+                            // Обновляем hintContent для тултипа полигона
+                            let hint = polygon.properties.get('hintContent') || {};
+                            hint.ezInfo = "ЕЗ: " + ezParent;
+                            polygon.properties.set('hintContent', hint);
+
+                            // Синхронизируем hintContent соответствующей текстовой метки на карте
+                            const matchingPlacemark = parcelPlacemarks.find(pm => pm.polygon === polygon);
+                            if (matchingPlacemark) {
+                                matchingPlacemark.properties.set('hintContent', hint);
+                            }
+                        }
+                    }
+                });
+            }
+        }
+    }
+    // --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
     document.querySelector('.loading-text').textContent = 'Обновление боковой панели (архив)...';
     populateSidebarWithParcels(loadedFeatures, loadedDate); // Pass date
+    
+    // --- ДОБАВЛЕНО: Сразу обновляем сайдбар данными о ЕЗ ---
+    updateSidebarForUluTheme(); 
 
     document.querySelector('.loading-text').textContent = 'Применение темы (архив)...';
     applyCurrentTheme();
@@ -17923,10 +17986,8 @@ async function loadAndProcessSupabaseData(loadedFeatures, loadedDate) {
      if (drawnObjects.length > 0) {
          let allBounds = null;
          drawnObjects.forEach(obj => {
-             // Make sure the object has a geometry and bounds before trying to get them
              if (obj && typeof obj.geometry?.getBounds === 'function') {
                   const bounds = obj.geometry.getBounds();
-                  // Ensure bounds are valid (not null/undefined and contain coordinates)
                   if (bounds && bounds[0] && bounds[1] && bounds[0].length === 2 && bounds[1].length === 2 && isFinite(bounds[0][0]) && isFinite(bounds[0][1]) && isFinite(bounds[1][0]) && isFinite(bounds[1][1])) {
                       if (!allBounds) {
                            allBounds = [
@@ -17943,9 +18004,7 @@ async function loadAndProcessSupabaseData(loadedFeatures, loadedDate) {
              }
          });
 
-         // Only set bounds if we collected valid bounds from drawn objects
          if (allBounds && allBounds[0] && allBounds[1]) {
-             // Add a small margin for better viewing
              const latDiff = (allBounds[1][0] - allBounds[0][0]) * 0.15 || 0.0005;
              const lonDiff = (allBounds[1][1] - allBounds[0][1]) * 0.15 || 0.0005;
              const viewBounds = [
@@ -17955,26 +18014,22 @@ async function loadAndProcessSupabaseData(loadedFeatures, loadedDate) {
              try {
                  map.setBounds(viewBounds, {
                      checkZoomRange: true,
-                     duration: 300 // Smooth transition
+                     duration: 300 
                  });
              } catch (setBoundsError) {
                   console.error("Ошибка установки границ карты:", setBoundsError, viewBounds);
              }
          } else if (drawnObjects.length > 0) {
-              // Fallback: if bounds couldn't be calculated but objects exist,
-              // try centering on the first object's coordinates if available
               const firstObjCoords = drawnObjects[0]?.geometry?.getCoordinates();
               if (firstObjCoords && Array.isArray(firstObjCoords[0])) {
-                   const centerCoords = firstObjCoords[0].length === 2 ? firstObjCoords[0] : firstObjCoords[0][0]; // Handle Point vs Polygon coords
+                   const centerCoords = firstObjCoords[0].length === 2 ? firstObjCoords[0] : firstObjCoords[0][0]; 
                    if (centerCoords && centerCoords.length === 2) {
                         map.setCenter(centerCoords, map.getZoom() > 16 ? map.getZoom() : 17, { duration: 300 });
                    }
               }
          }
     }
-    // Loader hiding and final notification are handled by the calling function (triggerSupabaseImport)
 }
-// --- END MODIFIED loadAndProcessSupabaseData ---
 
 
 // Global variable to hold geometry if found by point before map clear
