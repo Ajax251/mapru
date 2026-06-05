@@ -7505,6 +7505,13 @@ async function terrZoneMenuItemHandler(contextMenu, map, polygons, polygonStyle,
 
 
 async function getAllParcelsInQuarter(lat, lon, isSearchMode = false, directQuarterNumber = null, quarterAlreadyDrawn = false) {
+    // Сброс легенды и фильтров "Форма и тип собственности" на полную перед загрузкой новых данных
+    selectedAccessCategoryFromLegend = null;
+    selectedEzFromLegend = null;
+    if (window.disabledAccessFills) {
+        window.disabledAccessFills.clear();
+    }
+
     if (!isSearchMode) {
         if (directQuarterNumber) {
             showLoader(`Загрузка ${directQuarterNumber}...`);
@@ -12941,11 +12948,64 @@ function showExportOptionsDialog(lat, lon) {
         handleExportAction();
     };
 
-document.getElementById('btn-export-html-map').onclick = () => {
+document.getElementById('btn-export-html-map').onclick = async () => {
         closeModal();
-   
         const allObjectsToExport = [...polygons, ...areaObjects];
-     
+        
+        // 1. Собираем уникальные ЕЗ среди выгружаемых объектов
+        const ezList = [];
+        allObjectsToExport.forEach(obj => {
+            if (obj instanceof ymaps.Polygon) {
+                const cn = obj.properties.get('cadastralNumber');
+                const parentEz = obj.properties.get('uluParentCn') || zuToEzMapGlobal.get(cn);
+                if (parentEz && !ezList.includes(parentEz)) {
+                    ezList.push(parentEz);
+                }
+            }
+        });
+
+        // 2. Фоново дозагружаем их права
+        if (ezList.length > 0) {
+            await ensureEzMetadataLoaded(ezList);
+        }
+
+        // 3. Перед передачей экспортеру подменяем свойства объектов
+        allObjectsToExport.forEach(obj => {
+            if (obj instanceof ymaps.Polygon) {
+                const cn = obj.properties.get('cadastralNumber');
+                const parentEz = obj.properties.get('uluParentCn') || zuToEzMapGlobal.get(cn);
+                
+                if (parentEz && window.fetchedEzAccessMap && window.fetchedEzAccessMap.has(parentEz)) {
+                    const ezData = window.fetchedEzAccessMap.get(parentEz);
+                    const ownership = ezData.ownership_type || 'Не указана';
+                    const right = ezData.right_type || 'Не указана';
+
+                    // Обновляем подсказку на интерактивной карте
+                    let hint = obj.properties.get('hintContent') || {};
+                    hint.ezInfo = "ЕЗ: " + parentEz;
+                    hint.ownershipType = ownership;
+                    hint.rightType = right;
+                    obj.properties.set('hintContent', hint);
+
+                    // Если в данный момент включен режим "Форма и тип собственности"
+                    if (currentTheme === 'access') {
+                        // Перекрашиваем полигон в цвет его ЕЗ на экспортируемой карте
+                        const newFillColor = getAccessThemeColors(ownership, right);
+                        obj.options.set('fillColor', newFillColor);
+                    }
+
+                    // Обновляем вложенный featureData (его считывает экспортер карты)
+                    const featureData = obj.properties.get('featureData');
+                    if (featureData && featureData.properties && featureData.properties.options) {
+                        featureData.properties.options.ownership_type = ownership;
+                        featureData.properties.options.right_type = right;
+                        featureData.properties.options.uluParentCn = parentEz;
+                    }
+                }
+            }
+        });
+
+        // 4. Передаем подготовленные и обогащенные объекты стандартному генератору карт
         generateStandaloneHtmlMap(allObjectsToExport, map, mapOffsetX, mapOffsetY, kmlMapOffsetX, kmlMapOffsetY);
     };
     
@@ -14558,9 +14618,15 @@ async function enrichDashboardLayer(layerType, panelElement) {
 }
 
 
-// Modify clearMapAndResetTheme to clear specific object types
 function clearMapAndResetTheme() {
     if (!map) return;
+    
+    // Сброс фильтров легенды "Форма и тип собственности" в исходное состояние
+    selectedAccessCategoryFromLegend = null;
+    selectedEzFromLegend = null;
+    if (window.disabledAccessFills) {
+        window.disabledAccessFills.clear();
+    }
     
     activePanoramaPlacemark = null;
       if (rasterOverlay) {
@@ -27657,20 +27723,29 @@ async function handleZoneSearch(zoneNumber) {
 async function handleHtmlDeclExportAction(lat, lon) {
     syncFeaturesDataFromMap(); 
     
-    // Если данных нет, загружаем участки в квартале по координатам клика
     if (!parcelFeaturesData || parcelFeaturesData.length === 0) {
         showNotification('Данные не найдены. Определение квартала и загрузка участков...', 'info');
-        
-        // getAllParcelsInQuarter сам управляет лоадерами во время своей работы
         await getAllParcelsInQuarter(lat, lon);
-        
-        // Синхронизируем заново после отрисовки загруженных данных
         syncFeaturesDataFromMap(); 
-        
         if (!parcelFeaturesData || parcelFeaturesData.length === 0) {
             showNotification('В данном месте не найдено участков для экспорта.', 'warning', 'exclamation-triangle');
-            return; // Лоадер уже скрыт внутри getAllParcelsInQuarter
+            return;
         }
+    }
+
+    // Собираем ЕЗ
+    const ezList = [];
+    parcelFeaturesData.forEach(feature => {
+        const cn = feature.properties?.descr;
+        const parentEz = feature.properties?.options?.uluParentCn || zuToEzMapGlobal.get(cn);
+        if (parentEz && !ezList.includes(parentEz)) {
+            ezList.push(parentEz);
+        }
+    });
+
+    // Фоново подгружаем права ЕЗ
+    if (ezList.length > 0) {
+        await ensureEzMetadataLoaded(ezList);
     }
 
     showLoader('Подготовка данных для экспорта в HTML (декл.)...');
@@ -27679,37 +27754,48 @@ async function handleHtmlDeclExportAction(lat, lon) {
         let title = "Декларированные участки";
         let filename = "Декларированные_участки";
 
-        // Формируем заголовки, исключив ненужные колонки
+        // Добавлена колонка "ЕЗП"
         dataForSheet.push([
-            "Кадастровый номер", "Адрес", "Площадь (м²)", "Тип площади",
+            "Кадастровый номер", "ЕЗП", "Адрес", "Площадь (м²)", "Тип площади",
             "Вид разрешенного использования", "Форма собственности", "Тип права"
         ]);
 
         parcelFeaturesData.forEach(feature => {
             const properties = feature.properties || {};
             const options = properties.options || {};
+            const cn = properties.descr;
             const areaInfo = getAreaInfo(options);
             
-            // Фильтр: оставляем только участки, где тип площади содержит "Деклар"
             if (!areaInfo.type || !areaInfo.type.toLowerCase().includes('деклар')) {
-                return; // Пропускаем строку
+                return; // Пропускаем недекларированные
             }
 
             const areaValue = (areaInfo.value !== null && !isNaN(areaInfo.value)) ? areaInfo.value : 'Не указана';
             
-            // Очищаем адрес от лишнего текста
             let address = options.readable_address || 'Не указан';
             address = address.replace(/Российская Федерация,\s*/gi, '')
                              .replace(/Республика Татарстан,\s*/gi, '');
 
+            // Проверяем принадлежность к ЕЗ и подменяем права
+            const parentEz = options.uluParentCn || zuToEzMapGlobal.get(cn);
+            let ownership = options.ownership_type || 'Не указана';
+            let right = options.right_type || 'Не указана';
+
+            if (parentEz && window.fetchedEzAccessMap && window.fetchedEzAccessMap.has(parentEz)) {
+                const ezData = window.fetchedEzAccessMap.get(parentEz);
+                ownership = ezData.ownership_type || ownership;
+                right = ezData.right_type || right;
+            }
+
             dataForSheet.push([
                 properties.descr || 'Не указан',
+                parentEz || '-',
                 address,
                 areaValue,
                 areaInfo.type,
                 options.permitted_use_established_by_document || 'Не указан',
-                options.ownership_type || 'Не указана',
-                options.right_type || 'Не указана'
+                ownership,
+                right
             ]);
         });
 
@@ -27721,7 +27807,6 @@ async function handleHtmlDeclExportAction(lat, lon) {
 
         exportDataToInteractiveHtml(dataForSheet, filename, title, 1);
         showNotification('Данные успешно экспортированы в HTML', 'success', 'check-circle');
-
     } catch (error) {
         console.error('Ошибка при экспорте в HTML (декл.):', error);
         showNotification('Ошибка при экспорте в HTML', 'error', 'exclamation-circle');
@@ -27734,7 +27819,6 @@ async function handleHtmlDeclExportAction(lat, lon) {
 async function handleHtmlExportAction(lat, lon) {
     syncFeaturesDataFromMap();
 
-    // --- НАЧАЛО БЛОКА АВТОЗАГРУЗКИ ДАННЫХ ---
     const noDataOnMap = (!parcelFeaturesData || parcelFeaturesData.length === 0) &&
                         (!buildingFeaturesData || buildingFeaturesData.length === 0) &&
                         (!structureFeaturesData || structureFeaturesData.length === 0) &&
@@ -27742,21 +27826,31 @@ async function handleHtmlExportAction(lat, lon) {
 
     if (noDataOnMap) {
         showNotification('Данные не найдены. Определение квартала и загрузка участков...', 'info');
-        
-        // Загружаем данные. Функция сама покажет и скроет лоадер.
         await getAllParcelsInQuarter(lat, lon);
-        
-        // Синхронизируем данные еще раз после загрузки
         syncFeaturesDataFromMap(); 
-
-        // Повторная проверка. Если данные так и не появились, выходим.
         if ((!parcelFeaturesData || parcelFeaturesData.length === 0) && 
-            (!buildingFeaturesData || buildingFeaturesData.length === 0)) { // Проверяем хотя бы ЗУ и ОКС
+            (!buildingFeaturesData || buildingFeaturesData.length === 0)) {
             showNotification('В данном месте не найдено данных для экспорта.', 'warning', 'exclamation-triangle');
-            return; // Выходим из функции
+            return;
         }
     }
-    // --- КОНЕЦ БЛОКА АВТОЗАГРУЗКИ ДАННЫХ ---
+
+    // Собираем все уникальные ЕЗ
+    const ezList = [];
+    if (parcelFeaturesData && parcelFeaturesData.length > 0) {
+        parcelFeaturesData.forEach(feature => {
+            const cn = feature.properties?.descr;
+            const parentEz = feature.properties?.options?.uluParentCn || zuToEzMapGlobal.get(cn);
+            if (parentEz && !ezList.includes(parentEz)) {
+                ezList.push(parentEz);
+            }
+        });
+    }
+
+    // Фоново подгружаем права ЕЗ
+    if (ezList.length > 0) {
+        await ensureEzMetadataLoaded(ezList);
+    }
 
     showLoader('Подготовка данных для экспорта в HTML...');
     try {
@@ -27767,14 +27861,18 @@ async function handleHtmlExportAction(lat, lon) {
         if (parcelFeaturesData && parcelFeaturesData.length > 0) {
             title = "Участки";
             filename = "Найденные_участки";
+            
+            // Добавлена колонка "ЕЗП"
             dataForSheet.push([
-                "Кадастровый номер", "Адрес", "Площадь (м²)", "Тип площади",
+                "Кадастровый номер", "ЕЗП", "Адрес", "Площадь (м²)", "Тип площади",
                 "Стоимость (руб./м²)", "Стоимость (полная)", "Вид разрешенного использования",
                 "Категория земель", "Статус", "Дата внесения", "Форма собственности", "Тип права"
             ]);
+            
             parcelFeaturesData.forEach(feature => {
                 const properties = feature.properties || {};
                 const options = properties.options || {};
+                const cn = properties.descr;
                 const areaInfo = getAreaInfo(options);
                 const areaValue = (areaInfo.value !== null && !isNaN(areaInfo.value)) ? areaInfo.value : 'Не указана';
                 let costIndex = 'Не указана';
@@ -27784,8 +27882,20 @@ async function handleHtmlExportAction(lat, lon) {
                 const fullCost = options.cost_value !== undefined && options.cost_value !== null && isFinite(parseFloat(options.cost_value))
                     ? parseFloat(options.cost_value) : 'Не указана';
 
+                // Подменяем права
+                const parentEz = options.uluParentCn || zuToEzMapGlobal.get(cn);
+                let ownership = options.ownership_type || 'Не указана';
+                let right = options.right_type || 'Не указана';
+
+                if (parentEz && window.fetchedEzAccessMap && window.fetchedEzAccessMap.has(parentEz)) {
+                    const ezData = window.fetchedEzAccessMap.get(parentEz);
+                    ownership = ezData.ownership_type || ownership;
+                    right = ezData.right_type || right;
+                }
+
                 dataForSheet.push([
                     properties.descr || 'Не указан',
+                    parentEz || '-',
                     options.readable_address || 'Не указан',
                     areaValue,
                     areaInfo.type,
@@ -27795,11 +27905,12 @@ async function handleHtmlExportAction(lat, lon) {
                     options.land_record_category_type || 'Не указана',
                     options.status || 'Не указан',
                     options.land_record_reg_date || 'Не указана',
-                    options.ownership_type || 'Не указана',
-                    options.right_type || 'Не указана'
+                    ownership,
+                    right
                 ]);
             });
         } else if (buildingFeaturesData && buildingFeaturesData.length > 0) {
+            // Режим Здания (без изменений) ...
             title = "Здания";
             filename = "Найденные_Здания";
             dataForSheet.push([
@@ -27828,6 +27939,7 @@ async function handleHtmlExportAction(lat, lon) {
                 ]);
             });
         } else if (structureFeaturesData && structureFeaturesData.length > 0) {
+            // Режим Сооружения (без изменений) ...
             title = "Сооружения";
             filename = "Найденные_Сооружения";
             dataForSheet.push([
@@ -27851,6 +27963,7 @@ async function handleHtmlExportAction(lat, lon) {
                 ]);
             });
         } else if (zouitFeaturesData && zouitFeaturesData.length > 0) {
+            // Режим ЗОУИТ (без изменений) ...
             title = "Зоны и территории";
             filename = "Зоны_и_территории";
             dataForSheet.push([
@@ -27860,33 +27973,24 @@ async function handleHtmlExportAction(lat, lon) {
                 const p = f.properties || {};
                 const o = p.options || {};
                 const catId = p.category;
-                
                 let objType = 'ЗОУИТ';
                 let regNum = o.reg_numb_border || p.descr || '-';
                 let name = o.name_by_doc || '-';
                 let restrictions = o.content_restrict_encumbrances || '-';
                 let regDate = o.registration_date || '-';
-
                 if (catId === 36315) { objType = 'Территориальная зона'; name = o.type_zone || o.name_by_doc || '-'; restrictions = '-'; } 
                 else if (catId === 36281) { objType = 'Населенный пункт'; regNum = p.label || o.brd_nmb || '-'; name = o.name || '-'; restrictions = '-'; regDate = '-'; } 
                 else if (catId === 36278) { objType = 'Муниципальное образование'; regNum = p.label || '-'; name = p.descr || '-'; restrictions = '-'; regDate = '-'; } 
                 else if (catId === 36314) { objType = 'Лесничество'; }
-
                 dataForSheet.push([objType, regNum, name, restrictions, regDate]);
             });
-        } else {
-            // Эта ветка теперь почти невозможна, но оставляем на всякий случай
-            showNotification('Нет данных для экспорта. Сначала загрузите данные.', 'warning', 'exclamation-triangle');
-            hideLoader();
-            return;
         }
 
         exportDataToInteractiveHtml(dataForSheet, filename, title);
         showNotification('Данные успешно экспортированы в HTML', 'success', 'check-circle');
-
     } catch (error) {
         console.error('Ошибка при экспорте данных в HTML:', error);
-        showNotification('Ошибка при экспорте данных в HTML', 'error', 'exclamation-circle');
+        showNotification('Ошибка при экспорте в HTML', 'error', 'exclamation-circle');
     } finally {
         hideLoader();
     }
@@ -27896,6 +28000,7 @@ async function handleHtmlExportAction(lat, lon) {
 function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = null) {
     if (!data || data.length <= 1) return;
 
+    // Стили с добавлением оформления для кнопки группировки ЕЗП и строки Итого
     const styleAddition = `
         table { counter-reset: row-num; }
         tbody tr:not([style*="display: none"]) { counter-increment: row-num; }
@@ -27925,8 +28030,16 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
         .trim-modal .btn-ok:hover { background:#005a9e; }
         .trim-modal .btn-cancel { background:#e1e1e1; color:#333; }
         .trim-modal .btn-cancel:hover { background:#ccc; }
+
+        /* Добавленные стили для группировки ЕЗП и строки Итого */
+        #groupEzBtn:hover { color: #8b5cf6; background: rgba(139, 92, 246, 0.1); }
+        #groupEzBtn.active { color: #8b5cf6; background: rgba(139, 92, 246, 0.15); border: 1px solid rgba(139, 92, 246, 0.3); }
+        tfoot th { background: #f0f6fc; font-weight: bold; border-top: 2px solid #0078D4; color: #003366; text-align: left !important; }
+        table.show-nums tfoot .num-col { display: table-cell; }
+        tfoot .num-col { background: #f0f6fc; }
     `;
 
+    // Генерация заголовка таблицы
     let theadHtml = '<tr><th class="num-col">№</th>';
     data[0].forEach((c, ci) => {
         const safe = String(c).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
@@ -27938,6 +28051,20 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
     });
     theadHtml += '</tr>';
 
+    // Динамическая генерация строки tfoot в зависимости от количества колонок
+    let tfootHtml = '<tr><th class="num-col"></th>';
+    data[0].forEach((c, ci) => {
+        if (ci === 0) {
+            tfootHtml += '<th id="footCount" style="font-weight: bold;">Итого: 0</th>';
+        } else if (ci === 3) { // Колонка площади/протяженности всегда под индексом 3 в исходных массивах
+            tfootHtml += '<th id="footArea" style="font-weight: bold;">0</th>';
+        } else {
+            tfootHtml += '<th></th>';
+        }
+    });
+    tfootHtml += '</tr>';
+
+    // Тело таблицы
     let tbodyHtml = '';
     for (let i = 1; i < data.length; i++) {
         tbodyHtml += '<tr><td class="num-col"></td>';
@@ -27948,7 +28075,8 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
         tbodyHtml += '</tr>';
     }
 
-   const scriptCode = `
+    // JS-скрипт внутри результирующего HTML
+    const scriptCode = `
     (function(){
         var table=document.getElementById("dataTable");
         var globalInput=document.getElementById("filterInput");
@@ -27963,16 +28091,54 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
         var colFilters={};
         var activeDrop=null;
 
-        function updateCount(){
-          var v=dataRows.filter(function(r){return r.style.display!=="none";}).length;
-          countEl.textContent=v+" из "+dataRows.length;
+        // Поиск индексов колонок по тексту заголовков
+        var ezColIdx = -1;
+        var areaColIdx = -1;
+        var addrColIdx = -1;
+        var ths = table.querySelectorAll('thead th');
+        for (var i = 0; i < ths.length; i++) {
+            var colText = ths[i].textContent.toLowerCase();
+            if (colText.indexOf('езп') !== -1) ezColIdx = i;
+            if (colText.indexOf('площадь') !== -1 || colText.indexOf('протяженность') !== -1) areaColIdx = i;
+            if (colText.indexOf('адрес') !== -1 || colText.indexOf('местоположение') !== -1) addrColIdx = i;
         }
 
-        function updateBtns(){
-          table.querySelectorAll(".th-filter-btn").forEach(function(b){
-            var ci=parseInt(b.dataset.col);
-            b.classList.toggle("active",!!colFilters[ci]);
+        // Кнопка группировки (скрывается, если колонки ЕЗП нет на листе)
+        var groupEzBtn = document.getElementById('groupEzBtn');
+        if (ezColIdx === -1) {
+            groupEzBtn.style.display = 'none';
+        }
+
+        // Обновление количества строк и подсчет суммы площадей (Итого)
+        function updateCount(){
+          var visibleRows = dataRows.filter(function(r){return r.style.display!=="none";});
+          var v = visibleRows.length;
+          countEl.textContent = v + " из " + dataRows.length;
+
+          var totalArea = 0;
+          var hasValidNumbers = false;
+          visibleRows.forEach(function(row) {
+              if (areaColIdx !== -1 && row.cells[areaColIdx]) {
+                  var val = parseFloat(row.cells[areaColIdx].textContent.replace(/[\\s\\u00A0]/g, '').replace(',', '.'));
+                  if (!isNaN(val)) {
+                      totalArea += val;
+                      hasValidNumbers = true;
+                  }
+              }
           });
+
+          var footCount = document.getElementById("footCount");
+          var footArea = document.getElementById("footArea");
+          if (footCount) footCount.textContent = "Итого: " + v;
+          if (footArea) {
+              if (hasValidNumbers) {
+                  var isLength = ths[areaColIdx] && ths[areaColIdx].textContent.toLowerCase().indexOf('протяженность') !== -1;
+                  var unit = isLength ? " м" : " м²";
+                  footArea.textContent = totalArea.toLocaleString('ru-RU', { maximumFractionDigits: 2 }) + unit;
+              } else {
+                  footArea.textContent = "";
+              }
+          }
         }
 
         function filterAll(){
@@ -28181,16 +28347,6 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
         });
 
         // --- ЛОГИКА ОБРЕЗКИ АДРЕСА ---
-        var addrColIdx = -1;
-        var ths = table.querySelectorAll('thead th');
-        for (var i = 0; i < ths.length; i++) {
-            var colText = ths[i].textContent.toLowerCase();
-            if (colText.indexOf('адрес') !== -1 || colText.indexOf('местоположение') !== -1) {
-                addrColIdx = i - 1; // Учитываем скрытую колонку с номерами
-                break;
-            }
-        }
-
         var isAddressTrimmed = false;
         var lastTrimString = "";
         var trimBtn = document.getElementById('trimAddressBtn');
@@ -28204,7 +28360,7 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
             if (addrColIdx === -1) return "";
             var counts = {};
             dataRows.forEach(function(r, i) {
-                var addr = origTexts[i][addrColIdx] || "";
+                var addr = origTexts[i][addrColIdx - 1] || ""; // Смещение -1 для сопоставления с origTexts
                 var parts = addr.split(',');
                 if (parts.length >= 3) {
                     var target = parts[parts.length - 3].trim();
@@ -28228,8 +28384,8 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
             // Если уже обрезано - возвращаем исходный текст
             if (isAddressTrimmed) {
                 dataRows.forEach(function(row, ri) {
-                    var cell = row.cells[addrColIdx + 1]; 
-                    cell.textContent = origTexts[ri][addrColIdx];
+                    var cell = row.cells[addrColIdx]; 
+                    cell.textContent = origTexts[ri][addrColIdx - 1];
                 });
                 isAddressTrimmed = false;
                 trimBtn.classList.remove('active');
@@ -28259,14 +28415,13 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
             var lowerSearch = searchStr.toLowerCase();
 
             dataRows.forEach(function(row, ri) {
-                var origAddr = origTexts[ri][addrColIdx] || "";
+                var origAddr = origTexts[ri][addrColIdx - 1] || "";
                 var lowerAddr = origAddr.toLowerCase();
                 var idx = lowerAddr.indexOf(lowerSearch);
                 
-                var cell = row.cells[addrColIdx + 1];
+                var cell = row.cells[addrColIdx];
                 if (idx !== -1) {
                     var newAddr = origAddr.substring(idx);
-                    // Удаляем знаки препинания и пробелы по краям
                     newAddr = newAddr.replace(/^[\\s.,;:_\\-]+|[\\s.,;:_\\-]+$/g, '');
                     cell.textContent = newAddr;
                 } else {
@@ -28293,6 +28448,112 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
             if (e.target === trimOverlay) closeTrimModal();
         });
         // --- КОНЕЦ ЛОГИКИ ОБРЕЗКИ ---
+
+        // --- ЛОГИКА ГРУППИРОВКИ ПО ЕЗП ---
+        var isEzGrouped = false;
+        var originalRowsData = [];
+
+        // Сохранение исходного состояния строк перед группировкой
+        dataRows.forEach(function(row) {
+            var cells = Array.from(row.cells).map(function(c){return c.textContent;});
+            originalRowsData.push({
+                cells: cells,
+                display: row.style.display
+            });
+        });
+
+        function toggleEzGrouping() {
+            if (ezColIdx === -1 || areaColIdx === -1) return;
+            isEzGrouped = !isEzGrouped;
+            groupEzBtn.classList.toggle('active', isEzGrouped);
+            
+            if (isEzGrouped) {
+                var groups = {};
+                var nonGroupedRows = [];
+                
+                dataRows.forEach(function(row) {
+                    var cells = Array.from(row.cells).map(function(c){return c.textContent;});
+                    var ezVal = cells[ezColIdx].trim();
+                    if (ezVal && ezVal !== '-' && ezVal !== 'Не указана' && ezVal !== 'Не указано') {
+                        if (!groups[ezVal]) groups[ezVal] = [];
+                        groups[ezVal].push(cells);
+                    } else {
+                        nonGroupedRows.push(cells);
+                    }
+                });
+                
+                tbody.innerHTML = '';
+                var newRows = [];
+                
+                for (var ezNum in groups) {
+                    var rowsInGroup = groups[ezNum];
+                    var firstRow = rowsInGroup[0];
+                    var sumArea = 0;
+                    
+                    rowsInGroup.forEach(function(r) {
+                        var areaVal = parseFloat(r[areaColIdx].replace(/[\\s\\u00A0]/g, '').replace(',', '.'));
+                        if (!isNaN(areaVal)) sumArea += areaVal;
+                    });
+                    
+                    var newCells = [...firstRow];
+                    newCells[1] = ezNum; // Кадастровый номер становится номером ЕЗП
+                    newCells[areaColIdx] = sumArea.toFixed(2);
+                    
+               if (addrColIdx !== -1) {
+                        var ezRow = rowsInGroup.find(function(r) {
+                            return r[1].trim() === ezNum.trim();
+                        });
+                        newCells[addrColIdx] = ezRow ? ezRow[addrColIdx] : firstRow[addrColIdx];
+                    }
+                    
+                    var tr = document.createElement('tr');
+                    newCells.forEach(function(val, ci) {
+                        var td = document.createElement('td');
+                        if (ci === 0) td.className = 'num-col';
+                        else td.textContent = val;
+                        tr.appendChild(td);
+                    });
+                    tbody.appendChild(tr);
+                    newRows.push(tr);
+                }
+                
+                nonGroupedRows.forEach(function(cells) {
+                    var tr = document.createElement('tr');
+                    cells.forEach(function(val, ci) {
+                        var td = document.createElement('td');
+                        if (ci === 0) td.className = 'num-col';
+                        else td.textContent = val;
+                        tr.appendChild(td);
+                    });
+                    tbody.appendChild(tr);
+                    newRows.push(tr);
+                });
+                
+                dataRows = newRows;
+            } else {
+                tbody.innerHTML = '';
+                var restoredRows = [];
+                originalRowsData.forEach(function(data) {
+                    var tr = document.createElement('tr');
+                    data.cells.forEach(function(val, ci) {
+                        var td = document.createElement('td');
+                        if (ci === 0) td.className = 'num-col';
+                        else td.textContent = val;
+                        tr.appendChild(td);
+                    });
+                    tr.style.display = data.display;
+                    tbody.appendChild(tr);
+                    restoredRows.push(tr);
+                });
+                dataRows = restoredRows;
+            }
+            
+            origTexts = dataRows.map(function(r){return Array.from(r.cells).slice(1).map(function(c){return c.textContent;});});
+            filterAll();
+        }
+        
+        groupEzBtn.addEventListener('click', toggleEzGrouping);
+        // --- КОНЕЦ ЛОГИКИ ГРУППИРОВКИ ---
 
         // Начальная сортировка (если задана)
         var defSort = ${defaultSortCol !== null ? defaultSortCol : 'null'};
@@ -28354,6 +28615,7 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
         '<button id="exportExcelBtn" class="action-btn" title="Экспорт видимых данных в XLSX"><i class="fas fa-file-excel" style="color: #107C10;"></i></button>\n' +
         '<button id="toggleNumsBtn" class="action-btn active" title="Нумерация строк"><i class="fas fa-list-ol"></i></button>\n' +
         '<button id="trimAddressBtn" class="action-btn" title="Скрыть начало адреса до указанного текста"><i class="fas fa-cut"></i></button>\n' +
+        '<button id="groupEzBtn" class="action-btn" title="Группировать по ЕЗП"><i class="fas fa-object-group"></i></button>\n' +
         '</div>\n' +
         '<label for="filterInput">\u{1F50D} Общий фильтр:</label>\n' +
         '<input type="text" id="filterInput" placeholder="Поиск по всей таблице...">\n' +
@@ -28362,6 +28624,7 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
         '<table id="dataTable" class="show-nums">\n' +
         '<thead>' + theadHtml + '</thead>\n' +
         '<tbody>\n' + tbodyHtml + '\n</tbody>\n' +
+        '<tfoot>' + tfootHtml + '</tfoot>\n' +
         '</table>\n' +
         '<div id="trimModalOverlay" class="trim-modal-overlay">\n' +
         '    <div class="trim-modal">\n' +
@@ -28381,24 +28644,123 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
     saveAs(blob, `${filename}_${new Date().toISOString().slice(0, 10)}.html`);
 }
 
-function handleExportAction() {
+
+async function ensureEzMetadataLoaded(ezList) {
+    window.fetchedEzAccessMap = window.fetchedEzAccessMap || new Map();
+    if (!ezList || ezList.length === 0) return;
+
+    // Оставляем только те ЕЗ, по которым данных в памяти еще нет
+    const missingEzList = ezList.filter(ez => !window.fetchedEzAccessMap.has(ez));
+    if (missingEzList.length === 0) return;
+
+    showLoader("Проверка архива прав ЕЗ...");
+
+    let ezToFetchFromNspd = [];
+    try {
+        const { data: cachedRows, error: dbError } = await supabaseClient
+            .from('ez_details')
+            .select('reg_number, ownership_type, right_type')
+            .in('reg_number', missingEzList);
+
+        if (dbError) throw dbError;
+
+        const cachedMap = new Map();
+        if (cachedRows) {
+            cachedRows.forEach(row => {
+                cachedMap.set(row.reg_number, row);
+                window.fetchedEzAccessMap.set(row.reg_number, {
+                    ownership_type: row.ownership_type,
+                    right_type: row.right_type
+                });
+            });
+        }
+        ezToFetchFromNspd = missingEzList.filter(ez => !cachedMap.has(ez));
+    } catch (err) {
+        console.warn("[Export EZ] Ошибка загрузки из Supabase:", err.message);
+        ezToFetchFromNspd = [...missingEzList];
+    }
+
+    // Если каких-то ЕЗ нет в базе данных, запрашиваем напрямую из ЕГРН (НСПД)
+    if (ezToFetchFromNspd.length > 0) {
+        for (let i = 0; i < ezToFetchFromNspd.length; i++) {
+            const ezCn = ezToFetchFromNspd[i];
+            const loaderText = document.querySelector('.loading-text');
+            if (loaderText) {
+                loaderText.textContent = `Запрос ЕГРН для ЕЗ (${i + 1}/${ezToFetchFromNspd.length}): ${ezCn}`;
+            }
+            try {
+                const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(ezCn)}`;
+                const response = await fetchNspd(url);
+                if (response.ok) {
+                    const result = await response.json();
+                    const feature = result?.data?.features?.[0];
+                    if (feature && feature.properties && feature.properties.options) {
+                        const opts = feature.properties.options;
+                        const ownership = opts.ownership_type || 'Не указано';
+                        const right = opts.right_type || 'Не указано';
+                        
+                        window.fetchedEzAccessMap.set(ezCn, {
+                            ownership_type: ownership,
+                            right_type: right
+                        });
+
+                        // Кэшируем в Supabase
+                        await supabaseClient
+                            .from('ez_details')
+                            .upsert({
+                                reg_number: ezCn,
+                                ownership_type: ownership,
+                                right_type: right,
+                                nspd_json: feature,
+                                updated_at: new Date().toISOString()
+                            });
+                    }
+                }
+            } catch (e) {
+                console.error(`[Export EZ] Ошибка запроса НСПД для ${ezCn}:`, e);
+            }
+            await new Promise(resolve => setTimeout(resolve, 300));
+        }
+    }
+    hideLoader();
+}
+
+async function handleExportAction() {
     // 1. Синхронизируем данные с картой перед экспортом
     syncFeaturesDataFromMap(); 
-    let somethingWasExported = false;
+
+    // Собираем все уникальные родительские ЕЗ
+    const ezList = [];
+    if (parcelFeaturesData && parcelFeaturesData.length > 0) {
+        parcelFeaturesData.forEach(feature => {
+            const cn = feature.properties?.descr;
+            const parentEz = feature.properties?.options?.uluParentCn || zuToEzMapGlobal.get(cn);
+            if (parentEz && !ezList.includes(parentEz)) {
+                ezList.push(parentEz);
+            }
+        });
+    }
+
+    // Фоново подгружаем недостающие права для собранных ЕЗ
+    if (ezList.length > 0) {
+        await ensureEzMetadataLoaded(ezList);
+    }
     
+    let somethingWasExported = false;
     showLoader('Формирование сводного Excel файла...');
 
     try {
-        // Создаем одну общую рабочую книгу Excel
         const wb = XLSX.utils.book_new();
 
         // --- Вкладка: Земельные участки ---
         if (parcelFeaturesData && parcelFeaturesData.length > 0) {
-            const dataZU = [["Кадастровый номер", "Адрес", "Площадь (м²)", "Тип площади", "Стоимость (руб./м²)", "Стоимость (полная)", "Вид разрешенного использования", "Категория земель", "Статус", "Дата внесения", "Форма собственности", "Тип права"]];
+            // Добавлена новая колонка "ЕЗП" на 2-ю позицию
+            const dataZU = [["Кадастровый номер", "ЕЗП", "Адрес", "Площадь (м²)", "Тип площади", "Стоимость (руб./м²)", "Стоимость (полная)", "Вид разрешенного использования", "Категория земель", "Статус", "Дата внесения", "Форма собственности", "Тип права"]];
             
             parcelFeaturesData.forEach(feature => {
                 const properties = feature.properties || {};
                 const options = properties.options || {};
+                const cn = properties.descr;
                 const areaInfo = getAreaInfo(options);
                 const areaValue = (areaInfo.value !== null && !isNaN(areaInfo.value)) ? areaInfo.value : 'Не указана';
                 let costIndex = 'Не указана';
@@ -28407,34 +28769,45 @@ function handleExportAction() {
                 }
                 const fullCost = options.cost_value !== undefined && options.cost_value !== null && isFinite(parseFloat(options.cost_value)) ? parseFloat(options.cost_value) : 'Не указана';
                 
+                // Проверяем принадлежность к ЕЗ и подменяем права
+                const parentEz = options.uluParentCn || zuToEzMapGlobal.get(cn);
+                let ownership = options.ownership_type || 'Не указана';
+                let right = options.right_type || 'Не указана';
+
+                if (parentEz && window.fetchedEzAccessMap && window.fetchedEzAccessMap.has(parentEz)) {
+                    const ezData = window.fetchedEzAccessMap.get(parentEz);
+                    ownership = ezData.ownership_type || ownership;
+                    right = ezData.right_type || right;
+                }
+
                 dataZU.push([
                     properties.descr || 'Не указан',
+                    parentEz || '-', // Заполняем колонку ЕЗП
                     options.readable_address || 'Не указан',
                     areaValue, areaInfo.type, costIndex, fullCost,
                     options.permitted_use_established_by_document || 'Не указан',
                     options.land_record_category_type || 'Не указана',
                     options.status || 'Не указан',
                     options.land_record_reg_date || 'Не указана',
-                    options.ownership_type || 'Не указана',
-                    options.right_type || 'Не указана'
+                    ownership,
+                    right
                 ]);
             });
             const wsZU = XLSX.utils.aoa_to_sheet(dataZU);
-            wsZU['!cols'] = [{wch:20}, {wch:50}, {wch:15}, {wch:18}, {wch:15}, {wch:18}, {wch:30}, {wch:30}, {wch:20}, {wch:20}, {wch:20}, {wch:20}];
+            // Сдвинута и расширена сетка ширины колонок из-за добавления ЕЗП
+            wsZU['!cols'] = [{wch:20}, {wch:20}, {wch:50}, {wch:15}, {wch:18}, {wch:15}, {wch:18}, {wch:30}, {wch:30}, {wch:20}, {wch:20}, {wch:20}, {wch:20}];
             XLSX.utils.book_append_sheet(wb, wsZU, "Участки");
             somethingWasExported = true;
         }
 
-        // --- Вкладка: Здания ---
+        // --- Вкладка: Здания (без изменений) ---
         if (buildingFeaturesData && buildingFeaturesData.length > 0) {
             const dataOKS = [["Кадастровый номер", "Наименование", "Адрес", "Площадь (м²)", "Назначение", "Год постройки", "Материал стен", "Этажность", "Стоимость (полная)", "Форма собственности", "Тип права", "Дата внесения"]];
-            
             buildingFeaturesData.forEach(feature => {
                 const properties = feature.properties || {};
                 const options = properties.options || {};
                 const areaValue = (options.build_record_area && isFinite(parseFloat(options.build_record_area))) ? parseFloat(options.build_record_area) : 'Не указана';
                 const fullCost = (options.cost_value && isFinite(parseFloat(options.cost_value))) ? parseFloat(options.cost_value) : 'Не указана';
-                
                 dataOKS.push([
                     options.cad_num || properties.descr || 'Не указан',
                     properties.descr || 'Не указан',
@@ -28456,15 +28829,13 @@ function handleExportAction() {
             somethingWasExported = true;
         }
 
-        // --- Вкладка: Сооружения ---
+        // --- Вкладка: Сооружения (без изменений) ---
         if (structureFeaturesData && structureFeaturesData.length > 0) {
             const dataStr = [["Кадастровый номер", "Наименование", "Адрес", "Протяженность (м)", "Назначение", "Год постройки", "Форма собственности", "Тип права", "Дата внесения"]];
-            
             structureFeaturesData.forEach(feature => {
                 const properties = feature.properties || {};
                 const options = properties.options || {};
                 const lengthValue = (options.params_extension && isFinite(parseFloat(options.params_extension))) ? parseFloat(options.params_extension) : 'Не указана';
-                
                 dataStr.push([
                     options.cad_number || properties.descr || 'Не указан',
                     options.params_name || properties.descr || 'Не указано',
@@ -28483,26 +28854,22 @@ function handleExportAction() {
             somethingWasExported = true;
         }
 
-        // --- Вкладка: ЗОУИТ ---
+        // --- Вкладка: ЗОУИТ (без изменений) ---
         if (zouitFeaturesData && zouitFeaturesData.length > 0) {
             const dataZouit = [["Тип объекта", "Рег. номер / Кад. номер", "Наименование", "Ограничения / Доп. инфо", "Дата регистрации"]];
-            
             zouitFeaturesData.forEach(f => {
                 const p = f.properties || {};
                 const o = p.options || {};
                 const catId = p.category;
-                
                 let objType = 'ЗОУИТ';
                 let regNum = o.reg_numb_border || p.descr || '-';
                 let name = o.name_by_doc || '-';
                 let restrictions = o.content_restrict_encumbrances || '-';
                 let regDate = o.registration_date || '-';
-
                 if (catId === 36315) { objType = 'Территориальная зона'; name = o.type_zone || o.name_by_doc || '-'; restrictions = '-'; } 
                 else if (catId === 36281) { objType = 'Населенный пункт'; regNum = p.label || o.brd_nmb || '-'; name = o.name || '-'; restrictions = '-'; regDate = '-'; } 
                 else if (catId === 36278) { objType = 'Муниципальное образование'; regNum = p.label || '-'; name = p.descr || '-'; restrictions = '-'; regDate = '-'; } 
                 else if (catId === 36314) { objType = 'Лесничество'; }
-
                 dataZouit.push([objType, regNum, name, restrictions, regDate]);
             });
             const wsZouit = XLSX.utils.aoa_to_sheet(dataZouit);
@@ -28511,22 +28878,18 @@ function handleExportAction() {
             somethingWasExported = true;
         }
 
-        // --- Финальное сохранение файла ---
         if (somethingWasExported) {
             const dateStr = new Date().toISOString().slice(0, 10);
             XLSX.writeFile(wb, `Экспорт_объектов_${dateStr}.xlsx`);
             showNotification('Данные успешно экспортированы в Excel', 'success', 'check-circle');
-
-            // Сохраняем функционал открытия format.html и копирования текста участков
             if (parcelFeaturesData && parcelFeaturesData.length > 0) {
                 const textToCopy = XLSX.utils.sheet_to_csv(wb.Sheets["Участки"], { FS: "\t" });
                 navigator.clipboard.writeText(textToCopy).catch(e => console.error(e));
                 window.open('format.html', '_blank');
             }
         } else {
-            showNotification('Нет данных для экспорта. Сначала загрузите участки или ОКС.', 'warning', 'exclamation-triangle');
+            showNotification('Нет данных для экспорта.', 'warning', 'exclamation-triangle');
         }
-
     } catch (error) {
         console.error('Ошибка при экспорте в Excel:', error);
         showNotification('Произошла ошибка при экспорте файла', 'error', 'exclamation-circle');
@@ -29577,30 +29940,21 @@ function filterParcelList() {
     
     if (!filterInput || !contentDiv || !sidebar) return;
 
-    // Приводим поисковый запрос к нижнему регистру и убираем лишние пробелы
     const filterText = filterInput.value.toLowerCase().trim();
-    // Разбиваем запрос на отдельные слова (чтобы находить и по номеру, и по улице одновременно)
     const searchTerms = filterText.split(/\s+/).filter(term => term.length > 0);
 
     const items = contentDiv.querySelectorAll('.sidebar-item');
     let visibleCount = 0;
 
     items.forEach(item => {
-        // Получаем ВЕСЬ текст внутри карточки (номер, адрес, площадь и т.д.)
-        const itemFullText = item.innerText.toLowerCase(); // Используем innerText для поиска видимого текста
+        const itemFullText = item.innerText.toLowerCase();
 
-        let isVisible = false;
+        let isVisible = true;
 
-        if (searchTerms.length === 0) {
-            // Если фильтр пустой, показываем всё
-            isVisible = true;
-        } else {
-            // Проверяем: ВСЕ ли слова из запроса есть в тексте карточки?
-            // Например, запрос "нурлат советская" найдет карточку, где есть и "нурлат", и "советская"
+        if (searchTerms.length > 0) {
             isVisible = searchTerms.every(term => itemFullText.includes(term));
         }
 
-        // Переключаем класс видимости
         if (isVisible) {
             item.classList.remove('filtered-out');
             visibleCount++;
@@ -29609,11 +29963,77 @@ function filterParcelList() {
         }
     });
 
-    // Обновляем заголовок с количеством
     const sidebarTitle = document.getElementById('sidebar-title');
     const totalCount = sidebar.dataset.totalCount || items.length;
     const prefix = sidebar.dataset.titlePrefix || 'Список';
 
+    if (sidebarTitle) {
+        sidebarTitle.textContent = `${prefix} (${visibleCount}/${totalCount})`;
+    }
+}
+
+function filterSidebarByAccessLegend(key, isEz = false) {
+    const contentDiv = document.getElementById('parcel-list-content');
+    const sidebar = document.getElementById('parcel-results-sidebar');
+    if (!contentDiv || !sidebar) return;
+
+    const items = contentDiv.querySelectorAll('.sidebar-item');
+    let visibleCount = 0;
+
+    // Если ключ пустой (выделения нет), сбрасываем сайдбар на полный список
+    if (!key) {
+        items.forEach(item => item.classList.remove('filtered-out'));
+        visibleCount = items.length;
+    } else {
+        const matchedCns = new Set();
+        
+        // Быстро собираем подходящие кадастровые номера с карты
+        polygons.forEach(obj => {
+            if (obj instanceof ymaps.Polygon && (obj.properties?.get('isParcelInQuarter') || obj.properties?.get('isFoundInArea') || obj.properties?.get('isParcelFromSingleSearch'))) {
+                const cn = obj.properties.get('cadastralNumber');
+                if (!cn) return;
+
+                const parentEz = obj.properties.get('uluParentCn') || zuToEzMapGlobal.get(cn);
+                
+                if (isEz) {
+                    if (parentEz === key) {
+                        matchedCns.add(cn.toLowerCase());
+                    }
+                } else {
+                    let ownership = 'Не указано';
+                    let right = 'Не указано';
+                    if (parentEz && window.fetchedEzAccessMap?.has(parentEz)) {
+                        const ezData = window.fetchedEzAccessMap.get(parentEz);
+                        ownership = ezData.ownership_type;
+                        right = ezData.right_type;
+                    } else {
+                        const fOpts = obj.properties.get('featureData')?.properties?.options || {};
+                        ownership = fOpts.ownership_type || 'Не указано';
+                        right = fOpts.right_type || 'Не указано';
+                    }
+                    const categoryKey = getAccessCategoryKey(ownership, right);
+                    if (categoryKey === key) {
+                        matchedCns.add(cn.toLowerCase());
+                    }
+                }
+            }
+        });
+
+        items.forEach(item => {
+            const itemCn = (item.dataset.cadnum || '').toLowerCase();
+            if (matchedCns.has(itemCn)) {
+                item.classList.remove('filtered-out');
+                visibleCount++;
+            } else {
+                item.classList.add('filtered-out');
+            }
+        });
+    }
+
+    // Обновляем заголовок сайдбара
+    const sidebarTitle = document.getElementById('sidebar-title');
+    const totalCount = sidebar.dataset.totalCount || items.length;
+    const prefix = sidebar.dataset.titlePrefix || 'Список';
     if (sidebarTitle) {
         sidebarTitle.textContent = `${prefix} (${visibleCount}/${totalCount})`;
     }
@@ -31350,6 +31770,8 @@ function applyAccessTheme(ezDetailsMap = new Map(), options = {}) {
     const highlightMulti = options.highlightMulti === true;
     const multiColor = options.multiColor || '#d946ef';
     
+    window.disabledAccessFills = window.disabledAccessFills || new Set();
+
     // 1. Отрисовка базовых цветов на карте
     polygons.forEach(obj => {
         if (obj instanceof ymaps.Polygon && (obj.properties?.get('isParcelInQuarter') || obj.properties?.get('isFoundInArea') || obj.properties?.get('isParcelFromSingleSearch'))) {
@@ -31368,7 +31790,15 @@ function applyAccessTheme(ezDetailsMap = new Map(), options = {}) {
                 right = fOpts.right_type || 'Не указано';
             }
             
-            const fillColor = getAccessThemeColors(ownership, right);
+            const categoryKey = getAccessCategoryKey(ownership, right);
+            let fillColor = getAccessThemeColors(ownership, right);
+
+            const isCategoryDisabled = window.disabledAccessFills.has(categoryKey);
+            const isEzDisabled = parentEz && window.disabledAccessFills.has(parentEz);
+            if (isCategoryDisabled || isEzDisabled) {
+                fillColor = '#00000000';
+            }
+
             obj.options.set('fillColor', fillColor);
             
             let strokeColor, strokeWidth;
@@ -31406,7 +31836,6 @@ function applyAccessTheme(ezDetailsMap = new Map(), options = {}) {
         const legendList = document.getElementById('access-legend-list');
         
         if (legendList) {
-           // Динамически собираем список Единых землепользований, присутствующих на карте
             const uniqueEzCns = new Set();
             polygons.forEach(obj => {
                 if (obj instanceof ymaps.Polygon) {
@@ -31419,41 +31848,102 @@ function applyAccessTheme(ezDetailsMap = new Map(), options = {}) {
             });
             const activeEzList = Array.from(uniqueEzCns).sort();
 
-  let listHtml = `
+            const getFillToggleIcon = (key) => {
+                const isDisabled = window.disabledAccessFills.has(key);
+                const color = isDisabled ? '#cbd5e1' : '#3b82f6';
+                const opacity = isDisabled ? '0.4' : '1';
+                return `
+                    <span class="toggle-fill-btn" 
+                          onmouseenter="this.style.background='rgba(0,0,0,0.06)'" 
+                          onmouseleave="this.style.background='transparent'"
+                          style="padding: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 4px; transition: background 0.2s;" 
+                          title="${isDisabled ? 'Включить заливку' : 'Выключить заливку'}">
+                        <i class="fas fa-fill-drip" style="font-size: 11px; color: ${color}; opacity: ${opacity};"></i>
+                    </span>
+                `;
+            };
+
+            const getSyncSidebarIcon = (key) => {
+                return `
+                    <span class="sync-sidebar-btn" 
+                          onmouseenter="this.style.background='rgba(0,0,0,0.06)'" 
+                          onmouseleave="this.style.background='transparent'"
+                          style="padding: 4px; cursor: pointer; display: flex; align-items: center; justify-content: center; width: 22px; height: 22px; border-radius: 4px; transition: background 0.2s;" 
+                          title="Показать в списке">
+                        <i class="fas fa-sync-alt" style="font-size: 11px; color: #10b981;"></i>
+                    </span>
+                `;
+            };
+
+            const getColorBoxStyle = (key, baseColor, borderStyle) => {
+                const isDisabled = window.disabledAccessFills.has(key);
+                return isDisabled 
+                    ? `background-color: transparent !important; ${borderStyle}` 
+                    : `background-color: ${baseColor}; ${borderStyle}`;
+            };
+
+            let listHtml = `
                 <li data-access-key="Municipal|Post">
-                    <span class="legend-color-box" style="background-color: #1d4ed899; border: 1px solid #1d4ed8;"></span>
+                    <span class="legend-color-box" style="${getColorBoxStyle('Municipal|Post', '#1d4ed899', 'border: 1px solid #1d4ed8;')}"></span>
                     <span>Муниципальная (Пост. польз.)</span>
+                    <div style="margin-left: auto; display: flex; gap: 2px; align-items: center;">
+                        ${getFillToggleIcon('Municipal|Post')}
+                        ${getSyncSidebarIcon('Municipal|Post')}
+                    </div>
                 </li>
                 <li data-access-key="Municipal|Sobstv">
-                    <span class="legend-color-box" style="background-color: #3b82f699; border: 1px solid #3b82f6;"></span>
+                    <span class="legend-color-box" style="${getColorBoxStyle('Municipal|Sobstv', '#3b82f64D', 'border: 1px solid #3b82f6;')}"></span>
                     <span>Муниципальная (Собств.)</span>
+                    <div style="margin-left: auto; display: flex; gap: 2px; align-items: center;">
+                        ${getFillToggleIcon('Municipal|Sobstv')}
+                        ${getSyncSidebarIcon('Municipal|Sobstv')}
+                    </div>
                 </li>
                 <li data-access-key="Unregistered">
-                    <span class="legend-color-box" style="background-color: #00bfff99; border: 1px solid #00bfff;"></span>
+                    <span class="legend-color-box" style="${getColorBoxStyle('Unregistered', '#00bfff99', 'border: 1px solid #00bfff;')}"></span>
                     <span>Неоформленная (Гос. земли)</span>
+                    <div style="margin-left: auto; display: flex; gap: 2px; align-items: center;">
+                        ${getFillToggleIcon('Unregistered')}
+                        ${getSyncSidebarIcon('Unregistered')}
+                    </div>
                 </li>
                 <li data-access-key="Private|Doleva">
-                    <span class="legend-color-box" style="background-color: #dc2626a6; border: 1px solid #dc2626;"></span>
+                    <span class="legend-color-box" style="${getColorBoxStyle('Private|Doleva', '#dc2626a6', 'border: 1px solid #dc2626;')}"></span>
                     <span>Частная (Долевая/Совмест.)</span>
+                    <div style="margin-left: auto; display: flex; gap: 2px; align-items: center;">
+                        ${getFillToggleIcon('Private|Doleva')}
+                        ${getSyncSidebarIcon('Private|Doleva')}
+                    </div>
                 </li>
                 <li data-access-key="Private|Sobstv">
-                    <span class="legend-color-box" style="background-color: #ec489999; border: 1px solid #ec4899;"></span>
+                    <span class="legend-color-box" style="${getColorBoxStyle('Private|Sobstv', '#ec489999', 'border: 1px solid #ec4899;')}"></span>
                     <span>Частная (Собственность)</span>
+                    <div style="margin-left: auto; display: flex; gap: 2px; align-items: center;">
+                        ${getFillToggleIcon('Private|Sobstv')}
+                        ${getSyncSidebarIcon('Private|Sobstv')}
+                    </div>
                 </li>
                 <li data-access-key="Other">
-                    <span class="legend-color-box" style="background-color: #7c3aed99; border: 1px solid #7c3aed;"></span>
+                    <span class="legend-color-box" style="${getColorBoxStyle('Other', '#a855f733', 'border: 1px solid #a855f7;')}"></span>
                     <span>Иные права / Аренда</span>
+                    <div style="margin-left: auto; display: flex; gap: 2px; align-items: center;">
+                        ${getFillToggleIcon('Other')}
+                        ${getSyncSidebarIcon('Other')}
+                    </div>
                 </li>
             `;
 
-            // Если найдены ЕЗ, дополняем легенду
             if (activeEzList.length > 0) {
                 listHtml += `<li class="legend-title-no-hover" style="border-top: 1px solid rgba(0,0,0,0.1); margin-top: 6px; padding-top: 6px; font-weight: bold; pointer-events: none; padding-left: 2px;">Единые землепользования:</li>`;
                 activeEzList.forEach(ez => {
                     listHtml += `
                         <li data-ez-key="${ez}">
-                            <span class="legend-color-box" style="border: 2.5px solid #ffa500 !important; background: transparent !important;"></span>
+                            <span class="legend-color-box" style="${getColorBoxStyle(ez, 'transparent', 'border: 2.5px solid #ffa500 !important;')}"></span>
                             <span style="font-size: 11px;">${ez}</span>
+                            <div style="margin-left: auto; display: flex; gap: 2px; align-items: center;">
+                                ${getFillToggleIcon(ez)}
+                                ${getSyncSidebarIcon(ez)}
+                            </div>
                         </li>
                     `;
                 });
@@ -31468,7 +31958,6 @@ function applyAccessTheme(ezDetailsMap = new Map(), options = {}) {
 
             legendList.innerHTML = listHtml;
 
-            // Навешиваем обработчики кликов на элементы легенды
             legendList.querySelectorAll('li').forEach(li => {
                 const accessKey = li.dataset.accessKey;
                 const ezKey = li.dataset.ezKey;
@@ -31476,35 +31965,106 @@ function applyAccessTheme(ezDetailsMap = new Map(), options = {}) {
                 if (accessKey) {
                     li.style.cursor = 'pointer';
                     li.classList.toggle('legend-item-selected', selectedAccessCategoryFromLegend === accessKey);
-                    li.addEventListener('click', (e) => {
+                    
+                    // Двойной клик по строке (выбор/фильтрация карты)
+                    li.addEventListener('dblclick', (e) => {
                         e.stopPropagation();
                         if (selectedAccessCategoryFromLegend === accessKey) {
                             selectedAccessCategoryFromLegend = null;
                         } else {
                             selectedAccessCategoryFromLegend = accessKey;
-                            selectedEzFromLegend = null; // сбрасываем фильтр по ЕЗ во избежание конфликтов
+                            selectedEzFromLegend = null;
                         }
                         applyAccessFilter();
                     });
+
+                    // Клик по кнопке заливки
+                    const fillBtn = li.querySelector('.toggle-fill-btn');
+                    if (fillBtn) {
+                        fillBtn.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            if (window.disabledAccessFills.has(accessKey)) {
+                                window.disabledAccessFills.delete(accessKey);
+                            } else {
+                                window.disabledAccessFills.add(accessKey);
+                            }
+                            applyAccessTheme(window.fetchedEzAccessMap || new Map(), window.accessThemeOptions || {});
+                        });
+                    }
+
+                    // Клик по кнопке ручной синхронизации с сайдбаром
+                    const syncBtn = li.querySelector('.sync-sidebar-btn');
+                    if (syncBtn) {
+                        syncBtn.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            const isSelected = selectedAccessCategoryFromLegend === accessKey;
+                            if (isSelected) {
+                                filterSidebarByAccessLegend(accessKey, false);
+                            } else {
+                                if (selectedAccessCategoryFromLegend !== null) {
+                                    filterSidebarByAccessLegend(selectedAccessCategoryFromLegend, false);
+                                } else if (selectedEzFromLegend !== null) {
+                                    filterSidebarByAccessLegend(selectedEzFromLegend, true);
+                                } else {
+                                    filterSidebarByAccessLegend(null);
+                                }
+                            }
+                        });
+                    }
                 } else if (ezKey) {
                     li.style.cursor = 'pointer';
                     li.classList.toggle('legend-item-selected', selectedEzFromLegend === ezKey);
-                    li.addEventListener('click', (e) => {
+                    
+                    // Двойной клик по строке ЕЗ (выбор/фильтрация карты)
+                    li.addEventListener('dblclick', (e) => {
                         e.stopPropagation();
                         if (selectedEzFromLegend === ezKey) {
                             selectedEzFromLegend = null;
                         } else {
                             selectedEzFromLegend = ezKey;
-                            selectedAccessCategoryFromLegend = null; // сбрасываем фильтр по категориям
+                            selectedAccessCategoryFromLegend = null;
                         }
                         applyAccessFilter();
                     });
+
+                    // Клик по кнопке заливки ЕЗ
+                    const fillBtn = li.querySelector('.toggle-fill-btn');
+                    if (fillBtn) {
+                        fillBtn.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            if (window.disabledAccessFills.has(ezKey)) {
+                                window.disabledAccessFills.delete(ezKey);
+                            } else {
+                                window.disabledAccessFills.add(ezKey);
+                            }
+                            applyAccessTheme(window.fetchedEzAccessMap || new Map(), window.accessThemeOptions || {});
+                        });
+                    }
+
+                    // Клик по кнопке ручной синхронизации ЕЗ
+                    const syncBtn = li.querySelector('.sync-sidebar-btn');
+                    if (syncBtn) {
+                        syncBtn.addEventListener('click', (e) => {
+                            e.stopPropagation();
+                            const isSelected = selectedEzFromLegend === ezKey;
+                            if (isSelected) {
+                                filterSidebarByAccessLegend(ezKey, true);
+                            } else {
+                                if (selectedAccessCategoryFromLegend !== null) {
+                                    filterSidebarByAccessLegend(selectedAccessCategoryFromLegend, false);
+                                } else if (selectedEzFromLegend !== null) {
+                                    filterSidebarByAccessLegend(selectedEzFromLegend, true);
+                                } else {
+                                    filterSidebarByAccessLegend(null);
+                                }
+                            }
+                        });
+                    }
                 }
             });
         }
     }
     updateSidebarForUluTheme();
-    // Применяем фильтр, если до этого что-то было выбрано
     applyAccessFilter();
 }
 
@@ -31520,7 +32080,6 @@ function applyAccessFilter() {
         return;
     }
 
-    // Обновляем визуальное выделение пунктов в DOM
     const legendList = document.getElementById('access-legend-list');
     if (legendList) {
         legendList.querySelectorAll('li').forEach(li => {
@@ -31557,14 +32116,20 @@ function applyAccessFilter() {
 
             const categoryKey = getAccessCategoryKey(ownership, right);
 
-            // Проверка условий фильтра
             const matchesCategory = selectedAccessCategoryFromLegend === null || categoryKey === selectedAccessCategoryFromLegend;
             const matchesEz = selectedEzFromLegend === null || parentEz === selectedEzFromLegend;
             const isVisible = matchesCategory && matchesEz;
 
             obj.options.set('visible', isVisible);
 
-            // Добавление временных меток для отфильтрованных объектов
+            let fillColor = getAccessThemeColors(ownership, right);
+            const isCategoryDisabled = window.disabledAccessFills.has(categoryKey);
+            const isEzDisabled = parentEz && window.disabledAccessFills.has(parentEz);
+            if (isCategoryDisabled || isEzDisabled) {
+                fillColor = '#00000000';
+            }
+            obj.options.set('fillColor', fillColor);
+
             const existingPlacemark = accessFilterPlacemarks.get(cn);
             if (isVisible && (selectedAccessCategoryFromLegend !== null || selectedEzFromLegend !== null)) {
                 cnsToShowPlacemark.add(cn);
@@ -31589,7 +32154,6 @@ function applyAccessFilter() {
         }
     });
 
-    // Очистка старых маркеров фильтра
     accessFilterPlacemarks.forEach((placemark, cn) => {
         if (!cnsToShowPlacemark.has(cn)) {
             if (map?.geoObjects.indexOf(placemark) !== -1) {
@@ -31599,8 +32163,12 @@ function applyAccessFilter() {
         }
     });
 
-    // Синхронизируем видимость стандартных текстовых надписей кадастровых номеров на карте
     updatePlacemarksVisibility();
+
+    // --- Автоматический сброс сайдбара на полный список, если в легенде ничего не выделено ---
+    if (selectedAccessCategoryFromLegend === null && selectedEzFromLegend === null) {
+        filterSidebarByAccessLegend(null);
+    }
 }
 
         </script>
