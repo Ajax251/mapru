@@ -3,7 +3,7 @@
 <head>
 <meta charset="UTF-8">
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
-<title>SQLite Browser</title>
+<title>SQLite Browser — просмотр БД и экспорт в CSV</title>
 <link rel="icon" href="img/sqlbr.png" type="image/png">
 <style>
 :root{
@@ -220,10 +220,6 @@ table.grid td.blob{color:var(--faint);font-style:italic}
         <div class="toolbar">
           <input type="search" id="search" placeholder="Поиск по таблице…">
           <button class="btn green" id="addRowBtn" disabled>+ Добавить строку</button>
-          
-          <button class="btn sec" id="importCsvBtn">Импорт CSV</button>
-          <input type="file" id="csvFileInput" accept=".csv" class="hidden">
-
           <span class="spacer"></span>
           <span class="meta" id="dataMeta"></span>
           <button class="btn green" id="exportBtn">
@@ -452,54 +448,6 @@ table.grid td.blob{color:var(--faint);font-style:italic}
   </div>
 </div>
 
-<!-- Модальное окно для кастомных уведомлений (Замена системных alert / confirm / prompt) -->
-<div id="customDialogModal" class="modal">
-  <div class="modal-content" style="max-width:400px">
-    <div class="modal-header">
-      <h3 id="customDialogTitle">Уведомление</h3>
-      <button class="modal-close" onclick="closeModal('customDialogModal')">&times;</button>
-    </div>
-    <div class="modal-body" id="customDialogBody" style="font-size:14px;color:var(--text)"></div>
-    <div class="modal-footer" id="customDialogFooter"></div>
-  </div>
-</div>
-
-<!-- Модальное окно импорта CSV -->
-<div id="csvImportModal" class="modal">
-  <div class="modal-content" style="max-width:520px">
-    <div class="modal-header">
-      <h3>Импорт данных из CSV</h3>
-      <button class="modal-close" onclick="closeModal('csvImportModal')">&times;</button>
-    </div>
-    <div class="modal-body" style="display:flex;flex-direction:column;gap:14px">
-      <div>
-        <label style="display:block;font-weight:600;margin-bottom:6px">Имя результирующей таблицы:</label>
-        <input type="text" id="csvTableNameInput" placeholder="imported_table" style="width:100%;font:inherit;padding:7px 10px;border:1px solid var(--border);border-radius:7px;background:var(--panel);color:var(--text)">
-      </div>
-      <div>
-        <label style="display:block;font-weight:600;margin-bottom:6px">Разделитель полей:</label>
-        <select id="csvDelimSelect" style="width:100%;font:inherit;padding:7px 10px;border:1px solid var(--border);border-radius:7px;background:var(--panel);color:var(--text)">
-          <option value=",">Запятая (,)</option>
-          <option value=";">Точка с запятой (;)</option>
-          <option value="\t">Табуляция (Tab)</option>
-          <option value="|">Вертикальная черта (|)</option>
-        </select>
-      </div>
-      <div style="display:flex;justify-content:flex-start">
-        <button class="btn sec" id="csvAnalyzeBtn">Анализировать колонки</button>
-      </div>
-      <div id="csvSchemaConfigArea" class="hidden" style="display:flex;flex-direction:column;gap:10px">
-        <label style="display:block;font-weight:600;margin-bottom:4px">Колонки и типы данных:</label>
-        <div id="csvColumnsContainer" style="max-height:180px;overflow-y:auto;display:flex;flex-direction:column;gap:8px;padding:8px;border:1px solid var(--border-soft);border-radius:8px;background:var(--panel-soft)"></div>
-      </div>
-    </div>
-    <div class="modal-footer">
-      <button class="btn sec" onclick="closeModal('csvImportModal')">Отмена</button>
-      <button class="btn green" id="csvFinalImportBtn" disabled>Импортировать</button>
-    </div>
-  </div>
-</div>
-
 <div id="loaderOverlay" class="loader-overlay hidden">
   <div class="loader-box">
     <div class="spinner"></div>
@@ -514,28 +462,6 @@ table.grid td.blob{color:var(--faint);font-style:italic}
 <script>
 const CDN_WASM = "https://cdnjs.cloudflare.com/ajax/libs/sql.js/1.10.3/sql-wasm.wasm";
 let SQL=null, db=null, currentTable=null, currentRows=0, curCols=[], colTypes={};
-let rawCsvText = "";
-
-// Авто-инициализация пустой базы при загрузке страницы
-window.addEventListener('DOMContentLoaded', async () => {
-  showLoader("Инициализация SQLite в памяти...");
-  try {
-    await ensureSQL();
-    db = new SQL.Database();
-    $("dbname").textContent = "Локальная БД (В памяти)";
-    $("downloadDbBtn").disabled = false;
-    buildTableList();
-    $("dropZone").classList.add("hidden");
-    $("sidebar").classList.remove("hidden");
-    $("workspace").classList.add("active");
-    toast("Новая база данных создана в памяти!");
-  } catch(e) {
-    toast("Ошибка инициализации: " + e.message);
-  } finally {
-    hideLoader();
-  }
-});
-
 let sort={col:null,dir:"asc"}, page=0, lastSqlResult=null;
 let genFiles = [], isFolderUpload = false, generatedDbBytes = null;
 let currentGridData = { cols: [], rows: [] };
@@ -544,67 +470,6 @@ let activeBlobFilename = "file.bin";
 let tableHasRowid = false;
 let activeEditRowIdx = null;
 const $=id=>document.getElementById(id);
-
-// Красивые кастомные замены для alert, confirm, prompt в одном стиле
-function cAlert(title, message) {
-  return new Promise((resolve) => {
-    $("customDialogTitle").textContent = title;
-    $("customDialogBody").innerHTML = `<p style="margin:0;line-height:1.5">${escapeHtml(message)}</p>`;
-    $("customDialogFooter").innerHTML = `<button class="btn green" id="customDialogOkBtn">OK</button>`;
-    openModal("customDialogModal");
-    $("customDialogOkBtn").onclick = () => {
-      closeModal("customDialogModal");
-      resolve();
-    };
-  });
-}
-
-function cConfirm(title, message) {
-  return new Promise((resolve) => {
-    $("customDialogTitle").textContent = title;
-    $("customDialogBody").innerHTML = `<p style="margin:0;line-height:1.5">${escapeHtml(message)}</p>`;
-    $("customDialogFooter").innerHTML = `
-      <button class="btn sec" id="customDialogCancelBtn">Отмена</button>
-      <button class="btn green" id="customDialogOkBtn" style="background:var(--red)">Да, выполнить</button>
-    `;
-    openModal("customDialogModal");
-    $("customDialogOkBtn").onclick = () => {
-      closeModal("customDialogModal");
-      resolve(true);
-    };
-    $("customDialogCancelBtn").onclick = () => {
-      closeModal("customDialogModal");
-      resolve(false);
-    };
-  });
-}
-
-function cPrompt(title, message, defaultValue = "") {
-  return new Promise((resolve) => {
-    $("customDialogTitle").textContent = title;
-    $("customDialogBody").innerHTML = `
-      <p style="margin:0 0 10px;line-height:1.5">${escapeHtml(message)}</p>
-      <input type="text" id="customDialogInput" value="${escapeAttr(defaultValue)}" style="width:100%;font:inherit;padding:7px 10px;border:1px solid var(--border);border-radius:7px;background:var(--panel);color:var(--text)">
-    `;
-    $("customDialogFooter").innerHTML = `
-      <button class="btn sec" id="customDialogCancelBtn">Отмена</button>
-      <button class="btn green" id="customDialogOkBtn">ОК</button>
-    `;
-    openModal("customDialogModal");
-    const inp = $("customDialogInput");
-    inp.focus();
-    inp.select();
-    $("customDialogOkBtn").onclick = () => {
-      const val = inp.value;
-      closeModal("customDialogModal");
-      resolve(val);
-    };
-    $("customDialogCancelBtn").onclick = () => {
-      closeModal("customDialogModal");
-      resolve(null);
-    };
-  });
-}
 
 function toast(msg){const t=$("toast");t.textContent=msg;t.classList.add("show");
   clearTimeout(t._t);t._t=setTimeout(()=>t.classList.remove("show"),2200);}
@@ -1033,11 +898,9 @@ function addNewTableColumnRow() {
   container.appendChild(div);
 }
 
-async function executeCreateTable() {
+function executeCreateTable() {
   let name = $("newTableName").value.trim();
-  if (!name) { cAlert("Предупреждение", "Введите имя таблицы"); return; }
-  
-  if (!db) await ensureSQL(); 
+  if (!name) return alert("Введите имя таблицы");
   
   let colRows = document.querySelectorAll("#newTableColumns > div");
   let defs = [];
@@ -1046,6 +909,7 @@ async function executeCreateTable() {
     let colType = row.querySelector(".col-type").value;
     let colPk = row.querySelector(".col-pk").checked;
     let colNn = row.querySelector(".col-nn").checked;
+    
     if (colName) {
       let def = quoteId(colName) + " " + colType;
       if (colPk) def += " PRIMARY KEY";
@@ -1054,19 +918,19 @@ async function executeCreateTable() {
     }
   });
   
-  if (defs.length === 0) { cAlert("Ошибка", "Добавьте хотя бы одну колонку"); return; }
+  if (defs.length === 0) return alert("Добавьте хотя бы одну колонку");
   
+  let sql = "CREATE TABLE " + quoteId(name) + " (" + defs.join(", ") + ")";
   try {
-    db.run("CREATE TABLE " + quoteId(name) + " (" + defs.join(", ") + ")");
+    db.run(sql);
     closeModal("createTableModal");
     toast("Таблица создана");
-    $("sidebar").classList.remove("hidden");
-    $("workspace").classList.add("active");
-    $("dropZone").classList.add("hidden");
-    $("downloadDbBtn").disabled = false;
     buildTableList();
-    selectTable(name);
-  } catch(e) { cAlert("Ошибка выполнения", e.message); }
+    let tables = listTables();
+    if (tables.length) selectTable(name);
+  } catch(e) {
+    alert("Ошибка: " + e.message);
+  }
 }
 
 function openAddColumnModal(name) {
@@ -1075,11 +939,11 @@ function openAddColumnModal(name) {
   openModal("addColumnModal");
 }
 
-async function executeAddColumn() {
+function executeAddColumn() {
   let tableName = $("addColumnTargetTable").value;
   let colName = $("newColName").value.trim();
   let colType = $("newColType").value;
-  if (!colName) { cAlert("Предупреждение", "Введите имя колонки"); return; }
+  if (!colName) return alert("Введите имя колонки");
   
   let sql = "ALTER TABLE " + quoteId(tableName) + " ADD COLUMN " + quoteId(colName) + " " + colType;
   try {
@@ -1089,13 +953,12 @@ async function executeAddColumn() {
     buildTableList();
     buildSchema();
   } catch(e) {
-    cAlert("Ошибка добавления колонки", e.message);
+    alert("Ошибка: " + e.message);
   }
 }
 
-async function dropTable(name) {
-  let ok = await cConfirm("Удаление таблицы", "Вы действительно хотите окончательно удалить таблицу " + name + "?");
-  if (!ok) return;
+function dropTable(name) {
+  if (!confirm("Вы действительно хотите окончательно удалить таблицу " + name + "?")) return;
   try {
     db.run("DROP TABLE " + quoteId(name));
     toast("Таблица " + name + " удалена");
@@ -1110,13 +973,12 @@ async function dropTable(name) {
       $("dropZone").classList.remove("hidden");
     }
   } catch(e) {
-    cAlert("Ошибка удаления таблицы", e.message);
+    alert("Ошибка: " + e.message);
   }
 }
 
-async function deleteRow(rowIdx) {
-  let ok = await cConfirm("Удаление записи", "Вы действительно хотите удалить эту запись?");
-  if (!ok) return;
+function deleteRow(rowIdx) {
+  if (!confirm("Вы действительно хотите удалить эту запись?")) return;
   try {
     let row = currentGridData.rows[rowIdx];
     let rowid = row[0];
@@ -1228,7 +1090,7 @@ $("rowModalSaveBtn").onclick = async () => {
     buildTableList();
     loadData();
   } catch(e) {
-    cAlert("Ошибка сохранения", e.message);
+    alert("Ошибка сохранения: " + e.message);
   } finally {
     hideLoader();
   }
@@ -1523,7 +1385,7 @@ $("downloadDbBtn").onclick = () => {
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     toast("База данных скачана: " + name);
   } catch(e) {
-    cAlert("Ошибка при экспорте", e.message);
+    alert("Ошибка при экспорте: " + e.message);
   } finally {
     hideLoader();
   }
@@ -1538,192 +1400,6 @@ const dz=$("dropZone"),card=$("dropCard");
 ["dragenter","dragover"].forEach(ev=>document.addEventListener(ev,e=>{e.preventDefault();if(!$("workspace").classList.contains("active"))card.classList.add("over");}));
 ["dragleave","drop"].forEach(ev=>document.addEventListener(ev,e=>{e.preventDefault();card.classList.remove("over");}));
 document.addEventListener("drop",e=>{if(e.dataTransfer.files[0])openFile(e.dataTransfer.files[0]);});
-
-
-// --- МОДУЛЬ УЛУЧШЕННОГО ИМПОРТА CSV ---
-
-// Парсер CSV с поддержкой переносов строк и разделителей внутри кавычек (RFC 4180)
-function parseCSVText(text, delimiter) {
-  let lines = [];
-  let currentLine = [];
-  let currentField = '';
-  let inQuotes = false;
-  for (let i = 0; i < text.length; i++) {
-    let char = text[i];
-    let nextChar = text[i + 1];
-    if (char === '"') {
-      if (inQuotes && nextChar === '"') {
-        currentField += '"';
-        i++; // Пропускаем вторую кавычку экранирования
-      } else {
-        inQuotes = !inQuotes;
-      }
-    } else if (char === delimiter && !inQuotes) {
-      currentLine.push(currentField);
-      currentField = '';
-    } else if ((char === '\r' || char === '\n') && !inQuotes) {
-      if (char === '\r' && nextChar === '\n') {
-        i++;
-      }
-      currentLine.push(currentField);
-      lines.push(currentLine);
-      currentLine = [];
-      currentField = '';
-    } else {
-      currentField += char;
-    }
-  }
-  if (currentField || currentLine.length > 0) {
-    currentLine.push(currentField);
-    lines.push(currentLine);
-  }
-  return lines.filter(row => row.length > 0 && row.some(cell => cell.trim() !== ''));
-}
-
-$("importCsvBtn").onclick = () => $("csvFileInput").click();
-
-$("csvFileInput").onchange = (e) => {
-  const file = e.target.files[0];
-  if (!file) return;
-  const reader = new FileReader();
-  reader.onload = (event) => {
-    rawCsvText = event.target.result;
-    
-    // Предлагаем имя таблицы на основе имени файла (только латиница и цифры)
-    let suggestedName = file.name.replace(/\.[^/.]+$/, "").replace(/[^a-zA-Z0-9_]/g, "_").toLowerCase();
-    if (/^[0-9]/.test(suggestedName)) {
-      suggestedName = "table_" + suggestedName;
-    }
-    
-    $("csvTableNameInput").value = suggestedName || "imported_table";
-    $("csvSchemaConfigArea").classList.add("hidden");
-    $("csvFinalImportBtn").disabled = true;
-    openModal("csvImportModal");
-  };
-  reader.readAsText(file);
-};
-
-$("csvAnalyzeBtn").onclick = () => {
-  let delimiter = $("csvDelimSelect").value;
-  if (delimiter === "\\t") delimiter = "\t";
-  
-  let parsed = parseCSVText(rawCsvText, delimiter);
-  if (!parsed || parsed.length === 0) {
-    cAlert("Ошибка анализа", "Не удалось разобрать CSV-файл с текущим разделителем.");
-    return;
-  }
-  
-  let headers = parsed[0];
-  let container = $("csvColumnsContainer");
-  container.innerHTML = "";
-  
-  headers.forEach((h, i) => {
-    let colName = h.trim();
-    if (!colName) colName = `column_${i + 1}`;
-    let item = document.createElement("div");
-    item.style.cssText = "display:flex;align-items:center;justify-content:space-between;gap:10px;padding:6px 10px;background:var(--panel);border-radius:6px;border:1px solid var(--border-soft)";
-    item.innerHTML = `
-      <span style="font-weight:600;font-size:13px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap;max-width:240px">${escapeHtml(colName)}</span>
-      <select class="csv-col-type" data-col-index="${i}" style="font:inherit;font-size:12px;padding:4px 8px;border:1px solid var(--border);border-radius:6px;background:var(--panel);color:var(--text)">
-        <option value="TEXT" selected>TEXT</option>
-        <option value="INTEGER">INTEGER</option>
-        <option value="REAL">REAL</option>
-        <option value="BLOB">BLOB</option>
-      </select>
-    `;
-    container.appendChild(item);
-  });
-  
-  $("csvSchemaConfigArea").classList.remove("hidden");
-  $("csvFinalImportBtn").disabled = false;
-};
-
-$("csvFinalImportBtn").onclick = async () => {
-  let tableName = $("csvTableNameInput").value.trim();
-  if (!tableName) {
-    cAlert("Ошибка", "Пожалуйста, введите имя таблицы.");
-    return;
-  }
-  
-  if (!/^[a-zA-Z_][a-zA-Z0-9_]*$/.test(tableName)) {
-    cAlert("Ошибка", "Имя таблицы должно начинаться с буквы или подчеркивания и содержать только латинские буквы, цифры и подчеркивания.");
-    return;
-  }
-  
-  let delimiter = $("csvDelimSelect").value;
-  if (delimiter === "\\t") delimiter = "\t";
-  
-  let parsed = parseCSVText(rawCsvText, delimiter);
-  if (!parsed || parsed.length < 1) {
-    cAlert("Ошибка", "Файл пуст или содержит некорректные данные.");
-    return;
-  }
-  
-  let headers = parsed[0].map((h, i) => {
-    let colName = h.trim();
-    return colName ? colName : `column_${i + 1}`;
-  });
-  
-  let typeSelects = document.querySelectorAll(".csv-col-type");
-  let types = [];
-  typeSelects.forEach(sel => {
-    types.push(sel.value);
-  });
-  
-  closeModal("csvImportModal");
-  showLoader("Импорт CSV...");
-  
-  setTimeout(() => {
-    try {
-      // Полное затирание таблицы, если она существовала
-      db.run(`DROP TABLE IF EXISTS ${quoteId(tableName)}`);
-      
-      // Создание новой таблицы с выбранными типами
-      let colDefs = headers.map((h, i) => `${quoteId(h)} ${types[i]}`).join(", ");
-      db.run(`CREATE TABLE ${quoteId(tableName)} (${colDefs})`);
-      
-      // Вставка строк
-      let placeholders = headers.map(() => "?").join(", ");
-      let stmt = db.prepare(`INSERT INTO ${quoteId(tableName)} VALUES (${placeholders})`);
-      
-      let rows = parsed.slice(1);
-      let importedCount = 0;
-      
-      rows.forEach(row => {
-        let rowData = [];
-        for (let i = 0; i < headers.length; i++) {
-          let val = row[i];
-          if (val === undefined || val === null || val === "") {
-            rowData.push(null);
-          } else {
-            let type = types[i];
-            if (type === "INTEGER") {
-              let num = parseInt(val, 10);
-              rowData.push(isNaN(num) ? null : num);
-            } else if (type === "REAL") {
-              let num = parseFloat(val);
-              rowData.push(isNaN(num) ? null : num);
-            } else {
-              rowData.push(val);
-            }
-          }
-        }
-        stmt.run(rowData);
-        importedCount++;
-      });
-      stmt.free();
-      
-      toast(`Таблица ${tableName} импортирована (${importedCount} строк)`);
-      buildTableList();
-      selectTable(tableName);
-    } catch(err) {
-      cAlert("Ошибка импорта", err.message);
-    } finally {
-      hideLoader();
-    }
-  }, 100);
-};
-
 </script>
 </body>
 </html>
