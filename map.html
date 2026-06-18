@@ -3481,6 +3481,13 @@ body:has(#parcel-results-sidebar.collapsed:not(.hidden)) .google-sv-btn {
     color: #334155;
 }
 
+/* Увеличение точек измерения при наведении */
+.measure-vertex-dot:hover {
+    transform: translate(-50%, -50%) scale(1.4) !important;
+    cursor: grab !important;
+    transition: transform 0.1s ease;
+}
+
 @keyframes offsetSuccessFlash {
     0% {
         background-color: rgba(255, 255, 255, 0.95);
@@ -23817,6 +23824,83 @@ async function getQuarterCadastre(lat, lon) {
 
 
 
+// Перепривязка обработчиков событий (drag и contextmenu) для синхронизации индексов вершин
+
+function rebindVertexListeners(poly) {
+    poly.vertices.forEach((vertex, idx) => {
+      
+        vertex.options.set({
+            interactivityModel: 'default#geoObject',
+            draggable: true
+        });
+
+        // Очищаем старые события перед новой привязкой
+        vertex.events.remove(['drag', 'contextmenu']);
+
+        // Обработка перемещения точки
+        vertex.events.add('drag', () => {
+            const newCoords = vertex.geometry.getCoordinates();
+            const currentCoords = poly.geometry.getCoordinates()[0];
+            currentCoords[idx] = newCoords;
+            
+            if (idx === 0) {
+                currentCoords[currentCoords.length - 1] = newCoords;
+            }
+            
+            poly.geometry.setCoordinates([currentCoords]);
+            updateAreaLabelAndPolygon(poly);
+        });
+
+        // Обработка правого клика (удаление точки)
+        vertex.events.add('contextmenu', (e) => {
+            e.preventDefault(); // Предотвращаем системное меню браузера
+            
+            if (poly.vertices.length <= 3) {
+                showNotification('Полигон не может иметь менее 3 вершин.', 'warning');
+                return;
+            }
+
+            if (confirm('Удалить эту точку?')) {
+                map.geoObjects.remove(vertex);
+                areaObjects = areaObjects.filter(obj => obj !== vertex);
+                
+                // Удаляем из массива вершин полигона
+                poly.vertices.splice(idx, 1);
+
+                // Обновляем геометрию
+                const remainingCoords = poly.vertices.map(v => v.geometry.getCoordinates());
+                poly.geometry.setCoordinates([[...remainingCoords, remainingCoords[0]]]);
+
+                // Перестраиваем индексы и обновляем ярлык
+                rebindVertexListeners(poly);
+                updateAreaLabelAndPolygon(poly);
+            }
+        });
+    });
+}
+
+// Вспомогательная функция для обновления ярлыка площади и периметра
+function updateAreaLabelAndPolygon(poly) {
+    const coords = poly.geometry.getCoordinates()[0];
+    if (!coords || coords.length < 3) return;
+
+    const closedCoords = [...coords];
+    if (closedCoords[0][0] !== closedCoords[closedCoords.length - 1][0] || 
+        closedCoords[0][1] !== closedCoords[closedCoords.length - 1][1]) {
+        closedCoords.push(closedCoords[0]);
+    }
+
+    const tPoly = turf.polygon([closedCoords.map(c => [c[1], c[0]])]);
+    const a = turf.area(tPoly);
+    const p = turf.length(tPoly, { units: 'meters' });
+    const cent = turf.centroid(tPoly).geometry.coordinates;
+
+    if (poly.areaLabel) {
+        poly.areaLabel.geometry.setCoordinates([cent[1], cent[0]]);
+        poly.areaLabel.properties.set('iconContent', `${Math.round(a).toLocaleString('ru-RU')} м²<br><span style="font-size:10px;color:#777;font-weight:normal;">P: ${formatDistance(p)}</span>`);
+    }
+}
+
 function updateAreaPolygon() {
     if (areaPolygon) {
         map.geoObjects.remove(areaPolygon);
@@ -31080,13 +31164,16 @@ function onMeasureDblClick(e) {
         polygons.push(finalLabel);
 
     } else if (measureState.mode === 'area') {
-        measureState.activePolygon.geometry.setCoordinates([pts]);
-        
+        const poly = measureState.activePolygon;
+        const tempVertices = [...measureState.tempObjects]; // Сохраняем временные вершины до очистки
+
+        poly.geometry.setCoordinates([pts]);
+
         const closedCoords = [...pts, pts[0]];
         const turfPoly = turf.polygon([closedCoords.map(c => [c[1], c[0]])]);
         const area = turf.area(turfPoly);
         const perim = turf.length(turfPoly, { units: 'meters' });
-        
+
         const centroid = turf.centroid(turfPoly).geometry.coordinates;
         const finalLabel = new ymaps.Placemark([centroid[1], centroid[0]], {
             iconContent: `${Math.round(area).toLocaleString('ru-RU')} м²<br><span style="font-size:10px;color:#777;font-weight:normal;">P: ${formatDistance(perim)}</span>`,
@@ -31097,6 +31184,86 @@ function onMeasureDblClick(e) {
         });
         map.geoObjects.add(finalLabel);
         areaObjects.push(finalLabel);
+
+        // 1. СНАЧАЛА выполняем системную остановку измерения и сброс режимов рисования
+        measureState.activeLine = null; 
+        measureState.activePolygon = null;
+        stopMeasurement(); 
+
+        // 2. И ТОЛЬКО ПОСЛЕ ЭТОГО настраиваем интерактивность для готового объекта
+        poly.vertices = tempVertices;
+        poly.areaLabel = finalLabel;
+
+        // Позволяем полигону принимать события клика
+        poly.options.set('interactivityModel', 'default#geoObject');
+
+        // Обработчик клика на границе полигона для добавления новой точки
+        poly.events.add('click', (e) => {
+            if (e.get('altKey')) return; // Пропускаем, если зажат Alt (для заливки)
+
+            const clickCoords = e.get('coords');
+            const coords = poly.geometry.getCoordinates()[0];
+            const uniqueCoords = (coords[0][0] === coords[coords.length - 1][0] && coords[0][1] === coords[coords.length - 1][1])
+                ? coords.slice(0, -1)
+                : coords;
+
+            let minDistance = Infinity;
+            let insertIdx = -1;
+            const pt = turf.point([clickCoords[1], clickCoords[0]]);
+
+            // Находим ближайший отрезок (ребро) полигона
+            for (let i = 0; i < uniqueCoords.length; i++) {
+                const p1 = uniqueCoords[i];
+                const p2 = uniqueCoords[(i + 1) % uniqueCoords.length];
+                const line = turf.lineString([[p1[1], p1[0]], [p2[1], p2[0]]]);
+                const dist = turf.pointToLineDistance(pt, line, { units: 'meters' });
+                
+                if (dist < minDistance) {
+                    minDistance = dist;
+                    insertIdx = i + 1;
+                }
+            }
+
+            // Добавляем точку только если клик был совершен вблизи ребра границы (в пределах 15 метров)
+            if (minDistance > 15) return;
+
+            // Притягиваем координаты клика ровно к ребру для точности геометрии
+            const p1 = uniqueCoords[insertIdx - 1];
+            const p2 = uniqueCoords[insertIdx % uniqueCoords.length];
+            const segmentLine = turf.lineString([[p1[1], p1[0]], [p2[1], p2[0]]]);
+            const snapped = turf.nearestPointOnLine(segmentLine, pt);
+            const snappedCoords = [snapped.geometry.coordinates[1], snapped.geometry.coordinates[0]];
+
+            // Вставляем новую вершину
+            uniqueCoords.splice(insertIdx, 0, snappedCoords);
+            poly.geometry.setCoordinates([[...uniqueCoords, uniqueCoords[0]]]);
+
+            // Отрисовываем маркер новой точки
+            const newVertex = new ymaps.Placemark(snappedCoords, {
+                isMeasureTool: true, _googleShifted: true
+            }, {
+                iconLayout: vertexLayoutArea,
+                iconShape: { type: 'Circle', coordinates: [0, 0], radius: 5 },
+                interactivityModel: 'default#geoObject',
+                draggable: true
+            });
+
+            map.geoObjects.add(newVertex);
+            areaObjects.push(newVertex);
+
+            // Добавляем в локальный массив вершин
+            poly.vertices.splice(insertIdx, 0, newVertex);
+
+            // Перестраиваем события и пересчитываем площадь
+            rebindVertexListeners(poly);
+            updateAreaLabelAndPolygon(poly);
+        });
+
+        // Инициализируем события драга и правого клика для исходных вершин
+        rebindVertexListeners(poly);
+        updateAreaLabelAndPolygon(poly);
+
+        return; // Выходим из функции, чтобы не вызывать stopMeasurement() повторно в самом конце
     }
 
     measureState.activeLine = null; 
