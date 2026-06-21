@@ -1,4 +1,4 @@
-// ==========================================
+// ========================================== pzz-module.js
 
 console.log("[PZZ Module] Модуль успешно загружен");
 
@@ -280,7 +280,7 @@ function drawPzzPolygon(geometryGeoJSON, regNumber, moName, isFromDatabase) {
         const centerGeo = [(combinedBounds[0][0] + combinedBounds[1][0]) / 2, (combinedBounds[0][1] + combinedBounds[1][1]) / 2];
         const moTextPlacemark = new ymaps.Placemark(centerGeo, {
             iconContent: labelContent,
-            hintContent: isFromDatabase ? "ПЗЗ (Загружено из БД)" : "ПЗЗ"
+            hintContent: isFromDatabase ? "ПЗЗ " : "ПЗЗ"
         }, {
             preset: presetStyle,
             draggable: true
@@ -803,4 +803,362 @@ function openPzzViewer(pzzData, regNumber, moName) {
     });
 
     renderSidebar(zonesData);
+}
+
+
+// ==========================================
+// ЛОГИКА АВТОСМЕЩЕНИЯ ПО МУНИЦИПАЛЬНЫМ ОБРАЗОВАНИЯМ (МО)
+// ==========================================
+
+let lastCheckedCenter = null;
+let moOffsetsCache = [];
+
+// Загружаем кэш из localStorage при старте
+try {
+    const cached = localStorage.getItem('moOffsetsCache');
+    if (cached) moOffsetsCache = JSON.parse(cached);
+} catch(e) { 
+    console.error("Ошибка чтения кэша смещений", e); 
+}
+
+// 1. Сохраняем смещения для текущего МО в БД Supabase (конвертируем в WGS84)
+// 1. Сохраняем смещения для текущего МО в БД Supabase (конвертируем в WGS84) с проверкой перезаписи
+async function saveOffsetsForCurrentMo(lat, lon, yaX, yaY, goX, goY) {
+    if (typeof showLoader === 'function') showLoader("Определение МО для сохранения смещения...");
+    
+    try {
+        let targetRegNumber = null;
+        let targetName = null;
+        let targetGeometry = null;
+
+        // Ищем МО через API NSPD
+        if (typeof queryMunicipalInfo === 'function') {
+            const apiData = await queryMunicipalInfo(lat, lon);
+            if (apiData && apiData.features && apiData.features.length > 0) {
+                let bestApiItem = apiData.features[0];
+                let minArea = Infinity;
+                
+                apiData.features.forEach(item => {
+                    try {
+                        const tGeom = item.geometry.type === 'Polygon' ? turf.polygon(item.geometry.coordinates) : turf.multiPolygon(item.geometry.coordinates);
+                        const a = turf.area(tGeom);
+                        if (a < minArea) { minArea = a; bestApiItem = item; }
+                    } catch(e){}
+                });
+                
+                targetRegNumber = bestApiItem.properties.label || "Без номера";
+                targetName = bestApiItem.properties.descr || "Без названия";
+                targetGeometry = bestApiItem.geometry;
+            }
+        }
+
+        if (!targetRegNumber || !targetGeometry) {
+            throw new Error("Не удалось определить муниципальное образование в этой точке.");
+        }
+
+        // --- НАЧАЛО: Проверка существования записи в БД ---
+        const { data: existingData, error: checkError } = await supabaseClient
+            .from('municipal_offsets')
+            .select('ya_offset_x, ya_offset_y, go_offset_x, go_offset_y')
+            .eq('reg_number', targetRegNumber)
+            .maybeSingle(); // Возвращает данные или null, не выдает ошибку при отсутствии строк
+
+        if (checkError) {
+            console.error("Ошибка при проверке существующих данных:", checkError);
+            throw new Error("Не удалось проверить наличие данных в базе.");
+        }
+
+        if (existingData) {
+            if (typeof hideLoader === 'function') hideLoader(); // Прячем лоадер на время показа окна
+
+            // Встраиваем логику диалогового окна через Promise
+            const userConfirmed = await new Promise((resolve) => {
+                const modal = document.createElement('div');
+                modal.className = 'color-modal';
+                modal.style.display = 'flex';
+                modal.style.zIndex = '20000';
+                
+                modal.innerHTML = `
+                    <div class="color-modal-content" style="width: 400px; max-width: 90vw;">
+                        <h3 style="margin-top:0; color:#d97706;"><i class="fas fa-exclamation-triangle"></i> Обновление данных</h3>
+                        <p style="font-size:0.95rem; color:#555; text-align:center; margin-bottom: 15px; line-height: 1.4;">
+                            Найдены существуюшие смещения для:<br><b style="color: #1e293b;">${targetName}</b><br>Заменить их новыми значениями?
+                        </p>
+                        <table style="width:100%; border-collapse:collapse; font-size:0.9rem; margin-bottom:20px; text-align:center;">
+                            <tr style="border-bottom: 1px solid #ccc; background: #f8fafc;">
+                                <th style="padding:8px; text-align:left;">Параметр</th>
+                                <th style="padding:8px; color:#64748b;">Было</th>
+                                <th style="padding:8px; color:#10b981;">Станет</th>
+                            </tr>
+                            <tr style="border-bottom: 1px dashed #eee;">
+                                <td style="padding:8px; text-align:left; font-weight:600;">Яндекс X</td>
+                                <td style="padding:8px; color:#64748b;">${existingData.ya_offset_x}</td>
+                                <td style="padding:8px; color:#10b981; font-weight:bold;">${yaX}</td>
+                            </tr>
+                            <tr style="border-bottom: 1px dashed #eee;">
+                                <td style="padding:8px; text-align:left; font-weight:600;">Яндекс Y</td>
+                                <td style="padding:8px; color:#64748b;">${existingData.ya_offset_y}</td>
+                                <td style="padding:8px; color:#10b981; font-weight:bold;">${yaY}</td>
+                            </tr>
+                            <tr style="border-bottom: 1px dashed #eee;">
+                                <td style="padding:8px; text-align:left; font-weight:600;">Google X</td>
+                                <td style="padding:8px; color:#64748b;">${existingData.go_offset_x}</td>
+                                <td style="padding:8px; color:#10b981; font-weight:bold;">${goX}</td>
+                            </tr>
+                            <tr>
+                                <td style="padding:8px; text-align:left; font-weight:600;">Google Y</td>
+                                <td style="padding:8px; color:#64748b;">${existingData.go_offset_y}</td>
+                                <td style="padding:8px; color:#10b981; font-weight:bold;">${goY}</td>
+                            </tr>
+                        </table>
+                        <div class="buttons" style="display:flex; justify-content:space-between; gap:10px; width: 100%;">
+                            <button id="btn-replace-ok" style="flex:1; padding:12px; border:none; border-radius:8px; background:#f59e0b; color:white; font-weight:bold; cursor:pointer; transition: 0.2s;"><i class="fas fa-save"></i> Заменить</button>
+                            <button id="btn-replace-cancel" style="flex:1; padding:12px; border:none; border-radius:8px; background:#94a3b8; color:white; font-weight:bold; cursor:pointer; transition: 0.2s;"><i class="fas fa-times"></i> Отмена</button>
+                        </div>
+                    </div>
+                `;
+                document.body.appendChild(modal);
+
+                // Ховер-эффекты для кнопок
+                const btnOk = modal.querySelector('#btn-replace-ok');
+                const btnCancel = modal.querySelector('#btn-replace-cancel');
+                btnOk.onmouseenter = () => btnOk.style.background = '#d97706';
+                btnOk.onmouseleave = () => btnOk.style.background = '#f59e0b';
+                btnCancel.onmouseenter = () => btnCancel.style.background = '#64748b';
+                btnCancel.onmouseleave = () => btnCancel.style.background = '#94a3b8';
+
+                const cleanUp = (result) => {
+                    document.body.removeChild(modal);
+                    resolve(result);
+                };
+
+                btnOk.onclick = () => cleanUp(true);
+                btnCancel.onclick = () => cleanUp(false);
+            });
+
+            if (!userConfirmed) {
+                if (typeof showNotification === 'function') showNotification('Сохранение отменено', 'info');
+                return false;
+            }
+            if (typeof showLoader === 'function') showLoader(`Сохранение смещений для ${targetName}...`);
+        }
+        // --- КОНЕЦ: Проверка существования записи в БД ---
+
+        if (!existingData && typeof showLoader === 'function') {
+            showLoader(`Сохранение смещений для ${targetName}...`);
+        }
+
+        // Вычисляем Bounding Box с помощью Turf.js (в координатах API, т.е. EPSG:3857)
+        const tGeom = targetGeometry.type === 'Polygon' ? turf.polygon(targetGeometry.coordinates) : turf.multiPolygon(targetGeometry.coordinates);
+        const bbox3857 = turf.bbox(tGeom); // Возвращает [minLon, minLat, maxLon, maxLat] в EPSG:3857
+
+        // КОНВЕРТАЦИЯ В WGS84 ПЕРЕД СОХРАНЕНИЕМ
+        const minWgs = proj4('EPSG:3857', 'EPSG:4326', [bbox3857[0], bbox3857[1]]); // [minLon, minLat] в WGS84
+        const maxWgs = proj4('EPSG:3857', 'EPSG:4326', [bbox3857[2], bbox3857[3]]); // [maxLon, maxLat] в WGS84
+
+        // Отправляем данные в таблицу municipal_offsets через supabaseClient
+        const { data, error } = await supabaseClient
+            .from('municipal_offsets')
+            .upsert({
+                reg_number: targetRegNumber,
+                name: targetName,
+                min_lon: minWgs[0],
+                min_lat: minWgs[1],
+                max_lon: maxWgs[0],
+                max_lat: maxWgs[1],
+                ya_offset_x: yaX,
+                ya_offset_y: yaY,
+                go_offset_x: goX,
+                go_offset_y: goY,
+                updated_at: new Date().toISOString()
+            });
+
+        if (error) throw error;
+        
+        if (typeof showNotification === 'function') showNotification(`Смещения сохранены для: ${targetName}`, 'success');
+        return true;
+
+    } catch (err) {
+        console.error("[PZZ Offsets] Ошибка сохранения смещений:", err);
+        if (typeof showNotification === 'function') showNotification(`Ошибка: ${err.message}`, 'error');
+        return false;
+    } finally {
+        if (typeof hideLoader === 'function') hideLoader();
+    }
+}
+
+// 2. Загрузка всех Bounding Boxes (кэша смещений) из БД
+async function loadAllMoOffsetsCache() {
+    if (typeof showLoader === 'function') showLoader("Загрузка смещений...");
+    
+    try {
+        const { data, error } = await supabaseClient
+            .from('municipal_offsets')
+            .select('*');
+
+        if (error) throw error;
+        
+        console.log(`[PZZ Offsets] Загружено ${data.length} записей смещений.`);
+        
+        localStorage.setItem('moOffsetsCache', JSON.stringify(data));
+        if (typeof showNotification === 'function') showNotification(`Смещения обновлены`, 'success');
+        
+        return data;
+    } catch (err) {
+        console.error("[PZZ Offsets] Ошибка загрузки базы:", err);
+        if (typeof showNotification === 'function') showNotification(`Ошибка загрузки базы: ${err.message}`, 'error');
+        return null;
+    } finally {
+        if (typeof hideLoader === 'function') hideLoader();
+    }
+}
+
+// 3. Инициализация кнопок UI
+function initAutoOffsetUI() {
+    const wrapper = document.getElementById('offset-dropdown-wrapper');
+    const btn = document.getElementById('auto-offset-btn');
+    const menu = document.getElementById('offset-dropdown-menu');
+    const checkbox = document.getElementById('auto-offset-checkbox');
+    const saveBtn = document.getElementById('btn-save-mo-offset');
+    const loadBtn = document.getElementById('btn-load-mo-offsets');
+
+    if (!wrapper || !btn || !menu) return;
+
+    // Восстанавливаем состояние чекбокса
+    checkbox.checked = localStorage.getItem('isAutoMoOffsetEnabled') === 'true';
+
+    // Открытие/закрытие меню
+    btn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        menu.classList.toggle('show');
+    });
+
+    document.addEventListener('click', (e) => {
+        if (!wrapper.contains(e.target)) menu.classList.remove('show');
+    });
+
+    // Обработка чекбокса
+    checkbox.addEventListener('change', (e) => {
+        localStorage.setItem('isAutoMoOffsetEnabled', e.target.checked);
+        if (e.target.checked) checkMoOffset(map.getCenter(), true, true);
+    });
+
+    // Сохранение
+    saveBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        menu.classList.remove('show');
+        
+        const center = map.getCenter();
+        const yX = parseFloat(document.getElementById('mapOffsetX').value.replace(',', '.')) || 0;
+        const yY = parseFloat(document.getElementById('mapOffsetY').value.replace(',', '.')) || 0;
+        const gX = parseFloat(document.getElementById('kmlMapOffsetX').value.replace(',', '.')) || 0;
+        const gY = parseFloat(document.getElementById('kmlMapOffsetY').value.replace(',', '.')) || 0;
+
+        const success = await saveOffsetsForCurrentMo(center[0], center[1], yX, yY, gX, gY);
+        if (success) moOffsetsCache = await loadAllMoOffsetsCache() || moOffsetsCache;
+    });
+
+    // Загрузка
+    loadBtn.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        menu.classList.remove('show');
+        moOffsetsCache = await loadAllMoOffsetsCache() || moOffsetsCache;
+        // Передаем true, true для вывода уведомления при ручном нажатии
+        checkMoOffset(map.getCenter(), true, true); 
+    });
+}
+
+// 4. Проверка сдвига карты (> 1 км) и применение смещения
+function checkMoOffset(currentCenterGeo, forceCheck = false, showForceSuccess = false) {
+    if (!currentCenterGeo || !moOffsetsCache || moOffsetsCache.length === 0) {
+        if (showForceSuccess && typeof showNotification === 'function') {
+            showNotification('Смещений нет', 'warning');
+        }
+        return;
+    }
+
+    // Проверяем, пройдена ли дистанция в 1 км
+    if (!forceCheck && lastCheckedCenter) {
+        try {
+            const from = turf.point([lastCheckedCenter[1], lastCheckedCenter[0]]);
+            const to = turf.point([currentCenterGeo[1], currentCenterGeo[0]]);
+            if (turf.distance(from, to, { units: 'kilometers' }) < 1.0) return;
+        } catch(e) { console.error("Turf Error in checkMoOffset:", e); }
+    }
+
+    lastCheckedCenter = currentCenterGeo;
+    
+    // Яндекс отдает центр карты напрямую в WGS84
+    const [lat, lon] = currentCenterGeo;
+
+    // Ищем в каком МО мы находимся (база теперь тоже в WGS84)
+    let foundMo = null;
+    for (const mo of moOffsetsCache) {
+        const minLat = parseFloat(mo.min_lat);
+        const maxLat = parseFloat(mo.max_lat);
+        const minLon = parseFloat(mo.min_lon);
+        const maxLon = parseFloat(mo.max_lon);
+        
+        // Прямое сравнение без конвертаций!
+        if (lat >= minLat && lat <= maxLat && lon >= minLon && lon <= maxLon) {
+            foundMo = mo;
+            break;
+        }
+    }
+
+    if (foundMo) {
+        let needUpdate = false;
+        
+        const currYx = parseFloat(document.getElementById('mapOffsetX').value.replace(',', '.')) || 0;
+        const currYy = parseFloat(document.getElementById('mapOffsetY').value.replace(',', '.')) || 0;
+        const currGx = parseFloat(document.getElementById('kmlMapOffsetX').value.replace(',', '.')) || 0;
+        const currGy = parseFloat(document.getElementById('kmlMapOffsetY').value.replace(',', '.')) || 0;
+
+        const targetYx = parseFloat(foundMo.ya_offset_x);
+        const targetYy = parseFloat(foundMo.ya_offset_y);
+        const targetGx = parseFloat(foundMo.go_offset_x);
+        const targetGy = parseFloat(foundMo.go_offset_y);
+
+        // Применяем смещение Яндекс
+        if (!isNaN(targetYx) && !isNaN(targetYy)) {
+            if (currYx !== targetYx || currYy !== targetYy) {
+                document.getElementById('mapOffsetX').value = targetYx;
+                document.getElementById('mapOffsetY').value = targetYy;
+                mapOffsetX = targetYx;
+                mapOffsetY = targetYy;
+                localStorage.setItem('mapOffsetX', mapOffsetX);
+                localStorage.setItem('mapOffsetY', mapOffsetY);
+                needUpdate = true;
+            }
+        }
+
+        // Применяем смещение Google
+        if (!isNaN(targetGx) && !isNaN(targetGy)) {
+            if (currGx !== targetGx || currGy !== targetGy) {
+                if (typeof isGoogleLayerActive !== 'undefined' && isGoogleLayerActive) {
+                    const deltaX = targetGx - currGx;
+                    const deltaY = targetGy - currGy;
+                    if (typeof shiftAllMapObjects === 'function') shiftAllMapObjects(deltaY, deltaX); 
+                }
+                document.getElementById('kmlMapOffsetX').value = targetGx;
+                document.getElementById('kmlMapOffsetY').value = targetGy;
+                kmlMapOffsetX = targetGx;
+                kmlMapOffsetY = targetGy;
+                localStorage.setItem('kmlMapOffsetX', kmlMapOffsetX);
+                localStorage.setItem('kmlMapOffsetY', kmlMapOffsetY);
+                needUpdate = true;
+            }
+        }
+
+        if (needUpdate) {
+         //   if (typeof showNotification === 'function') showNotification(`Применено автосмещение: ${foundMo.name}`, 'info', 'crosshairs');
+            if (typeof findAndConvert === 'function') findAndConvert();
+        } else if (showForceSuccess) {
+            // Уведомление при ручной загрузке
+            if (typeof showNotification === 'function') showNotification(`Смещения уже актуальны для: ${foundMo.name}`, 'success');
+        }
+    } else if (showForceSuccess) {
+        // Уведомление, если для этой зоны нет данных
+        if (typeof showNotification === 'function') showNotification(`В базе нет данных о смещении для текущей локации`, 'warning');
+    }
 }

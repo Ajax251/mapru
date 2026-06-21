@@ -381,7 +381,7 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
                     <label style="font-size: 0.8rem; color: #64748b; font-weight: 600;">Наименование документа:</label>
                     <textarea id="pzz-name-input" placeholder="Введите наименование" style="width: 100%; padding: 8px; border-radius: 6px; border: 1px solid #cbd5e1; box-sizing: border-box; font-size: 0.9rem; resize: vertical; min-height: 60px;">${docName}</textarea>
                 </div>
-              <div>
+                <div>
                     <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 5px;">
                         <label style="font-size: 0.8rem; color: #64748b; font-weight: 600;">База регламентов (JSON файл):</label>
                         <button type="button" onclick="window.open('app/map/pzz_docx2json.html', '_blank')" style="background: #8b5cf6; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; transition: 0.2s; box-shadow: 0 2px 4px rgba(139, 92, 246, 0.2);">
@@ -389,8 +389,15 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
                         </button>
                     </div>
                     <input type="file" id="pzz-json-input" accept=".json" style="font-size: 0.85rem; width: 100%;">
-                    <div id="json-status" style="font-size: 0.75rem; color: ${hasJson ? '#10b981' : '#e74c3c'}; margin-top: 5px; font-weight: bold;">
-                        ${hasJson ? '✓ В базе сохранен JSON с регламентами' : 'JSON файл не прикреплен'}
+                    
+                    <!-- Измененный блок отображения статуса JSON файла с добавлением кнопки "Сохранить в JSON" -->
+                    <div id="json-status-container" style="display: flex; justify-content: space-between; align-items: center; margin-top: 5px; gap: 10px;">
+                        <div id="json-status" style="font-size: 0.75rem; color: ${hasJson ? '#10b981' : '#e74c3c'}; font-weight: bold;">
+                            ${hasJson ? '✓ В базе сохранен JSON с регламентами' : 'JSON файл не прикреплен'}
+                        </div>
+                        <button type="button" id="btn-pzz-download-json" style="background: #10b981; color: white; border: none; padding: 4px 8px; border-radius: 4px; font-size: 0.75rem; cursor: pointer; transition: 0.2s; box-shadow: 0 2px 4px rgba(16, 185, 129, 0.2); display: ${hasJson ? 'inline-flex' : 'none'}; align-items: center; gap: 4px;">
+                            <i class="fas fa-download"></i> Сохранить в JSON
+                        </button>
                     </div>
                 </div>
             </div>
@@ -427,6 +434,7 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
     const extraFields = document.getElementById('pzz-extra-fields');
     const fileInput = document.getElementById('pzz-json-input');
     const jsonStatus = document.getElementById('json-status');
+    const downloadBtn = document.getElementById('btn-pzz-download-json'); // Ссылка на кнопку скачивания
     const goBtn = document.getElementById('btn-pzz-go');
     const saveBtn = document.getElementById('btn-pzz-save');
     const cancelBtn = document.getElementById('btn-pzz-cancel');
@@ -462,12 +470,14 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
         }
     });
 
+    // Обработчик изменения файла JSON
     fileInput.addEventListener('change', (e) => {
         const file = e.target.files[0];
         if (!file) {
             parsedJsonData = existingJsonData; 
             jsonStatus.textContent = existingJsonData ? '✓ Используется ранее сохраненный JSON' : 'JSON файл не прикреплен';
             jsonStatus.style.color = existingJsonData ? '#10b981' : '#e74c3c';
+            if (downloadBtn) downloadBtn.style.display = existingJsonData ? 'inline-flex' : 'none';
             return;
         }
 
@@ -479,6 +489,7 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
                     parsedJsonData = data;
                     jsonStatus.textContent = '✓ Файл корректен и готов к сохранению';
                     jsonStatus.style.color = '#10b981';
+                    if (downloadBtn) downloadBtn.style.display = 'inline-flex';
                     console.log("[PZZ Modal] JSON загружен успешно. Зон найдено:", data.length);
                 } else {
                     throw new Error('Несоответствие формату JSON (нужны id, name, uses)');
@@ -489,10 +500,39 @@ function showPzzModal(regNumber, moName, pzzData, geometryGeoJSON) {
                 fileInput.value = '';
                 jsonStatus.textContent = '✗ Ошибка: Неверный формат JSON файла';
                 jsonStatus.style.color = '#e74c3c';
+                if (downloadBtn) downloadBtn.style.display = 'none';
             }
         };
         reader.readAsText(file);
     });
+
+    // Обработчик для скачивания текущего JSON-файла регламентов
+    if (downloadBtn) {
+        downloadBtn.addEventListener('click', (e) => {
+            e.preventDefault();
+            if (!parsedJsonData) return;
+            try {
+                const blob = new Blob([JSON.stringify(parsedJsonData, null, 2)], { type: 'application/json' });
+                const url = URL.createObjectURL(blob);
+                const a = document.createElement('a');
+                a.href = url;
+                a.download = `${regNumber || 'pzz'}_regulations.json`;
+                document.body.appendChild(a);
+                a.click();
+                document.body.removeChild(a);
+                URL.revokeObjectURL(url);
+                console.log("[PZZ Modal] JSON файл успешно скачан");
+                if (typeof window.showNotification === 'function') {
+                    window.showNotification('JSON файл успешно сохранен на устройство', 'success');
+                }
+            } catch (err) {
+                console.error("[PZZ Modal] Ошибка при скачивании JSON:", err);
+                if (typeof window.showNotification === 'function') {
+                    window.showNotification('Ошибка при генерации файла', 'error');
+                }
+            }
+        });
+    }
 
     saveBtn.addEventListener('click', async () => {
         console.log("[PZZ Modal] Нажата кнопка 'Сохранить'");
@@ -821,7 +861,6 @@ try {
     console.error("Ошибка чтения кэша смещений", e); 
 }
 
-// 1. Сохраняем смещения для текущего МО в БД Supabase (конвертируем в WGS84)
 // 1. Сохраняем смещения для текущего МО в БД Supabase (конвертируем в WGS84) с проверкой перезаписи
 async function saveOffsetsForCurrentMo(lat, lon, yaX, yaY, goX, goY) {
     if (typeof showLoader === 'function') showLoader("Определение МО для сохранения смещения...");
