@@ -59,11 +59,17 @@ function startSchemaWorkflow(lat, lon, targetPolygon) {
 
 function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
     const modal = document.createElement('div');
-    modal.className = 'color-modal';
-    modal.style.zIndex = '15000';
+    modal.style.position = 'fixed';
+    modal.style.top = '0';
+    modal.style.left = '0';
+    modal.style.width = '100%';
+    modal.style.height = '100%';
+    modal.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
+    modal.style.backdropFilter = 'blur(4px)';
     modal.style.display = 'flex';
     modal.style.alignItems = 'center';
     modal.style.justifyContent = 'center';
+    modal.style.zIndex = '15000';
 
     const sLineColor = localStorage.getItem('sch_lineColor') || '#FF0000';
     const sLineWidth = localStorage.getItem('sch_lineWidth') || '3';
@@ -100,47 +106,49 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
     const sShowZuLabel = localStorage.getItem('sch_showZuLabel') !== 'false';
 
     modal.innerHTML = `
-        <div class="color-modal-content" style="padding: 20px; width: 80%; max-width: 800px; max-height: 90vh; overflow-y: auto; text-align: left; font-size: 13px; box-sizing: border-box; background: #ffffff; border-radius: 12px;">
+        <div style="background: #ffffff; padding: 25px; width: 80%; max-width: 800px; max-height: 90vh; overflow-y: auto; text-align: left; font-size: 13px; box-sizing: border-box; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); font-family: Arial, sans-serif;">
             <h3 style="margin: 0 0 15px 0; text-align: center; color: #1e3a8a; font-size: 18px; font-weight: bold;">Настройки Схемы СРЗУ</h3>
             
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px;">
-                <div style="display: flex; flex-direction: column; gap: 12px;">
-                    <div style="background: #f8fafc; border: 1px solid #e2e8f0; padding: 12px; border-radius: 8px;">
-                        <h4 style="margin: 0 0 10px 0; color: #0f172a; font-size: 14px;">Оформление и точки</h4>
-                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 10px;">
-                            <div style="display: flex; flex-direction: column; gap: 3px;">
-                                <label style="color: #555;">Цвет контура:</label>
-                                <input type="color" id="sch_lineColor" value="${sLineColor}" style="width: 100%; height: 28px; border-radius: 4px; border:none; cursor:pointer;">
-                            </div>
-                            <div style="display: flex; flex-direction: column; gap: 3px;">
-                                <label style="color: #555;">Толщина: <span id="sch_lineWidth_val">${sLineWidth}</span>px</label>
-                                <input type="range" id="sch_lineWidth" min="1" max="10" value="${sLineWidth}" style="width: 100%;">
-                            </div>
-                            <div style="display: flex; flex-direction: column; gap: 3px;">
-                                <label style="color: #555;">Цвет заливки:</label>
-                                <input type="color" id="sch_fillColor" value="${sFillColor}" style="width: 100%; height: 28px; border-radius: 4px; border:none; cursor:pointer;">
-                            </div>
-                            <div style="display: flex; flex-direction: column; gap: 3px;">
-                                <label style="color: #555;">Заливка: <span id="sch_fillOpacity_val">${sFillOpacity}</span>%</label>
-                                <input type="range" id="sch_fillOpacity" min="0" max="100" value="${sFillOpacity}" style="width: 100%;">
-                            </div>
+                <div>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px;">
+                        <div style="display: flex; flex-direction: column; gap: 3px;">
+                            <label style="color: #555;">Цвет контура:</label>
+                            <input type="color" id="sch_lineColor" value="${sLineColor}" style="width: 100%; height: 28px; border-radius: 4px; border:none; cursor:pointer;">
                         </div>
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                            <label style="cursor:pointer; display:flex; align-items:center; gap:6px; font-weight: bold;">
-                                <input type="checkbox" id="sch_showPoints" ${sShowPoints ? 'checked' : ''}> Точки (н1, н2...)
-                            </label>
-                            <div style="display: flex; align-items: center; gap: 6px;">
-                                <label style="color: #555;">Цвет:</label>
-                                <input type="color" id="sch_pointColor" value="${sPointColor}" style="width: 40px; height: 24px; border:none; cursor:pointer;">
-                            </div>
+                        <div style="display: flex; flex-direction: column; gap: 3px;">
+                            <label style="color: #555;">Толщина: <span id="sch_lineWidth_val">${sLineWidth}</span>px</label>
+                            <input type="range" id="sch_lineWidth" min="1" max="10" value="${sLineWidth}">
                         </div>
-                        <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; color: #333;">
-                            <input type="checkbox" id="sch_autoSort" checked> Автоустановка точек (СЗ -> по часовой)
-                        </label>
+                        <div style="display: flex; flex-direction: column; gap: 3px;">
+                            <label style="color: #555;">Цвет заливки:</label>
+                            <input type="color" id="sch_fillColor" value="${sFillColor}" style="width: 100%; height: 28px; border-radius: 4px; border:none; cursor:pointer;">
+                        </div>
+                        <div style="display: flex; flex-direction: column; gap: 3px;">
+                            <label style="color: #555;">Заливка: <span id="sch_fillOpacity_val">${sFillOpacity}</span>%</label>
+                            <input type="range" id="sch_fillOpacity" min="0" max="100" value="${sFillOpacity}">
+                        </div>
                     </div>
 
-                    <div style="background: #f8fafc; border: 1px solid #e2e8f0; padding: 12px; border-radius: 8px; display: flex; flex-direction: column; gap: 6px;">
-                        <h4 style="margin: 0 0 4px 0; color: #0f172a; font-size: 14px;">Страницы отчета</h4>
+                    <div style="border-top: 1px solid #ddd; margin: 10px 0;"></div>
+
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                        <label style="cursor:pointer; display:flex; align-items:center; gap:6px; font-weight: bold;">
+                            <input type="checkbox" id="sch_showPoints" ${sShowPoints ? 'checked' : ''}> Точки (н1, н2...)
+                        </label>
+                        <div style="display: flex; align-items: center; gap: 6px;">
+                            <label style="color: #555;">Цвет:</label>
+                            <input type="color" id="sch_pointColor" value="${sPointColor}" style="width: 40px; height: 24px; border:none; cursor:pointer;">
+                        </div>
+                    </div>
+                    <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; margin-bottom: 12px; color: #333;">
+                        <input type="checkbox" id="sch_autoSort" checked> Автоустановка точек (СЗ -> по часовой)
+                    </label>
+
+                    <div style="border-top: 1px solid #ddd; margin: 10px 0;"></div>
+
+                    <div style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; background: #f8fafc; padding: 12px; border-radius: 8px; border: 1px solid #e2e8f0;">
+                        <label style="font-weight: bold; color: #1e3a8a; font-size: 14px; margin-bottom: 4px;">Страницы отчета</label>
                         <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
                             <input type="checkbox" id="sch_includePzz" ${sIncludePzz ? 'checked' : ''}> Схема ПЗЗ (загрузка .rst растра)
                         </label>
@@ -153,7 +161,7 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
                     </div>
 
                     <div style="background: #f8fafc; border: 1px solid #e2e8f0; padding: 12px; border-radius: 8px; display: flex; flex-direction: column; gap: 6px;">
-                        <h4 style="margin: 0 0 4px 0; color: #0f172a; font-size: 14px;">Индивидуальные настройки страниц</h4>
+                        <label style="font-weight: bold; color: #1e3a8a; font-size: 14px; margin-bottom: 4px;">Индивидуальные настройки страниц</label>
                         <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
                             <input type="checkbox" id="sch_showZuLabel" ${sShowZuLabel ? 'checked' : ''}> Название ЗУ с выноской
                         </label>
@@ -174,7 +182,7 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
                     </div>
                 </div>
 
-                <div style="display: flex; flex-direction: column; gap: 12px;">
+                <div>
                     <div style="background: #f8fafc; border: 1px solid #e2e8f0; padding: 12px; border-radius: 8px; display: flex; flex-direction: column; gap: 8px;">
                         <h4 style="margin: 0 0 4px 0; color: #0f172a; font-size: 14px;">Атрибуты схемы</h4>
                         <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
@@ -207,7 +215,7 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
                         </div>
                     </div>
 
-                    <div style="background: #f1f5f9; border: 1px solid #cbd5e1; padding: 12px; border-radius: 8px; display: flex; flex-direction: column; gap: 6px;">
+                    <div style="background: #f1f5f9; border: 1px solid #cbd5e1; padding: 12px; border-radius: 8px; display: flex; flex-direction: column; gap: 6px; margin-top: 12px;">
                         <h4 style="margin: 0 0 4px 0; color: #0f172a; font-size: 14px;">Масштабирование карт</h4>
                         <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px; margin-bottom: 6px;">
                             <label style="color: #334155; font-size: 0.85rem;">Режим:</label>
@@ -244,7 +252,7 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
                         </div>
                     </div>
 
-                    <div style="background: #f8fafc; border: 1px solid #cbd5e1; padding: 12px; border-radius: 8px; display: flex; flex-direction: column; gap: 6px;">
+                    <div style="background: #f8fafc; border: 1px solid #cbd5e1; padding: 12px; border-radius: 8px; display: flex; flex-direction: column; gap: 6px; margin-top: 12px;">
                         <h4 style="margin: 0 0 4px 0; color: #0f172a; font-size: 14px;">Поиск данных окружения</h4>
                         <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
                             <input type="checkbox" id="sch_skipLoad" ${sSkipLoad ? 'checked' : ''}> Не загружать объекты повторно
