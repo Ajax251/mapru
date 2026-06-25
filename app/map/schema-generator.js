@@ -1,5 +1,6 @@
 window.__schemaDataLoaded = false;
 
+
 function startSchemaWorkflow(lat, lon, targetPolygon) {
     if (!targetPolygon) return;
 
