@@ -71,6 +71,7 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
     const sFillOpacity = localStorage.getItem('sch_fillOpacity') || '20';
     const sShowPoints = localStorage.getItem('sch_showPoints') !== 'false';
     const sPointColor = localStorage.getItem('sch_pointColor') || '#FF0000';
+    const sZoom = localStorage.getItem('sch_zoom') || '100';
     const sSkipLoad = window.__schemaDataLoaded;
     const sLoadZouit = localStorage.getItem('sch_loadZouit') !== 'false';
     const sLoadNearby = localStorage.getItem('sch_loadNearby') !== 'false';
@@ -218,6 +219,13 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
             </div>
 
             <div style="border-top: 1px solid #ddd; margin: 10px 0;"></div>
+            <div style="display: flex; gap: 8px; margin-bottom: 12px;">
+                <button id="sch_export_json_btn" class="btn-ui" style="flex: 1; padding: 6px; font-size: 11px; background: #6c757d; cursor: pointer; color: white; border: none; border-radius: 4px;">Экспорт JSON</button>
+                <button id="sch_import_json_btn" class="btn-ui" style="flex: 1; padding: 6px; font-size: 11px; background: #6c757d; cursor: pointer; color: white; border: none; border-radius: 4px;">Импорт JSON</button>
+                <input type="file" id="sch_import_file_input" accept=".json" style="display: none;">
+            </div>
+
+            <div style="border-top: 1px solid #ddd; margin: 10px 0;"></div>
 
             <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; margin-bottom: 8px; color: #333;">
                 <input type="checkbox" id="sch_skipLoad" ${sSkipLoad ? 'checked' : ''}> Не загружать объекты повторно
@@ -269,6 +277,83 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
 
     modal.querySelector('#sch_lineWidth').addEventListener('input', e => modal.querySelector('#sch_lineWidth_val').textContent = e.target.value);
     modal.querySelector('#sch_fillOpacity').addEventListener('input', e => modal.querySelector('#sch_fillOpacity_val').textContent = e.target.value);
+
+    modal.querySelector('#sch_export_json_btn').onclick = () => {
+        const config = {
+            lineColor: modal.querySelector('#sch_lineColor').value,
+            lineWidth: parseInt(modal.querySelector('#sch_lineWidth').value, 10),
+            fillColor: modal.querySelector('#sch_fillColor').value,
+            fillOpacity: parseInt(modal.querySelector('#sch_fillOpacity').value, 10),
+            showPoints: modal.querySelector('#sch_showPoints').checked,
+            pointColor: modal.querySelector('#sch_pointColor').value,
+            autoSort: modal.querySelector('#sch_autoSort').checked,
+            quarter: modal.querySelector('#sch_quarter').value.trim(),
+            settlement: modal.querySelector('#sch_settlement').value.trim(),
+            municipality: modal.querySelector('#sch_municipality').value.trim(),
+            terrZone: modal.querySelector('#sch_terrZone').value.trim(),
+            zuName: modal.querySelector('#sch_zuName').value.trim(),
+            approvalDoc: modal.querySelector('#sch_approvalDoc').value.trim(),
+            scaleText: modal.querySelector('#sch_scaleText').value.trim(),
+            includePzz: modal.querySelector('#sch_includePzz').checked,
+            includeSat: modal.querySelector('#sch_includeSat').checked,
+            includeParts: modal.querySelector('#sch_includeParts').checked,
+            zoomMode: zoomModeSelect.value,
+            pzzOffset: parseInt(modal.querySelector('#sch_pzzOffset').value, 10),
+            satOffset: parseInt(modal.querySelector('#sch_satOffset').value, 10)
+        };
+        const jsonString = JSON.stringify(config, null, 2);
+        const blob = new Blob([jsonString], {type: "application/json;charset=utf-8"});
+        saveAs(blob, "настройки_схемы.json");
+    };
+
+    const fileInput = modal.querySelector('#sch_import_file_input');
+    modal.querySelector('#sch_import_json_btn').onclick = () => {
+        fileInput.click();
+    };
+
+    fileInput.onchange = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            try {
+                const config = JSON.parse(event.target.result);
+                if (config.lineColor) modal.querySelector('#sch_lineColor').value = config.lineColor;
+                if (config.lineWidth) {
+                    modal.querySelector('#sch_lineWidth').value = config.lineWidth;
+                    modal.querySelector('#sch_lineWidth_val').textContent = config.lineWidth;
+                }
+                if (config.fillColor) modal.querySelector('#sch_fillColor').value = config.fillColor;
+                if (config.fillOpacity !== undefined) {
+                    modal.querySelector('#sch_fillOpacity').value = config.fillOpacity;
+                    modal.querySelector('#sch_fillOpacity_val').textContent = config.fillOpacity;
+                }
+                if (config.showPoints !== undefined) modal.querySelector('#sch_showPoints').checked = config.showPoints;
+                if (config.pointColor) modal.querySelector('#sch_pointColor').value = config.pointColor;
+                if (config.autoSort !== undefined) modal.querySelector('#sch_autoSort').checked = config.autoSort;
+                if (config.quarter !== undefined) modal.querySelector('#sch_quarter').value = config.quarter;
+                if (config.settlement !== undefined) modal.querySelector('#sch_settlement').value = config.settlement;
+                if (config.municipality !== undefined) modal.querySelector('#sch_municipality').value = config.municipality;
+                if (config.terrZone !== undefined) modal.querySelector('#sch_terrZone').value = config.terrZone;
+                if (config.zuName !== undefined) modal.querySelector('#sch_zuName').value = config.zuName;
+                if (config.approvalDoc !== undefined) modal.querySelector('#sch_approvalDoc').value = config.approvalDoc;
+                if (config.scaleText !== undefined) modal.querySelector('#sch_scaleText').value = config.scaleText;
+                if (config.includePzz !== undefined) modal.querySelector('#sch_includePzz').checked = config.includePzz;
+                if (config.includeSat !== undefined) modal.querySelector('#sch_includeSat').checked = config.includeSat;
+                if (config.includeParts !== undefined) modal.querySelector('#sch_includeParts').checked = config.includeParts;
+                if (config.zoomMode) {
+                    zoomModeSelect.value = config.zoomMode;
+                    toggleOffsets();
+                }
+                if (config.pzzOffset !== undefined) modal.querySelector('#sch_pzzOffset').value = config.pzzOffset;
+                if (config.satOffset !== undefined) modal.querySelector('#sch_satOffset').value = config.satOffset;
+                showNotification("Настройки успешно загружены из JSON", "success");
+            } catch (err) {
+                showNotification("Ошибка чтения JSON файла", "error");
+            }
+        };
+        reader.readAsText(file);
+    };
 
     const closeModal = () => document.body.removeChild(modal);
     modal.querySelector('#sch_cancel_btn').onclick = closeModal;
@@ -482,6 +567,38 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
     } finally {
         hideLoader();
     }
+}
+
+function sortPointsClockwiseNW(coords) {
+    if (coords.length < 3) return coords;
+    let sumLat = 0, sumLon = 0;
+    coords.forEach(c => { sumLat += c[0]; sumLon += c[1]; });
+    const center = [sumLat / coords.length, sumLon / coords.length];
+
+    const pointsWithAngle = coords.map(c => {
+        const dLat = c[0] - center[0]; 
+        const dLon = c[1] - center[1]; 
+        let angle = Math.atan2(dLon, dLat) * (180 / Math.PI);
+        if (angle < 0) angle += 360;
+        return { coord: c, angle: angle };
+    });
+
+    pointsWithAngle.sort((a, b) => a.angle - b.angle);
+
+    let nwIndex = 0;
+    let minDiff = Infinity;
+    pointsWithAngle.forEach((p, i) => {
+        let diff = Math.abs(p.angle - 315);
+        if (diff > 180) diff = 360 - diff; 
+        if (diff < minDiff) { minDiff = diff; nwIndex = i; }
+    });
+
+    const sortedCoords = [];
+    for (let i = 0; i < pointsWithAngle.length; i++) {
+        const idx = (nwIndex + i) % pointsWithAngle.length;
+        sortedCoords.push(pointsWithAngle[idx].coord);
+    }
+    return sortedCoords;
 }
 
 function processAndDrawSchemaPoints(rings, polygon, config) {
@@ -988,6 +1105,8 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
         .btn-ui:hover { background: #2563eb; transform: translateY(-1px); }
         .btn-save { background: #10b981; }
         .btn-save:hover { background: #059669; }
+        .btn-html { background: #f59e0b; }
+        .btn-html:hover { background: #d97706; }
 
         @media print {
             body { background: white; padding: 0; }
@@ -1000,6 +1119,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
 
     <div class="btn-panel">
         <button class="btn-ui" onclick="window.print()"><i class="fas fa-print"></i> Печать в PDF</button>
+        <button class="btn-ui btn-html" onclick="saveAsHtml()"><i class="fas fa-file-code"></i> Сохранить HTML</button>
         <button class="btn-ui btn-save" id="btnExportWord"><i class="fas fa-file-word"></i> Скачать DOCX</button>
     </div>
 
@@ -1107,6 +1227,12 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 };
                 img.src = base64Str;
             });
+        }
+
+        function saveAsHtml() {
+            var html = "<!DOCTYPE html><html>" + document.documentElement.innerHTML + "</html>";
+            var blob = new Blob([html], {type: "text/html;charset=utf-8"});
+            saveAs(blob, "Схема_расположения.html");
         }
 
         document.getElementById('btnExportWord').addEventListener('click', async function() {
