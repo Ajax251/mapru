@@ -2,10 +2,62 @@ window.__schemaDataLoaded = false;
 
 function startSchemaWorkflow(lat, lon, targetPolygon) {
     if (!targetPolygon) return;
-    openSchemaSettingsModal(lat, lon, targetPolygon);
+
+    let detectedQuarter = currentQuarterNumber || '';
+    let detectedSettlement = '';
+    let detectedMunicipality = '';
+    let detectedTerrZone = '';
+    let detectedZuName = '';
+
+    const cn = targetPolygon.properties.get('cadastralNumber') || '';
+    if (cn) {
+        const parts = cn.split(':');
+        if (parts.length >= 3) {
+            detectedQuarter = parts.slice(0, 3).join(':');
+            detectedZuName = cn.replace(detectedQuarter, '');
+            if (detectedZuName.startsWith(':')) {
+                detectedZuName = detectedZuName.substring(1);
+            }
+        } else {
+            detectedZuName = cn;
+        }
+    }
+    if (!detectedZuName) detectedZuName = '';
+
+    polygons.forEach(p => {
+        if (p instanceof ymaps.Polygon || p instanceof ymaps.Placemark) {
+            const fd = p.properties.get('featureData');
+            const cat = fd?.properties?.category;
+            const catName = fd?.properties?.categoryName || '';
+            const descr = p.properties.get('descr') || p.properties.get('label') || fd?.properties?.descr || '';
+            const name = p.properties.get('name') || fd?.properties?.options?.name_by_doc || fd?.properties?.options?.name || '';
+            
+            if (cat === 36278 || catName.includes('Муниципальные') || descr.toLowerCase().includes('поселение') || name.toLowerCase().includes('поселение')) {
+                detectedMunicipality = name || descr;
+            }
+            if (cat === 36281 || catName.includes('Населенные') || descr.toLowerCase().includes('с.') || descr.toLowerCase().includes('д.') || descr.toLowerCase().includes('г.')) {
+                detectedSettlement = name || descr;
+            }
+            if (cat === 36315 || catName.includes('Зоны') || descr.toLowerCase().includes('зона')) {
+                detectedTerrZone = name || descr;
+            }
+        }
+    });
+
+    if (!detectedTerrZone) {
+        detectedTerrZone = findTerrZoneLocally(targetPolygon.geometry.getCoordinates()[0][0]) || '';
+    }
+
+    openSchemaSettingsModal(lat, lon, targetPolygon, {
+        quarter: detectedQuarter,
+        settlement: detectedSettlement,
+        municipality: detectedMunicipality,
+        terrZone: detectedTerrZone,
+        zuName: detectedZuName
+    });
 }
 
-function openSchemaSettingsModal(lat, lon, targetPolygon) {
+function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
     const modal = document.createElement('div');
     modal.className = 'color-modal';
     modal.style.zIndex = '15000';
@@ -24,12 +76,22 @@ function openSchemaSettingsModal(lat, lon, targetPolygon) {
     const sLoadZouit = localStorage.getItem('sch_loadZouit') !== 'false';
     const sLoadNearby = localStorage.getItem('sch_loadNearby') !== 'false';
     const sNearbyRadius = localStorage.getItem('sch_nearbyRadius') || '200';
-    const sQuarter = localStorage.getItem('sch_quarter') || '';
-    const sSettlement = localStorage.getItem('sch_settlement') || '';
+    const sScaleText = localStorage.getItem('sch_scaleText') || '';
+
+    const sQuarter = detectedData.quarter || localStorage.getItem('sch_quarter') || '';
+    const sSettlement = detectedData.settlement || localStorage.getItem('sch_settlement') || '';
+    const sMunicipality = detectedData.municipality || localStorage.getItem('sch_municipality') || '';
+    const sTerrZone = detectedData.terrZone || localStorage.getItem('sch_terrZone') || '';
+    const sZuName = detectedData.zuName || localStorage.getItem('sch_zuName') || '';
+    const sApprovalDoc = localStorage.getItem('sch_approvalDoc') || '';
+
+    const sIncludePzz = localStorage.getItem('sch_includePzz') !== 'false';
+    const sIncludeSat = localStorage.getItem('sch_includeSat') !== 'false';
+    const sIncludeParts = localStorage.getItem('sch_includeParts') !== 'false';
 
     modal.innerHTML = `
-        <div class="color-modal-content" style="padding: 15px; width: 380px; max-height: 95vh; overflow-y: auto; text-align: left; font-size: 13px; box-sizing: border-box;">
-            <h3 style="margin: 0 0 12px 0; text-align: center; color: #1e3a8a; font-size: 16px;">Настройки Схемы</h3>
+        <div class="color-modal-content" style="padding: 15px; width: 440px; max-height: 95vh; overflow-y: auto; text-align: left; font-size: 13px; box-sizing: border-box;">
+            <h3 style="margin: 0 0 12px 0; text-align: center; color: #1e3a8a; font-size: 16px;">Настройки Схемы СРЗУ</h3>
             
             <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 10px; margin-bottom: 12px;">
                 <div style="display: flex; flex-direction: column; gap: 3px;">
@@ -52,8 +114,8 @@ function openSchemaSettingsModal(lat, lon, targetPolygon) {
 
             <div style="border-top: 1px solid #ddd; margin: 10px 0;"></div>
 
-            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 8px;">
-                <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; font-weight: bold;">
+            <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 10px;">
+                <label style="cursor:pointer; display:flex; align-items:center; gap:6px; font-weight: bold;">
                     <input type="checkbox" id="sch_showPoints" ${sShowPoints ? 'checked' : ''}> Точки (н1, н2...)
                 </label>
                 <div style="display: flex; align-items: center; gap: 6px;">
@@ -69,13 +131,48 @@ function openSchemaSettingsModal(lat, lon, targetPolygon) {
 
             <div style="display: flex; flex-direction: column; gap: 8px; margin-bottom: 12px;">
                 <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
-                    <label style="color: #555; white-space: nowrap;">Квартал:</label>
-                    <input type="text" id="sch_quarter" value="${sQuarter}" placeholder="" style="width: 100%; padding: 4px 6px; border: 1px solid #ccc; border-radius: 3px; font-size: 13px;">
+                    <label style="color: #555; white-space: nowrap; width: 100px;">Документ утв.:</label>
+                    <input type="text" id="sch_approvalDoc" value="${sApprovalDoc}" placeholder="" style="flex:1; padding: 4px 6px; border: 1px solid #ccc; border-radius: 3px;">
                 </div>
                 <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
-                    <label style="color: #555; white-space: nowrap;">Нас. пункт:</label>
-                    <input type="text" id="sch_settlement" value="${sSettlement}" placeholder="" style="width: 100%; padding: 4px 6px; border: 1px solid #ccc; border-radius: 3px; font-size: 13px;">
+                    <label style="color: #555; white-space: nowrap; width: 100px;">Поселение:</label>
+                    <input type="text" id="sch_municipality" value="${sMunicipality}" placeholder="" style="flex:1; padding: 4px 6px; border: 1px solid #ccc; border-radius: 3px;">
                 </div>
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+                    <label style="color: #555; white-space: nowrap; width: 100px;">Нас. пункт:</label>
+                    <input type="text" id="sch_settlement" value="${sSettlement}" placeholder="" style="flex:1; padding: 4px 6px; border: 1px solid #ccc; border-radius: 3px;">
+                </div>
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+                    <label style="color: #555; white-space: nowrap; width: 100px;">Квартал:</label>
+                    <input type="text" id="sch_quarter" value="${sQuarter}" placeholder="" style="flex:1; padding: 4px 6px; border: 1px solid #ccc; border-radius: 3px;">
+                </div>
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+                    <label style="color: #555; white-space: nowrap; width: 100px;">Усл. номер ЗУ:</label>
+                    <input type="text" id="sch_zuName" value="${sZuName}" placeholder="" style="flex:1; padding: 4px 6px; border: 1px solid #ccc; border-radius: 3px;">
+                </div>
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+                    <label style="color: #555; white-space: nowrap; width: 100px;">Терр. зона:</label>
+                    <input type="text" id="sch_terrZone" value="${sTerrZone}" placeholder="" style="flex:1; padding: 4px 6px; border: 1px solid #ccc; border-radius: 3px;">
+                </div>
+                <div style="display: flex; align-items: center; justify-content: space-between; gap: 10px;">
+                    <label style="color: #555; white-space: nowrap; width: 100px;">Масштаб подп.:</label>
+                    <input type="text" id="sch_scaleText" value="${sScaleText}" placeholder="" style="flex:1; padding: 4px 6px; border: 1px solid #ccc; border-radius: 3px;">
+                </div>
+            </div>
+
+            <div style="border-top: 1px solid #ddd; margin: 10px 0;"></div>
+
+            <div style="display: flex; flex-direction: column; gap: 6px; margin-bottom: 12px; background: #f8fafc; padding: 8px; border-radius: 6px; border: 1px solid #e2e8f0;">
+                <label style="font-weight: bold; color: #1e3a8a;">Дополнительные страницы:</label>
+                <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                    <input type="checkbox" id="sch_includePzz" ${sIncludePzz ? 'checked' : ''}> Схема ПЗЗ (загрузка .rst растра)
+                </label>
+                <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                    <input type="checkbox" id="sch_includeSat" ${sIncludeSat ? 'checked' : ''}> Схема на спутнике
+                </label>
+                <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                    <input type="checkbox" id="sch_includeParts" ${sIncludeParts ? 'checked' : ''}> Схема частей ЗУ (чертеж размеров сторон)
+                </label>
             </div>
 
             <div style="border-top: 1px solid #ddd; margin: 10px 0;"></div>
@@ -99,7 +196,7 @@ function openSchemaSettingsModal(lat, lon, targetPolygon) {
             <div style="border-top: 1px solid #ddd; margin: 10px 0;"></div>
 
             <div style="display: flex; flex-direction: column; gap: 3px; margin-bottom: 15px;">
-                <label style="color: #555; font-weight: bold;">Масштаб охвата: <span id="sch_zoom_val">${sZoom}</span>%</label>
+                <label style="color: #555; font-weight: bold;">Масштаб охвата камеры: <span id="sch_zoom_val">${sZoom}</span>%</label>
                 <input type="range" id="sch_zoom" min="20" max="200" step="10" value="${sZoom}">
             </div>
 
@@ -111,9 +208,6 @@ function openSchemaSettingsModal(lat, lon, targetPolygon) {
     `;
 
     document.body.appendChild(modal);
-    
-    modal.querySelector('#sch_quarter').addEventListener('input', e => localStorage.setItem('sch_quarter', e.target.value));
-    modal.querySelector('#sch_settlement').addEventListener('input', e => localStorage.setItem('sch_settlement', e.target.value));
 
     const skipLoadCheckbox = modal.querySelector('#sch_skipLoad');
     const dataOptionsDiv = modal.querySelector('#sch_data_options');
@@ -152,7 +246,15 @@ function openSchemaSettingsModal(lat, lon, targetPolygon) {
             loadNearby: modal.querySelector('#sch_loadNearby').checked,
             nearbyRadius: parseInt(modal.querySelector('#sch_nearbyRadius').value) || 200,
             quarter: modal.querySelector('#sch_quarter').value.trim(),
-            settlement: modal.querySelector('#sch_settlement').value.trim()
+            settlement: modal.querySelector('#sch_settlement').value.trim(),
+            municipality: modal.querySelector('#sch_municipality').value.trim(),
+            terrZone: modal.querySelector('#sch_terrZone').value.trim(),
+            zuName: modal.querySelector('#sch_zuName').value.trim(),
+            approvalDoc: modal.querySelector('#sch_approvalDoc').value.trim(),
+            scaleText: modal.querySelector('#sch_scaleText').value.trim(),
+            includePzz: modal.querySelector('#sch_includePzz').checked,
+            includeSat: modal.querySelector('#sch_includeSat').checked,
+            includeParts: modal.querySelector('#sch_includeParts').checked
         };
 
         localStorage.setItem('sch_lineColor', config.lineColor);
@@ -167,14 +269,42 @@ function openSchemaSettingsModal(lat, lon, targetPolygon) {
         localStorage.setItem('sch_nearbyRadius', config.nearbyRadius);
         localStorage.setItem('sch_quarter', config.quarter);
         localStorage.setItem('sch_settlement', config.settlement);
+        localStorage.setItem('sch_municipality', config.municipality);
+        localStorage.setItem('sch_terrZone', config.terrZone);
+        localStorage.setItem('sch_zuName', config.zuName);
+        localStorage.setItem('sch_approvalDoc', config.approvalDoc);
+        localStorage.setItem('sch_scaleText', config.scaleText);
+        localStorage.setItem('sch_includePzz', config.includePzz);
+        localStorage.setItem('sch_includeSat', config.includeSat);
+        localStorage.setItem('sch_includeParts', config.includeParts);
 
         closeModal();
         executeSchemaGeneration(lat, lon, targetPolygon, config);
     };
 }
 
+async function silentLoadRasterForSchema(quarterNumber) {
+    if (rasterOverlay) return true;
+    const quarterSafe = quarterNumber.replace(/:/g, '_');
+    const filename = `${quarterSafe}.rst`;
+    try {
+        const response = await fetch(`${STORAGE_API_URL}/nspd/${filename}`);
+        if (!response.ok) return false;
+        const zipBlob = await response.blob();
+        await processImportedZipBlob(zipBlob);
+        return true;
+    } catch (e) {
+        return false;
+    }
+}
+
 async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
-    showLoader('Подготовка Схемы (1/4)...');
+    showLoader('Подготовка Схемы КПТ (1/4)...');
+
+    const originalMode = localStorage.getItem('mapMode') || 'map';
+    const originalCenter = map.getCenter();
+    const originalZoom = map.getZoom();
+    const originalRasterVisible = rasterOverlay ? rasterOverlay.options.get('visible') : false;
 
     try {
         const fillHex = Math.round(config.fillOpacity * 255).toString(16).padStart(2, '0');
@@ -185,9 +315,7 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
             zIndex: 1000
         });
 
-        // --- ИЗМЕНЕНИЕ: Обработка всех контуров (включая внутренние) ---
         let rings = targetPolygon.geometry.getCoordinates().map(ring => ring.slice());
-        
         rings = rings.map(ring => {
             const firstPt = ring[0];
             const lastPt = ring[ring.length - 1];
@@ -197,7 +325,6 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
             if (config.autoSort) return sortPointsClockwiseNW(ring);
             return ring;
         });
-        // --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
         const pointsToRemove = [];
         polygons.forEach(p => {
@@ -205,39 +332,89 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
         });
         pointsToRemove.forEach(p => { map.geoObjects.remove(p); polygons = polygons.filter(poly => poly !== p); });
 
-        // Передаем массив контуров
         const { mskCoordsTable, centerGeo } = processAndDrawSchemaPoints(rings, targetPolygon, config);
 
-        let terrZoneName = "Не установлена";
         if (!config.skipLoad) {
-            showLoader('Поиск окружения и ЗОУИТ (2/4)...');
+            showLoader('Поиск окружения и ЗОУИТ...');
             await loadEnvironmentData(centerGeo, targetPolygon, config);
             window.__schemaDataLoaded = true;
-            
-            showLoader('Определение терр. зоны (3/4)...');
-            terrZoneName = await fetchTerrZoneName(centerGeo);
-        } else {
-            terrZoneName = findTerrZoneLocally(centerGeo) || "Не установлена";
         }
 
         showLoader('Настройка камеры...');
         await setupCameraForScreenshot(targetPolygon, config.zoom);
 
-        // --- ИЗМЕНЕНИЕ: Добавление видимых меток ЗОУИТ ---
         showLoader('Размещение меток ЗОУИТ...');
         const schemaZouitLabels = addVisibleZouitLabelsForSchema();
-        await new Promise(r => setTimeout(r, 400)); // Пауза для рендера меток
-        // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+        await new Promise(r => setTimeout(r, 600));
 
-        showLoader('Создание снимка карты...');
+        showLoader('Создание снимка карты КПТ...');
         const mapImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement);
 
-        // --- ИЗМЕНЕНИЕ: Удаление временных меток ЗОУИТ после скриншота ---
         schemaZouitLabels.forEach(lbl => {
             map.geoObjects.remove(lbl);
             polygons = polygons.filter(p => p !== lbl);
         });
-        // --- КОНЕЦ ИЗМЕНЕНИЯ ---
+
+        let pzzImageBase64 = null;
+        let rasterLoadedSuccessfully = false;
+
+        if (config.includePzz) {
+            showLoader('Подготовка ПЗЗ растра...');
+            rasterLoadedSuccessfully = await silentLoadRasterForSchema(config.quarter);
+            if (rasterLoadedSuccessfully && rasterOverlay) {
+                rasterOverlay.options.set('visible', true);
+                await new Promise(r => setTimeout(r, 600));
+                pzzImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement);
+                rasterOverlay.options.set('visible', false);
+            }
+        }
+
+        let satelliteImageBase64 = null;
+
+        if (config.includeSat) {
+            showLoader('Переключение на спутник...');
+            setMapMode('google-hyb');
+
+            const satStyle = document.createElement('style');
+            satStyle.id = 'sat-contrast-style';
+            satStyle.innerHTML = `
+                .custom-placemark {
+                    color: #ffffff !important;
+                    text-shadow: -1px -1px 0 #000, 1px -1px 0 #000, -1px 1px 0 #000, 1px 1px 0 #000, 0 0 4px #000 !important;
+                }
+            `;
+            document.head.appendChild(satStyle);
+
+            const hiddenZouits = [];
+            polygons.forEach(p => {
+                if (p.options && (p.properties.get('isZouit') || p.properties.get('featureData')?.properties?.category === 36940)) {
+                    if (p.options.get('visible') !== false) {
+                        p.options.set('visible', false);
+                        hiddenZouits.push(p);
+                    }
+                }
+            });
+
+            await new Promise(r => setTimeout(r, 800));
+            satelliteImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement);
+
+            hiddenZouits.forEach(p => p.options.set('visible', true));
+            satStyle.remove();
+        }
+
+        let partsImageBase64 = null;
+
+        if (config.includeParts) {
+            showLoader('Отрисовка чертежа контура...');
+            partsImageBase64 = generatePartsSchemaImage(targetPolygon, config);
+        }
+
+        showLoader('Сброс камеры и подложек...');
+        setMapMode(originalMode);
+        map.setCenter(originalCenter, originalZoom);
+        if (rasterOverlay) {
+            rasterOverlay.options.set('visible', originalRasterVisible);
+        }
 
         const geomStats = calculatePreciseGeometry(targetPolygon);
         const areaStr = Math.round(geomStats.area).toLocaleString('ru-RU');
@@ -245,11 +422,14 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
         const imgLegendPoly = generateLegendPolygonImage(config.lineColor, config.fillColor, config.fillOpacity);
         const imgLegendPoint = generateLegendPointImage(config.pointColor);
 
-        openSchemaDocumentWindow(mapImageBase64, mskCoordsTable, areaStr, terrZoneName, imgLegendPoly, imgLegendPoint);
+        openSchemaDocumentWindow(
+            mapImageBase64, pzzImageBase64, satelliteImageBase64, partsImageBase64,
+            mskCoordsTable, areaStr, config.terrZone, imgLegendPoly, imgLegendPoint, config
+        );
         showNotification('Схема успешно сформирована', 'success');
 
     } catch (error) {
-        showNotification(`Ошибка: ${error.message}`, 'error');
+        showNotification(`Ошибка генерации: ${error.message}`, 'error');
     } finally {
         hideLoader();
     }
@@ -302,9 +482,8 @@ function processAndDrawSchemaPoints(rings, polygon, config) {
 
     let mskCoordsTable = [];
     let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
-    let globalPointIndex = 1; // Сквозная нумерация для всех контуров
+    let globalPointIndex = 1;
 
-    // --- ИЗМЕНЕНИЕ: Перебор всех контуров ---
     rings.forEach((coords) => {
         let firstPointOfRing = null;
         for (let i = 0; i < coords.length; i++) {
@@ -320,7 +499,7 @@ function processAndDrawSchemaPoints(rings, polygon, config) {
                 y_msk = mskPoint[0] + mskOffsetY;
                 x_msk = mskPoint[1] + mskOffsetX;
             } else {
-                x_msk = trueLon; y_msk = trueLat; // Fallback
+                x_msk = trueLon; y_msk = trueLat;
             }
 
             const pointName = `н${globalPointIndex}`;
@@ -349,24 +528,20 @@ function processAndDrawSchemaPoints(rings, polygon, config) {
             globalPointIndex++;
         }
         
-        // Замыкаем текущий контур в таблице
         if (firstPointOfRing) {
             mskCoordsTable.push({ ...firstPointOfRing });
         }
     });
-    // --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
     const centerGeo = [(minLat + maxLat) / 2, (minLon + maxLon) / 2];
     return { mskCoordsTable, centerGeo };
 }
 
-// --- ИЗМЕНЕНИЕ: Новая функция для умного размещения меток ЗОУИТ в видимой зоне ---
 function addVisibleZouitLabelsForSchema() {
     const addedLabels = [];
     const bounds = map.getBounds();
     if (!bounds) return addedLabels;
 
-    // Определяем видимую область экрана для Turf [minLon, minLat, maxLon, maxLat]
     const screenBbox = [
         Math.min(bounds[0][1], bounds[1][1]), Math.min(bounds[0][0], bounds[1][0]),
         Math.max(bounds[0][1], bounds[1][1]), Math.max(bounds[0][0], bounds[1][0])
@@ -386,15 +561,13 @@ function addVisibleZouitLabelsForSchema() {
 
             try {
                 const rings = obj.geometry.getCoordinates();
-                const geoJsonCoords = rings.map(ring => ring.map(c => [c[1], c[0]])); // lon, lat
+                const geoJsonCoords = rings.map(ring => ring.map(c => [c[1], c[0]]));
                 const turfPoly = turf.polygon(geoJsonCoords);
 
-                // Находим пересечение ЗОУИТ с видимой областью экрана
                 const intersection = turf.intersect(turf.featureCollection([turfPoly, screenPoly]));
                 if (!intersection) return;
 
                 let pointToLabel;
-                // Пытаемся найти оптимальный центр внутри видимой части
                 try {
                      pointToLabel = turf.centerOfMass(intersection);
                 } catch(e) {
@@ -402,9 +575,8 @@ function addVisibleZouitLabelsForSchema() {
                 }
 
                 if (pointToLabel && pointToLabel.geometry) {
-                    const coords = [pointToLabel.geometry.coordinates[1], pointToLabel.geometry.coordinates[0]]; // lat, lon
+                    const coords = [pointToLabel.geometry.coordinates[1], pointToLabel.geometry.coordinates[0]];
 
-                    // Определяем цвет метки на основе цвета контура ЗОУИТ
                     const strokeColor = obj.options.get('strokeColor');
                     let preset = 'islands#orangeStretchyIcon';
                     if (strokeColor && strokeColor.toUpperCase().includes('FF0000')) preset = 'islands#redStretchyIcon';
@@ -414,7 +586,7 @@ function addVisibleZouitLabelsForSchema() {
                         iconContent: fullName
                     }, {
                         preset: preset,
-                        zIndex: 1500 // Поверх всех остальных элементов
+                        zIndex: 1500
                     });
 
                     map.geoObjects.add(label);
@@ -430,7 +602,6 @@ function addVisibleZouitLabelsForSchema() {
 
     return addedLabels;
 }
-// --- КОНЕЦ ИЗМЕНЕНИЯ ---
 
 async function loadEnvironmentData(centerGeo, polygon, config) {
     const trueLat = centerGeo[0] + (mapOffsetY * 0.000008983);
@@ -492,6 +663,7 @@ async function fetchTerrZoneName(centerGeo) {
 }
 
 function findTerrZoneLocally(centerGeo) {
+    if (!centerGeo) return null;
     const p = turf.point([centerGeo[1], centerGeo[0]]);
     for (const obj of polygons) {
         if (obj instanceof ymaps.Polygon && obj.properties.get('featureData')) {
@@ -527,77 +699,36 @@ async function setupCameraForScreenshot(polygon, zoomPercent) {
     }
 
     const baseMultiplier = 1.5; 
-    const userMultiplier = 100 / zoomPercent; 
-    const finalMultiplier = baseMultiplier * userMultiplier;
+    const userMultiplier = 100 / zoomPercent;
+    const scale = baseMultiplier * userMultiplier;
 
-    const cLat = (bounds[0][0] + bounds[1][0]) / 2;
-    const cLon = (bounds[0][1] + bounds[1][1]) / 2;
+    const center = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
+    map.setCenter(center);
 
-    const newLatDelta = (bounds[1][0] - bounds[0][0]) * finalMultiplier;
-    const newLonDelta = (bounds[1][1] - bounds[0][1]) * finalMultiplier;
-
-    map.setBounds([
-        [cLat - newLatDelta/2, cLon - newLonDelta/2],
-        [cLat + newLatDelta/2, cLon + newLonDelta/2]
-    ], { duration: 300 });
-
-    await new Promise(r => setTimeout(r, 1200));
+    const projectedBounds = [
+        [center[0] - latDelta * scale, center[1] - lonDelta * scale],
+        [center[0] + latDelta * scale, center[1] + lonDelta * scale]
+    ];
+    
+    map.setBounds(projectedBounds, { checkZoomRange: true });
+    await new Promise(r => setTimeout(r, 600));
 }
 
-async function takeMapScreenshotForSchema(quarterText, settlementText) {
-    const widgets = document.querySelectorAll('.widget, .map-mode-switcher, .input-container, .mobile-menu-btn, .camera-height-label, .map-legend, .raster-controls-panel, .bottom-dashboard, .custom-context-menu');
-    widgets.forEach(w => { if (w) w.style.display = 'none'; });
-
+async function takeMapScreenshotForSchema(quarter, settlement) {
     const mapElement = document.getElementById('map');
     
-    // Убрали scale: 4, html2canvas сам возьмет devicePixelRatio (четко как на экране)
     const canvas = await html2canvas(mapElement, {
-        useCORS: true, allowTaint: true, logging: false,
-        width: mapElement.clientWidth, height: mapElement.clientHeight, scrollX: 0, scrollY: 0,
+        useCORS: true,
+        allowTaint: true,
+        logging: false,
+        scale: 1.5,
+        width: mapElement.clientWidth,
+        height: mapElement.clientHeight,
+        scrollX: 0,
+        scrollY: 0,
         ignoreElements: (el) => typeof el.className === 'string' && (el.className.includes('-copyright') || el.className.includes('-gototech'))
     });
 
-    if (quarterText || settlementText) {
-        const ctx = canvas.getContext('2d');
-        
-        ctx.textAlign = 'left';
-        ctx.textBaseline = 'top';
-        
-        const startX = 25; 
-        let currentY = 25;
-
-        const drawBeautifulText = (text, x, y, font, color) => {
-            ctx.font = font;
-            
-            ctx.shadowColor = 'rgba(0, 0, 0, 0.4)';
-            ctx.shadowBlur = 5;
-            ctx.shadowOffsetX = 2;
-            ctx.shadowOffsetY = 2;
-            
-            ctx.strokeStyle = 'rgba(255, 255, 255, 0.95)';
-            ctx.lineWidth = 5; // Слегка уменьшили толщину обводки под нормальный масштаб
-            ctx.lineJoin = 'round';
-            ctx.strokeText(text, x, y);
-            
-            ctx.shadowColor = 'transparent';
-            
-            ctx.fillStyle = color;
-            ctx.fillText(text, x, y);
-        };
-
-        if (quarterText) {
-            drawBeautifulText(quarterText, startX, currentY, 'bold 28px "Segoe UI", Roboto, Helvetica, Arial, sans-serif', '#0f4c81');
-            currentY += 36; 
-        }
-        
-        if (settlementText) {
-            drawBeautifulText(settlementText, startX, currentY, 'bold 22px "Segoe UI", Roboto, Helvetica, Arial, sans-serif', '#374151');
-        }
-    }
-
-    widgets.forEach(w => { if (w) w.style.display = ''; });
-    
-    // Формат PNG исключает любые артефакты и искажения картинки (Lossless)
     return canvas.toDataURL('image/png'); 
 }
 
@@ -631,7 +762,7 @@ function generateLegendPointImage(color) {
     ctx.lineWidth = 1;
     ctx.stroke();
 
-    ctx.font = 'bold 16px Arial';
+    ctx.font = 'bold 14px Arial';
     ctx.fillStyle = color;
     ctx.textBaseline = 'middle';
     ctx.fillText('н1', 20, 16);
@@ -639,13 +770,156 @@ function generateLegendPointImage(color) {
     return canvas.toDataURL('image/png');
 }
 
-function openSchemaDocumentWindow(imageBase64, coordsTable, areaStr, terrZoneName, imgLegendPoly, imgLegendPoint) {
-    // ДОБАВЛЕНО: Читаем сохраненные значения до формирования HTML
+function generatePartsSchemaImage(targetPolygon, config) {
+    const canvas = document.createElement('canvas');
+    canvas.width = 600;
+    canvas.height = 500;
+    const ctx = canvas.getContext('2d');
+    const padding = 60;
+
+    ctx.fillStyle = '#FFFFFF';
+    ctx.fillRect(0, 0, canvas.width, canvas.height);
+
+    const coords = targetPolygon.geometry.getCoordinates()[0];
+    if (!coords || coords.length < 3) return canvas.toDataURL('image/png');
+
+    let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+    coords.forEach(c => {
+        minLat = Math.min(minLat, c[0]); maxLat = Math.max(maxLat, c[0]);
+        minLon = Math.min(minLon, c[1]); maxLon = Math.max(maxLon, c[1]);
+    });
+
+    const centerLat = (minLat + maxLat) / 2;
+    const latScale = 111132.95 - 559.82 * Math.cos(2 * centerLat * Math.PI / 180);
+    const lonScale = 111412.84 * Math.cos(centerLat * Math.PI / 180);
+
+    const localPoints = coords.map(c => {
+        return {
+            x: (c[1] - minLon) * lonScale,
+            y: (c[0] - minLat) * latScale
+        };
+    });
+
+    let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+    localPoints.forEach(p => {
+        minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x);
+        minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y);
+    });
+
+    const widthMeters = maxX - minX;
+    const heightMeters = maxY - minY;
+
+    const scaleX = (canvas.width - padding * 2) / (widthMeters || 1);
+    const scaleY = (canvas.height - padding * 2) / (heightMeters || 1);
+    const scale = Math.min(scaleX, scaleY);
+
+    let gridStep = 5;
+    if (widthMeters > 50) gridStep = 10;
+    if (widthMeters > 150) gridStep = 20;
+    if (widthMeters > 500) gridStep = 100;
+
+    const startGridX = Math.floor(minX / gridStep) * gridStep;
+    const endGridX = Math.ceil(maxX / gridStep) * gridStep;
+    const startGridY = Math.floor(minY / gridStep) * gridStep;
+    const endGridY = Math.ceil(maxY / gridStep) * gridStep;
+
+    ctx.strokeStyle = '#f1f5f9';
+    ctx.lineWidth = 1;
+    for (let gx = startGridX; gx <= endGridX; gx += gridStep) {
+        const cx = (canvas.width / 2) + (gx - (minX + maxX) / 2) * scale;
+        ctx.beginPath(); ctx.moveTo(cx, 0); ctx.lineTo(cx, canvas.height); ctx.stroke();
+    }
+    for (let gy = startGridY; gy <= endGridY; gy += gridStep) {
+        const cy = (canvas.height / 2) - (gy - (minY + maxY) / 2) * scale;
+        ctx.beginPath(); ctx.moveTo(0, cy); ctx.lineTo(canvas.width, cy); ctx.stroke();
+    }
+
+    const drawPoints = localPoints.map(p => {
+        const cx = (canvas.width / 2) + (p.x - (minX + maxX) / 2) * scale;
+        const cy = (canvas.height / 2) - (p.y - (minY + maxY) / 2) * scale;
+        return { x: cx, y: cy };
+    });
+
+    ctx.beginPath();
+    ctx.moveTo(drawPoints[0].x, drawPoints[0].y);
+    for (let i = 1; i < drawPoints.length; i++) {
+        ctx.lineTo(drawPoints[i].x, drawPoints[i].y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = 'rgba(255, 59, 48, 0.1)'; 
+    ctx.fill();
+    ctx.strokeStyle = '#ff3b30'; 
+    ctx.lineWidth = 2.5;
+    ctx.stroke();
+
+    const isClosed = Math.abs(drawPoints[0].x - drawPoints[drawPoints.length-1].x) < 1e-3 && Math.abs(drawPoints[0].y - drawPoints[drawPoints.length-1].y) < 1e-3;
+    const drawLimit = isClosed ? drawPoints.length - 1 : drawPoints.length;
+
+    drawPoints.forEach((p, idx) => {
+        if (idx >= drawLimit) return;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, 4, 0, 2 * Math.PI);
+        ctx.fillStyle = '#ffffff';
+        ctx.fill();
+        ctx.strokeStyle = '#ff3b30';
+        ctx.lineWidth = 1.5;
+        ctx.stroke();
+    });
+
+    ctx.font = 'bold 11px Arial';
+    ctx.fillStyle = '#000000';
+    ctx.textAlign = 'center';
+    ctx.textBaseline = 'bottom';
+
+    for (let i = 0; i < drawPoints.length - 1; i++) {
+        const p1 = drawPoints[i];
+        const p2 = drawPoints[i+1];
+        const midX = (p1.x + p2.x) / 2;
+        const midY = (p1.y + p2.y) / 2;
+
+        const lp1 = localPoints[i];
+        const lp2 = localPoints[i+1];
+        const distance = Math.sqrt((lp1.x - lp2.x)**2 + (lp1.y - lp2.y)**2);
+
+        let angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
+        if (angle > Math.PI / 2 || angle < -Math.PI / 2) {
+            angle += Math.PI;
+        }
+
+        ctx.save();
+        ctx.translate(midX, midY);
+        ctx.rotate(angle);
+        
+        const labelText = `${distance.toFixed(2)} м`;
+        ctx.strokeStyle = '#ffffff';
+        ctx.lineWidth = 3;
+        ctx.strokeText(labelText, 0, -4);
+        ctx.fillText(labelText, 0, -4);
+        ctx.restore();
+    }
+
+    let dynamicZuName = config.zuName;
+    if (config.quarter && !dynamicZuName.includes(config.quarter)) {
+        dynamicZuName = `${config.quarter}:${dynamicZuName}`;
+    }
+
+    ctx.font = 'bold 12px Arial';
+    ctx.fillStyle = '#ff3b30';
+    ctx.textBaseline = 'middle';
+    ctx.strokeStyle = '#ffffff';
+    ctx.lineWidth = 3;
+    ctx.strokeText(dynamicZuName, canvas.width/2, canvas.height/2);
+    ctx.fillText(dynamicZuName, canvas.width/2, canvas.height/2);
+
+    return canvas.toDataURL('image/png');
+}
+
+function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage, coordsTable, areaStr, terrZoneName, imgLegendPoly, imgLegendPoint, config) {
     const sAl1 = localStorage.getItem('sch_al1') || '';
     const sAl2 = localStorage.getItem('sch_al2') || '';
     const sAl3 = localStorage.getItem('sch_al3') || '';
 
-   const coordsRows = coordsTable.map(c => `
+    const coordsRows = coordsTable.map(c => `
         <tr>
             <td style="border:1px solid #000; padding:4px; text-align:center;" contenteditable="true">${c.point}</td>
             <td style="border:1px solid #000; padding:4px; text-align:center;" contenteditable="true">${c.x}</td>
@@ -653,97 +927,148 @@ function openSchemaDocumentWindow(imageBase64, coordsTable, areaStr, terrZoneNam
         </tr>
     `).join('');
 
+    const midX = coordsTable.length > 0 ? (parseFloat(coordsTable[0].x) || 0) : 0;
+    const midY = coordsTable.length > 0 ? (parseFloat(coordsTable[0].y) || 0) : 0;
+
+    let totalLength = 0;
+    if (coordsTable.length > 1) {
+        for (let i = 0; i < coordsTable.length - 1; i++) {
+            const x1 = parseFloat(coordsTable[i].x);
+            const y1 = parseFloat(coordsTable[i].y);
+            const x2 = parseFloat(coordsTable[i + 1].x);
+            const y2 = parseFloat(coordsTable[i + 1].y);
+            if (!isNaN(x1) && !isNaN(y1) && !isNaN(x2) && !isNaN(y2)) {
+                totalLength += Math.sqrt((x2 - x1) ** 2 + (y2 - y1) ** 2);
+            }
+        }
+    }
+
     const htmlContent = `<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
-    <title>Схема расположения земельного участка</title>
+    <title>Схема СРЗУ - Печать</title>
     <script src="https://unpkg.com/docx@7.8.2/build/index.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
     <style>
-        body { font-family: "Times New Roman", Times, serif; font-size: 14pt; background: #e9ecef; margin: 0; padding: 20px; }
-        .page { background: white; width: 210mm; min-height: 297mm; padding: 20mm; margin: 0 auto; box-shadow: 0 0 10px rgba(0,0,0,0.1); box-sizing: border-box; }
-        .header-text { text-align: right; margin-bottom: 20px; line-height: 1.2; }
-        .auth-line { width: 350px; border: none; border-bottom: 1px solid black; background: transparent; font-family: inherit; font-size: inherit; text-align: center; margin-bottom: 4px; outline: none;}
-        .scale-input { border: none; background: transparent; font-family: inherit; font-size: inherit; font-weight: bold; text-align: center; outline: none; width: 200px; }
-        .title { text-align: center; font-weight: bold; font-size: 16pt; margin-bottom: 20px; }
-        table { width: 100%; border-collapse: collapse; margin-bottom: 20px; }
-        th, td { border: 1px solid black; padding: 6px; text-align: left; }
-        .coords-table th, .coords-table td { text-align: center; }
-        .map-img { width: 100%; max-height: 400px; object-fit: contain; border: 1px solid #000; margin-bottom: 10px; }
-        .legend-item { display: flex; align-items: center; margin-bottom: 8px; font-size: 12pt;}
-        .legend-item img { margin-right: 10px; height: 20px; object-fit: contain; }
+        body { font-family: "Times New Roman", Times, serif; font-size: 11pt; background: #e9ecef; margin: 0; padding: 20px; }
+        .page { background: white; width: 210mm; min-height: 297mm; padding: 15mm 20mm; margin: 0 auto 20px auto; box-shadow: 0 0 10px rgba(0,0,0,0.1); box-sizing: border-box; }
+        .header-text { text-align: right; margin-bottom: 20px; line-height: 1.2; font-size: 11pt; }
+        .auth-line { width: 330px; border: none; border-bottom: 1px solid black; background: transparent; font-family: inherit; font-size: inherit; text-align: center; margin-bottom: 4px; outline: none; }
+        .scale-input { border: none; background: transparent; font-family: inherit; font-size: 12pt; font-weight: bold; text-align: center; outline: none; width: 100%; margin-top: 5px; }
+        .title { text-align: center; font-weight: bold; font-size: 13pt; margin-bottom: 20px; text-transform: uppercase; line-height: 1.3; }
+        table { width: 100%; border-collapse: collapse; margin-bottom: 15px; font-size: 10.5pt; }
+        th, td { border: 1px solid #000; padding: 5px 6px; text-align: left; }
+        th { background-color: #f2f2f2; text-align: center; font-weight: bold; }
+        .map-frame { width: 100%; height: 380px; border: 1.5px solid #000; box-sizing: border-box; display: flex; justify-content: center; align-items: center; overflow: hidden; background: #fafafa; }
+        .map-frame img { width: 100%; height: 100%; object-fit: contain; }
         
-        .floating-bar { position: fixed; top: 20px; right: 20px; display: flex; flex-direction: column; gap: 10px; }
-        .floating-bar button { padding: 10px 15px; font-size: 14px; cursor: pointer; border: none; border-radius: 5px; color: white; box-shadow: 0 2px 5px rgba(0,0,0,0.2); transition: 0.2s;}
-        .btn-print { background: #3b82f6; } .btn-print:hover { background: #2563eb; }
-        .btn-docx { background: #10b981; } .btn-docx:hover { background: #059669; }
-        .btn-html { background: #f59e0b; } .btn-html:hover { background: #d97706; }
-        
+        .badge-bar { display: flex; justify-content: center; gap: 15px; margin-top: 15px; }
+        .badge { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 20px; padding: 6px 14px; font-size: 10pt; font-weight: bold; color: #334155; display: flex; align-items: center; gap: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
+
+        .btn-panel { position: fixed; top: 20px; left: 20px; display: flex; flex-direction: column; gap: 10px; z-index: 9999; }
+        .btn-ui { padding: 10px 16px; background: #3b82f6; color: white; border: none; border-radius: 6px; font-weight: bold; font-size: 10pt; cursor: pointer; transition: 0.2s; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
+        .btn-ui:hover { background: #2563eb; transform: translateY(-1px); }
+        .btn-save { background: #10b981; }
+        .btn-save:hover { background: #059669; }
+
         @media print {
-            body { background: none; padding: 0; }
-            .page { box-shadow: none; margin: 0; padding: 0; width: 100%; }
-            .floating-bar { display: none; }
-            .auth-line { border-bottom: 1px solid black; }
+            body { background: white; padding: 0; }
+            .page { box-shadow: none; margin: 0; padding: 15mm 20mm; page-break-after: always; width: 100%; min-height: auto; }
+            .btn-panel { display: none !important; }
         }
     </style>
 </head>
 <body>
 
-    <div class="floating-bar">
-        <button class="btn-print" onclick="window.print()"><i class="fas fa-print"></i> Печать (А4)</button>
-        <button class="btn-html" onclick="saveAsHtml()"><i class="fas fa-file-code"></i> Сохранить HTML</button>
-        <button class="btn-docx" id="docxBtn"><i class="fas fa-file-word"></i> Скачать DOCX</button>
+    <div class="btn-panel">
+        <button class="btn-ui" onclick="window.print()"><i class="fas fa-print"></i> Печать в PDF</button>
+        <button class="btn-ui btn-save" id="btnExportWord"><i class="fas fa-file-word"></i> Скачать DOCX</button>
     </div>
 
-    <div class="page" id="documentContent">
-    <div class="header-text">
+    <div class="page">
+        <div class="header-text">
             <b>Утверждена</b><br>
             <input type="text" id="authLine1" class="auth-line" placeholder="" value="${sAl1}"><br>
             <input type="text" id="authLine2" class="auth-line" placeholder="" value="${sAl2}"><br>
             <input type="text" id="authLine3" class="auth-line" value="${sAl3}"><br>
-            <span style="font-size: 10pt;">(наименование документа об утверждении, включая наименование<br>
-            органов государственной власти или органов местного<br>
-            самоуправления, принявших решение об утверждении<br>
-            или подписавших соглашение о перераспределении<br>
-            земельных участков)</span><br><br>
+            <span style="font-size: 8pt; color: #555;">(наименование документа об утверждении, включая наименование органов гос. власти или органов местного самоуправления)</span><br>
             от _____________ № _____
         </div>
 
-       <div class="title" contenteditable="true">
+        <div class="title">
             Схема расположения земельного участка или земельных участков на кадастровом плане территории
         </div>
 
         <table>
-            <tr><td colspan="3" contenteditable="true"><b>Условный номер земельного участка:</b> ЗУ1</td></tr>
-            <tr><td colspan="3" contenteditable="true"><b>Площадь земельного участка:</b> ${areaStr} кв.м.</td></tr>
-            <tr><td colspan="3" contenteditable="true"><b>Территориальная зона:</b> ${terrZoneName}</td></tr>
-            <tr class="coords-table">
-                <td rowspan="2" style="width: 40%; vertical-align: middle;" contenteditable="true"><b>Обозначение характерных точек границ</b></td>
-                <td colspan="2" contenteditable="true"><b>Координаты в местной системе координат, м</b></td>
+            <tr><td colspan="3" contenteditable="true"><b>Условный номер земельного участка:</b> ${config.quarter}:${config.zuName}</td></tr>
+            <tr><td colspan="3" contenteditable="true"><b>Площадь земельного участка:</b> ${areaStr} кв.м</td></tr>
+            <tr><td colspan="3" contenteditable="true"><b>Территориальная зона:</b> ${config.terrZone || 'Не установлена'}</td></tr>
+            <tr>
+                <th rowspan="2" style="width: 40%;" contenteditable="true">Обозначение характерных точек границ</th>
+                <th colspan="2">Координаты в местной системе координат, м</th>
             </tr>
-            <tr class="coords-table"><td contenteditable="true"><b>X</b></td><td contenteditable="true"><b>Y</b></td></tr>
+            <tr><th contenteditable="true">X</th><th contenteditable="true">Y</th></tr>
             ${coordsRows}
         </table>
 
-      <div style="text-align: center; margin: 15px 0;">
-            <img src="${imageBase64}" id="previewMapImg" class="map-img" alt="Карта СРЗУ">
-            <div><input type="text" id="scaleText" class="scale-input" value="Масштаб 1:500"></div>
+        <div class="map-frame">
+            <img src="${mapImage}" alt="">
         </div>
+        <div style="text-align: center;"><input type="text" id="scaleText" class="scale-input" value="${config.scaleText}"></div>
 
-        <div style="margin-top: 20px;">
+        <div style="margin-top: 15px; font-size: 10pt;">
             <b contenteditable="true">Условные обозначения:</b>
-            <div class="legend-item" style="margin-top: 10px;">
-                <img src="${imgLegendPoly}"> <span contenteditable="true">- образуемый земельный участок</span>
+            <div style="display: flex; align-items: center; margin-top: 5px;">
+                <img src="${imgLegendPoly}" style="margin-right: 10px; height: 16px;"> <span contenteditable="true">- образуемый земельный участок</span>
             </div>
-            <div class="legend-item">
-                <img src="${imgLegendPoint}"> <span contenteditable="true">- обозначение характерной точки границы образуемого земельного участка</span>
+            <div style="display: flex; align-items: center; margin-top: 5px;">
+                <img src="${imgLegendPoint}" style="margin-right: 10px; height: 16px;"> <span contenteditable="true">- обозначение характерной точки границы образуемого земельного участка</span>
             </div>
         </div>
     </div>
 
+    ${(config.includePzz || config.includeSat) ? `
+    <div class="page">
+        ${config.includePzz ? `
+            <div class="title" style="font-size: 12pt; margin-bottom: 10px;">
+                Схема расположения образуемого земельного участка на карте градостроительного зонирования ${config.municipality || ''}
+            </div>
+            <div class="map-frame" style="height: 380px; margin-bottom: 25px;">
+                ${pzzImage ? `<img src="${pzzImage}" alt="">` : `<div style="padding: 40px; text-align: center; color: #777; font-style: italic; border: 1px dashed #999; width:100%; box-sizing:border-box;">Растр ПЗЗ (.rst) для квартала ${config.quarter} не найден в облаке. Снимок пропущен.</div>`}
+            </div>
+        ` : ''}
+
+        ${config.includeSat ? `
+            <div class="title" style="font-size: 12pt; margin-bottom: 10px; ${config.includePzz ? 'margin-top: 20px;' : ''}">
+                Схема расположения образуемого земельного участка на спутниковой карте
+            </div>
+            <div class="map-frame" style="height: 380px;">
+                <img src="${satelliteImage}" alt="">
+            </div>
+        ` : ''}
+    </div>
+    ` : ''}
+
+    ${config.includeParts ? `
+    <div class="page">
+        <div class="title" style="font-size: 13pt;">
+            Схема частей образуемого земельного участка
+        </div>
+        
+        <div class="map-frame" style="height: 580px; border: 1px solid #e2e8f0; background: #ffffff;">
+            <img src="${partsImage}" style="object-fit: contain;">
+        </div>
+
+        <div class="badge-bar">
+            <div class="badge"> Сетка: 5 м</div>
+            <div class="badge"> Высота: 76.7 м</div>
+        </div>
+    </div>
+    ` : ''}
+
     <script>
-             const al1 = document.getElementById('authLine1');
+        const al1 = document.getElementById('authLine1');
         const al2 = document.getElementById('authLine2');
         const al3 = document.getElementById('authLine3');
         
@@ -753,42 +1078,29 @@ function openSchemaDocumentWindow(imageBase64, coordsTable, areaStr, terrZoneNam
             localStorage.setItem('sch_al3', al3.value);
         };
 
-        al1.addEventListener('input', saveLines);
-        al2.addEventListener('input', saveLines);
-        al3.addEventListener('input', saveLines);
+        if(al1) al1.addEventListener('input', saveLines);
+        if(al2) al2.addEventListener('input', saveLines);
+        if(al3) al3.addEventListener('input', saveLines);
 
-        function saveAsHtml() {
-            const html = "<!DOCTYPE html><html>" + document.documentElement.innerHTML + "</html>";
-            const blob = new Blob([html], {type: "text/html;charset=utf-8"});
-            saveAs(blob, "Схема_СРЗУ.html");
-        }
-
-     document.getElementById('docxBtn').addEventListener('click', function() {
+        document.getElementById('btnExportWord').addEventListener('click', function() {
             const coords = ${JSON.stringify(coordsTable)};
             const sqImgData = "${imgLegendPoly}";
             const circImgData = "${imgLegendPoint}";
-            const mapImgData = "${imageBase64}";
-
-            // Вычисляем правильные пропорции изображения для сохранения в DOCX
-            const mapImgEl = document.getElementById('previewMapImg');
-            const imgRatio = mapImgEl.naturalHeight / mapImgEl.naturalWidth;
-            const targetWidth = 550; // Фиксированная ширина для листа А4
-            const targetHeight = Math.round(targetWidth * imgRatio);
-
+            
             const docRows = [
-                new docx.TableRow({ children: [new docx.TableCell({ children: [new docx.Paragraph({ children: [new docx.TextRun({ text: "Условный номер земельного участка: ЗУ1", size: 24 })] })], columnSpan: 3 })] }),
-                new docx.TableRow({ children: [new docx.TableCell({ children: [new docx.Paragraph({ children: [new docx.TextRun({ text: "Площадь земельного участка: ${areaStr} кв.м.", size: 24 })] })], columnSpan: 3 })] }),
-                new docx.TableRow({ children: [new docx.TableCell({ children: [new docx.Paragraph({ children: [new docx.TextRun({ text: "Территориальная зона: ${terrZoneName}", size: 24 })] })], columnSpan: 3 })] }),
+                new docx.TableRow({ children: [new docx.TableCell({ children: [new docx.Paragraph({ children: [new docx.TextRun({ text: "Условный номер земельного участка: ${config.quarter}:${config.zuName}", size: 22 })] })], columnSpan: 3 })] }),
+                new docx.TableRow({ children: [new docx.TableCell({ children: [new docx.Paragraph({ children: [new docx.TextRun({ text: "Площадь земельного участка: ${areaStr} кв.м", size: 22 })] })], columnSpan: 3 })] }),
+                new docx.TableRow({ children: [new docx.TableCell({ children: [new docx.Paragraph({ children: [new docx.TextRun({ text: "Территориальная зона: ${config.terrZone || 'Не установлена'}", size: 22 })] })], columnSpan: 3 })] }),
                 new docx.TableRow({
                     children: [
-                        new docx.TableCell({ children: [new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: "Обозначение характерных точек границ", size: 24 })] })], rowSpan: 2, verticalAlign: docx.VerticalAlign.CENTER, width: { size: 40, type: docx.WidthType.PERCENTAGE } }),
-                        new docx.TableCell({ children: [new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: "Координаты в местной системе координат, м", size: 24 })] })], columnSpan: 2 }),
+                        new docx.TableCell({ children: [new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: "Обозначение характерных точек границ", size: 22 })] })], rowSpan: 2, verticalAlign: docx.VerticalAlign.CENTER, width: { size: 40, type: docx.WidthType.PERCENTAGE } }),
+                        new docx.TableCell({ children: [new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: "Координаты в местной системе координат, м", size: 22 })] })], columnSpan: 2 }),
                     ]
                 }),
                 new docx.TableRow({
                     children: [
-                        new docx.TableCell({ children: [new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: "X", size: 24, bold: true })] })] }),
-                        new docx.TableCell({ children: [new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: "Y", size: 24, bold: true })] })] }),
+                        new docx.TableCell({ children: [new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: "X", size: 22, bold: true })] })] }),
+                        new docx.TableCell({ children: [new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: "Y", size: 22, bold: true })] })] }),
                     ]
                 })
             ];
@@ -796,63 +1108,103 @@ function openSchemaDocumentWindow(imageBase64, coordsTable, areaStr, terrZoneNam
             coords.forEach(c => {
                 docRows.push(new docx.TableRow({
                     children: [
-                        new docx.TableCell({ children: [new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: c.point, size: 24 })] })] }),
-                        new docx.TableCell({ children: [new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: c.x, size: 24 })] })] }),
-                        new docx.TableCell({ children: [new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: c.y, size: 24 })] })] }),
+                        new docx.TableCell({ children: [new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: c.point, size: 22 })] })] }),
+                        new docx.TableCell({ children: [new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: c.x, size: 22 })] })] }),
+                        new docx.TableCell({ children: [new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [new docx.TextRun({ text: c.y, size: 22 })] })] }),
                     ]
                 }));
             });
 
             const formatLine = (val) => val.trim().length > 0 ? val : "                                                                            ";
 
-            const doc = new docx.Document({
-                sections: [{
+            const sections = [{
+                properties: { page: { size: { width: docx.convertMillimetersToTwip(210), height: docx.convertMillimetersToTwip(297) }, margin: { top: 1134, right: 850, bottom: 1134, left: 1700 } } },
+                children: [
+                    new docx.Paragraph({ alignment: docx.AlignmentType.RIGHT, children: [new docx.TextRun({ text: "Утверждена", bold: true, size: 22 })] }),
+                    new docx.Paragraph({ alignment: docx.AlignmentType.RIGHT, children: [new docx.TextRun({ text: formatLine(al1.value), size: 22, underline: { type: "single" } })] }),
+                    new docx.Paragraph({ alignment: docx.AlignmentType.RIGHT, children: [new docx.TextRun({ text: formatLine(al2.value), size: 22, underline: { type: "single" } })] }),
+                    new docx.Paragraph({ alignment: docx.AlignmentType.RIGHT, children: [new docx.TextRun({ text: formatLine(al3.value), size: 22, underline: { type: "single" } })] }),
+                    new docx.Paragraph({ alignment: docx.AlignmentType.RIGHT, children: [new docx.TextRun({ text: "(наименование документа об утверждении, включая наименование органов гос. власти или органов местного самоуправления)", size: 16, color: "555555" })] }),
+                    new docx.Paragraph({ alignment: docx.AlignmentType.RIGHT, spacing: { after: 300 }, children: [
+                        new docx.TextRun({ text: "от _____________ № _____ ", size: 22, bold: true })
+                    ]}),
+                    new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
+                        new docx.TextRun({ text: "Схема расположения земельного участка или земельных участков на кадастровом плане территории", size: 26, bold: true })
+                    ]}),
+                    new docx.Table({ width: { size: 100, type: docx.WidthType.PERCENTAGE }, rows: docRows }),
+                    new docx.Paragraph({
+                        alignment: docx.AlignmentType.CENTER,
+                        spacing: { before: 200, after: 100 },
+                        children: [
+                            new docx.ImageRun({
+                                data: "${mapImage}".split(',')[1],
+                                transformation: { width: 500, height: 350 }
+                            })
+                        ]
+                    }),
+                    new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
+                        new docx.TextRun({ text: document.getElementById('scaleText').value, size: 22, bold: true })
+                    ]}),
+                    new docx.Paragraph({ spacing: { after: 100 }, children: [new docx.TextRun({ text: "Условные обозначения:", size: 22, bold: true })] }),
+                    new docx.Paragraph({ spacing: { after: 50 }, children: [
+                        new docx.ImageRun({ data: sqImgData.split(',')[1], transformation: { width: 18, height: 18 } }),
+                        new docx.TextRun({ text: "  - образуемый земельный участок", size: 20 })
+                    ]}),
+                    new docx.Paragraph({ spacing: { after: 50 }, children: [
+                        new docx.ImageRun({ data: circImgData.split(',')[1], transformation: { width: 24, height: 18 } }),
+                        new docx.TextRun({ text: "  - обозначение характерной точки границы образуемого земельного участка", size: 20 })
+                    ]})
+                ]
+            }];
+
+            if (${config.includePzz || config.includeSat}) {
+                const s2Children = [];
+                if (${config.includePzz}) {
+                    s2Children.push(new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { before: 100, after: 100 }, children: [
+                        new docx.TextRun({ text: "Схема расположения образуемого земельного участка на карте градостроительного зонирования", size: 24, bold: true })
+                    ]}));
+                    if ("${pzzImage}") {
+                        s2Children.push(new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
+                            new docx.ImageRun({ data: "${pzzImage}".split(',')[1], transformation: { width: 500, height: 320 } })
+                        ]}));
+                    } else {
+                        s2Children.push(new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
+                            new docx.TextRun({ text: "[Растр ПЗЗ не найден в облаке]", size: 20, italic: true })
+                        ]}));
+                    }
+                }
+                if (${config.includeSat}) {
+                    s2Children.push(new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { before: 100, after: 100 }, children: [
+                        new docx.TextRun({ text: "Схема расположения образуемого земельного участка на спутниковой карте", size: 24, bold: true })
+                    ]}));
+                    s2Children.push(new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [
+                        new docx.ImageRun({ data: "${satelliteImage}".split(',')[1], transformation: { width: 500, height: 320 } })
+                    ]}));
+                }
+                sections.push({
+                    properties: { page: { size: { width: docx.convertMillimetersToTwip(210), height: docx.convertMillimetersToTwip(297) }, margin: { top: 1134, right: 850, bottom: 1134, left: 1700 } } },
+                    children: s2Children
+                });
+            }
+
+            if (${config.includeParts}) {
+                sections.push({
                     properties: { page: { size: { width: docx.convertMillimetersToTwip(210), height: docx.convertMillimetersToTwip(297) }, margin: { top: 1134, right: 850, bottom: 1134, left: 1700 } } },
                     children: [
-                        new docx.Paragraph({ alignment: docx.AlignmentType.RIGHT, children: [new docx.TextRun({ text: "Утверждена", bold: true, size: 24 })] }),
-                        new docx.Paragraph({ alignment: docx.AlignmentType.RIGHT, children: [new docx.TextRun({ text: formatLine(al1.value), size: 24, underline: { type: "single" } })] }),
-                        new docx.Paragraph({ alignment: docx.AlignmentType.RIGHT, children: [new docx.TextRun({ text: formatLine(al2.value), size: 24, underline: { type: "single" } })] }),
-                        new docx.Paragraph({ alignment: docx.AlignmentType.RIGHT, children: [new docx.TextRun({ text: formatLine(al3.value), size: 24, underline: { type: "single" } })] }),
-                        new docx.Paragraph({ alignment: docx.AlignmentType.RIGHT, children: [new docx.TextRun({ text: "(наименование документа об утверждении, включая наименование", size: 18 })] }),
-                        new docx.Paragraph({ alignment: docx.AlignmentType.RIGHT, children: [new docx.TextRun({ text: "органов государственной власти или органов местного", size: 18 })] }),
-                        new docx.Paragraph({ alignment: docx.AlignmentType.RIGHT, children: [new docx.TextRun({ text: "самоуправления, принявших решение об утверждении", size: 18 })] }),
-                        new docx.Paragraph({ alignment: docx.AlignmentType.RIGHT, spacing: { after: 200 }, children: [new docx.TextRun({ text: "или подписавших соглашение о перераспределении земельных участков)", size: 18 })] }),
-                        new docx.Paragraph({ alignment: docx.AlignmentType.RIGHT, spacing: { after: 400 }, children: [
-                            new docx.TextRun({ text: "от ", size: 24, bold: true }),
-                            new docx.TextRun({ text: "_____________ ", size: 24, bold: true, underline: { type: "single" } }),
-                            new docx.TextRun({ text: "№ ", size: 24, bold: true }),
-                            new docx.TextRun({ text: "_____", size: 24, bold: true, underline: { type: "single" } })
+                        new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
+                            new docx.TextRun({ text: "Схема частей образуемого земельного участка", size: 26, bold: true })
                         ]}),
                         new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
-                            new docx.TextRun({ text: "Схема расположения земельного участка или земельных участков на кадастровом плане территории", size: 28, bold: true })
+                            new docx.ImageRun({ data: "${partsImage}".split(',')[1], transformation: { width: 500, height: 420 } })
                         ]}),
-                        new docx.Table({ width: { size: 100, type: docx.WidthType.PERCENTAGE }, rows: docRows }),
-                      new docx.Paragraph({
-                            alignment: docx.AlignmentType.CENTER,
-                            spacing: { before: 200, after: 100 },
-                            children: [
-                                new docx.ImageRun({
-                                    data: mapImgData.split(',')[1],
-                                    transformation: { width: targetWidth, height: targetHeight }
-                                })
-                            ]
-                        }),
-                        new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
-                            new docx.TextRun({ text: document.getElementById('scaleText').value, size: 24, bold: true })
-                        ]}),
-                        new docx.Paragraph({ spacing: { after: 100 }, children: [new docx.TextRun({ text: "Условные обозначения:", size: 24, bold: true })] }),
-                        new docx.Paragraph({ spacing: { after: 100 }, children: [
-                            new docx.ImageRun({ data: sqImgData.split(',')[1], transformation: { width: 22, height: 22 } }),
-                            new docx.TextRun({ text: "  - образуемый земельный участок", size: 24 })
-                        ]}),
-                        new docx.Paragraph({ spacing: { after: 100 }, children: [
-                            new docx.ImageRun({ data: circImgData.split(',')[1], transformation: { width: 30, height: 22 } }),
-                            new docx.TextRun({ text: "  - обозначение характерной точки границы образуемого земельного участка", size: 24 })
+                        new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [
+                            new docx.TextRun({ text: "Сетка: 5 м   |   Высота: 76.7 м", size: 20, bold: true })
                         ]})
                     ]
-                }]
-            });
+                });
+            }
 
+            const doc = new docx.Document({ sections: sections });
             docx.Packer.toBlob(doc).then(blob => {
                 saveAs(blob, "Схема_расположения.docx");
             }).catch(e => alert("Ошибка создания DOCX: " + e));
