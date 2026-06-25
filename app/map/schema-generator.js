@@ -1,3 +1,4 @@
+
 window.__schemaDataLoaded = false;
 
 function startSchemaWorkflow(lat, lon, targetPolygon) {
@@ -64,7 +65,7 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
     modal.style.justifyContent = 'center';
     modal.style.zIndex = '15000';
 
-    // Базовые стили контура и заливки
+    // Загрузка сохраненных настроек
     const sLineColor = localStorage.getItem('sch_lineColor') || '#FF0000';
     const sLineWidth = localStorage.getItem('sch_lineWidth') || '3';
     const sFillColor = localStorage.getItem('sch_fillColor') || '#FFA500';
@@ -157,8 +158,8 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
                         <input type="color" id="sch_pointColor" value="${sPointColor}" style="width: 40px; height: 24px; border:none; cursor:pointer;">
                     </div>
                     <div style="display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px;">
-                        <label style="color: #555;">Размер шрифта точек: <span id="sch_pointFontSize_val">${sPointFontSize}</span>px</label>
-                        <input type="range" id="sch_pointFontSize" min="10" max="24" value="${sPointFontSize}" style="width: 100%;">
+                        <label style="color: #555;">Размер шрифта точек (px):</label>
+                        <input type="number" id="sch_pointFontSize" min="8" max="72" value="${sPointFontSize}" style="width: 100%; padding: 4px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
                     </div>
                     <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; margin-bottom: 12px; color: #333;">
                         <input type="checkbox" id="sch_autoSort" checked> Автоустановка точек (СЗ -> по часовой)
@@ -195,52 +196,31 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
                         </div>
                     </div>
                     <div style="display: flex; flex-direction: column; gap: 3px; margin-bottom: 12px;">
-                        <label style="color: #555;">Размер шрифта выноски: <span id="sch_calloutFontSize_val">${sCalloutFontSize}</span>px</label>
-                        <input type="range" id="sch_calloutFontSize" min="10" max="24" value="${sCalloutFontSize}" style="width: 100%;">
+                        <label style="color: #555;">Размер шрифта выноски (px):</label>
+                        <input type="number" id="sch_calloutFontSize" min="8" max="72" value="${sCalloutFontSize}" style="width: 100%; padding: 4px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
                     </div>
 
                     <h4 style="margin: 15px 0 10px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px;">Настройки по листам</h4>
                     <div style="background: #f8fafc; border: 1px solid #e2e8f0; padding: 10px; border-radius: 8px; display: flex; flex-direction: column; gap: 8px; font-size: 0.85rem;">
                         <div>
                             <strong>Лист КПТ:</strong>
-                            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px;">
-                                <div style="display: flex; gap: 10px;">
-                                    <label style="cursor:pointer;"><input type="checkbox" id="sch_cptShowZu" ${sCptShowZu ? 'checked' : ''}> ЗУ</label>
-                                    <label style="cursor:pointer;"><input type="checkbox" id="sch_cptShowZouit" ${sCptShowZouit ? 'checked' : ''}> ЗОУИТ</label>
-                                </div>
-                                <select id="sch_cptZuNameMode" style="padding: 2px; border-radius: 4px; border: 1px solid #ccc; font-size: 0.8rem;">
-                                    <option value="off" ${sCptZuNameMode === 'off' ? 'selected' : ''}>Название: Выкл</option>
-                                    <option value="inside" ${sCptZuNameMode === 'inside' ? 'selected' : ''}>Название: Внутри</option>
-                                    <option value="callout" ${sCptZuNameMode === 'callout' ? 'selected' : ''}>Название: Выноска</option>
-                                </select>
+                            <div style="display: flex; gap: 15px; margin-top: 2px;">
+                                <label style="cursor:pointer;"><input type="checkbox" id="sch_cptShowZu" ${sCptShowZu ? 'checked' : ''}> ЗУ</label>
+                                <label style="cursor:pointer;"><input type="checkbox" id="sch_cptShowZouit" ${sCptShowZouit ? 'checked' : ''}> ЗОУИТ</label>
                             </div>
                         </div>
                         <div style="border-top: 1px solid #eee; padding-top: 4px;">
                             <strong>Лист ПЗЗ:</strong>
-                            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px;">
-                                <div style="display: flex; gap: 10px;">
-                                    <label style="cursor:pointer;"><input type="checkbox" id="sch_pzzShowZu" ${sPzzShowZu ? 'checked' : ''}> ЗУ</label>
-                                    <label style="cursor:pointer;"><input type="checkbox" id="sch_pzzShowZouit" ${sPzzShowZouit ? 'checked' : ''}> ЗОУИТ</label>
-                                </div>
-                                <select id="sch_pzzZuNameMode" style="padding: 2px; border-radius: 4px; border: 1px solid #ccc; font-size: 0.8rem;">
-                                    <option value="off" ${sPzzZuNameMode === 'off' ? 'selected' : ''}>Название: Выкл</option>
-                                    <option value="inside" ${sPzzZuNameMode === 'inside' ? 'selected' : ''}>Название: Внутри</option>
-                                    <option value="callout" ${sPzzZuNameMode === 'callout' ? 'selected' : ''}>Название: Выноска</option>
-                                </select>
+                            <div style="display: flex; gap: 15px; margin-top: 2px;">
+                                <label style="cursor:pointer;"><input type="checkbox" id="sch_pzzShowZu" ${sPzzShowZu ? 'checked' : ''}> ЗУ</label>
+                                <label style="cursor:pointer;"><input type="checkbox" id="sch_pzzShowZouit" ${sPzzShowZouit ? 'checked' : ''}> ЗОУИТ</label>
                             </div>
                         </div>
                         <div style="border-top: 1px solid #eee; padding-top: 4px;">
                             <strong>Лист Спутник:</strong>
-                            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px;">
-                                <div style="display: flex; gap: 10px;">
-                                    <label style="cursor:pointer;"><input type="checkbox" id="sch_satShowZu" ${sSatShowZu ? 'checked' : ''}> ЗУ</label>
-                                    <label style="cursor:pointer;"><input type="checkbox" id="sch_satShowZouit" ${sSatShowZouit ? 'checked' : ''}> ЗОУИТ</label>
-                                </div>
-                                <select id="sch_satZuNameMode" style="padding: 2px; border-radius: 4px; border: 1px solid #ccc; font-size: 0.8rem;">
-                                    <option value="off" ${sSatZuNameMode === 'off' ? 'selected' : ''}>Название: Выкл</option>
-                                    <option value="inside" ${sSatZuNameMode === 'inside' ? 'selected' : ''}>Название: Внутри</option>
-                                    <option value="callout" ${sSatZuNameMode === 'callout' ? 'selected' : ''}>Название: Выноска</option>
-                                </select>
+                            <div style="display: flex; gap: 15px; margin-top: 2px;">
+                                <label style="cursor:pointer;"><input type="checkbox" id="sch_satShowZu" ${sSatShowZu ? 'checked' : ''}> ЗУ</label>
+                                <label style="cursor:pointer;"><input type="checkbox" id="sch_satShowZouit" ${sSatShowZouit ? 'checked' : ''}> ЗОУИТ</label>
                             </div>
                         </div>
                     </div>
@@ -776,6 +756,7 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
 
         // --- ЛИСТ 1: СХЕМА КПТ ---
         showLoader('Создание снимка карты КПТ...');
+        map.setCenter(centerGeo); // Гарантированная центровка исходного объекта
         setLayerVisibilityForPage({ showZu: config.cptShowZu, showZouit: config.cptShowZouit });
         const tempLabelsCP = addSchemaTemporaryLabels(centerGeo, 'cp', config);
         const cptGrid = addSchemaGrid(config);
@@ -802,6 +783,7 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
                     pzzZoom = originalZoom + config.pzzOffset;
                 }
                 map.setZoom(pzzZoom);
+                map.setCenter(centerGeo); // Гарантированная центровка исходного объекта
 
                 setLayerVisibilityForPage({ showZu: config.pzzShowZu, showZouit: config.pzzShowZouit });
 
@@ -849,6 +831,7 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
                 satZoom = originalZoom + config.satOffset;
             }
             map.setZoom(satZoom);
+            map.setCenter(centerGeo); // Гарантированная центровка исходного объекта
 
             setLayerVisibilityForPage({ showZu: config.satShowZu, showZouit: config.satShowZouit });
 
@@ -1006,7 +989,7 @@ function addSchemaTemporaryLabels(centerGeo, mapType, config) {
 
         if (zuNameMode === 'inside') {
             // Отрисовка названия строго внутри полигона (по центру)
-            const zStyle = `position: absolute; transform: translate(-50%, -50%); color: ${config.pointColor || '#ff3b30'}; font-size: ${calloutFontSize}px; font-weight: bold; text-shadow: -2px -2px 0 #fff, 2px -2px 0 #fff, -2px 2px 0 #fff, 2px 2px 0 #fff, 0 0 6px #fff; font-family: Arial, sans-serif; white-space: nowrap; text-align: center;`;
+            const zStyle = `position: absolute; transform: translate(-50%, -50%); color: ${calloutFontColor}; font-size: ${calloutFontSize}px; font-weight: bold; text-shadow: -2px -2px 0 #fff, 2px -2px 0 #fff, -2px 2px 0 #fff, 2px 2px 0 #fff, 0 0 6px #fff; font-family: Arial, sans-serif; white-space: nowrap; text-align: center;`;
             const zLayout = ymaps.templateLayoutFactory.createClass(`<div style="${zStyle}">${labelText}</div>`);
             const p = new ymaps.Placemark(centerGeo, {}, { iconLayout: zLayout, zIndex: 1210 });
             map.geoObjects.add(p);
@@ -1016,7 +999,7 @@ function addSchemaTemporaryLabels(centerGeo, mapType, config) {
             const zLayout = ymaps.templateLayoutFactory.createClass(
                 `<div style="position: absolute; transform: translate(-50%, -50%); ${styleBase}">${labelText}</div>`
             );
-            // Чуть уменьшаем отступ от центра, чтобы предотвратить геометрический срез
+            // Предотвращение выхода за рамки (клиппинга) за счет умеренного смещения
             const labelPoint = [centerGeo[0] + latDelta * 0.12, centerGeo[1] - lonDelta * 0.14];
             const p = new ymaps.Placemark(labelPoint, {}, { iconLayout: zLayout, zIndex: 1210 });
             map.geoObjects.add(p);
@@ -1369,6 +1352,26 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
     const sAl2 = localStorage.getItem('sch_al2') || '';
     const sAl3 = localStorage.getItem('sch_al3') || '';
 
+    // Разделение единой строки документа утверждения на три строки для заполнения шаблона
+    function splitApprovalDoc(docText) {
+        if (!docText) return ['', '', ''];
+        const words = docText.split(' ');
+        const lines = ['', '', ''];
+        let lineIdx = 0;
+        words.forEach(word => {
+            if (lineIdx < 2 && (lines[lineIdx] + ' ' + word).length > 45) {
+                lineIdx++;
+            }
+            lines[lineIdx] = (lines[lineIdx] + ' ' + word).trim();
+        });
+        return lines;
+    }
+
+    const docLines = splitApprovalDoc(config.approvalDoc);
+    const val1 = sAl1 || docLines[0];
+    const val2 = sAl2 || docLines[1];
+    const val3 = sAl3 || docLines[2];
+
     const coordsRows = coordsTable.map(c => `
         <tr>
             <td style="border:1px solid #000; padding:4px; text-align:center;" contenteditable="true">${c.point}</td>
@@ -1426,9 +1429,9 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
     <div class="page">
         <div class="header-text">
             <b>Утверждена</b><br>
-            <input type="text" id="authLine1" class="auth-line" placeholder="" value="${sAl1}"><br>
-            <input type="text" id="authLine2" class="auth-line" placeholder="" value="${sAl2}"><br>
-            <input type="text" id="authLine3" class="auth-line" value="${sAl3}"><br>
+            <input type="text" id="authLine1" class="auth-line" placeholder="" value="${val1}"><br>
+            <input type="text" id="authLine2" class="auth-line" placeholder="" value="${val2}"><br>
+            <input type="text" id="authLine3" class="auth-line" value="${val3}"><br>
             <span style="font-size: 8pt; color: #555;">(наименование документа об утверждении, включая наименование органов гос. власти или органов местного самоуправления)</span><br>
             от _____________ № _____
         </div>
