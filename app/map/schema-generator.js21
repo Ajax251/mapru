@@ -1,12 +1,13 @@
 window.__schemaDataLoaded = false;
 
+
 function startSchemaWorkflow(lat, lon, targetPolygon) {
     if (!targetPolygon) return;
 
     let detectedQuarter = currentQuarterNumber || '';
     let detectedSettlement = '';
     let detectedMunicipality = '';
-    let detectedTerrZone = ''; // Ошибочное автозаполнение ЗОУИТ удалено
+    let detectedTerrZone = ''; // Автозаполнение очищено по умолчанию
     let detectedZuName = '';
 
     const cn = targetPolygon.properties.get('cadastralNumber') || '';
@@ -345,6 +346,9 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
 
             <!-- Блок Дополнительных Индивидуальных Опций Оформления -->
             <div style="background: #fff; border: 1px dashed #cbd5e1; padding: 10px; border-radius: 8px; display: flex; flex-wrap: wrap; gap: 20px; margin-top: 15px; font-size: 0.85rem;">
+                <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;">
+                    <input type="checkbox" id="sch_showZuLabel" ${sCptZuNameMode !== 'off' ? 'checked' : ''} style="display:none;">
+                </label>
                 <div style="display: flex; align-items: center; gap: 8px; margin-left: auto;">
                     <span>Цвет контура ПЗЗ:</span>
                     <input type="color" id="sch_pzzLineColor" value="${sPzzLineColor}" style="width: 40px; height: 24px; border: none; cursor: pointer; border-radius: 4px;">
@@ -1016,8 +1020,7 @@ function addSchemaTemporaryLabels(centerGeo, mapType, config) {
             const zLayout = ymaps.templateLayoutFactory.createClass(
                 `<div style="position: absolute; transform: translate(-50%, -50%); ${styleBase}">${labelText}</div>`
             );
-            // Чуть уменьшаем отступ от центра, чтобы предотвратить геометрический срез
-            const labelPoint = [centerGeo[0] + latDelta * 0.12, centerGeo[1] - lonDelta * 0.14];
+            const labelPoint = [centerGeo[0] + latDelta * 0.15, centerGeo[1] - lonDelta * 0.2];
             const p = new ymaps.Placemark(labelPoint, {}, { iconLayout: zLayout, zIndex: 1210 });
             map.geoObjects.add(p);
             tempObjects.push(p);
@@ -1180,6 +1183,292 @@ function addSchemaCompass(config) {
     const compass = new ymaps.Placemark(compassPos, {}, { iconLayout: compassLayout, zIndex: 1300 });
     map.geoObjects.add(compass);
     return compass;
+}
+
+function sortPointsClockwiseNW(coords) {
+    if (coords.length < 3) return coords;
+    let sumLat = 0, sumLon = 0;
+    coords.forEach(c => { sumLat += c[0]; sumLon += c[1]; });
+    const center = [sumLat / coords.length, sumLon / coords.length];
+
+    const pointsWithAngle = coords.map(c => {
+        const dLat = c[0] - center[0]; 
+        const dLon = c[1] - center[1]; 
+        let angle = Math.atan2(dLon, dLat) * (180 / Math.PI);
+        if (angle < 0) angle += 360;
+        return { coord: c, angle: angle };
+    });
+
+    pointsWithAngle.sort((a, b) => a.angle - b.angle);
+
+    let nwIndex = 0;
+    let minDiff = Infinity;
+    pointsWithAngle.forEach((p, i) => {
+        let diff = Math.abs(p.angle - 315);
+        if (diff > 180) diff = 360 - diff; 
+        if (diff < minDiff) { minDiff = diff; nwIndex = i; }
+    });
+
+    const sortedCoords = [];
+    for (let i = 0; i < pointsWithAngle.length; i++) {
+        const idx = (nwIndex + i) % pointsWithAngle.length;
+        sortedCoords.push(pointsWithAngle[idx].coord);
+    }
+    return sortedCoords;
+}
+
+function processAndDrawSchemaPoints(rings, polygon, config) {
+    const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
+    const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destSc);
+    let mskOffsetX = 0, mskOffsetY = 0;
+
+    if (localStorage.getItem('autoLoadMskOffset') !== 'false' && destSystem) {
+        mskOffsetX = destSystem.offsetX || 0; mskOffsetY = destSystem.offsetY || 0;
+    } else {
+        mskOffsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
+        mskOffsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
+    }
+    if (destSystem && destSystem.def) proj4.defs(destSc, destSystem.def);
+
+    let mskCoordsTable = [];
+    let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+    let globalPointIndex = 1;
+
+    const ptFontSize = config.pointFontSize || 14;
+
+    rings.forEach((coords) => {
+        let firstPointOfRing = null;
+        for (let i = 0; i < coords.length; i++) {
+            const c = coords[i];
+            minLat = Math.min(minLat, c[0]); maxLat = Math.max(maxLat, c[0]);
+            minLon = Math.min(minLon, c[1]); maxLon = Math.max(maxLon, c[1]);
+
+            const trueLat = c[0] + (mapOffsetY * 0.000008983);
+            const trueLon = c[1] + (mapOffsetX * 0.000008983);
+            let x_msk = 0, y_msk = 0;
+            if (destSystem) {
+                const mskPoint = proj4("EPSG:4326", destSc, [trueLon, trueLat]);
+                y_msk = mskPoint[0] + mskOffsetY;
+                x_msk = mskPoint[1] + mskOffsetX;
+            } else {
+                x_msk = trueLon; y_msk = trueLat;
+            }
+
+            const pointName = `н${globalPointIndex}`;
+            const tableEntry = { point: pointName, x: x_msk.toFixed(2), y: y_msk.toFixed(2) };
+            mskCoordsTable.push(tableEntry);
+
+            if (i === 0) firstPointOfRing = tableEntry;
+
+            if (config.showPoints) {
+                const dotLayout = ymaps.templateLayoutFactory.createClass(
+                    `<div style="width: 10px; height: 10px; background-color: ${config.pointColor}; border-radius: 50%; border: 1px solid white; box-shadow: 0 0 3px rgba(0,0,0,0.5);"></div>`
+                );
+                const textLayout = ymaps.templateLayoutFactory.createClass(
+                    `<div style="color: ${config.pointColor}; font-size: ${ptFontSize}px; font-weight: bold; font-family: Arial; text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff; white-space: nowrap;">${pointName}</div>`
+                );
+
+                const dot = new ymaps.Placemark(c, {}, { iconLayout: dotLayout, iconOffset: [-5, -5], zIndex: 1140 });
+                const label = new ymaps.Placemark(c, {}, { iconLayout: textLayout, iconOffset: [8, -12], zIndex: 1150 });
+                
+                dot.properties.set({ 'isSchemaPoint': true, 'relatedPolygon': polygon });
+                label.properties.set({ 'isSchemaPoint': true, 'relatedPolygon': polygon });
+                
+                map.geoObjects.add(dot); map.geoObjects.add(label);
+                polygons.push(dot); polygons.push(label);
+            }
+            globalPointIndex++;
+        }
+        
+        if (firstPointOfRing) {
+            mskCoordsTable.push({ ...firstPointOfRing });
+        }
+    });
+
+    const centerGeo = [(minLat + maxLat) / 2, (minLon + maxLon) / 2];
+    return { mskCoordsTable, centerGeo };
+}
+
+function addVisibleZouitLabelsForSchema() {
+    const addedLabels = [];
+    const bounds = map.getBounds();
+    if (!bounds) return addedLabels;
+
+    const screenBbox = [
+        Math.min(bounds[0][1], bounds[1][1]), Math.min(bounds[0][0], bounds[1][0]),
+        Math.max(bounds[0][1], bounds[1][1]), Math.max(bounds[0][0], bounds[1][0])
+    ];
+    const screenPoly = turf.bboxPolygon(screenBbox);
+    const drawnZouitLabels = new Set();
+
+    polygons.forEach(obj => {
+        if (obj instanceof ymaps.Polygon && (obj.properties.get('isZouit') || obj.properties.get('featureData')?.properties?.category === 36940)) {
+            const regNum = obj.properties.get('cadastralNumber');
+            const featureData = obj.properties.get('featureData');
+            const name = obj.properties.get('name') || featureData?.properties?.options?.name_by_doc || '';
+            if (!regNum) return;
+
+            const fullName = name ? `${regNum} - ${name}` : regNum;
+            if (drawnZouitLabels.has(fullName)) return;
+
+            try {
+                const rings = obj.geometry.getCoordinates();
+                const geoJsonCoords = rings.map(ring => ring.map(c => [c[1], c[0]]));
+                const turfPoly = turf.polygon(geoJsonCoords);
+
+                const intersection = turf.intersect(turf.featureCollection([turfPoly, screenPoly]));
+                if (!intersection) return;
+
+                let pointToLabel;
+                try {
+                     pointToLabel = turf.centerOfMass(intersection);
+                } catch(e) {
+                     pointToLabel = turf.centroid(intersection);
+                }
+
+                if (pointToLabel && pointToLabel.geometry) {
+                    const coords = [pointToLabel.geometry.coordinates[1], pointToLabel.geometry.coordinates[0]];
+
+                    const strokeColor = obj.options.get('strokeColor');
+                    let preset = 'islands#orangeStretchyIcon';
+                    if (strokeColor && strokeColor.toUpperCase().includes('FF0000')) preset = 'islands#redStretchyIcon';
+                    else if (strokeColor && (strokeColor.toUpperCase().includes('FFBF00') || strokeColor.toUpperCase().includes('FFA500'))) preset = 'islands#yellowStretchyIcon';
+
+                    const label = new ymaps.Placemark(coords, {
+                        iconContent: fullName
+                    }, {
+                        preset: preset,
+                        zIndex: 1500
+                    });
+
+                    map.geoObjects.add(label);
+                    polygons.push(label);
+                    addedLabels.push(label);
+                    drawnZouitLabels.add(fullName);
+                }
+            } catch(e) {
+                console.error("Ошибка при расчете центра ЗОУИТ для схемы:", e);
+            }
+        }
+    });
+
+    return addedLabels;
+}
+
+async function loadEnvironmentData(centerGeo, polygon, config) {
+    const trueLat = centerGeo[0] + (mapOffsetY * 0.000008983);
+    const trueLon = centerGeo[1] + (mapOffsetX * 0.000008983);
+    const centerPoint = proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
+    
+    const oldBounds = map.getBounds();
+    try {
+        if (config.loadNearby) {
+            const halfSize = config.nearbyRadius; 
+            const box3857 = [
+                [centerPoint[0] - halfSize, centerPoint[1] - halfSize], [centerPoint[0] + halfSize, centerPoint[1] - halfSize],
+                [centerPoint[0] + halfSize, centerPoint[1] + halfSize], [centerPoint[0] - halfSize, centerPoint[1] + halfSize],
+                [centerPoint[0] - halfSize, centerPoint[1] - halfSize]
+            ];
+            const parcels = await searchParcelsByArea(box3857);
+            if (parcels && parcels.length > 0) await drawFoundParcels(parcels, false);
+        }
+
+        const promises = [
+            searchFeaturesByGeometry(polygon, 36369),
+            searchFeaturesByGeometry(polygon, 36383)
+        ];
+
+        if (config.loadZouit) {
+            let zouitSearchObj = polygon;
+            if (config.zouitNearby) {
+                const rings = polygon.geometry.getCoordinates();
+                const turfRings = rings.map(ring => ring.map(c => [c[1], c[0]]));
+                const turfPoly = turf.polygon(turfRings);
+                const bbox = turf.bbox(turfPoly);
+                const bboxPoly = turf.bboxPolygon(bbox);
+                const buffered = turf.buffer(bboxPoly, 50, { units: 'meters' });
+                const ymapsCoords = buffered.geometry.coordinates.map(ring => ring.map(c => [c[1], c[0]]));
+                zouitSearchObj = new ymaps.Polygon(ymapsCoords);
+            }
+            promises.push(searchFeaturesByGeometry(zouitSearchObj, 36940));
+        } else {
+            promises.push(Promise.resolve([]));
+        }
+
+        const [oks, structs, zouits] = await Promise.all(promises);
+
+        if (oks && oks.length > 0) await processAndDrawBuildings(oks);
+        if (structs && structs.length > 0) await processAndDrawStructures(structs);
+        if (zouits && zouits.length > 0) await processAndDrawZouits(zouits);
+        
+    } catch (e) {
+    } finally {
+        map.setBounds(oldBounds, {duration: 0});
+    }
+}
+
+async function fetchTerrZoneName(centerGeo) {
+    const trueLat = centerGeo[0] + (mapOffsetY * 0.000008983);
+    const trueLon = centerGeo[1] + (mapOffsetX * 0.000008983);
+    const res = await searchContainingObjectByPoint(trueLat, trueLon, 36315);
+    if (res && res.features && res.features.length > 0) {
+        const props = res.features[0].properties || {};
+        const opts = props.options || {};
+        const regNum = opts.reg_numb_border || props.descr || '';
+        const name = opts.name_by_doc || opts.type_zone || 'Территориальная зона';
+        const fullName = regNum ? `${regNum} - ${name}` : name;
+        
+        const tzLabel = new ymaps.Placemark([centerGeo[0] + 0.0002, centerGeo[1]], { iconContent: `ТЗ: ${fullName}` }, { preset: 'islands#blueStretchyIcon', zIndex: 1200 });
+        map.geoObjects.add(tzLabel); polygons.push(tzLabel);
+        return fullName;
+    }
+    return "Не установлена";
+}
+
+function findTerrZoneLocally(centerGeo) {
+    if (!centerGeo) return null;
+    const p = turf.point([centerGeo[1], centerGeo[0]]);
+    for (const obj of polygons) {
+        if (obj instanceof ymaps.Polygon && obj.properties.get('featureData')) {
+            const fd = obj.properties.get('featureData');
+            if (fd.properties?.category === 36315 || fd.properties?.categoryName === 'Территориальные зоны') {
+                try {
+                    const coords = obj.geometry.getCoordinates()[0];
+                    const turfPoly = turf.polygon([coords.map(c => [c[1], c[0]])]);
+                    if (turf.booleanPointInPolygon(p, turfPoly)) {
+                        const props = fd.properties || {};
+                        const opts = props.options || {};
+                        const regNum = opts.reg_numb_border || props.descr || '';
+                        const name = opts.name_by_doc || opts.type_zone || 'Территориальная зона';
+                        return regNum ? `${regNum} - ${name}` : name;
+                    }
+                } catch (e) {}
+            }
+        }
+    }
+    return null;
+}
+
+async function takeMapScreenshotForSchema(quarter, settlement) {
+    const mapElement = document.getElementById('map');
+    const canvas = await html2canvas(mapElement, {
+        useCORS: true,
+        allowTaint: true,
+        logging: false,
+        width: mapElement.clientWidth,
+        height: mapElement.clientHeight,
+        scrollX: 0,
+        scrollY: 0,
+        ignoreElements: (element) => {
+            if (typeof element.className === 'string') {
+                return element.className.includes('-copyright') || 
+                       element.className.includes('-gototech') || 
+                       element.className.includes('-gotoymaps');
+            }
+            return false;
+        }
+    });
+    return canvas.toDataURL('image/png'); 
 }
 
 function generateLegendPolygonImage(strokeColor, fillColor, opacity) {
@@ -1683,7 +1972,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             }
 
             const doc = new docx.Document({ sections: sections });
-            docx.Packer.toBlob(doc).then(blob => {
+            docx.Post.toBlob(doc).then(blob => {
                 saveAs(blob, "Схема_расположения.docx");
             }).catch(e => alert("Ошибка создания DOCX: " + e));
         });
