@@ -915,30 +915,18 @@ const sevenDigitsRegions = ['06', '07', '09', '10', '11', '12', '13', '14', '17'
 async function getCoordinatesFromImageAI(base64ImageData) {
     const aiLoader = document.getElementById('aiLoader');
     if (aiLoader) {
-        aiLoader.querySelector('span').textContent = 'Подготовка и распознавание изображения...';
+        aiLoader.querySelector('span').textContent = 'Распознавание координат из изображения...';
         aiLoader.style.display = 'flex';
-    }
-
-    let optimizedBase64;
-    try {
-        // Всегда пропорционально уменьшаем изображение до макс. 800px по большей стороне перед отправкой
-        optimizedBase64 = await resizeBase64ImageToMax(base64ImageData, 800);
-    } catch (e) {
-        console.warn("Не удалось оптимизировать размер изображения перед отправкой:", e);
-        optimizedBase64 = base64ImageData;
     }
 
     const prompt = `Extract all numerical coordinates from this image.
 Present them as two columns separated by a tab character (\\t).
 
-Important rules for coordinate grouping, precision, and sorting:
-1. Grouping into separate contours/blocks:
-   - If the image contains multiple separate tables, lists, sections, or distinct land parcels, you MUST output them in separate blocks.
-   - Separate each block of coordinates with a single empty line. Do not merge them into one continuous list.
-2. Check if the values are geographical coordinates (latitude and longitude in degrees, typically between -180 and 180, e.g., 55.123456 and 37.123456). 
+Important rules for coordinate precision and sorting:
+1. Check if the values are geographical coordinates (latitude and longitude in degrees, typically between -180 and 180, e.g., 54.45593 and 50.77906). 
    - For geographical coordinates, do NOT swap them based on value. Keep their original order exactly as shown in the document.
    - Do NOT round geographical coordinates to two decimal places. Preserve their original high precision exactly as displayed in the image (typically 5 to 9 decimal places).
-3. For flat projected coordinates (like MSK, where values are large numbers, usually 6 or 7 digits before the decimal point):
+2. For flat projected coordinates (like MSK, where values are large numbers, usually 6 or 7 digits before the decimal point):
    - The first coordinate in a pair (X) must always be less than the second coordinate (Y). If the original X > Y, swap them.
    - These projected coordinates should have no more than two decimal places. Round mathematically.
 
@@ -948,17 +936,12 @@ Regarding the number of digits before the decimal point in projected coordinates
 
 Do not include any headers, descriptions, comments, markdown formatting (e.g., \`\`\`), or any characters other than the coordinates themselves and the delimiters (tab and newline).
 If there are no coordinates in the image or you cannot recognize them, return an empty response. If for some reason you must write an explanatory message, it MUST be in Russian (for example: "Координаты на изображении не найдены"). Do not respond in English.
-
-Example of correct output with multiple geographical contours (separated by an empty line):
-55.11111111\\t37.11111111
-55.22222222\\t37.22222222
-55.33333333\\t37.33333333
-55.11111111\\t37.11111111
-
-55.44444444\\t37.44444444
-55.55555555\\t37.55555555
-55.66666666\\t37.66666666
-55.44444444\\t37.44444444`;
+Example of correct geographical output:
+54.45593000\\t50.77906000
+54.44885000\\t50.78896000
+Example of correct projected output:
+123456.78\\t1234567.89
+654321.00\\t7654321.00`;
 
     let apiUrl, requestBody;
     const modelId = "gemini-3.1-flash-lite";
@@ -971,7 +954,7 @@ Example of correct output with multiple geographical contours (separated by an e
                 role: "user",
                 content: [
                     { type: "text", text: prompt },
-                    { type: "image_url", image_url: { url: `data:image/jpeg;base64,${optimizedBase64}` } }
+                    { type: "image_url", image_url: { url: `data:image/jpeg;base64,${base64ImageData}` } }
                 ]
             }],
             max_tokens: 4096
@@ -983,7 +966,7 @@ Example of correct output with multiple geographical contours (separated by an e
                 role: "user",
                 parts: [
                     { text: prompt },
-                    { inlineData: { mimeType: "image/jpeg", data: optimizedBase64 } }
+                    { inlineData: { mimeType: "image/jpeg", data: base64ImageData } }
                 ]
             }]
         };
@@ -996,14 +979,6 @@ Example of correct output with multiple geographical contours (separated by an e
             body: JSON.stringify(requestBody)
         });
         
-        // Повторное сжатие при ошибке 413 до экстремально низкого размера (до 400px)
-        if (response.status === 413) {
-            console.warn("Размер запроса превысил лимит (413). Сжимаем повторно до 400px...");
-            showNotification("Изображение все еще слишком велико. Дополнительное сжатие...");
-            const ultraOptimized = await resizeBase64ImageToMax(optimizedBase64, 400);
-            return await getCoordinatesFromImageAI(ultraOptimized);
-        }
-
         const data = await response.json();
         console.log("Raw AI JSON response (Image):", JSON.stringify(data, null, 2));
 
@@ -1036,24 +1011,6 @@ Example of correct output with multiple geographical contours (separated by an e
     }
 }
 
-
-function downscaleBase64Image(base64Str) {
-    return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => {
-            const canvas = document.createElement('canvas');
-            canvas.width = Math.floor(img.width * 0.5);
-            canvas.height = Math.floor(img.height * 0.5);
-            const ctx = canvas.getContext('2d');
-            ctx.drawImage(img, 0, 0, canvas.width, canvas.height);
-            // Экспортируем в JPEG с качеством 85% для оптимизации веса
-            const resizedBase64 = canvas.toDataURL('image/jpeg', 0.85);
-            resolve(resizedBase64.split(',')[1]);
-        };
-        img.onerror = (e) => reject(new Error("Ошибка загрузки изображения для сжатия: " + e));
-        img.src = `data:image/jpeg;base64,${base64Str}`;
-    });
-}
 
 async function getCoordinatesFromTextAI(textData) {
     const aiLoader = document.getElementById('aiLoader');
@@ -1894,8 +1851,6 @@ async function generateAndDownloadXML() {
         function showCropModalScheme(imageFile) {
     return new Promise((resolve) => {
         cropModalResolveScheme = resolve;
-        const currentResolve = resolve; // Сохраняем локальную ссылку для безопасного асинхронного вызова
-        
         const modal = document.getElementById('crop-image-modal-scheme');
         const imgPreview = document.getElementById('crop-image-preview-scheme');
         const cropContainer = document.getElementById('crop-image-container-scheme');
@@ -2000,9 +1955,9 @@ async function generateAndDownloadXML() {
             const selWidth = Math.abs(cropSelectionScheme.endX - cropSelectionScheme.startX);
             const selHeight = Math.abs(cropSelectionScheme.endY - cropSelectionScheme.startY);
             if (selWidth < 5 || selHeight < 5 || selectionRectDiv.style.display === 'none') {
-                fileToBase64(imageFile).then(base64 => {
-                    currentResolve({ cropped: false, data: base64.split(',')[1] });
-                });
+                fileToBase64(imageFile).then(base64 => cropModalResolveScheme({
+                    cropped: false, data: base64.split(',')[1]
+                }));
                 cleanupModalScheme();
                 return;
             }
@@ -2018,14 +1973,14 @@ async function generateAndDownloadXML() {
             canvas.height = sHeight;
             ctx.drawImage(imgPreview, sX, sY, sWidth, sHeight, 0, 0, sWidth, sHeight);
             const croppedImageDataUrl = canvas.toDataURL(imageFile.type);
-            currentResolve({ cropped: true, data: croppedImageDataUrl.split(',')[1] });
+            cropModalResolveScheme({ cropped: true, data: croppedImageDataUrl.split(',')[1] });
             cleanupModalScheme();
         };
 
         const handleCancelScheme = () => {
-            fileToBase64(imageFile).then(base64 => {
-                currentResolve({ cropped: false, data: base64.split(',')[1] });
-            });
+            fileToBase64(imageFile).then(base64 => cropModalResolveScheme({
+                cropped: false, data: base64.split(',')[1]
+            }));
             cleanupModalScheme();
         };
 
@@ -2040,6 +1995,7 @@ async function generateAndDownloadXML() {
             imgPreview.onload = null;
             cropContainer.removeEventListener('mousedown', onMouseDownScheme);
             cropContainer.removeEventListener('touchstart', onMouseDownScheme);
+            // ... (удаление остальных обработчиков, как в вашем предыдущем коде, но с суффиксом Scheme)
             cropContainer.removeEventListener('mousemove', onMouseMoveScheme);
             cropContainer.removeEventListener('touchmove', onMouseMoveScheme);
             window.removeEventListener('mouseup', onMouseUpScheme);
@@ -2532,39 +2488,6 @@ if (canvasEl) {
      setRandomTextareaControlColors();
 });
 
-
-function resizeBase64ImageToMax(base64Str, maxDim = 800) {
-    return new Promise((resolve, reject) => {
-        const img = new Image();
-        img.onload = () => {
-            let width = img.width;
-            let height = img.height;
-            
-            if (width > maxDim || height > maxDim) {
-                if (width > height) {
-                    height = Math.round((height * maxDim) / width);
-                    width = maxDim;
-                } else {
-                    width = Math.round((width * maxDim) / height);
-                    height = maxDim;
-                }
-                const canvas = document.createElement('canvas');
-                canvas.width = width;
-                canvas.height = height;
-                const ctx = canvas.getContext('2d');
-                ctx.drawImage(img, 0, 0, width, height);
-                const resizedBase64 = canvas.toDataURL('image/jpeg', 0.8); // Качество 80% для уменьшения размера в Кб
-                resolve(resizedBase64.split(',')[1]);
-            } else {
-                resolve(base64Str); // Если изображение изначально меньше лимита
-            }
-        };
-        img.onerror = (e) => reject(new Error("Ошибка при обработке изображения: " + e));
-        img.src = `data:image/jpeg;base64,${base64Str}`;
-    });
-}
-
-
 function cleanAndFormatAICoordinates(aiText) {
     if (!aiText || aiText.trim() === "") {
         return "";
@@ -2574,51 +2497,30 @@ function cleanAndFormatAICoordinates(aiText) {
     const formattedCoords = [];
 
     for (const line of lines) {
-        const trimmed = line.trim();
-        if (trimmed === "") {
-            // Сохраняем пустую строку-разделитель между контурами
-            formattedCoords.push("");
-            continue;
-        }
-
-        const parts = trimmed.split(/\s+|\\t/);
+        // Разделяем по пробельным символам или символу табуляции
+        const parts = line.trim().split(/\s+|\\t/);
         
         if (parts.length === 2) {
             let x = parseFloat(parts[0].replace(',', '.'));
             let y = parseFloat(parts[1].replace(',', '.'));
 
             if (!isNaN(x) && !isNaN(y)) {
+                // Проверяем, являются ли координаты географическими (в пределах от -180 до 180)
                 const isGeo = Math.abs(x) <= 180 && Math.abs(y) <= 180;
+
+                // Для плоских прямоугольных координат (МСК) оставляем сортировку X < Y
                 if (!isGeo && x > y) {
                     [x, y] = [y, x];
                 }
+
+                // Сохраняем высокую точность для географических координат и 2 знака для плоских (МСК)
                 const precision = isGeo ? 8 : 2;
                 formattedCoords.push(`${x.toFixed(precision)}\t${y.toFixed(precision)}`);
             }
         }
     }
-
-    // Очищаем от лишних дублирующихся подряд пустых строк
-    let cleanedList = [];
-    let lastWasEmpty = true;
-    for (const item of formattedCoords) {
-        if (item === "") {
-            if (!lastWasEmpty) {
-                cleanedList.push("");
-                lastWasEmpty = true;
-            }
-        } else {
-            cleanedList.push(item);
-            lastWasEmpty = false;
-        }
-    }
-
-    // Убираем пустую строку в самом конце, если осталась
-    if (cleanedList.length > 0 && cleanedList[cleanedList.length - 1] === "") {
-        cleanedList.pop();
-    }
-
-    return cleanedList.join('\n');
+    console.log("cleanAndFormatAICoordinates returning:", formattedCoords.join('\n'));
+    return formattedCoords.join('\n');
 }
 
 
@@ -3350,9 +3252,106 @@ function generateMIF(coords) {
     return mifContent;
 }
 
+function generateCSV(coords) {
+    let csvContent = "Контур;Префикс номера;Номер;Старый X;Старый Y;Новый X;Новый Y;Метод определения;Формула;Радиус;Погрешность;Описание закрепления\n";
+    csvContent += ";;;;;;;;;;;\n";
+
+    let contourNumber = 1;
+    let pointNumber = 1;
+    let contour = [];
+
+    coords.forEach((coord, index) => {
+        if (coord.trim() === '') {
+            // Завершаем текущий контур
+            if (contour.length > 0) {
+                csvContent += processContour(contour, contourNumber, pointNumber);
+                contourNumber++;
+                pointNumber = 1;
+                contour = [];
+                csvContent += ";;;;;;;;;;;\n"; // Пустая строка между контурами
+            }
+        } else {
+            const [x, y] = coord.split(/\s+|\t/).map(Number);
+            if (!isNaN(x) && !isNaN(y)) {
+                contour.push([x, y]);
+            } else {
+                console.warn('Некорректные координаты:', coord);
+            }
+        }
+    });
+
+    // Обрабатываем последний контур, если он есть
+    if (contour.length > 0) {
+        csvContent += processContour(contour, contourNumber, pointNumber);
+    }
+
+    return csvContent;
+}
 
 
 
+function initializeZoom() {
+    const canvas = document.getElementById('canvas');
+
+    // Обработка колесика мыши для масштабирования
+      canvas.addEventListener('wheel', function(e) {
+        e.preventDefault();
+        const rect = canvas.getBoundingClientRect();
+        const mouseX = e.clientX - rect.left;
+        const mouseY = e.clientY - rect.top;
+
+        // Определяем направление прокрутки
+        const delta = Math.sign(e.deltaY);
+        const zoomFactor = delta > 0 ? 0.9 : 1.1;
+
+        // Обновляем уровень масштабирования
+        const oldZoom = zoomLevel;
+        zoomLevel *= zoomFactor;
+        zoomLevel = Math.min(Math.max(zoomLevel, 0.1), 10); // Ограничиваем масштаб
+
+        // Корректируем позицию панорамирования для зума в точку мыши
+        panX += (mouseX / oldZoom - mouseX / zoomLevel);
+        panY += (mouseY / oldZoom - mouseY / zoomLevel);
+
+        // Перерисовываем canvas
+         drawContour(savedContours); // Перерисовываем с savedContours
+    });
+    
+     // Обработка перетаскивания
+    canvas.addEventListener('mousedown', function(e) {
+        isDragging = true;
+        lastX = e.clientX;
+        lastY = e.clientY;
+        canvas.style.cursor = 'grabbing';
+    });
+
+    canvas.addEventListener('mousemove', function(e) {
+        if (isDragging) {
+            const dx = e.clientX - lastX;
+            const dy = e.clientY - lastY;
+            
+            panX += dx / zoomLevel;
+            panY += dy / zoomLevel;
+
+            lastX = e.clientX;
+            lastY = e.clientY;
+
+            drawContour(savedContours); // Перерисовываем с savedContours
+        }
+    });
+
+    canvas.addEventListener('mouseup', function() {
+        isDragging = false;
+        canvas.style.cursor = 'grab';
+    });
+
+    canvas.addEventListener('mouseleave', function() {
+        isDragging = false;
+        canvas.style.cursor = 'grab';
+    });
+}
+
+// Функции для кнопок масштабирования
 // Функция для плавного масштабирования
 function smoothZoom(targetZoom, duration = 300) {
     const startZoom = zoomLevel;
@@ -3385,8 +3384,36 @@ function resetZoom() {
     drawContour(getCurrentCoordinates());
 }
 
+// Добавьте обработку тачскрина для мобильных устройств
+function initializeTouchZoom() {
+    const canvas = document.getElementById('canvas');
+    let initialDistance = 0;
+    let initialZoom = 1;
+    
+    canvas.addEventListener('touchstart', function(e) {
+        if (e.touches.length === 2) {
+            initialDistance = Math.hypot(
+                e.touches[0].clientX - e.touches[1].clientX,
+                e.touches[0].clientY - e.touches[1].clientY
+            );
+            initialZoom = zoomLevel;
+        }
+    });
 
-
+    canvas.addEventListener('touchmove', function(e) {
+        if (e.touches.length === 2) {
+            e.preventDefault();
+            const currentDistance = Math.hypot(
+                e.touches[0].clientX - e.touches[1].clientX,
+                e.touches[0].clientY - e.touches[1].clientY
+            );
+            
+            const scale = currentDistance / initialDistance;
+            zoomLevel = Math.min(Math.max(initialZoom * scale, 0.1), 10);
+            drawContour(savedContours);
+        }
+    });
+}
 
 
 // Обновленные функции зума
@@ -5699,7 +5726,15 @@ function extractSingleNumberPerLine(text) {
 }
 
 
-
+function showNotification(message) {
+    const notification = document.getElementById('notification');
+    notification.textContent = message;
+    notification.style.display = 'block';
+    
+    setTimeout(() => {
+        notification.style.display = 'none';
+    }, 2000);
+}
 
 function createComboBoxes(objects) {
     const startPointWrapper = document.getElementById('start-point-wrapper');
