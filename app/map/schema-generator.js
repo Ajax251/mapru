@@ -1682,7 +1682,7 @@ function generatePartsSchemaImage(targetPolygon, config) {
         gridStep: gridStep,
         heightMeters: parseFloat(heightMeters.toFixed(1))
     };
-}
+
 
 }
 
