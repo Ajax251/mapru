@@ -1186,16 +1186,12 @@
     <!-- Модалка проверки смежного ЗУ -->
 <div id="relatedParcelModal" class="modal-overlay">
     <div class="related-parcel-modal-content">
-       <div class="related-parcel-modal-header">
+        <div class="related-parcel-modal-header">
             <h2><i class="fas fa-draw-polygon"></i> Проверка (описания части границ) смежного ЗУ </h2>
-            <div style="display:flex; align-items:center; gap:10px;">
-                <button id="copyModalCoordsBtn" class="print-btn docs-btn" style="padding:6px 14px; font-size:0.9rem;" title="Скопировать координаты всех объектов на схеме в буфер обмена и открыть редактор">
-                    <i class="fas fa-copy"></i> <span>Скопировать координаты</span>
-                </button>
-                <button class="red-close-btn" id="relatedParcelModalClose" title="Закрыть окно">
-                    <i class="fas fa-times"></i>
-                </button>
-            </div>
+            <!-- Обновленная кнопка закрытия -->
+            <button class="red-close-btn" id="relatedParcelModalClose" title="Закрыть окно">
+                <i class="fas fa-times"></i>
+            </button>
         </div>
         
         <div class="related-parcel-modal-body">
@@ -4230,188 +4226,6 @@ function extractMainParcelContoursFromXml() {
 
 
 
-async function getCorrectedContourForCadastralNumber(cadNum, mskSystem) {
-    if (!lastXmlDoc) return null;
-    const cadNumLower = cadNum.toLowerCase();
-    
-    // 1. Поиск в SpecifyRelatedParcel (уточняемые смежные)
-    const relatedNodes = All(lastXmlDoc, 'SpecifyRelatedParcel');
-    for (const node of relatedNodes) {
-        if ((A(node, 'CadastralNumber') || '').toLowerCase() === cadNumLower) {
-            const xmlData = extractSpecifyRelatedParcelData(node);
-            if (xmlData.isAllBorder && xmlData.contours) {
-                return xmlData.contours;
-            } else if (xmlData.junctionPoints) {
-                try {
-                    const egrnContours = await fetchEgrnCoordinates(xmlData.cadNumber);
-                    if (egrnContours && egrnContours.length > 0) {
-                        const res = applyBorderChangesToContour(
-                            egrnContours[0], xmlData.junctionPoints, xmlData.removedPoints, xmlData.newPoints
-                        );
-                        if (res.resultContour) {
-                            return [res.resultContour];
-                        }
-                    }
-                } catch (e) {
-                    console.error(`Ошибка построения границ для смежника ${cadNum}:`, e);
-                }
-            }
-        }
-    }
-    
-    // 2. Поиск в SpecifyParcelApproximal (исправляемые смежные)
-    const approxNodes = All(lastXmlDoc, 'SpecifyParcelApproximal > ExistParcel');
-    for (const node of approxNodes) {
-        if ((A(node, 'CadastralNumber') || '').toLowerCase() === cadNumLower) {
-            const xmlData = extractSpecifyRelatedParcelData(node);
-            if (xmlData.isAllBorder && xmlData.contours) {
-                return xmlData.contours;
-            } else if (xmlData.junctionPoints) {
-                try {
-                    const egrnContours = await fetchEgrnCoordinates(xmlData.cadNumber);
-                    if (egrnContours && egrnContours.length > 0) {
-                        const res = applyBorderChangesToContour(
-                            egrnContours[0], xmlData.junctionPoints, xmlData.removedPoints, xmlData.newPoints
-                        );
-                        if (res.resultContour) {
-                            return [res.resultContour];
-                        }
-                    }
-                } catch (e) {
-                    console.error(`Ошибка построения границ для исправляемого смежника ${cadNum}:`, e);
-                }
-            }
-        }
-    }
-    return null;
-}
-
-
-function findProblematicOverlappingPoints(poly1, poly2) {
-    const problemPoints = [];
-    if (!poly1 || !poly2 || poly1.length === 0 || poly2.length === 0) return problemPoints;
-    
-    // 1. Точки первого полигона внутри второго
-    poly1.forEach(pt => {
-        const onBoundary = poly2.some(op => Math.abs(pt.x - op.x) < 0.001 && Math.abs(pt.y - op.y) < 0.001);
-        if (!onBoundary && isPointInPolygon(pt, poly2)) {
-            problemPoints.push(pt);
-        }
-    });
-    
-    // 2. Точки второго полигона внутри первого
-    poly2.forEach(pt => {
-        const onBoundary = poly1.some(op => Math.abs(pt.x - op.x) < 0.001 && Math.abs(pt.y - op.y) < 0.001);
-        if (!onBoundary && isPointInPolygon(pt, poly1)) {
-            problemPoints.push(pt);
-        }
-    });
-    
-    // 3. Точки пересечения отрезков границ
-    const getLineIntersection = (p1, p2, p3, p4) => {
-        const det = (p2.x - p1.x) * (p4.y - p3.y) - (p4.x - p3.x) * (p2.y - p1.y);
-        if (det === 0) return null;
-        
-        const t = ((p3.x - p1.x) * (p4.y - p3.y) - (p3.y - p1.y) * (p4.x - p3.x)) / det;
-        const u = ((p3.x - p1.x) * (p2.y - p1.y) - (p3.y - p1.y) * (p2.x - p1.x)) / det;
-        
-        if (t >= 0 && t <= 1 && u >= 0 && u <= 1) {
-            return {
-                x: p1.x + t * (p2.x - p1.x),
-                y: p1.y + t * (p2.y - p1.y)
-            };
-        }
-        return null;
-    };
-    
-    for (let i = 0; i < poly1.length - 1; i++) {
-        for (let j = 0; j < poly2.length - 1; j++) {
-            const inter = getLineIntersection(poly1[i], poly1[i+1], poly2[j], poly2[j+1]);
-            if (inter) {
-                const isVertex = (pt) => Math.abs(inter.x - pt.x) < 0.001 && Math.abs(inter.y - pt.y) < 0.001;
-                if (!poly1.some(isVertex) && !poly2.some(isVertex)) {
-                    problemPoints.push(inter);
-                }
-            }
-        }
-    }
-    
-    return problemPoints;
-}
-
-function copyModalCoordinates() {
-    if (!relatedParcelCheckData) return;
-    const { mainContours, resultContour, otherCorrectedParcels } = relatedParcelCheckData;
-    let textToCopy = '';
-
-    const formatContourText = (contour) => {
-        if (!contour || contour.length === 0) return '';
-        let result = '';
-        const closedContour = [...contour];
-        const first = closedContour[0];
-        const last = closedContour[closedContour.length - 1];
-        
-        // Автоматическое замыкание контура
-        if (Math.abs(first.x - last.x) > 0.001 || Math.abs(first.y - last.y) > 0.001) {
-            closedContour.push(first);
-        }
-        
-        closedContour.forEach(pt => {
-            result += `${pt.x}\t${pt.y}\n`;
-        });
-        return result.trim() + '\n';
-    };
-
-    // 1. Уточняемый ЗУ
-    if (mainContours && mainContours.length > 0) {
-        mainContours.forEach(contour => {
-            const fmt = formatContourText(contour);
-            if (fmt) textToCopy += fmt + '\n';
-        });
-    }
-
-    // 2. Текущий смежник (Результат изменений)
-    if (resultContour && resultContour.length > 0) {
-        resultContour.forEach(contour => {
-            const fmt = formatContourText(contour);
-            if (fmt) textToCopy += fmt + '\n';
-        });
-    }
-
-    // 3. Другие смежники из XML
-    if (otherCorrectedParcels && otherCorrectedParcels.length > 0) {
-        otherCorrectedParcels.forEach(oc => {
-            oc.contours.forEach(contour => {
-                const fmt = formatContourText(contour);
-                if (fmt) textToCopy += fmt + '\n';
-            });
-        });
-    }
-
-    textToCopy = textToCopy.trim();
-    if (!textToCopy) {
-        alert('Координаты не найдены.');
-        return;
-    }
-
-    navigator.clipboard.writeText(textToCopy).then(() => {
-        const btn = document.getElementById('copyModalCoordsBtn');
-        if (btn) {
-            const originalHtml = btn.innerHTML;
-            btn.innerHTML = '<i class="fas fa-check"></i> <span>Скопировано!</span>';
-            setTimeout(() => {
-                btn.innerHTML = originalHtml;
-                window.open('editor.html', '_blank');
-            }, 800);
-        } else {
-            window.open('editor.html', '_blank');
-        }
-    }).catch(err => {
-        console.error('Ошибка копирования:', err);
-        alert('Не удалось скопировать координаты.');
-    });
-}
-
 async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNumber) {
     const modal = document.getElementById('relatedParcelModal');
     const infoDiv = document.getElementById('relatedParcelInfo');
@@ -4429,46 +4243,15 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
         // Запрос актуальных границ смежника из ЕГРН (НСПД)
         const egrnContours = await fetchEgrnCoordinates(xmlData.cadNumber);
         
-        // Извлечение проектных границ основного/уточняемого участка из XML
+        // Извлечение проектных границ основного/образуемого участка из XML
         const mainContoursXml = extractMainParcelContoursFromXml();
         
-        // --- СОБИРАЕМ ДРУГИЕ ИЗМЕНЯЕМЫЕ СМЕЖНЫЕ ЗУ ДЛЯ ОТОБРАЖЕНИЯ И ИСКЛЮЧЕНИЯ НАЛОЖЕНИЙ ---
-        const otherCorrectedParcels = [];
-        const allRelatedNodes = All(lastXmlDoc, 'SpecifyRelatedParcel');
-        const allApproxNodes = All(lastXmlDoc, 'SpecifyParcelApproximal > ExistParcel');
-        
-        const currentCadNumLower = xmlData.cadNumber.toLowerCase();
-        
-        for (const node of allRelatedNodes) {
-            const cn = A(node, 'CadastralNumber');
-            if (cn && cn.toLowerCase() !== currentCadNumLower) {
-                const corrected = await getCorrectedContourForCadastralNumber(cn, mskSystem);
-                if (corrected) {
-                    otherCorrectedParcels.push({ cadNumber: cn, contours: corrected });
-                }
-            }
-        }
-        for (const node of allApproxNodes) {
-            const cn = A(node, 'CadastralNumber');
-            if (cn && cn.toLowerCase() !== currentCadNumLower) {
-                const corrected = await getCorrectedContourForCadastralNumber(cn, mskSystem);
-                if (corrected) {
-                    otherCorrectedParcels.push({ cadNumber: cn, contours: corrected });
-                }
-            }
-        }
-
         let resultContour = null;
         let errors = [];
         let appliedChanges = null;
         let hasOverlap = false;
         let comparisonResults = null;
-        let neighboringOverlaps = [];
-        const problemPoints = []; // Массив для хранения красных проблемных точек
-
-        console.log("=== НАЧАЛО АНАЛИЗА СМЕЖНОГО ЗУ ===");
-        console.log("Смежный участок:", xmlData.cadNumber);
-        console.log("Целевой уточняемый участок:", mainParcelCadNumber);
+        let neighboringOverlaps = []; // Сторонние наложения смежника на соседей
 
         if (xmlData.isAllBorder) {
             // --- ЛОГИКА ДЛЯ ПЛОЩАДНОГО ОПИСАНИЯ СМЕЖНИКА (ExistParcel / AllBorder) ---
@@ -4476,38 +4259,20 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             comparisonResults = comp.comparisonResults;
             resultContour = xmlData.contours;
 
+            // Вычисление проектной площади смежного ЗУ по координатам из XML
             const geomArea = calculateTotalArealGeometryArea(xmlData.contours);
 
-            // 1. Проверка наложения уточняемого участка на этот смежный ЗУ по проектным координатам XML
+            // 1. Проверка наложения образуемого участка на этот смежный ЗУ по проектным координатам XML
             let overlapArea = 0;
             if (mainContoursXml.length > 0) {
                 overlapArea = checkPlanarOverlap(mainContoursXml, xmlData.contours);
                 if (overlapArea > 0.01) {
                     hasOverlap = true;
-                    errors.push(`ОШИБКА НАЛОЖЕНИЯ: Граница смежного ЗУ ${xmlData.cadNumber} по проектным координатам пересекается с уточняемым ЗУ ${mainParcelCadNumber}! Площадь пересечения: ${overlapArea.toFixed(2)} кв.м.`);
+                    errors.push(`ОШИБКА НАЛОЖЕНИЯ: Граница смежного ЗУ по проектным координатам пересекается с образуемым ЗУ! Площадь пересечения: ${overlapArea.toFixed(2)} кв.м.`);
                 }
-                
-                // Ищем проблемные точки пересечения
-                xmlData.contours.forEach(subContour => {
-                    mainContoursXml.forEach(mainContour => {
-                        const pts = findProblematicOverlappingPoints(subContour, mainContour);
-                        problemPoints.push(...pts);
-                    });
-                });
             }
 
-            // Ищем пересечения с другими изменяемыми смежными участками из XML
-            if (xmlData.contours && otherCorrectedParcels.length > 0) {
-                otherCorrectedParcels.forEach(other => {
-                    other.contours.forEach(otherContour => {
-                        xmlData.contours.forEach(subContour => {
-                            const pts = findProblematicOverlappingPoints(subContour, otherContour);
-                            problemPoints.push(...pts);
-                        });
-                    });
-                });
-            }
-
+            // Формирование сводной информации по площади
             let areaAnalysisHtml = `
                 <div style="margin-top: 12px; background: #f8fafc; border: 1px solid var(--border-color); border-radius: 8px; padding: 12px;">
                     <div style="font-weight: 600; font-size: 0.95rem; margin-bottom: 8px; color: var(--text-primary);"><i class="fas fa-calculator"></i> Анализ площади смежного ЗУ:</div>
@@ -4519,6 +4284,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
                 </div>
             `;
 
+            // Подготовка строк таблицы с координатами и дельтами сдвига
             let tableRows = '';
             comparisonResults.forEach(r => {
                 const deltaStr = r.isMatch ? r.delta.toFixed(3) : `<span style="color:#ef4444; font-weight:bold">${r.delta.toFixed(3)}</span>`;
@@ -4533,9 +4299,10 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
                 </tr>`;
             });
 
+            // Настройка классов и статусных надписей для исправляемого ЗУ
             const statusClass = hasOverlap ? 'error' : (comp.hasDiff ? 'success' : 'warning');
             const statusText = hasOverlap 
-                ? `НАЛОЖЕНИЕ НА УТОЧНЯЕМЫЙ УЧАСТОК ${mainParcelCadNumber}!` 
+                ? 'ОБНАРУЖЕНО ПЕРЕСЕЧЕНИЕ ПРОЕКТНЫХ ГРАНИЦ С ОБРАЗУЕМЫМ ЗУ!' 
                 : (comp.hasDiff 
                     ? 'Проектные границы успешно изменены относительно ЕГРН (реестровая ошибка исправляется)' 
                     : 'Внимание: Проектные границы совпадают с ЕГРН (изменения отсутствуют)');
@@ -4575,31 +4342,19 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             errors = res.errors;
             appliedChanges = res.appliedChanges;
             
-            // Проверка наложения с уточняемым ЗУ
             if (resultContour && mainContoursXml.length > 0) {
                 for (const mainContour of mainContoursXml) {
                     if (checkPolygonsOverlap(resultContour, mainContour)) {
                         hasOverlap = true;
-                        errors.push(`НАЛОЖЕНИЕ: Новые границы уточняемого участка ${mainParcelCadNumber} пересекают измененные границы смежного ${xmlData.cadNumber}!`);
+                        errors.push("НАЛОЖЕНИЕ: Новые границы образуемого участка пересекают измененные границы смежного!");
+                        break;
                     }
-                    const pts = findProblematicOverlappingPoints(resultContour, mainContour);
-                    problemPoints.push(...pts);
                 }
-            }
-
-            // Проверка наложения с другими изменяемыми смежными ЗУ из XML
-            if (resultContour && otherCorrectedParcels.length > 0) {
-                otherCorrectedParcels.forEach(other => {
-                    other.contours.forEach(otherContour => {
-                        const pts = findProblematicOverlappingPoints(resultContour, otherContour);
-                        problemPoints.push(...pts);
-                    });
-                });
             }
 
             const statusClass = (hasOverlap || errors.length) ? 'error' : 'success';
             const statusText = hasOverlap 
-                ? `НАЛОЖЕНИЕ НА УТОЧНЯЕМЫЙ УЧАСТОК ${mainParcelCadNumber}!` 
+                ? 'НАЛОЖЕНИЕ НА ОБРАЗУЕМЫЙ УЧАСТОК!' 
                 : (errors.length ? 'Ошибка построения границ' : 'Проектные границы смежного участка успешно изменены относительно ЕГРН');
             const iconClass = hasOverlap ? 'times-circle' : (errors.length ? 'exclamation-circle' : 'check-circle');
 
@@ -4620,40 +4375,31 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             }
         }
 
-        // Логирование обнаруженных пересечений
-        if (problemPoints.length > 0) {
-            console.log(`Обнаружено наложений: ${problemPoints.length} шт.`);
-            problemPoints.forEach((p, i) => {
-                console.log(`Точка наложения #${i + 1}: X=${p.x.toFixed(6)}, Y=${p.y.toFixed(6)}`);
-            });
-        } else {
-            console.log("Геометрических пересечений наложения не обнаружено.");
-        }
-
-        // Встречный анализ наложений на сторонние участки в ЕГРН
+        // --- 2. ВСТРЕЧНЫЙ АНАЛИЗ НАЛОЖЕНИЙ ИСПРАВЛЕННОГО СМЕЖНИКА НА ДРУГИЕ ЗУ В ЕГРН ---
         if (resultContour && resultContour.length > 0) {
             try {
+                // Ищем в НСПД все участки, пересекающие исправленный контур смежника
                 const intersectedFeatures = await searchIntersectingObjects(resultContour, NSPD_CATEGORY_ZU, mskSystem);
                 
                 for (const f of intersectedFeatures) {
                     const fCadNum = f.properties?.options?.cad_number || f.properties?.options?.cad_num || f.properties?.descr;
                     if (!fCadNum) continue;
 
+                    // Игнорируем сопоставление со своим старым контуром и целевым ЗУ
                     const isSelf = fCadNum.toLowerCase() === xmlData.cadNumber.toLowerCase();
                     const isMainTarget = mainParcelCadNumber && fCadNum.toLowerCase() === mainParcelCadNumber.toLowerCase();
 
                     if (isSelf || isMainTarget) continue;
 
+                    // Извлекаем геометрию соседнего участка и переводим в МСК
                     let neighborContours = [];
-                    const correctedNeighbor = await getCorrectedContourForCadastralNumber(fCadNum, mskSystem);
-                    if (correctedNeighbor) {
-                        neighborContours = correctedNeighbor;
-                    } else if (f.geometry) {
+                    if (f.geometry) {
                         neighborContours = await convertEgrnGeometryToMsk(f.geometry, mskSystem);
                     }
 
                     if (neighborContours.length > 0) {
                         const overlapWithNeighbor = checkPlanarOverlap(resultContour, neighborContours);
+                        // Порог обнаружения наложения — более 0.01 кв.м.
                         if (overlapWithNeighbor > 0.01) {
                             neighboringOverlaps.push({
                                 cadNumber: fCadNum,
@@ -4668,6 +4414,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             }
         }
 
+        // Если обнаружены наложения на третьих лиц, выводим предупреждения
         if (neighboringOverlaps.length > 0) {
             const warningBlock = document.createElement('div');
             warningBlock.className = 'related-parcel-errors';
@@ -4691,6 +4438,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             `;
             infoDiv.insertBefore(warningBlock, infoDiv.lastElementChild);
             
+            // Снижаем визуальный статус до предупреждения/ошибки
             const statusBanner = infoDiv.querySelector('.related-parcel-status');
             if (statusBanner && !hasOverlap) {
                 statusBanner.className = 'related-parcel-status warning';
@@ -4710,13 +4458,10 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             mainParcelCadNumber, 
             hasOverlap,
             comparisonResults,
-            neighboringOverlaps,
-            otherCorrectedParcels, 
-            problemPoints          
+            neighboringOverlaps // Передаем наложения на схему
         };
         
         drawRelatedParcelSchema();
-        console.log("=== АНАЛИЗ СМЕЖНОГО ЗУ ЗАВЕРШЕН ===");
         
     } catch (error) {
         console.error(error);
@@ -4725,27 +4470,20 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
 }
 
 
+
 function drawRelatedParcelSchema() {
     const canvas = document.getElementById('relatedParcelCanvas');
     const ctx = canvas.getContext('2d');
     
     if (!relatedParcelCheckData) return;
 
-    const { xmlData, egrnContour, mainContours, resultContour, hasOverlap, comparisonResults, neighboringOverlaps, otherCorrectedParcels, problemPoints } = relatedParcelCheckData;
+    const { xmlData, egrnContour, mainContours, resultContour, hasOverlap, comparisonResults, neighboringOverlaps } = relatedParcelCheckData;
 
-    // Собираем абсолютно все точки для расчета охвата схемы (масштабирования)
     const allPoints = [];
     if (egrnContour) egrnContour.forEach(c => c.forEach(p => allPoints.push(p)));
     if (mainContours) mainContours.forEach(c => c.forEach(p => allPoints.push(p)));
-    if (resultContour) {
-        resultContour.forEach(c => {
-            if (Array.isArray(c)) c.forEach(p => allPoints.push(p));
-            else allPoints.push(c);
-        });
-    }
+    if (resultContour) resultContour.forEach(c => c.forEach(p => allPoints.push(p)));
     if (neighboringOverlaps) neighboringOverlaps.forEach(no => no.contours.forEach(c => c.forEach(p => allPoints.push(p))));
-    if (otherCorrectedParcels) otherCorrectedParcels.forEach(oc => oc.contours.forEach(c => c.forEach(p => allPoints.push(p))));
-    if (problemPoints) problemPoints.forEach(p => allPoints.push(p));
 
     if (!allPoints.length) return;
 
@@ -4760,13 +4498,13 @@ function drawRelatedParcelSchema() {
 
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     allPoints.forEach(p => { 
-        if (p && p.x !== undefined && p.y !== undefined) {
+        if (p.x !== undefined && p.y !== undefined) {
             minX = Math.min(minX, p.x); maxX = Math.max(maxX, p.x); 
             minY = Math.min(minY, p.y); maxY = Math.max(maxY, p.y); 
         }
     });
     
-    const pad = 60; // Увеличенный отступ, чтобы координаты по краям не обрезались
+    const pad = 50;
     const scale = Math.min((w - pad*2) / (maxY - minY || 1), (h - pad*2) / (maxX - minX || 1)) * 0.9;
     const offX = pad + (w - pad*2 - (maxY - minY)*scale)/2;
     const offY = pad + (h - pad*2 - (maxX - minX)*scale)/2;
@@ -4796,7 +4534,7 @@ function drawRelatedParcelSchema() {
     // 1. Проектный / образуемый ЗУ из XML (Зеленый или красный при наложении)
     if (mainContours && mainContours.length > 0) {
         const color = hasOverlap ? '#ef4444' : '#10b981';
-        drawPolygonalObject(mainContours, color, 'rgba(16, 185, 129, 0.08)');
+        drawPolygonalObject(mainContours, color, 'rgba(16, 185, 129, 0.1)');
         
         const cp = toCanvas(mainContours[0][0]);
         ctx.font = 'bold 11px Arial';
@@ -4806,32 +4544,19 @@ function drawRelatedParcelSchema() {
 
     // 2. Смежный ЗУ до изменений по сведениям ЕГРН (Оранжевый пунктир)
     if (egrnContour && egrnContour.length > 0) {
-        drawPolygonalObject(egrnContour, '#f59e0b', 'rgba(245, 158, 11, 0.03)', [6, 4]);
+        drawPolygonalObject(egrnContour, '#f59e0b', 'rgba(245, 158, 11, 0.05)', [6, 4]);
     }
 
-    // 3. Другие изменяемые смежные ЗУ из XML (Розовый контур)
-    if (otherCorrectedParcels && otherCorrectedParcels.length > 0) {
-        otherCorrectedParcels.forEach(oc => {
-            drawPolygonalObject(oc.contours, '#ec4899', 'rgba(236, 72, 153, 0.08)');
-            
-            const labelText = oc.cadNumber.split(':').pop();
-            const cp = toCanvas(oc.contours[0][0]);
-            ctx.font = 'bold 11px Arial';
-            ctx.fillStyle = '#ec4899';
-            ctx.fillText(labelText + ' (изменяется)', cp.x, cp.y - 10);
-        });
-    }
-
-    // 4. Проектные новые/исправленные границы смежного ЗУ из XML (Синий сплошной)
+    // 3. Проектные новые/исправленные границы смежного ЗУ из XML (Синий сплошной)
     if (resultContour && resultContour.length > 0) {
-        drawPolygonalObject(resultContour, '#2563eb', 'rgba(37, 99, 235, 0.12)');
+        drawPolygonalObject(resultContour, '#2563eb', 'rgba(37, 99, 235, 0.15)');
     }
 
-    // 5. Сторонние соседние ЗУ из ЕГРН, на которые выявлено наложение (Красный штрих)
+    // 4. Сторонние соседние ЗУ из ЕГРН, на которые выявлено наложение (Красный штрих)
     if (neighboringOverlaps && neighboringOverlaps.length > 0) {
         neighboringOverlaps.forEach(no => {
             if (no.contours && no.contours.length > 0) {
-                drawPolygonalObject(no.contours, '#ef4444', 'rgba(239, 68, 68, 0.05)', [3, 3]);
+                drawPolygonalObject(no.contours, '#ef4444', 'rgba(239, 68, 68, 0.08)', [3, 3]);
                 
                 const cp = toCanvas(no.contours[0][0]);
                 ctx.font = 'bold 10px Arial';
@@ -4841,87 +4566,24 @@ function drawRelatedParcelSchema() {
         });
     }
 
-    // Вспомогательная функция отрисовки стандартной мелкой вершины
-    const drawSmallVertex = (p, color = '#64748b') => {
-        const cp = toCanvas(p);
-        ctx.beginPath();
-        ctx.arc(cp.x, cp.y, 2.5, 0, Math.PI*2);
-        ctx.fillStyle = color;
-        ctx.fill();
-        ctx.strokeStyle = '#fff';
-        ctx.lineWidth = 0.5;
-        ctx.stroke();
-    };
-
-    // 6. Отрисовываем мелкие стандартные вершины всех полигонов
-    if (mainContours) {
-        mainContours.forEach(c => c.forEach(p => drawSmallVertex(p, '#10b981')));
-    }
-    if (resultContour) {
-        resultContour.forEach(c => {
-            if (Array.isArray(c)) c.forEach(p => drawSmallVertex(p, '#2563eb'));
-            else drawSmallVertex(c, '#2563eb');
-        });
-    }
-    if (otherCorrectedParcels) {
-        otherCorrectedParcels.forEach(oc => oc.contours.forEach(c => c.forEach(p => drawSmallVertex(p, '#ec4899'))));
-    }
-
-    // 7. Отрисовываем БОЛЬШИЕ КРАСНЫЕ точки в местах наложений с выводом координат
-    if (problemPoints && problemPoints.length > 0) {
-        problemPoints.forEach(p => {
-            const cp = toCanvas(p);
-            
-            // Отрисовка красной точки
+    // 5. Характерные точки
+    if (xmlData.isAllBorder && comparisonResults) {
+        comparisonResults.forEach(r => {
+            const cp = toCanvas({x: r.xmlX, y: r.xmlY});
             ctx.beginPath();
-            ctx.arc(cp.x, cp.y, 5.5, 0, Math.PI*2);
-            ctx.fillStyle = '#ef4444';
-            ctx.fill();
-            ctx.strokeStyle = '#fff';
-            ctx.lineWidth = 1.5;
-            ctx.stroke();
-
-            // Координаты текстом рядом
-            ctx.font = 'bold 9px monospace';
-            ctx.fillStyle = '#b91c1c';
-            const text = `X:${p.x.toFixed(2)}\nY:${p.y.toFixed(2)}`;
-            
-            ctx.shadowColor = 'rgba(255, 255, 255, 0.95)';
-            ctx.shadowBlur = 4;
-            
-            // Разносим X и Y на две строчки для аккуратности
-            ctx.fillText(`X:${p.x.toFixed(2)}`, cp.x + 8, cp.y - 1);
-            ctx.fillText(`Y:${p.y.toFixed(2)}`, cp.x + 8, cp.y + 8);
-            
-            ctx.shadowBlur = 0; // Сбрасываем тень
-        });
-    }
-
-    // 8. Отрисовка стыковочных точек по ChangeBorder
-    if (!xmlData.isAllBorder && xmlData.junctionPoints) {
-        xmlData.junctionPoints.forEach(p => {
-            const cp = toCanvas(p);
-            ctx.beginPath(); 
-            ctx.arc(cp.x, cp.y, 4, 0, Math.PI*2); 
-            ctx.fillStyle = '#3b82f6'; 
+            ctx.arc(cp.x, cp.y, 4, 0, Math.PI*2);
+            ctx.fillStyle = r.isMatch ? '#10b981' : '#ef4444';
             ctx.fill();
             ctx.strokeStyle = '#fff';
             ctx.lineWidth = 1;
             ctx.stroke();
         });
-    }
-    
-    // Обновляем легенду
-    const legend = document.getElementById('relatedParcelLegend');
-    if (legend) {
-        legend.innerHTML = `
-            <div class="legend-item"><span class="legend-line" style="background:#10b981;"></span> Проектный ЗУ</div>
-            <div class="legend-item"><span class="legend-line dashed" style="border-color:#f59e0b;"></span> Смежный ЗУ (ЕГРН)</div>
-            <div class="legend-item"><span class="legend-line" style="background:#2563eb;"></span> Изменяемый ЗУ (Результат)</div>
-            <div class="legend-item"><span class="legend-line" style="background:#ec4899;"></span> Другой смежник из XML</div>
-            <div class="legend-item"><span class="legend-point" style="background:#ef4444; width:11px; height:11px;"></span> Точка наложения / Проблема</div>
-            <div class="legend-item"><span class="legend-point" style="background:#64748b; width:5px; height:5px;"></span> Обычная вершина</div>
-        `;
+    } else if (xmlData.junctionPoints) {
+        xmlData.junctionPoints.forEach(p => {
+            const cp = toCanvas(p);
+            ctx.beginPath(); ctx.arc(cp.x, cp.y, 4, 0, Math.PI*2); 
+            ctx.fillStyle = '#3b82f6'; ctx.fill();
+        });
     }
 }
 
@@ -6018,13 +5680,6 @@ window.addEventListener('resize', () => {
                 const spIndex = parseInt(checkChzuBoundsBtn.dataset.spIndex, 10);
                 const nspIndex = parseInt(checkChzuBoundsBtn.dataset.nspIndex, 10);
                 checkChZUBoundaries(parentCad, spIndex, nspIndex, checkChzuBoundsBtn);
-                return;
-            }
-            
-            const copyModalCoordsBtn = event.target.closest('#copyModalCoordsBtn');
-            if (copyModalCoordsBtn) {
-                event.preventDefault();
-                copyModalCoordinates();
                 return;
             }
             
