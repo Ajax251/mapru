@@ -1616,7 +1616,6 @@ let renameFileId = null;
 let storageMode = 'cloud';
 let calRefDate = new Date();
 let dragFileId = null;
-let lastSelectedId = null;
 
 const windowState = {
 explorer: { open: false, minimized: false },
@@ -1655,27 +1654,6 @@ accent: localStorage.getItem('vpc_accent') || '#0078d4',
 wallpaper: localStorage.getItem('vpc_wallpaper') || "url('img/w11.jpg')",
 autoTheme: localStorage.getItem('vpc_autotheme') === '1'
 };
-
-const dbName = 'VirtualPC_DB';
-const dbVersion = 1;
-let db = null;
-
-function initDB() {
-    return new Promise((resolve, reject) => {
-        const request = indexedDB.open(dbName, dbVersion);
-        request.onupgradeneeded = (e) => {
-            const database = e.target.result;
-            if (!database.objectStoreNames.contains('files')) {
-                database.createObjectStore('files', { keyPath: 'id' });
-            }
-        };
-        request.onsuccess = (e) => {
-            db = e.target.result;
-            resolve(db);
-        };
-        request.onerror = (e) => reject(e.target.error);
-    });
-}
 
 function hexToRgb(hex) {
 const a = ACCENTS.find(x => x.color.toLowerCase() === hex.toLowerCase());
@@ -2120,341 +2098,40 @@ e.preventDefault(); showContextMenu(e);
 document.addEventListener('click', () => { document.getElementById('ctxMenu').style.display = 'none'; });
 }
 
-
-
-async function addVirtualItemToZip(zipObj, item) {
-    if (item.type === 'folder') {
-        const folderZip = zipObj.folder(item.name);
-        const children = files.filter(f => f.parent_id === item.id);
-        for (const child of children) {
-            await addVirtualItemToZip(folderZip, child);
-        }
-    } else {
-        let fileData = null;
-        if (item.content) {
-            fileData = item.content;
-        } else if (storageMode === 'local' && item.blob_data) {
-            fileData = item.blob_data;
-        } else if (storageMode === 'local' && item.data_url) {
-            const response = await fetch(item.data_url);
-            fileData = await response.blob();
-        } else if (item.storage_path) {
-            const { data, error } = await sb.storage.from('user_files').download(item.storage_path);
-            if (!error) fileData = data;
-        }
-        if (fileData) {
-            zipObj.file(item.name, fileData);
-        }
-    }
-}
-
-
-async function downloadSelectedItems() {
-    document.getElementById('ctxMenu').style.display = 'none';
-    if (!selectedIds.length) return;
-    
-    if (selectedIds.length === 1) {
-        const f = files.find(x => x.id === selectedIds[0]);
-        if (f && f.type !== 'folder') {
-            await downloadFile(f.id);
-            return;
-        }
-    }
-    
-    showNotification('Подготовка архива...', 'bx-archive');
-    const zip = new JSZip();
-    for (let id of selectedIds) {
-        const item = files.find(x => x.id === id);
-        if (item) {
-            await addVirtualItemToZip(zip, item);
-        }
-    }
-    
-    try {
-        const content = await zip.generateAsync({
-            type: 'blob',
-            compression: 'DEFLATE',
-            compressionOptions: { level: 9 }
-        });
-        const archiveName = selectedIds.length === 1 ? (files.find(x => x.id === selectedIds[0]).name + '.zip') : 'Выбранные_файлы.zip';
-        saveAs(content, archiveName);
-        showNotification('Архив готов и скачан', 'bx-check-circle');
-    } catch (err) {
-        showNotification('Ошибка архивации', 'bx-error');
-    }
-}
-
-async function archiveSelectedToZip() {
-    document.getElementById('ctxMenu').style.display = 'none';
-    if (!selectedIds.length) return;
-    
-    showNotification('Сжатие в виртуальном ПК...', 'bx-archive');
-    const zip = new JSZip();
-    for (let id of selectedIds) {
-        const item = files.find(x => x.id === id);
-        if (item) {
-            await addVirtualItemToZip(zip, item);
-        }
-    }
-    
-    try {
-        const zipBlob = await zip.generateAsync({
-            type: 'blob',
-            compression: 'DEFLATE',
-            compressionOptions: { level: 9 }
-        });
-        
-        let defaultName = 'Архив.zip';
-        if (selectedIds.length === 1) {
-            const singleItem = files.find(x => x.id === selectedIds[0]);
-            defaultName = singleItem.name + '.zip';
-        }
-        
-        const dest = currentPath === 'trash' ? 'desktop' : currentPath;
-        const fileSize = zipBlob.size;
-        
-        if (storageMode === 'local') {
-            files.push({
-                id: 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
-                name: defaultName,
-                type: 'file',
-                parent_id: dest,
-                content: null,
-                blob_data: zipBlob,
-                size: fileSize,
-                user_id: 'local_user',
-                created_at: new Date().toISOString(),
-                updated_at: new Date().toISOString()
-            });
-            await saveLocalFiles();
-            loadFiles();
-            showNotification('Архив создан внутри ПК', 'bx-check-circle');
-        } else {
-            const path = `${currentUser.id}/${Date.now()}_${defaultName}`;
-            const { error } = await sb.storage.from('user_files').upload(path, zipBlob);
-            if (error) {
-                showNotification('Ошибка сохранения в облаке', 'bx-error');
-                return;
-            }
-            await sb.from('files').insert({
-                name: defaultName,
-                type: 'file',
-                parent_id: dest,
-                content: null,
-                storage_path: path,
-                size: fileSize,
-                user_id: currentUser.id
-            });
-            loadFiles();
-            showNotification('Архив создан внутри ПК', 'bx-check-circle');
-        }
-    } catch (err) {
-        showNotification('Ошибка архивации', 'bx-error');
-    }
-}
-
-async function unzipSelectedFile() {
-    document.getElementById('ctxMenu').style.display = 'none';
-    if (selectedIds.length !== 1) return;
-    const f = files.find(x => x.id === selectedIds[0]);
-    if (!f || !f.name.endsWith('.zip')) {
-        showNotification('Выберите один ZIP-файл', 'bx-info-circle');
-        return;
-    }
-    
-    showNotification('Распаковка архива...', 'bx-loader-alt');
-    
-    let zipBlob = null;
-    if (storageMode === 'local' && f.blob_data) {
-        zipBlob = f.blob_data;
-    } else if (storageMode === 'local' && f.data_url) {
-        const response = await fetch(f.data_url);
-        zipBlob = await response.blob();
-    } else if (f.storage_path) {
-        const { data, error } = await sb.storage.from('user_files').download(f.storage_path);
-        if (!error) zipBlob = data;
-    }
-    
-    if (!zipBlob) {
-        showNotification('Не удалось загрузить архив', 'bx-error');
-        return;
-    }
-    
-    try {
-        const zip = await JSZip.loadAsync(zipBlob);
-        const dest = currentPath === 'trash' ? 'desktop' : currentPath;
-        const createdFolders = {}; 
-        
-        const entries = Object.keys(zip.files).sort((a, b) => a.split('/').length - b.split('/').length);
-        
-        for (const relativePath of entries) {
-            const zipEntry = zip.files[relativePath];
-            const pathParts = relativePath.split('/');
-            
-            if (zipEntry.dir) {
-                const folderName = pathParts[pathParts.length - 2];
-                const folderParentPath = pathParts.slice(0, -2).join('/');
-                const parentFolderId = folderParentPath ? createdFolders[folderParentPath] : dest;
-                const uniqueFolderName = getUniqueFileName(folderName, parentFolderId);
-                
-                const folderId = 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9);
-                if (storageMode === 'local') {
-                    files.push({
-                        id: folderId,
-                        name: uniqueFolderName,
-                        type: 'folder',
-                        parent_id: parentFolderId,
-                        user_id: 'local_user',
-                        created_at: new Date().toISOString(),
-                        updated_at: new Date().toISOString()
-                    });
-                } else {
-                    const { data, error } = await sb.from('files').insert({
-                        name: uniqueFolderName,
-                        type: 'folder',
-                        parent_id: parentFolderId,
-                        user_id: currentUser.id
-                    }).select();
-                    if (!error && data && data[0]) {
-                        createdFolders[relativePath.slice(0, -1)] = data[0].id;
-                        continue;
-                    }
-                }
-                createdFolders[relativePath.slice(0, -1)] = folderId;
-            } else {
-                const fileName = pathParts[pathParts.length - 1];
-                const fileParentPath = pathParts.slice(0, -1).join('/');
-                const parentFolderId = fileParentPath ? createdFolders[fileParentPath] : dest;
-                const uniqueFileName = getUniqueFileName(fileName, parentFolderId);
-                
-                const fileBlob = await zipEntry.async('blob');
-                let type = 'file';
-                if (fileName.match(/\.(jpg|jpeg|png|gif|webp|bmp)$/i)) type = 'img';
-                else if (fileName.endsWith('.txt')) type = 'txt';
-                
-                if (storageMode === 'local') {
-                    let content = null;
-                    if (type === 'txt') {
-                        content = await zipEntry.async('string');
-                    }
-                    files.push({
-                        id: 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
-                        name: uniqueFileName,
-                        type,
-                        parent_id: parentFolderId,
-                        content,
-                        blob_data: fileBlob,
-                        size: fileBlob.size,
-                        user_id: 'local_user',
-                        created_at: new Date().toISOString(),
-                        updated_at: new Date().toISOString()
-                    });
-                } else {
-                    let storagePath = null;
-                    let content = null;
-                    if (type === 'txt' && fileBlob.size < 100000) {
-                        content = await zipEntry.async('string');
-                    } else {
-                        const path = `${currentUser.id}/${Date.now()}_${uniqueFileName}`;
-                        const { error } = await sb.storage.from('user_files').upload(path, fileBlob);
-                        if (!error) storagePath = path;
-                    }
-                    await sb.from('files').insert({
-                        name: uniqueFileName,
-                        type,
-                        parent_id: parentFolderId,
-                        content,
-                        storage_path: storagePath,
-                        size: fileBlob.size,
-                        user_id: currentUser.id
-                    });
-                }
-            }
-        }
-        
-        if (storageMode === 'local') await saveLocalFiles();
-        loadFiles();
-        showNotification('Архив успешно распакован', 'bx-check-circle');
-    } catch (err) {
-        showNotification('Ошибка распаковки архива', 'bx-error');
-    }
-}
-
-async function prepareDragDownload(el, f) {
-    if (f.type === 'folder' || el.dataset.dragUrlReady) return;
-    let mime = 'application/octet-stream';
-    if (f.type === 'txt') mime = 'text/plain';
-    else if (f.type === 'img') mime = 'image/*';
-    
-    let url = '';
-    if (f.content) {
-        url = URL.createObjectURL(new Blob([f.content], { type: mime }));
-    } else if (storageMode === 'local' && f.blob_data) {
-        url = URL.createObjectURL(f.blob_data);
-    } else if (storageMode === 'local' && f.data_url) {
-        try {
-            const res = await fetch(f.data_url);
-            const blob = await res.blob();
-            url = URL.createObjectURL(blob);
-        } catch (e) {}
-    } else if (f.storage_path) {
-        try {
-            const { data } = await sb.storage.from('user_files').createSignedUrl(f.storage_path, 3600);
-            if (data) url = data.signedUrl;
-        } catch (e) {}
-    }
-    
-    if (url) {
-        el.dataset.dragUrl = `${mime}:${f.name}:${url}`;
-        el.dataset.dragUrlReady = 'true';
-    }
-}
-
-
 function showContextMenu(e) {
-    const ctx = document.getElementById('ctxMenu');
-    const fileItem = e.target.closest('.file-item, .file-row:not(.list-header)');
-    let html = '';
-    if (fileItem) {
-        const id = fileItem.dataset.id;
-        if (!selectedIds.includes(id)) { 
-            selectItemVisual(id); 
-        }
-        const f = files.find(x => x.id === id);
-        
-        html += `<div class="ctx-item" onclick="openFileById('${id}')"><i class='bx bx-folder-open'></i> Открыть</div>`;
-        html += `<div class="ctx-item" onclick="downloadSelectedItems()"><i class='bx bx-download'></i> Скачать</div>`;
-        html += `<div class="ctx-item" onclick="archiveSelectedToZip()"><i class='bx bx-archive-out'></i> Сжать в ZIP</div>`;
-        
-        if (selectedIds.length === 1 && f && f.name.endsWith('.zip')) {
-            html += `<div class="ctx-item" onclick="unzipSelectedFile()"><i class='bx bx-archive-in'></i> Распаковать здесь</div>`;
-        }
-        
-        html += `<div class="ctx-sep"></div>`;
-        html += `<div class="ctx-item" onclick="fsCut()"><i class='bx bx-cut'></i> Вырезать</div>`;
-        html += `<div class="ctx-item" onclick="fsCopy()"><i class='bx bx-copy'></i> Копировать</div>`;
-        html += `<div class="ctx-sep"></div>`;
-        html += `<div class="ctx-item" onclick="openRenameModal('${id}')"><i class='bx bx-rename'></i> Переименовать</div>`;
-        html += `<div class="ctx-item" onclick="fsDelete()"><i class='bx bx-trash'></i> Удалить</div>`;
-    } else {
-        const canPaste = appClipboard && appClipboard.items.length > 0;
-        html += `<div class="ctx-item" onclick="openFolderModal()"><i class='bx bx-folder-plus'></i> Создать папку</div>`;
-        html += `<div class="ctx-item" onclick="document.getElementById('upl').click()"><i class='bx bx-upload'></i> Загрузить файлы</div>`;
-        html += `<div class="ctx-sep"></div>`;
-        html += `<div class="ctx-item ${canPaste ? '' : 'disabled'}" onclick="fsPaste()"><i class='bx bx-paste'></i> Вставить</div>`;
-        html += `<div class="ctx-sep"></div>`;
-        html += `<div class="ctx-item" onclick="loadFiles()"><i class='bx bx-refresh'></i> Обновить</div>`;
-    }
-    ctx.innerHTML = html;
-    ctx.style.display = 'flex';
-    const menuWidth = 210, menuHeight = ctx.offsetHeight || 200;
-    let x = e.clientX, y = e.clientY;
-    if (x + menuWidth > window.innerWidth) x = window.innerWidth - menuWidth - 10;
-    if (y + menuHeight > window.innerHeight - 48) y = window.innerHeight - menuHeight - 58;
-    ctx.style.left = x + 'px'; ctx.style.top = y + 'px';
+const ctx = document.getElementById('ctxMenu');
+const fileItem = e.target.closest('.file-item, .file-row:not(.list-header)');
+let html = '';
+if (fileItem) {
+const id = fileItem.dataset.id;
+if (!selectedIds.includes(id)) { selectedIds = [id]; renderFiles(); }
+const f = files.find(x => x.id === id);
+html += `<div class="ctx-item" onclick="openFileById('${id}')"><i class='bx bx-folder-open'></i> Открыть</div>`;
+if (f.type !== 'folder') html += `<div class="ctx-item" onclick="downloadFile('${id}')"><i class='bx bx-download'></i> Скачать</div>`;
+html += `<div class="ctx-sep"></div>`;
+html += `<div class="ctx-item" onclick="fsCut()"><i class='bx bx-cut'></i> Вырезать</div>`;
+html += `<div class="ctx-item" onclick="fsCopy()"><i class='bx bx-copy'></i> Копировать</div>`;
+html += `<div class="ctx-sep"></div>`;
+html += `<div class="ctx-item" onclick="openRenameModal('${id}')"><i class='bx bx-rename'></i> Переименовать</div>`;
+html += `<div class="ctx-item" onclick="fsDelete()"><i class='bx bx-trash'></i> Удалить</div>`;
+} else {
+const canPaste = appClipboard && appClipboard.items.length > 0;
+html += `<div class="ctx-item" onclick="openFolderModal()"><i class='bx bx-folder-plus'></i> Создать папку</div>`;
+html += `<div class="ctx-item" onclick="document.getElementById('upl').click()"><i class='bx bx-upload'></i> Загрузить файлы</div>`;
+html += `<div class="ctx-sep"></div>`;
+html += `<div class="ctx-item ${canPaste ? '' : 'disabled'}" onclick="fsPaste()"><i class='bx bx-paste'></i> Вставить</div>`;
+html += `<div class="ctx-sep"></div>`;
+html += `<div class="ctx-item" onclick="openApp('settings')"><i class='bx bx-cog'></i> Персонализация</div>`;
+html += `<div class="ctx-item" onclick="loadFiles()"><i class='bx bx-refresh'></i> Обновить</div>`;
 }
-
-
+ctx.innerHTML = html;
+ctx.style.display = 'flex';
+const menuWidth = 210, menuHeight = ctx.offsetHeight || 200;
+let x = e.clientX, y = e.clientY;
+if (x + menuWidth > window.innerWidth) x = window.innerWidth - menuWidth - 10;
+if (y + menuHeight > window.innerHeight - 48) y = window.innerHeight - menuHeight - 58;
+ctx.style.left = x + 'px'; ctx.style.top = y + 'px';
+}
 
 // ===============================================
 //  KEYBOARD SHORTCUTS
@@ -2478,153 +2155,105 @@ if (e.key === 'Escape') closeAllMenus();
 //  FILE SYSTEM
 // ===============================================
 async function loadFiles() {
-    if (!currentUser) return;
-    if (storageMode === 'local') {
-        if (!db) await initDB();
-        files = await new Promise((resolve, reject) => {
-            const transaction = db.transaction('files', 'readonly');
-            const store = transaction.objectStore('files');
-            const request = store.getAll();
-            request.onsuccess = () => resolve(request.result || []);
-            request.onerror = () => reject(request.error);
-        });
-    } else {
-        const { data, error } = await sb.from('files').select('*');
-        if (!error) files = data || [];
-    }
-    renderFiles();
+if (!currentUser) return;
+if (storageMode === 'local') {
+const stored = localStorage.getItem('wincloud_files');
+files = stored ? JSON.parse(stored) : [];
+} else {
+const { data, error } = await sb.from('files').select('*');
+if (!error) files = data || [];
+}
+renderFiles();
 }
 
-async function saveLocalFiles() {
-    if (storageMode !== 'local') return;
-    if (!db) await initDB();
-    return new Promise((resolve, reject) => {
-        const transaction = db.transaction('files', 'readwrite');
-        const store = transaction.objectStore('files');
-        store.clear();
-        for (let f of files) {
-            store.add(f);
-        }
-        transaction.oncomplete = () => resolve();
-        transaction.onerror = () => reject(transaction.error);
-    });
+function saveLocalFiles() {
+if (storageMode === 'local') localStorage.setItem('wincloud_files', JSON.stringify(files));
 }
-
 
 function renderFiles() {
-    const view = document.getElementById('file-view');
-    view.innerHTML = '';
-    const currentFiles = files.filter(f => f.parent_id === String(currentPath));
-    document.getElementById('status-count').innerText = `${currentFiles.length} элементов`;
-    document.getElementById('status-selected').innerText = selectedIds.length > 0 ? `Выбрано: ${selectedIds.length}` : '';
+const view = document.getElementById('file-view');
+view.innerHTML = '';
+const currentFiles = files.filter(f => f.parent_id === String(currentPath));
+document.getElementById('status-count').innerText = `${currentFiles.length} элементов`;
+document.getElementById('status-selected').innerText = selectedIds.length > 0 ? `Выбрано: ${selectedIds.length}` : '';
 
-    if (currentFiles.length === 0) {
-        view.innerHTML = `<div class="empty-folder"><i class='bx bx-folder-open'></i><span>Эта папка пуста</span></div>`;
-        updateBreadcrumb(); 
-        return;
-    }
+if (currentFiles.length === 0) {
+view.innerHTML = `<div class="empty-folder"><i class='bx bx-folder-open'></i><span>Эта папка пуста</span></div>`;
+updateBreadcrumb(); return;
+}
 
-    currentFiles.sort((a, b) => {
-        if (a.type === 'folder' && b.type !== 'folder') return -1;
-        if (a.type !== 'folder' && b.type === 'folder') return 1;
-        return a.name.localeCompare(b.name);
-    });
+currentFiles.sort((a, b) => {
+if (a.type === 'folder' && b.type !== 'folder') return -1;
+if (a.type !== 'folder' && b.type === 'folder') return 1;
+return a.name.localeCompare(b.name);
+});
 
-    if (viewMode === 'grid' || viewMode === 'thumbnails') {
-        const grid = document.createElement('div');
-        grid.className = 'file-grid';
-        if (viewMode === 'thumbnails') {
-            grid.style.gridTemplateColumns = 'repeat(auto-fill, minmax(110px, 1fr))';
-        }
-        currentFiles.forEach(f => {
-            const el = document.createElement('div');
-            el.className = `file-item ${selectedIds.includes(f.id) ? 'selected' : ''}`;
-            if (viewMode === 'thumbnails') {
-                el.style.width = '104px';
-                el.style.height = 'auto';
-                el.style.minHeight = '136px';
-                el.style.padding = '12px 6px 8px 6px';
-            }
-            el.dataset.id = f.id;
-            el.dataset.type = f.type;
-            el.draggable = true;
-            
-            const mediaMarkup = getThumbnailMarkup(f, viewMode);
-            el.innerHTML = `${mediaMarkup}<div class="f-name">${f.name}</div>`;
-            el.onclick = (e) => handleFileClick(e, f.id);
-            el.ondblclick = () => openFile(f);
-            attachDragHandlers(el, f);
-            grid.appendChild(el);
-        });
-        view.appendChild(grid);
-    } else {
-        const list = document.createElement('div');
-        list.className = 'file-list';
-        list.innerHTML = `<div class="file-row list-header"><div class="row-icon"></div><div class="row-name">Имя</div><div class="row-date">Дата изменения</div><div class="row-size">Размер</div></div>`;
-        currentFiles.forEach(f => {
-            const el = document.createElement('div');
-            el.className = `file-row ${selectedIds.includes(f.id) ? 'selected' : ''}`;
-            el.dataset.id = f.id;
-            el.dataset.type = f.type;
-            el.draggable = true;
-            const date = f.updated_at ? new Date(f.updated_at).toLocaleDateString('ru-RU') : '-';
-            el.innerHTML = `<div class="row-icon">${getIcon(f.type, 24)}</div><div class="row-name">${f.name}</div><div class="row-date">${date}</div><div class="row-size">${formatFileSize(f)}</div>`;
-            el.onclick = (e) => handleFileClick(e, f.id);
-            el.ondblclick = () => openFile(f);
-            attachDragHandlers(el, f);
-            list.appendChild(el);
-        });
-        view.appendChild(list);
-    }
-    updateBreadcrumb();
+if (viewMode === 'grid') {
+const grid = document.createElement('div');
+grid.className = 'file-grid';
+currentFiles.forEach(f => {
+const el = document.createElement('div');
+el.className = `file-item ${selectedIds.includes(f.id) ? 'selected' : ''}`;
+el.dataset.id = f.id;
+el.dataset.type = f.type;
+el.draggable = true;
+el.innerHTML = `${getIcon(f.type, 48)}<div class="f-name">${f.name}</div>`;
+el.onclick = (e) => handleFileClick(e, f.id);
+el.ondblclick = () => openFile(f);
+attachDragHandlers(el, f);
+grid.appendChild(el);
+});
+view.appendChild(grid);
+} else {
+const list = document.createElement('div');
+list.className = 'file-list';
+list.innerHTML = `<div class="file-row list-header"><div class="row-icon"></div><div class="row-name">Имя</div><div class="row-date">Дата изменения</div><div class="row-size">Размер</div></div>`;
+currentFiles.forEach(f => {
+const el = document.createElement('div');
+el.className = `file-row ${selectedIds.includes(f.id) ? 'selected' : ''}`;
+el.dataset.id = f.id;
+el.dataset.type = f.type;
+el.draggable = true;
+const date = f.updated_at ? new Date(f.updated_at).toLocaleDateString('ru-RU') : '-';
+el.innerHTML = `<div class="row-icon">${getIcon(f.type, 24)}</div><div class="row-name">${f.name}</div><div class="row-date">${date}</div><div class="row-size">${formatFileSize(f)}</div>`;
+el.onclick = (e) => handleFileClick(e, f.id);
+el.ondblclick = () => openFile(f);
+attachDragHandlers(el, f);
+list.appendChild(el);
+});
+view.appendChild(list);
+}
+updateBreadcrumb();
 }
 
 // ===============================================
 //  DRAG & DROP (files)
 // ===============================================
 function attachDragHandlers(el, f) {
-    el.addEventListener('mouseenter', () => prepareDragDownload(el, f));
-    el.addEventListener('pointerdown', () => prepareDragDownload(el, f));
-
-    el.addEventListener('dragstart', (e) => {
-        dragFileId = f.id;
-        if (!selectedIds.includes(f.id)) { selectedIds = [f.id]; }
-        el.classList.add('dragging-item');
-        e.dataTransfer.effectAllowed = 'copyMove';
-        try { 
-            e.dataTransfer.setData('text/plain', f.id); 
-        } catch(_) {}
-        if (el.dataset.dragUrlReady && el.dataset.dragUrl) {
-            try {
-                e.dataTransfer.setData('DownloadURL', el.dataset.dragUrl);
-            } catch(err) {}
-        }
-    });
-    
-    el.addEventListener('dragend', () => {
-        el.classList.remove('dragging-item');
-        dragFileId = null;
-        document.querySelectorAll('.drop-target').forEach(x => x.classList.remove('drop-target'));
-    });
-    
-    if (f.type === 'folder') {
-        el.addEventListener('dragover', (e) => {
-            if (dragFileId && dragFileId !== f.id) { 
-                e.preventDefault(); 
-                e.dataTransfer.dropEffect = 'move'; 
-                el.classList.add('drop-target'); 
-            }
-        });
-        el.addEventListener('dragleave', () => el.classList.remove('drop-target'));
-        el.addEventListener('drop', (e) => {
-            e.preventDefault(); 
-            e.stopPropagation();
-            el.classList.remove('drop-target');
-            if (dragFileId && dragFileId !== f.id) moveItemsTo(f.id);
-        });
-    }
+el.addEventListener('dragstart', (e) => {
+dragFileId = f.id;
+if (!selectedIds.includes(f.id)) { selectedIds = [f.id]; }
+el.classList.add('dragging-item');
+e.dataTransfer.effectAllowed = 'move';
+try { e.dataTransfer.setData('text/plain', f.id); } catch(_) {}
+});
+el.addEventListener('dragend', () => {
+el.classList.remove('dragging-item');
+dragFileId = null;
+document.querySelectorAll('.drop-target').forEach(x => x.classList.remove('drop-target'));
+});
+if (f.type === 'folder') {
+el.addEventListener('dragover', (e) => {
+if (dragFileId && dragFileId !== f.id) { e.preventDefault(); e.dataTransfer.dropEffect = 'move'; el.classList.add('drop-target'); }
+});
+el.addEventListener('dragleave', () => el.classList.remove('drop-target'));
+el.addEventListener('drop', (e) => {
+e.preventDefault(); e.stopPropagation();
+el.classList.remove('drop-target');
+if (dragFileId && dragFileId !== f.id) moveItemsTo(f.id);
+});
 }
-
+}
 
 function initExplorerDropZone() {
 // Drop internal items onto empty explorer area = current folder (no-op) — handled by folders/sidebar.
@@ -2687,78 +2316,15 @@ loadFiles();
 showNotification(`Перемещено: ${clean.length}`, 'bx-move');
 }
 
-
-
-
-function selectItemVisual(id) {
-    document.querySelectorAll('.file-item, .file-row').forEach(el => {
-        el.classList.toggle('selected', el.dataset.id === id);
-    });
-    selectedIds = [id];
-    lastSelectedId = id;
-    const statusSel = document.getElementById('status-selected');
-    if (statusSel) {
-        statusSel.innerText = 'Выбрано: 1';
-    }
-}
-
-
-
 function handleFileClick(e, id) {
-    e.stopPropagation();
-    
-    const ctx = document.getElementById('ctxMenu');
-    if (ctx) {
-        ctx.style.display = 'none';
-    }
-    
-    const fileItem = e.currentTarget;
-    const renderedItems = Array.from(document.querySelectorAll('.file-view .file-item, .file-view .file-row:not(.list-header), #file-view .file-item, #file-view .file-row:not(.list-header)'));
-    const renderedIds = renderedItems.map(el => el.dataset.id);
-    
-    if (e.shiftKey && lastSelectedId && renderedIds.includes(lastSelectedId)) {
-        const anchorIdx = renderedIds.indexOf(lastSelectedId);
-        const clickedIdx = renderedIds.indexOf(id);
-        
-        const start = Math.min(anchorIdx, clickedIdx);
-        const end = Math.max(anchorIdx, clickedIdx);
-        
-        const targetIds = renderedIds.slice(start, end + 1);
-        
-        if (!e.ctrlKey) {
-            renderedItems.forEach(el => el.classList.remove('selected'));
-            selectedIds = [];
-        }
-        
-        targetIds.forEach(targetId => {
-            if (!selectedIds.includes(targetId)) {
-                selectedIds.push(targetId);
-            }
-            const itemEl = renderedItems.find(el => el.dataset.id === targetId);
-            if (itemEl) {
-                itemEl.classList.add('selected');
-            }
-        });
-    } else if (e.ctrlKey) {
-        if (selectedIds.includes(id)) {
-            selectedIds = selectedIds.filter(x => x !== id);
-            fileItem.classList.remove('selected');
-        } else {
-            selectedIds.push(id);
-            fileItem.classList.add('selected');
-        }
-        lastSelectedId = id;
-    } else {
-        renderedItems.forEach(el => el.classList.remove('selected'));
-        selectedIds = [id];
-        fileItem.classList.add('selected');
-        lastSelectedId = id;
-    }
-    
-    const statusSel = document.getElementById('status-selected');
-    if (statusSel) {
-        statusSel.innerText = selectedIds.length > 0 ? `Выбрано: ${selectedIds.length}` : '';
-    }
+e.stopPropagation();
+if (e.ctrlKey) {
+if (selectedIds.includes(id)) selectedIds = selectedIds.filter(x => x !== id);
+else selectedIds.push(id);
+} else {
+selectedIds = [id];
+}
+renderFiles();
 }
 
 function getIcon(type, size = 48) {
@@ -2794,31 +2360,27 @@ openFileId = null;
 }
 
 async function npSave(e) {
-    if (e) e.stopPropagation();
-    closeNpMenus();
-    if (!openFileId) { npSaveAs(e); return; }
-    const val = document.getElementById('np-text').value;
-    const blobSize = new Blob([val]).size;
-    if (storageMode === 'local') {
-        const idx = files.findIndex(f => f.id === openFileId);
-        if (idx !== -1) {
-            files[idx].content = val; 
-            files[idx].size = blobSize; 
-            files[idx].updated_at = new Date().toISOString();
-            await saveLocalFiles(); 
-            showNotification('Файл сохранён', 'bx-save');
-        }
-    } else {
-        const { error } = await sb.from('files').update({ content: val, size: blobSize }).eq('id', openFileId);
-        if (error) { showNotification('Ошибка сохранения', 'bx-error'); }
-        else {
-            showNotification('Файл сохранён', 'bx-save');
-            const i = files.findIndex(f => f.id === openFileId);
-            if (i !== -1) { files[i].content = val; files[i].size = blobSize; }
-        }
-    }
+if (e) e.stopPropagation();
+closeNpMenus();
+if (!openFileId) { npSaveAs(e); return; }
+const val = document.getElementById('np-text').value;
+const blobSize = new Blob([val]).size;
+if (storageMode === 'local') {
+const idx = files.findIndex(f => f.id === openFileId);
+if (idx !== -1) {
+files[idx].content = val; files[idx].size = blobSize; files[idx].updated_at = new Date().toISOString();
+saveLocalFiles(); showNotification('Файл сохранён', 'bx-save');
 }
-
+} else {
+const { error } = await sb.from('files').update({ content: val, size: blobSize }).eq('id', openFileId);
+if (error) { showNotification('Ошибка сохранения', 'bx-error'); }
+else {
+showNotification('Файл сохранён', 'bx-save');
+const i = files.findIndex(f => f.id === openFileId);
+if (i !== -1) { files[i].content = val; files[i].size = blobSize; }
+}
+}
+}
 
 function npSaveAs(e) {
 if (e) e.stopPropagation();
@@ -2831,32 +2393,28 @@ input.focus(); input.select();
 }
 
 async function confirmSaveAs() {
-    let name = document.getElementById('saveas-input').value.trim();
-    if (!name) return;
-    if (!name.includes('.')) name += '.txt';
-    const val = document.getElementById('np-text').value;
-    const blobSize = new Blob([val]).size;
-    const parent = currentPath === 'trash' ? 'desktop' : currentPath;
-    const uniqueName = getUniqueFileName(name, parent);
-    if (storageMode === 'local') {
-        const nf = {
-            id: 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
-            name: uniqueName, type: 'txt', parent_id: parent, content: val, size: blobSize,
-            user_id: 'local_user', created_at: new Date().toISOString(), updated_at: new Date().toISOString()
-        };
-        files.push(nf); 
-        await saveLocalFiles(); 
-        openFileId = nf.id;
-        document.getElementById('notepad-title').innerText = uniqueName + ' — Блокнот';
-    } else {
-        const res = await sb.from('files').insert({ name: uniqueName, type: 'txt', parent_id: parent, content: val, size: blobSize, user_id: currentUser.id }).select();
-        if (res.data && res.data[0]) { openFileId = res.data[0].id; document.getElementById('notepad-title').innerText = uniqueName + ' — Блокнот'; }
-    }
-    closeModal('saveas-modal');
-    loadFiles();
-    showNotification('Файл сохранён как «' + uniqueName + '»', 'bx-save');
+let name = document.getElementById('saveas-input').value.trim();
+if (!name) return;
+if (!name.includes('.')) name += '.txt';
+const val = document.getElementById('np-text').value;
+const blobSize = new Blob([val]).size;
+const parent = currentPath === 'trash' ? 'desktop' : currentPath;
+if (storageMode === 'local') {
+const nf = {
+id: 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+name, type: 'txt', parent_id: parent, content: val, size: blobSize,
+user_id: 'local_user', created_at: new Date().toISOString(), updated_at: new Date().toISOString()
+};
+files.push(nf); saveLocalFiles(); openFileId = nf.id;
+document.getElementById('notepad-title').innerText = name + ' — Блокнот';
+} else {
+const res = await sb.from('files').insert({ name, type: 'txt', parent_id: parent, content: val, size: blobSize, user_id: currentUser.id }).select();
+if (res.data && res.data[0]) { openFileId = res.data[0].id; document.getElementById('notepad-title').innerText = name + ' — Блокнот'; }
 }
-
+closeModal('saveas-modal');
+loadFiles();
+showNotification('Файл сохранён как «' + name + '»', 'bx-save');
+}
 
 function closeNpMenus() { document.querySelectorAll('.np-dropdown').forEach(m => m.classList.remove('show')); }
 
@@ -2886,168 +2444,12 @@ bc.innerHTML = `<span onclick="navigate('desktop')">Рабочий стол</spa
 }
 }
 
-
-function getUniqueFileName(name, parentId) {
-    let currentName = name;
-    let counter = 1;
-    
-    const existingNames = files
-        .filter(f => String(f.parent_id) === String(parentId))
-        .map(f => f.name.toLowerCase());
-    
-    if (!existingNames.includes(currentName.toLowerCase())) {
-        return currentName;
-    }
-    
-    let base = currentName;
-    let ext = '';
-    const lastDot = currentName.lastIndexOf('.');
-    if (lastDot !== -1 && lastDot > 0) {
-        base = currentName.substring(0, lastDot);
-        ext = currentName.substring(lastDot);
-    }
-    
-    while (existingNames.includes(currentName.toLowerCase())) {
-        currentName = `${base} (${counter})${ext}`;
-        counter++;
-    }
-    return currentName;
-}
-
-function getThumbnailMarkup(f, viewMode) {
-    if (f.type === 'img') {
-        let src = '';
-        if (storageMode === 'local') {
-            if (f.blob_data) src = URL.createObjectURL(f.blob_data);
-            else if (f.data_url) src = f.data_url;
-        }
-        
-        const imgId = `thumb-${f.id}`;
-        if (storageMode === 'cloud' && f.storage_path) {
-            setTimeout(async () => {
-                const imgEl = document.getElementById(imgId);
-                if (imgEl) {
-                    const { data } = await sb.storage.from('user_files').createSignedUrl(f.storage_path, 3600);
-                    if (data) imgEl.src = data.signedUrl;
-                }
-            }, 50);
-        }
-        
-        const style = viewMode === 'thumbnails' 
-            ? 'width: 64px; height: 64px; object-fit: cover; border-radius: 4px; box-shadow: 0 1px 3px rgba(0,0,0,0.15); margin-bottom: 8px;' 
-            : 'width: 48px; height: 48px; object-fit: cover; border-radius: 3px; margin-bottom: 8px;';
-        
-        return `<img id="${imgId}" src="${src || 'img/vp.png'}" style="${style}" onerror="this.src='img/vp.png'">`;
-    }
-    return getIcon(f.type, viewMode === 'thumbnails' ? 64 : 48);
-}
-
-function initPhotoViewerButtons() {
-    const body = document.querySelector('.pv-body');
-    if (!body || body.querySelector('.pv-nav-btn')) return;
-    
-    body.style.position = 'relative';
-    
-    const prevBtn = document.createElement('div');
-    prevBtn.className = 'pv-nav-btn prev';
-    prevBtn.innerHTML = "<i class='bx bx-chevron-left'></i>";
-    prevBtn.onclick = (e) => { e.stopPropagation(); navigatePhoto(-1); };
-    
-    const nextBtn = document.createElement('div');
-    nextBtn.className = 'pv-nav-btn next';
-    nextBtn.innerHTML = "<i class='bx bx-chevron-right'></i>";
-    nextBtn.onclick = (e) => { e.stopPropagation(); navigatePhoto(1); };
-    
-    const style = document.createElement('style');
-    style.innerHTML = `
-        .pv-nav-btn {
-            position: absolute;
-            top: 50%;
-            transform: translateY(-50%);
-            width: 44px;
-            height: 44px;
-            background: rgba(0, 0, 0, 0.4);
-            color: white;
-            border-radius: 50%;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            font-size: 28px;
-            transition: background 0.2s, opacity 0.2s;
-            opacity: 0.6;
-            user-select: none;
-            z-index: 10;
-        }
-        .pv-nav-btn:hover {
-            background: rgba(0, 0, 0, 0.7);
-            opacity: 1;
-        }
-        .pv-nav-btn.prev { left: 16px; }
-        .pv-nav-btn.next { right: 16px; }
-    `;
-    document.head.appendChild(style);
-    
-    body.appendChild(prevBtn);
-    body.appendChild(nextBtn);
-}
-
-async function navigatePhoto(direction) {
-    if (!openFileId) return;
-    const currentImg = files.find(x => x.id === openFileId);
-    if (!currentImg) return;
-    
-    const parentId = currentImg.parent_id;
-    const imgFiles = files.filter(f => f.parent_id === parentId && f.type === 'img');
-    if (imgFiles.length <= 1) return;
-    
-    imgFiles.sort((a, b) => a.name.localeCompare(b.name));
-    const currentIndex = imgFiles.findIndex(f => f.id === openFileId);
-    if (currentIndex === -1) return;
-    
-    let targetIndex = currentIndex + direction;
-    if (targetIndex < 0) targetIndex = imgFiles.length - 1;
-    if (targetIndex >= imgFiles.length) targetIndex = 0;
-    
-    const targetImg = imgFiles[targetIndex];
-    await openFile(targetImg);
-}
-
-
-
-function deselectAll() {
-    selectedIds = [];
-    document.querySelectorAll('.file-item, .file-row').forEach(el => {
-        el.classList.remove('selected');
-    });
-    const statusSel = document.getElementById('status-selected');
-    if (statusSel) {
-        statusSel.innerText = '';
-    }
-}
-
-
-
+function deselectAll() { selectedIds = []; renderFiles(); }
 function toggleView() {
-    if (viewMode === 'grid') {
-        viewMode = 'list';
-    } else if (viewMode === 'list') {
-        viewMode = 'thumbnails';
-    } else {
-        viewMode = 'grid';
-    }
-    
-    const viewIcon = document.getElementById('view-icon');
-    if (viewIcon) {
-        if (viewMode === 'grid') viewIcon.className = 'bx bx-grid-alt';
-        else if (viewMode === 'list') viewIcon.className = 'bx bx-list-ul';
-        else viewIcon.className = 'bx bxs-grid';
-    }
-    renderFiles();
+viewMode = viewMode === 'grid' ? 'list' : 'grid';
+document.getElementById('view-icon').className = viewMode === 'grid' ? 'bx bx-grid-alt' : 'bx bx-list-ul';
+renderFiles();
 }
-
-
-
 function navigate(path) {
 currentPath = path; selectedIds = []; pathHistory.push(path);
 document.querySelectorAll('.side-item').forEach(el => el.classList.remove('active'));
@@ -3067,28 +2469,22 @@ renderFiles();
 function openFileById(id) { const f = files.find(x => x.id === id); if (f) openFile(f); }
 
 async function openFile(f) {
-    if (f.type === 'folder') { enterFolder(f.id); }
-    else if (f.type === 'txt') {
-        openApp('notepad');
-        document.getElementById('np-text').value = f.content || '';
-        document.getElementById('notepad-title').innerText = `${f.name} — Блокнот`;
-        openFileId = f.id;
-    } else if (f.type === 'img') {
-        openApp('photoviewer');
-        initPhotoViewerButtons();
-        document.getElementById('pv-title').innerText = f.name;
-        openFileId = f.id;
-        if (storageMode === 'local' && f.blob_data) {
-            document.getElementById('pv-img').src = URL.createObjectURL(f.blob_data);
-        } else if (storageMode === 'local' && f.data_url) {
-            document.getElementById('pv-img').src = f.data_url;
-        } else if (f.storage_path) {
-            const { data } = await sb.storage.from('user_files').createSignedUrl(f.storage_path, 3600);
-            if (data) document.getElementById('pv-img').src = data.signedUrl;
-        }
-    }
+if (f.type === 'folder') { enterFolder(f.id); }
+else if (f.type === 'txt') {
+openApp('notepad');
+document.getElementById('np-text').value = f.content || '';
+document.getElementById('notepad-title').innerText = `${f.name} — Блокнот`;
+openFileId = f.id;
+} else if (f.type === 'img') {
+openApp('photoviewer');
+document.getElementById('pv-title').innerText = f.name;
+if (storageMode === 'local' && f.data_url) document.getElementById('pv-img').src = f.data_url;
+else if (f.storage_path) {
+const { data } = await sb.storage.from('user_files').createSignedUrl(f.storage_path, 3600);
+if (data) document.getElementById('pv-img').src = data.signedUrl;
 }
-
+}
+}
 
 async function uploadFiles(e) {
 await uploadFileList(e.target.files);
@@ -3096,50 +2492,41 @@ e.target.value = '';
 }
 
 async function uploadFileList(fileList) {
-    const upFiles = Array.from(fileList);
-    if (!upFiles.length) return;
-    const dest = currentPath === 'trash' ? 'desktop' : currentPath;
-    for (let file of upFiles) {
-        const safeName = file.name.replace(/[<>:"/\\|?*]/g, '');
-        const uniqueName = getUniqueFileName(safeName, dest);
-        let type = 'file';
-        if (file.type.startsWith('image/')) type = 'img';
-        else if (file.type.includes('text') || file.name.endsWith('.txt')) type = 'txt';
-        const fileSize = file.size;
+const upFiles = Array.from(fileList);
+if (!upFiles.length) return;
+const dest = currentPath === 'trash' ? 'desktop' : currentPath;
+for (let file of upFiles) {
+const safeName = file.name.replace(/[<>:"/\\|?*]/g, '');
+let type = 'file';
+if (file.type.startsWith('image/')) type = 'img';
+else if (file.type.includes('text') || file.name.endsWith('.txt')) type = 'txt';
+const fileSize = file.size;
 
-        if (storageMode === 'local') {
-            let content = null;
-            if (type === 'txt') content = await file.text();
-            
-            files.push({
-                id: 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
-                name: uniqueName, 
-                type, 
-                parent_id: dest, 
-                content, 
-                blob_data: file, 
-                size: fileSize,
-                user_id: 'local_user', 
-                created_at: new Date().toISOString(), 
-                updated_at: new Date().toISOString()
-            });
-        } else {
-            let storagePath = null, content = null;
-            if (type === 'txt' && file.size < 100000) content = await file.text();
-            else {
-                const path = `${currentUser.id}/${Date.now()}_${uniqueName}`;
-                const { error } = await sb.storage.from('user_files').upload(path, file);
-                if (error) { showNotification('Ошибка загрузки', 'bx-error'); continue; }
-                storagePath = path;
-            }
-            await sb.from('files').insert({ name: uniqueName, type, parent_id: dest, content, storage_path: storagePath, size: fileSize, user_id: currentUser.id });
-        }
-    }
-    if (storageMode === 'local') await saveLocalFiles();
-    loadFiles();
-    showNotification(`Загружено файлов: ${upFiles.length}`, 'bx-upload');
+if (storageMode === 'local') {
+let content = null, dataUrl = null;
+if (type === 'txt') content = await file.text();
+else dataUrl = await fileToDataUrl(file);
+files.push({
+id: 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9),
+name: safeName, type, parent_id: dest, content, data_url: dataUrl, size: fileSize,
+user_id: 'local_user', created_at: new Date().toISOString(), updated_at: new Date().toISOString()
+});
+saveLocalFiles();
+} else {
+let storagePath = null, content = null;
+if (type === 'txt' && file.size < 100000) content = await file.text();
+else {
+const path = `${currentUser.id}/${Date.now()}_${safeName}`;
+const { error } = await sb.storage.from('user_files').upload(path, file);
+if (error) { showNotification('Ошибка загрузки', 'bx-error'); continue; }
+storagePath = path;
 }
-
+await sb.from('files').insert({ name: safeName, type, parent_id: dest, content, storage_path: storagePath, size: fileSize, user_id: currentUser.id });
+}
+}
+loadFiles();
+showNotification(`Загружено файлов: ${upFiles.length}`, 'bx-upload');
+}
 
 function fileToDataUrl(file) {
 return new Promise((resolve) => { const r = new FileReader(); r.onload = () => resolve(r.result); r.readAsDataURL(file); });
@@ -3162,68 +2549,55 @@ showNotification('Вырезано', 'bx-cut');
 }
 
 async function fsPaste() {
-    document.getElementById('ctxMenu').style.display = 'none';
-    if (!appClipboard || !appClipboard.items.length) return;
-    const target = currentPath;
-    if (storageMode === 'local') {
-        if (appClipboard.op === 'cut') {
-            appClipboard.items.forEach(item => { 
-                const idx = files.findIndex(f => f.id === item.id); 
-                if (idx !== -1) {
-                    const uniqueName = getUniqueFileName(item.name, target);
-                    files[idx].name = uniqueName;
-                    files[idx].parent_id = target; 
-                }
-            });
-            appClipboard = null;
-        } else {
-            appClipboard.items.forEach(item => {
-                const uniqueName = getUniqueFileName('Копия — ' + item.name, target);
-                files.push({ ...item, id: 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9), name: uniqueName, parent_id: target, created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
-            });
-        }
-        await saveLocalFiles();
-    } else {
-        if (appClipboard.op === 'cut') {
-            for (let item of appClipboard.items) {
-                const uniqueName = getUniqueFileName(item.name, target);
-                await sb.from('files').update({ parent_id: target, name: uniqueName }).eq('id', item.id);
-            }
-            appClipboard = null;
-        } else {
-            for (let item of appClipboard.items) {
-                const uniqueName = getUniqueFileName('Копия — ' + item.name, target);
-                await sb.from('files').insert({ name: uniqueName, type: item.type, parent_id: target, content: item.content, storage_path: item.storage_path, size: item.size, user_id: currentUser.id });
-            }
-        }
-    }
-    loadFiles();
-    showNotification('Вставлено', 'bx-paste');
+document.getElementById('ctxMenu').style.display = 'none';
+if (!appClipboard || !appClipboard.items.length) return;
+const target = currentPath;
+if (storageMode === 'local') {
+if (appClipboard.op === 'cut') {
+appClipboard.items.forEach(item => { const idx = files.findIndex(f => f.id === item.id); if (idx !== -1) files[idx].parent_id = target; });
+appClipboard = null;
+} else {
+appClipboard.items.forEach(item => {
+files.push({ ...item, id: 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9), name: 'Копия — ' + item.name, parent_id: target, created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+});
+}
+saveLocalFiles();
+} else {
+if (appClipboard.op === 'cut') {
+for (let item of appClipboard.items) await sb.from('files').update({ parent_id: target }).eq('id', item.id);
+appClipboard = null;
+} else {
+for (let item of appClipboard.items) {
+await sb.from('files').insert({ name: 'Копия — ' + item.name, type: item.type, parent_id: target, content: item.content, storage_path: item.storage_path, size: item.size, user_id: currentUser.id });
+}
+}
+}
+loadFiles();
+showNotification('Вставлено', 'bx-paste');
 }
 
-
 async function fsDelete() {
-    document.getElementById('ctxMenu').style.display = 'none';
-    if (!selectedIds.length) return;
-    if (storageMode === 'local') {
-        if (currentPath === 'trash') files = files.filter(f => !selectedIds.includes(f.id));
-        else files.forEach(f => { if (selectedIds.includes(f.id)) f.parent_id = 'trash'; });
-        await saveLocalFiles();
-    } else {
-        const toDel = files.filter(f => selectedIds.includes(f.id));
-        if (currentPath === 'trash') {
-            for (let f of toDel) {
-                if (f.storage_path) await sb.storage.from('user_files').remove([f.storage_path]);
-                await sb.from('files').delete().eq('id', f.id);
-            }
-        } else {
-            for (let f of toDel) await sb.from('files').update({ parent_id: 'trash' }).eq('id', f.id);
-        }
-    }
-    const n = selectedIds.length;
-    selectedIds = [];
-    loadFiles();
-    showNotification(currentPath === 'trash' ? `Удалено навсегда: ${n}` : `Перемещено в корзину: ${n}`, 'bx-trash');
+document.getElementById('ctxMenu').style.display = 'none';
+if (!selectedIds.length) return;
+if (storageMode === 'local') {
+if (currentPath === 'trash') files = files.filter(f => !selectedIds.includes(f.id));
+else files.forEach(f => { if (selectedIds.includes(f.id)) f.parent_id = 'trash'; });
+saveLocalFiles();
+} else {
+const toDel = files.filter(f => selectedIds.includes(f.id));
+if (currentPath === 'trash') {
+for (let f of toDel) {
+if (f.storage_path) await sb.storage.from('user_files').remove([f.storage_path]);
+await sb.from('files').delete().eq('id', f.id);
+}
+} else {
+for (let f of toDel) await sb.from('files').update({ parent_id: 'trash' }).eq('id', f.id);
+}
+}
+const n = selectedIds.length;
+selectedIds = [];
+loadFiles();
+showNotification(currentPath === 'trash' ? `Удалено навсегда: ${n}` : `Перемещено в корзину: ${n}`, 'bx-trash');
 }
 
 // ===============================================
@@ -3235,21 +2609,19 @@ document.getElementById('folder-modal').style.display = 'flex';
 const input = document.getElementById('folder-name-input');
 input.value = 'Новая папка'; input.focus(); input.select();
 }
-
 async function confirmCreateFolder() {
-    const name = document.getElementById('folder-name-input').value.trim();
-    if (name) {
-        const uniqueName = getUniqueFileName(name, currentPath);
-        if (storageMode === 'local') {
-            files.push({ id: 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9), name: uniqueName, type: 'folder', parent_id: currentPath, user_id: 'local_user', created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
-            await saveLocalFiles();
-        } else {
-            await sb.from('files').insert({ name: uniqueName, type: 'folder', parent_id: currentPath, user_id: currentUser.id });
-        }
-        loadFiles();
-        showNotification('Папка создана', 'bx-folder-plus');
-    }
-    closeModal('folder-modal');
+const name = document.getElementById('folder-name-input').value.trim();
+if (name) {
+if (storageMode === 'local') {
+files.push({ id: 'local_' + Date.now() + '_' + Math.random().toString(36).substr(2, 9), name, type: 'folder', parent_id: currentPath, user_id: 'local_user', created_at: new Date().toISOString(), updated_at: new Date().toISOString() });
+saveLocalFiles();
+} else {
+await sb.from('files').insert({ name, type: 'folder', parent_id: currentPath, user_id: currentUser.id });
+}
+loadFiles();
+showNotification('Папка создана', 'bx-folder-plus');
+}
+closeModal('folder-modal');
 }
 
 function openRenameModal(id) {
@@ -3261,85 +2633,59 @@ document.getElementById('rename-modal').style.display = 'flex';
 const input = document.getElementById('rename-input');
 input.value = f.name; input.focus(); input.select();
 }
-
-
 async function confirmRename() {
-    const newName = document.getElementById('rename-input').value.trim();
-    if (newName && renameFileId) {
-        const f = files.find(x => x.id === renameFileId);
-        if (f) {
-            const uniqueName = getUniqueFileName(newName, f.parent_id);
-            if (storageMode === 'local') {
-                const idx = files.findIndex(f => f.id === renameFileId);
-                if (idx !== -1) { files[idx].name = uniqueName; files[idx].updated_at = new Date().toISOString(); await saveLocalFiles(); }
-            } else {
-                await sb.from('files').update({ name: uniqueName }).eq('id', renameFileId);
-            }
-        }
-        loadFiles();
-        showNotification('Переименовано', 'bx-rename');
-    }
-    renameFileId = null;
-    closeModal('rename-modal');
+const newName = document.getElementById('rename-input').value.trim();
+if (newName && renameFileId) {
+if (storageMode === 'local') {
+const idx = files.findIndex(f => f.id === renameFileId);
+if (idx !== -1) { files[idx].name = newName; files[idx].updated_at = new Date().toISOString(); saveLocalFiles(); }
+} else {
+await sb.from('files').update({ name: newName }).eq('id', renameFileId);
+}
+loadFiles();
+showNotification('Переименовано', 'bx-rename');
+}
+renameFileId = null;
+closeModal('rename-modal');
 }
 
 // ===============================================
 //  DOWNLOAD
 // ===============================================
 async function downloadFile(id) {
-    document.getElementById('ctxMenu').style.display = 'none';
-    const f = files.find(x => x.id === id);
-    if (!f) return;
-    let url;
-    if (f.content) {
-        url = URL.createObjectURL(new Blob([f.content], { type: 'text/plain' }));
-    } else if (storageMode === 'local' && f.blob_data) {
-        url = URL.createObjectURL(f.blob_data);
-    } else if (storageMode === 'local' && f.data_url) {
-        url = f.data_url;
-    } else if (f.storage_path) {
-        const { data } = await sb.storage.from('user_files').download(f.storage_path);
-        url = URL.createObjectURL(data);
-    }
-    if (url) {
-        const a = document.createElement('a');
-        a.href = url; a.download = f.name; a.click();
-        if (!url.startsWith('data:')) URL.revokeObjectURL(url);
-    }
+document.getElementById('ctxMenu').style.display = 'none';
+const f = files.find(x => x.id === id);
+if (!f) return;
+let url;
+if (f.content) url = URL.createObjectURL(new Blob([f.content], { type: 'text/plain' }));
+else if (storageMode === 'local' && f.data_url) url = f.data_url;
+else if (f.storage_path) { const { data } = await sb.storage.from('user_files').download(f.storage_path); url = URL.createObjectURL(data); }
+if (url) {
+const a = document.createElement('a');
+a.href = url; a.download = f.name; a.click();
+if (!url.startsWith('data:')) URL.revokeObjectURL(url);
+}
 }
 
-
-
 async function downloadAllData() {
-    if (!files.length) { showNotification('Нет файлов для скачивания', 'bx-info-circle'); return; }
-    const zip = new JSZip();
-    showNotification('Архивация...', 'bx-archive');
-    async function addFolderToZip(zipFolder, parentId) {
-        const items = files.filter(f => f.parent_id === parentId);
-        for (const item of items) {
-            if (item.type === 'folder') { 
-                await addFolderToZip(zipFolder.folder(item.name), item.id); 
-            } else {
-                if (item.content) {
-                    zipFolder.file(item.name, item.content);
-                } else if (storageMode === 'local' && item.blob_data) {
-                    zipFolder.file(item.name, item.blob_data);
-                } else if (storageMode === 'local' && item.data_url) { 
-                    const r = await fetch(item.data_url); 
-                    zipFolder.file(item.name, await r.blob()); 
-                } else if (item.storage_path) { 
-                    const { data } = await sb.storage.from('user_files').download(item.storage_path); 
-                    if (data) zipFolder.file(item.name, data); 
-                }
-            }
-        }
-    }
-    for (let root of ['desktop', 'documents', 'downloads', 'images']) {
-        await addFolderToZip(zip.folder(root), root);
-    }
-    const content = await zip.generateAsync({ type: 'blob' });
-    saveAs(content, 'MyCloudData.zip');
-    showNotification('Архив готов', 'bx-check-circle');
+if (!files.length) { showNotification('Нет файлов для скачивания', 'bx-info-circle'); return; }
+const zip = new JSZip();
+showNotification('Архивация...', 'bx-archive');
+async function addFolderToZip(zipFolder, parentId) {
+const items = files.filter(f => f.parent_id === parentId);
+for (const item of items) {
+if (item.type === 'folder') { await addFolderToZip(zipFolder.folder(item.name), item.id); }
+else {
+if (item.content) zipFolder.file(item.name, item.content);
+else if (storageMode === 'local' && item.data_url) { const r = await fetch(item.data_url); zipFolder.file(item.name, await r.blob()); }
+else if (item.storage_path) { const { data } = await sb.storage.from('user_files').download(item.storage_path); if (data) zipFolder.file(item.name, data); }
+}
+}
+}
+for (let root of ['desktop', 'documents', 'downloads', 'images']) await addFolderToZip(zip.folder(root), root);
+const content = await zip.generateAsync({ type: 'blob' });
+saveAs(content, 'MyCloudData.zip');
+showNotification('Архив готов', 'bx-check-circle');
 }
 
 // ===============================================
