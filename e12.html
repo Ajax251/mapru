@@ -4056,14 +4056,31 @@ body:has(#parcel-results-sidebar.collapsed:not(.hidden)) .google-sv-btn {
                 <input type="checkbox" id="toggleHeightLabel" onchange="toggleCameraHeightLabelVisibility()">
             </div>
             <!-- КОНЕЦ НОВОЙ НАСТРОЙКИ -->
-            <button class="gradient-button" onclick="openGradientModal()">
-                <i class="fas fa-palette"></i>
-            </button>
-             <!-- СЮДА можно добавить input для thematicCostColor, если нужно -->
-             <!-- <div class="style-setting">
-                 <label>Цвет (Стоимость):</label>
-                 <input type="color" id="thematicCostColorInputId" onchange="updatePolygonStyle()">
-             </div> -->
+            <div style="display: flex; gap: 10px; margin-top: 15px; width: 100%;">
+                <button class="gradient-button" onclick="openGradientModal()" style="flex: 1; margin-top: 0; height: 38px;">
+                    <i class="fas fa-palette"></i> 
+                </button>
+                <button onclick="resetAppLocalStorage()" style="
+                    flex: 1;
+                    padding: 8px 16px;
+                    background: linear-gradient(135deg, #FF2C2C, #B20000);
+                    color: white;
+                    border: none;
+                    border-radius: 8px;
+                    cursor: pointer;
+                    font-size: 14px;
+                    font-weight: bold;
+                    transition: all 0.3s ease;
+                    display: flex;
+                    align-items: center;
+                    justify-content: center;
+                    gap: 8px;
+                    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.2);
+                    height: 38px;
+                " onmouseenter="this.style.transform='translateY(-1px)'" onmouseleave="this.style.transform='translateY(0)'">
+                    <i class="fas fa-sync-alt"></i> 
+                </button>
+            </div>
         </div>
     </div>
 
@@ -5345,26 +5362,41 @@ const STORAGE_API_URL = 'https://mapruapp.ru/storage';
 const BUCKET_NAME = 'kpt';
 
 const supabaseUrl = 'https://vznsatvyikahngdfvqho.supabase.co'; 
-const supabaseAnonKey = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ6bnNhdHZ5aWthaG5nZGZ2cWhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDU0MjM3MDMsImV4cCI6MjA2MDk5OTcwM30.FJmk0lgIjqvcdV7p6C0riaxqS9QWKAuIHDZtkMYMJe4';
+const supabaseAnonKey = 'sb_publishable_M9OBRzcvRjcWrtJtKekyAQ_dAQdfhED';
 
-const FORCE_SUPABASE_PROXY = 1; 
+
+const FORCE_SUPABASE_PROXY = 2; 
 const VERCEL_SUPABASE_PROXY = 'https://supred.vercel.app/supabase-api';
+const MAPRU_SUPABASE_PROXY = 'https://mapruapp.ru/api/sync';
 
 const { createClient } = supabase;
 
 const fallbackFetch = async (url, options) => {
-    // 1. Если включен принудительный прокси (1) -> сразу отправляем через Vercel
+   
     if (FORCE_SUPABASE_PROXY === 1) {
         const originalUrl = new URL(url);
         const proxyUrl = `${VERCEL_SUPABASE_PROXY}${originalUrl.pathname}${originalUrl.search}`;
         return fetch(proxyUrl, options);
     }
 
-    // 2. Если прокси выключен (0) -> пробуем напрямую с таймаутом 5 секунд
+   
+    if (FORCE_SUPABASE_PROXY === 2) {
+        const originalUrl = new URL(url);
+        const proxyUrl = `${MAPRU_SUPABASE_PROXY}${originalUrl.pathname}${originalUrl.search}`;
+        
+      
+        const newOptions = { ...options };
+        const headers = new Headers(newOptions.headers || {});
+        headers.set('x-sync-host', 'https://vznsatvyikahngdfvqho.supabase.co');
+        newOptions.headers = headers;
+
+        return fetch(proxyUrl, newOptions);
+    }
+
+    
     const controller = new AbortController();
     let isTimeoutTriggered = false;
 
-    // Ставим таймаут 5000 мс (5 сек)
     const timeoutId = setTimeout(() => {
         isTimeoutTriggered = true;
         controller.abort(); 
@@ -7265,6 +7297,224 @@ function generateKmlForPolyline(polylineObject, placemarkName) {
 
 
 
+async function exportVisibleToGeoredaсtorWithRaster() {
+    console.log("=== [МСК + РАСТР] Начат процесс экспорта (Скриншот-подложка) ===");
+    try {
+        const bounds = map.getBounds();
+        if (!bounds) {
+            console.error("[МСК + РАСТР] Ошибка: Не удалось получить границы карты bounds");
+            showNotification('Не удалось определить границы экрана', 'error');
+            return;
+        }
+
+        const screenBbox = [
+            Math.min(bounds[0][1], bounds[1][1]), 
+            Math.min(bounds[0][0], bounds[1][0]), 
+            Math.max(bounds[0][1], bounds[1][1]), 
+            Math.max(bounds[0][0], bounds[1][0])
+        ];
+        console.log("[МСК + РАСТР] Границы экрана WGS84 (screenBbox):", screenBbox);
+
+        // 1. ОПРЕДЕЛЕНИЕ СИСТЕМЫ МСК И СМЕЩЕНИЙ
+        const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
+        const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destSc);
+        if (!destSystem || !destSystem.def) {
+            throw new Error(`Определение для ${destSc} не найдено в sk.js`);
+        }
+
+        let offsetX = 0, offsetY = 0;
+        if (localStorage.getItem('autoLoadMskOffset') !== 'false') {
+            offsetX = destSystem.offsetX || 0;
+            offsetY = destSystem.offsetY || 0;
+        } else {
+            offsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
+            offsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
+        }
+
+        proj4.defs(destSc, destSystem.def);
+
+        const convertWgsToMskSingle = (lat, lon) => {
+            const [trueLat, trueLon] = getTrueWgs84Coords(lat, lon);
+            const mskPoint = proj4("EPSG:4326", destSc, [trueLon, trueLat]);
+            const x = mskPoint[1] + offsetX;
+            const y = mskPoint[0] + offsetY;
+            return [x, y];
+        };
+
+        // Подготавливаем базовые географические координаты углов экрана
+        let boundsTL_lat = bounds[1][0]; // maxLat (Верх)
+        let boundsTL_lon = bounds[0][1]; // minLon (Лево)
+        let boundsBR_lat = bounds[0][0]; // minLat (Низ)
+        let boundsBR_lon = bounds[1][1]; // maxLon (Право)
+
+        // Если активен слой Google, прибавляем отрицательный сдвиг для верного смещения подложки
+        if (typeof isGoogleLayerActive !== 'undefined' && isGoogleLayerActive) {
+            const dLat = (typeof kmlMapOffsetY !== 'undefined' ? kmlMapOffsetY : 0) * 0.000008983;
+            const dLon = (typeof kmlMapOffsetX !== 'undefined' ? kmlMapOffsetX : 0) * 0.000008983;
+            boundsTL_lat += dLat; // Прибавление отрицательного числа сдвигает на запад/север
+            boundsTL_lon += dLon;
+            boundsBR_lat += dLat;
+            boundsBR_lon += dLon;
+            console.log("[МСК + РАСТР] В расчет углов подложки добавлено смещение Google:", { dLat, dLon });
+        }
+
+        // Вычисляем координаты углов экрана в МСК для геопривязки растра
+        const mskTL = convertWgsToMskSingle(boundsTL_lat, boundsTL_lon);
+        const mskBR = convertWgsToMskSingle(boundsBR_lat, boundsBR_lon);
+        console.log("[МСК + РАСТР] Координаты углов экрана в МСК:", { topLeft: mskTL, bottomRight: mskBR });
+
+        showLoader('Снимок подложки экрана...');
+
+        // 2. ВРЕМЕННО СКРЫВАЕМ ВЕКТОРНЫЕ ОБЪЕКТЫ ДЛЯ ЧИСТОГО СНИМКА ПОДЛОЖКИ
+        console.log("[МСК + РАСТР] Временное скрытие векторов для снимка подложки...");
+        const hiddenObjects = [];
+        map.geoObjects.each(obj => {
+            // Скрываем все векторные объекты (полигоны, линии, маркеры), кроме пользовательской растровой подложки (если она есть)
+            if (obj !== rasterOverlay && obj.options && obj.options.get('visible') !== false) {
+                obj.options.set('visible', false);
+                hiddenObjects.push(obj);
+            }
+        });
+
+        // 3. ДЕЛАЕМ СНИМОК КАРТЫ С ПОМОЩЬЮ HTML2CANVAS (как в F10)
+        console.log("[МСК + РАСТР] Запуск генерации скриншота через html2canvas...");
+        const mapElement = document.getElementById('map');
+        let base64Image = null;
+
+        try {
+            const canvas = await html2canvas(mapElement, {
+                useCORS: true,
+                allowTaint: true,
+                logging: false,
+                width: mapElement.clientWidth,
+                height: mapElement.clientHeight,
+                scrollX: 0,
+                scrollY: 0,
+                ignoreElements: (element) => {
+                    // Скрываем копирайты Яндекса на снимке
+                    if (typeof element.className === 'string') {
+                        return element.className.includes('-copyright') || 
+                               element.className.includes('-gototech') || 
+                               element.className.includes('-gotoymaps');
+                    }
+                    return false;
+                }
+            });
+            base64Image = canvas.toDataURL('image/jpeg', 0.85);
+            console.log("[МСК + РАСТР] Скриншот успешно создан. Длина строки Base64:", base64Image.length);
+        } catch (canvasErr) {
+            console.error("[МСК + РАСТР] Ошибка при создании снимка карты:", canvasErr);
+        }
+
+        // ВОССТАНАВЛИВАЕМ ВИДИМОСТЬ ВЕКТОРОВ
+        console.log("[МСК + РАСТР] Восстановление видимости векторов на карте...");
+        hiddenObjects.forEach(obj => obj.options.set('visible', true));
+
+        // 4. СБОР И ОБРЕЗКА ВЕКТОРНЫХ ДАННЫХ
+        console.log("[МСК + РАСТР] Сбор и обрезка видимых векторов...");
+        const allDrawableObjects = new Set([...polygons, ...areaObjects]);
+        const objectsToConvert = Array.from(allDrawableObjects).filter(obj => 
+            obj instanceof ymaps.Polygon || obj instanceof ymaps.Polyline
+        );
+
+        const vectorsList = [];
+        let objectCounter = 1;
+
+        for (const targetObject of objectsToConvert) {
+            let identifier = null;
+            let turfFeature;
+
+            if (targetObject instanceof ymaps.Polygon) {
+                const rings = targetObject.geometry.getCoordinates();
+                const geoJsonCoords = rings.map(ring => ring.map(c => [c[1], c[0]])); 
+                turfFeature = turf.polygon(geoJsonCoords);
+            } else { 
+                const coords = targetObject.geometry.getCoordinates();
+                const geoJsonCoords = coords.map(c => [c[1], c[0]]);
+                turfFeature = turf.lineString(geoJsonCoords);
+            }
+
+            const clipped = turf.bboxClip(turfFeature, screenBbox);
+            const geometry = clipped.geometry;
+            if (!geometry || geometry.coordinates.length === 0) continue; 
+
+            identifier = targetObject.properties.get('cadastralNumber');
+            if (!identifier) {
+                const featureData = targetObject.properties.get('featureData');
+                if (featureData && featureData.properties) {
+                    identifier = featureData.properties.descr || 
+                                 featureData.properties.options?.reg_numb_border || 
+                                 featureData.properties.options?.cad_num || 
+                                 featureData.properties.options?.cad_number;
+                }
+            }
+            if (!identifier) {
+                let hint = targetObject.properties.get('hintContent');
+                if (hint) {
+                    if (typeof hint === 'object' && hint.cadastralNumber) identifier = hint.cadastralNumber;
+                    else if (typeof hint === 'string') identifier = hint.replace(/<[^>]*>?/gm, '').trim();
+                }
+            }
+            if (!identifier) {
+                identifier = (targetObject instanceof ymaps.Polygon) ? `Объект_${objectCounter++}` : `Линия_${objectCounter++}`;
+            }
+            identifier = String(identifier).replace(/[\r\n]+/g, ' ').trim();
+
+            let coordsToProcess = [];
+            if (geometry.type === 'Polygon') coordsToProcess = geometry.coordinates;
+            else if (geometry.type === 'MultiPolygon') geometry.coordinates.forEach(p => coordsToProcess.push(...p));
+            else if (geometry.type === 'LineString') coordsToProcess = [geometry.coordinates];
+            else if (geometry.type === 'MultiLineString') coordsToProcess = geometry.coordinates;
+
+            for (const ring of coordsToProcess) {
+                if (ring.length === 0) continue;
+
+                const wgs84Coords = ring.map(coord => {
+                    const [trueLat, trueLon] = getTrueWgs84Coords(coord[1], coord[0]);
+                    return [trueLon, trueLat];
+                });
+
+                const mskCoordsText = convertWgs84ToMskWithOffset(wgs84Coords, destSc, destSystem.def, offsetX, offsetY);
+                if (mskCoordsText) {
+                    vectorsList.push({
+                        name: identifier,
+                        coords: mskCoordsText
+                    });
+                }
+            }
+        }
+        console.log(`[МСК + РАСТР] Обработано векторов для экспорта: ${vectorsList.length}`);
+
+        // 5. СБОРКА ИТОГОВОГО JSON ПАКЕТА И ОТПРАВКА В БУФЕР ОБМЕНА
+        const payload = {
+            type: "GeoredactorWithRaster",
+            mskSystem: destSystem.text,
+            vectors: vectorsList,
+            raster: base64Image ? {
+                image: base64Image,
+                boundsMsk: {
+                    topLeft: mskTL,
+                    bottomRight: mskBR
+                }
+            } : null
+        };
+
+        const jsonString = JSON.stringify(payload);
+        await navigator.clipboard.writeText(jsonString);
+        console.log("[МСК + РАСТР] Итоговый JSON успешно записан в буфер обмена.");
+
+        showNotification('Данные векторов и подложки скопированы!', 'success', 'check-circle');
+        window.open('editor.html', '_blank');
+
+    } catch (error) {
+        console.error("[МСК + РАСТР] Критическая ошибка в функции экспорта:", error);
+        showNotification(`Ошибка: ${error.message}`, 'error', 'exclamation-circle');
+    } finally {
+        hideLoader();
+    }
+}
+
+
 // ИЗМЕНЕННАЯ ФУНКЦИЯ exportAllMapObjectsToKml
 function exportAllMapObjectsToKml() {
     if (!map) {
@@ -8762,12 +9012,23 @@ map.events.add('click', function (e) {
         <div class="custom-context-menu-item" id="convert-visible-msk-menu-item">
             <i class="fas fa-crop-alt"></i>Видимые в МСК
         </div>
+        
+     
+
         <div class="custom-context-menu-item" id="georedaсtor-all-objects-menu-item">
             <i class="fas fa-drafting-compass"></i>ГеоРедактор
         </div>
+
+   
+
+
         <div class="custom-context-menu-item" id="georedaсtor-visible-menu-item">
             <i class="fas fa-crop"></i>Видимые в ГеоРедактор
         </div>
+
+<div class="custom-context-menu-item" id="georedaсtor-raster-menu-item">
+    <i class="fas fa-image"></i>Геоснимок
+</div>
         <div class="custom-context-menu-item" id="quarter-msk-xml-menu-item">
             <i class="fas fa-file-archive"></i>ЗУ в XML КПТ
         </div>
@@ -8918,6 +9179,12 @@ if (event.target.id === 'select-objects-rect-menu-item' || event.target.closest(
     } else {
         generateLinearObjectReport(targetObject); // Если нашли конкретную, отчет для нее
     }
+}
+
+
+if (event.target.id === 'georedaсtor-raster-menu-item' || event.target.closest('#georedaсtor-raster-menu-item')) {
+    contextMenu.style.display = 'none';
+    await exportVisibleToGeoredaсtorWithRaster();
 }
 
 
@@ -30442,7 +30709,7 @@ function saveToRecentMsk(scValue) {
     localStorage.setItem('recentMskSystems', JSON.stringify(recent));
 }
 
-// Отрисовка кнопок-тегов недавних систем координат
+
 function renderRecentMskTags(container, select) {
     if (!container || !select) return;
     container.innerHTML = '';
@@ -30466,25 +30733,28 @@ function renderRecentMskTags(container, select) {
         const system = COORDINATE_SYSTEMS.find(s => s.value === value);
         if (!system) return;
         
-        // Форматируем отображаемое имя (например, убираем длинное описание в скобках)
+        // Форматируем отображаемое имя (убираем длинное описание в скобках)
         const shortName = system.text.split('(')[0].trim().replace('зона ', 'з.');
         
-        const tag = document.createElement('button');
+        const tag = document.createElement('div');
         tag.className = 'msk-tag';
-        tag.textContent = shortName;
-        tag.title = system.text;
         tag.style.cssText = `
+            display: inline-flex;
+            align-items: center;
+            gap: 6px;
             font-size: 0.72rem;
             padding: 4px 10px;
             background: rgba(255, 255, 255, 0.45);
             border: 1px solid rgba(0, 0, 0, 0.12);
             border-radius: 12px;
-            cursor: pointer;
+            cursor: default;
             transition: all 0.2s ease;
             color: #2c3e50;
             font-weight: 500;
+            user-select: none;
         `;
         
+        // Наведение на сам тег (подсвечивание плашки)
         tag.addEventListener('mouseenter', () => {
             tag.style.backgroundColor = 'rgba(255, 255, 255, 0.75)';
             tag.style.transform = 'translateY(-1px)';
@@ -30494,12 +30764,66 @@ function renderRecentMskTags(container, select) {
             tag.style.transform = 'translateY(0)';
         });
         
-        // Клик по тегу меняет значение в select и запускает обновление смещений
-        tag.addEventListener('click', (e) => {
-            e.stopPropagation();
+        // Область с текстом названия МСК (клик по ней выбирает МСК и перезагружает страницу)
+        const textSpan = document.createElement('span');
+        textSpan.textContent = shortName;
+        textSpan.title = system.text;
+        textSpan.style.cssText = `
+            cursor: pointer;
+        `;
+        textSpan.addEventListener('click', (e) => {
             select.value = value;
             select.dispatchEvent(new Event('change'));
+            
+            // Перезагрузка страницы с небольшой задержкой для надежного сохранения настроек
+            setTimeout(() => {
+                window.location.reload();
+            }, 150);
         });
+        tag.appendChild(textSpan);
+        
+        // Красный крестик для удаления элемента из списка
+        const deleteSpan = document.createElement('span');
+        deleteSpan.textContent = '×';
+        deleteSpan.title = 'Удалить из недавних';
+        deleteSpan.style.cssText = `
+            cursor: pointer;
+            color: #ef4444;
+            font-weight: bold;
+            font-size: 0.95rem;
+            padding: 0 2px;
+            line-height: 1;
+            transition: transform 0.15s ease, color 0.15s ease;
+            display: inline-block;
+        `;
+        
+        deleteSpan.addEventListener('mouseenter', () => {
+            deleteSpan.style.color = '#dc2626';
+            deleteSpan.style.transform = 'scale(1.25)';
+        });
+        deleteSpan.addEventListener('mouseleave', () => {
+            deleteSpan.style.color = '#ef4444';
+            deleteSpan.style.transform = 'scale(1)';
+        });
+        
+        deleteSpan.addEventListener('click', (e) => {
+            e.stopPropagation(); // Предотвращаем срабатывание клика по плашке выбора
+            
+            // Извлекаем текущий список, удаляем выбранную систему и перезаписываем
+            let updatedRecent = [];
+            try {
+                updatedRecent = JSON.parse(localStorage.getItem('recentMskSystems')) || [];
+            } catch (err) {
+                updatedRecent = [];
+            }
+            
+            updatedRecent = updatedRecent.filter(item => item !== value);
+            localStorage.setItem('recentMskSystems', JSON.stringify(updatedRecent));
+            
+            // Мгновенная перерисовка списка в окне
+            renderRecentMskTags(container, select);
+        });
+        tag.appendChild(deleteSpan);
         
         container.appendChild(tag);
     });
@@ -30549,10 +30873,10 @@ function openMskConverterModal() {
             <span style="font-size: 0.75rem; color: #444; font-weight: bold; text-align: left; margin-left: 5px;">Недавние:</span>
             <div id="recent-msk-tags" style="display: flex; flex-wrap: wrap; gap: 6px;"></div>
         </div>
-        <textarea id="msk-templates-input" 
+      <textarea id="msk-templates-input" 
                   placeholder="текст_поиска_МСК;префикс_Y;префикс_X \nнапример: 16-2;22;3" 
-                  title="Автоопределение по шаблону: текст для поиска в названии МСК;префикс Y;префикс X (каждый с новой строки)"
-                  style="width: 100%; min-height: 100px; margin-top: 15px; padding: 10px; border-radius: 12px; border: 1px solid rgba(0,0,0,0.1); font-family: monospace; resize: vertical; box-sizing: border-box; background: rgba(255, 255, 255, 0.7);"
+                  title="Автоопределение по шаблону..."
+                  style="display: none; width: 100%; min-height: 100px; margin-top: 15px; padding: 10px; border-radius: 12px; border: 1px solid rgba(0,0,0,0.1); font-family: monospace; resize: vertical; box-sizing: border-box; background: rgba(255, 255, 255, 0.7);"
         ></textarea>
     `;
 
@@ -30631,6 +30955,7 @@ function openMskConverterModal() {
 
     // Первоначальное заполнение полей смещения при открытии окна
     updateOffsetFields();
+        renderRecentMskTags(recentTagsContainer, select); 
 
     // --- ОБРАБОТЧИКИ СОБЫТИЙ ---
     
@@ -31879,6 +32204,65 @@ document.addEventListener('DOMContentLoaded', () => {
     }
 });
 
+// Функция точечного сброса всех данных только приложения "Карта"
+function resetAppLocalStorage() {
+    if (!confirm('Вы действительно хотите сбросить настройки?')) {
+        return;
+    }
+
+    // Полный реестр ключей, используемых данным веб-приложением
+    const keysToRemove = [
+        'polygonColor', 
+        'polygonWidth', 
+        'parcelsColor', 
+        'declaredParcelsColor',
+        'buildingsColor', 
+        'structuresColor', 
+        'thematicCostColor',
+        'thematicRegistrationDateColor1', 
+        'thematicRegistrationDateColor2',
+        'isGlobalFillActive', 
+        'manualObjectOpacity', 
+        'loadedObjectOpacity',
+        'mapOffsetX', 
+        'mapOffsetY', 
+        'kmlMapOffsetX', 
+        'kmlMapOffsetY',
+        'isCameraHeightLabelVisible', 
+        'openGoogleEarthAfterExport', 
+        'nearbySearchRadius',
+        'savedDefaultMskSystem', 
+        'autoLoadMskOffset', 
+        'savedMskOffsetX', 
+        'savedMskOffsetY',
+        'isStreetViewActive', 
+        'mapMode', 
+        'moOffsetsCache', 
+        'isAutoMoOffsetEnabled',
+        'widgetGradientColors', 
+        'widgetFontColor', 
+        'searchHistory', 
+        'city',
+        'mapCenter', 
+        'mapZoom', 
+        'mskConverterMode', 
+        'mskCoordinateTemplates',
+        'panoMinWidth', 
+        'panoMinHeight', 
+        'recentMskSystems'
+    ];
+
+    // Удаляем только наши системные ключи
+    keysToRemove.forEach(key => localStorage.removeItem(key));
+
+    // Уведомляем пользователя и перезагружаем страницу для применения изменений
+    showNotification('Настройки сброшены. Страница перезагружается...', 'info', 'sync-alt', 3500);
+    
+    setTimeout(() => {
+        window.location.reload();
+    }, 1500);
+}
+
 // ==========================================
 //  ИНСТРУМЕНТЫ ИЗМЕРЕНИЯ
 // ==========================================
@@ -32244,6 +32628,9 @@ function onMeasureDblClick(e) {
     measureState.activePolygon = null;
     stopMeasurement();
 }
+
+
+
 
 
 
@@ -33649,6 +34036,9 @@ function finishRectSelection(p1, p2) {
     rectSelectionState.active = false;
     rectSelectionState.p1 = null;
 }
+
+
+
 
 // Применение интерактивной фильтрации
 function applyAccessFilter() {
