@@ -6399,28 +6399,23 @@ function parseSchemaXml(xmlString) {
             });
             
             // Извлекаем Разрешенное использование (ВРИ)
-          const utilNode = parcel.querySelector('Utilization');
-let utilization = '';
-if (utilNode) {
-    utilization = utilNode.getAttribute('ByDoc') || 
-                  utilNode.getAttribute('Utilization') || 
-                  (utilNode.querySelector('ByDocument') ? utilNode.querySelector('ByDocument').textContent : '') ||
-                  utilNode.textContent.trim();
-}
-
-// Извлекаем Категорию земель (ДОБАВЛЕНО)
-const categoryNode = parcel.querySelector('Category');
-let category = categoryNode ? (categoryNode.getAttribute('Category') || '') : '';
-
-if (contours.length > 0) {
-    parcels.push({
-        contours: contours,
-        utilization: utilization,
-        category: category // Сохраняем категорию
-    });
-} else {
-    console.warn(`В участке схемы №${idx + 1} не найдены координаты.`);
-}
+            const utilNode = parcel.querySelector('Utilization');
+            let utilization = '';
+            if (utilNode) {
+                utilization = utilNode.getAttribute('ByDoc') || 
+                              utilNode.getAttribute('Utilization') || 
+                              (utilNode.querySelector('ByDocument') ? utilNode.querySelector('ByDocument').textContent : '') ||
+                              utilNode.textContent.trim();
+            }
+            
+            if (contours.length > 0) {
+                parcels.push({
+                    contours: contours,
+                    utilization: utilization
+                });
+            } else {
+                console.warn(`В участке схемы №${idx + 1} не найдены координаты.`);
+            }
         });
         
         console.log("Извлеченные данные из схемы:", parcels);
@@ -7015,7 +7010,110 @@ function runTechPlanValidation(xmlDoc, xmlText) {
     
     
     
+ // --- ПРОВЕРКА СОВПАДЕНИЯ СО СХЕМОЙ (Schema*.zip) ---
+        console.log("=== ЗАПУСК ПРОВЕРКИ СХЕМЫ ===");
+        const newParcelsNodes = Array.from(xmlDoc.querySelectorAll('NewParcel'));
+        console.log(`Образуемых участков (NewParcel) в основном XML: ${newParcelsNodes.length}`);
+        console.log(`Статус загрузки схемы (isSchemaZipFound): ${isSchemaZipFound}`);
+        
+        if (newParcelsNodes.length > 0) {
+            if (!isSchemaZipFound) {
+                console.log("Предупреждение: Архив схемы не найден, но есть образуемые участки.");
+                messages.push(`
+                    <div class="validation-message validation-warning" style="align-items:flex-start;">
+                        ${sectionIcons.warningIcon}
+                        <div>
+                            <strong>Схема расположения:</strong> В загруженном архиве не найден файл <code>Schema*.zip</code>.<br>
+                            <span style="font-size:0.9em;">Для образуемых участков рекомендуется прикладывать электронную XML-схему расположения.</span>
+                        </div>
+                    </div>`);
+            } else if (!parsedSchemaParcels || parsedSchemaParcels.length === 0) {
+                console.log("Ошибка: Архив схемы найден, но распарсить участки из него не удалось.");
+                messages.push(`
+                    <div class="validation-message validation-error" style="align-items:flex-start;">
+                        ${sectionIcons.errorIcon}
+                        <div>
+                            <strong>Ошибка Схемы расположения:</strong> Файл <code>Schema*.zip</code> найден, но внутри него не удалось прочитать XML или не найдены координаты участков.
+                        </div>
+                    </div>`);
+            } else {
+                let allMatch = true;
+                let errorDetails = [];
 
+                // Вспомогательная функция для нормализации текста
+                const normalizeText = (text) => {
+                    if (!text) return '';
+                    return text.toLowerCase().replace(/[\s.,;:"'«»\-]/g, '');
+                };
+
+                console.log("Начинаем сравнение координат и ВРИ...");
+                newParcelsNodes.forEach((node, index) => {
+                    const defNode = node.querySelector('Definition');
+                    const blockNode = node.querySelector('CadastralBlock');
+                    const def = node.getAttribute('Definition') || (defNode ? defNode.textContent : null) || (blockNode ? blockNode.textContent : `ЗУ${index + 1}`);
+                    
+                    const mainContours = extractContoursFromNode(node);
+                    
+                    // Извлекаем ВРИ из МП (NewParcel)
+                    const mainVriNode = node.querySelector('PermittedUseEstablished, PermittedUsesLand > PermittedUseEstablished');
+                    const mainVri = mainVriNode ? (mainVriNode.getAttribute('ByDocument') || mainVriNode.textContent.trim()) : '';
+
+                    let matchedSchemaParcel = null;
+
+                    const matchFound = parsedSchemaParcels.some((schemaParcel, schemaIdx) => {
+                        // Поддержка и старого массива, и нового объекта:
+                        const schemaContours = Array.isArray(schemaParcel) ? schemaParcel : (schemaParcel.contours || []);
+                        
+                        const isMatch = doContoursMatch(mainContours, schemaContours);
+                        if (isMatch) {
+                            matchedSchemaParcel = schemaParcel;
+                        }
+                        return isMatch;
+                    });
+
+                    if (!matchFound) {
+                        allMatch = false;
+                        errorDetails.push(`Координаты участка <b>${def}</b> не совпадают с координатами в Схеме расположения.`);
+                        console.warn(`❌ Несовпадение координат для ЗУ '${def}'!`);
+                    } else if (matchedSchemaParcel && !Array.isArray(matchedSchemaParcel)) {
+                        // Если координаты совпали, проверяем Разрешенное использование
+                        const normMainVri = normalizeText(mainVri);
+                        const normSchemaVri = normalizeText(matchedSchemaParcel.utilization);
+
+                        if (normMainVri && normSchemaVri && normMainVri !== normSchemaVri) {
+                            allMatch = false;
+                            errorDetails.push(`Разрешенное использование участка <b>${def}</b> различается!<br>В МП: <i>"${mainVri}"</i><br>В Схеме: <i>"${matchedSchemaParcel.utilization}"</i>`);
+                        }
+                    }
+                });
+
+                if (allMatch) {
+                     messages.push(`
+                        <div class="validation-message validation-success">
+                            ${sectionIcons.successIcon} 
+                            <strong>Схема расположения:</strong> Координаты и виды разрешенного использования всех образуемых участков совпадают с данными в XML схеме (Schema*.zip).
+                        </div>`);
+                } else {
+                     messages.push(`
+                        <div class="validation-message validation-error" style="align-items:flex-start;">
+                            ${sectionIcons.errorIcon}
+                            <div>
+                                <strong>Найдены ошибки (расхождения) в приложенной Схеме расположения Schema*.zip!</strong><br>
+                                <span style="font-size:0.9em;">${errorDetails.join('<br><br>')}</span>
+                            </div>
+                        </div>`);
+                }
+            }
+        } else if (isSchemaZipFound) {
+            console.log("Инфо: Архив схемы загружен, но образуемых участков в XML нет.");
+            messages.push(`
+                <div class="validation-message" style="background:#f0f9ff; border:1px solid #bae6fd; color:#0369a1; align-items:flex-start;">
+                    <i class="fas fa-info-circle"></i>
+                    <div>
+                        <strong>Схема расположения обнаружена:</strong> Файл <code>Schema*.zip</code> загружен, однако в основном документе нет образуемых участков (<code>NewParcel</code>). Проверка контуров пропущена.
+                    </div>
+                </div>`);
+        }
          
     // Проверка на несоответствия (AI)
     const contradictionHtml = `
@@ -7767,7 +7865,7 @@ function runValidation(xmlDoc, xmlText) {
     console.log("=== НАЧАЛО RUNVALIDATION ===");
     let messages = [];
     
-  // --- 1. ПРОВЕРКА СОВПАДЕНИЯ СО СХЕМОЙ (Schema*.zip) ---
+    // --- 1. ПРОВЕРКА СОВПАДЕНИЯ СО СХЕМОЙ (Schema*.zip) ---
     const newParcelsNodes = Array.from(xmlDoc.querySelectorAll('NewParcel'));
     
     if (newParcelsNodes.length > 0) {
@@ -7791,7 +7889,6 @@ function runValidation(xmlDoc, xmlText) {
         } else {
             let allMatch = true;
             let errorDetails = [];
-            let matchedDetails = []; // Массив для красивого вывода совпавших данных
 
             const normalizeText = (text) => {
                 if (!text) return '';
@@ -7807,16 +7904,10 @@ function runValidation(xmlDoc, xmlText) {
                 const mainVriNode = node.querySelector('PermittedUseEstablished, PermittedUsesLand > PermittedUseEstablished');
                 const mainVri = mainVriNode ? (mainVriNode.getAttribute('ByDocument') || mainVriNode.textContent.trim()) : '';
 
-                // Получаем категорию из основного XML Межевого плана
-                const mainCategoryNode = node.querySelector('Category');
-                const mainCategoryCode = mainVriNode ? mainCategoryNode?.getAttribute('Category') : null;
-                const mainCategoryName = landCategories[mainCategoryCode] || 'Не установлена';
-
                 let matchedSchemaParcel = null;
 
                 const matchFound = parsedSchemaParcels.some((schemaParcel) => {
-                    const schemaContours = Array.isArray(schemaParcel) ? schemaParcel : (schemaParcel.contours || []);
-                    const isMatch = doContoursMatch(mainContours, schemaContours);
+                    const isMatch = doContoursMatch(mainContours, schemaParcel.contours);
                     if (isMatch) {
                         matchedSchemaParcel = schemaParcel;
                     }
@@ -7827,7 +7918,6 @@ function runValidation(xmlDoc, xmlText) {
                     allMatch = false;
                     errorDetails.push(`Координаты участка <b>${def}</b> не совпадают с координатами в Схеме расположения.`);
                 } else if (matchedSchemaParcel) {
-                    // Сравнение ВРИ
                     const normMainVri = normalizeText(mainVri);
                     const normSchemaVri = normalizeText(matchedSchemaParcel.utilization);
 
@@ -7835,38 +7925,23 @@ function runValidation(xmlDoc, xmlText) {
                         allMatch = false;
                         errorDetails.push(`Разрешенное использование участка <b>${def}</b> различается!<br>В МП: <i>"${mainVri}"</i><br>В Схеме: <i>"${matchedSchemaParcel.utilization}"</i>`);
                     }
-
-                    // Сравнение Категории земель
-                    const schemaCatCode = matchedSchemaParcel.category || '';
-                    const schemaCatName = landCategories[schemaCatCode] || 'Не установлена';
-
-                    if (mainCategoryCode !== schemaCatCode) {
-                        allMatch = false;
-                        errorDetails.push(`Категория земель участка <b>${def}</b> различается!<br>В МП: <i>"${mainCategoryName}"</i> (<code>${mainCategoryCode}</code>)<br>В Схеме: <i>"${schemaCatName}"</i> (<code>${schemaCatCode}</code>)`);
-                    } else {
-                        // Обязательно добавляем информацию о выбранной категории для привлечения внимания пользователя
-                        matchedDetails.push(`Участок <b>${def}</b>: категория совпадает — <span style="background-color: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; padding: 2px 6px; border-radius: 4px; font-weight: bold;">"${mainCategoryName}"</span>`);
-                    }
                 }
             });
 
             if (allMatch) {
                  messages.push(`
-                    <div class="validation-message validation-success" style="flex-direction: column; align-items: flex-start; gap: 6px;">
-                        <div>${sectionIcons.successIcon} <strong>Схема расположения:</strong> Координаты, виды разрешенного использования и категории земель всех образуемых участков полностью совпадают со Схемой (Schema*.zip).</div>
-                        ${matchedDetails.length > 0 ? `<div style="margin-top: 6px; font-size: 0.9em; padding-left: 32px; line-height: 1.5;">${matchedDetails.join('<br>')}</div>` : ''}
+                    <div class="validation-message validation-success">
+                        ${sectionIcons.successIcon} 
+                        <strong>Схема расположения:</strong> Координаты и вид разрешенного использования всех образуемых участков полностью совпадают со Схемой (Schema*.zip).
                     </div>`);
             } else {
                  messages.push(`
-                    <div class="validation-message validation-error" style="align-items:flex-start; flex-direction: column;">
-                        <div style="display: flex; align-items: center; gap: 12px;">
-                            ${sectionIcons.errorIcon}
-                            <strong>Найдены расхождения с приложенной Схемой расположения (Schema*.zip)!</strong>
+                    <div class="validation-message validation-error" style="align-items:flex-start;">
+                        ${sectionIcons.errorIcon}
+                        <div>
+                            <strong>Найдены расхождения с приложенной Схемой расположения (Schema*.zip)!</strong><br>
+                            <span style="font-size:0.9em;">${errorDetails.join('<br><br>')}</span>
                         </div>
-                        <div style="font-size:0.9em; margin-top: 8px; padding-left: 36px; line-height: 1.5; width: 100%;">
-                            ${errorDetails.join('<br><br>')}
-                        </div>
-                        ${matchedDetails.length > 0 ? `<div style="margin-top: 12px; padding-top: 8px; border-top: 1px dashed #fca5a5; font-size: 0.9em; padding-left: 36px; width: 100%;"><strong>Успешные совпадения:</strong><br>${matchedDetails.join('<br>')}</div>` : ''}
                     </div>`);
             }
         }
