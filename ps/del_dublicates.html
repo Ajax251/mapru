@@ -1,0 +1,243 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Анализатор дубликатов файлов</title>
+    <style>
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: #f4f6f8;
+            color: #333;
+            margin: 0;
+            padding: 20px;
+        }
+        .container {
+            max-width: 1100px;
+            margin: 0 auto;
+            background: #fff;
+            padding: 25px;
+            border-radius: 8px;
+            box-shadow: 0 4px 10px rgba(0,0,0,0.08);
+        }
+        h1 {
+            font-size: 22px;
+            margin-top: 0;
+            color: #222;
+            border-bottom: 1px solid #eaeaea;
+            padding-bottom: 10px;
+        }
+        p {
+            font-size: 14px;
+            color: #666;
+            line-height: 1.5;
+        }
+        .grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 20px;
+            margin-top: 15px;
+        }
+        .full-width {
+            grid-column: span 2;
+        }
+        label {
+            display: block;
+            font-weight: 600;
+            margin-bottom: 5px;
+            font-size: 14px;
+        }
+        textarea {
+            width: 100%;
+            height: 220px;
+            font-family: Consolas, Monaco, monospace;
+            font-size: 13px;
+            padding: 10px;
+            box-sizing: border-box;
+            border: 1px solid #ccc;
+            border-radius: 4px;
+            background-color: #fafafa;
+            resize: vertical;
+        }
+        button {
+            background-color: #007bff;
+            color: #fff;
+            border: none;
+            padding: 10px 20px;
+            font-size: 14px;
+            font-weight: bold;
+            border-radius: 4px;
+            cursor: pointer;
+            transition: background-color 0.2s;
+        }
+        button:hover {
+            background-color: #0056b3;
+        }
+        button:disabled {
+            background-color: #cccccc;
+            cursor: not-allowed;
+        }
+        .btn-download {
+            background-color: #28a745;
+        }
+        .btn-download:hover {
+            background-color: #218838;
+        }
+        .error-box {
+            background-color: #fff3cd;
+            border: 1px solid #ffeeba;
+            color: #856404;
+            padding: 10px;
+            border-radius: 4px;
+            margin-top: 15px;
+            display: none;
+        }
+    </style>
+</head>
+<body>
+
+<div class="container">
+    <h1>Анализатор дубликатов файлов (по дате в имени)</h1>
+    <p>
+        Вставьте список имен файлов в левое поле. Программа распознает дату в формате <code>ГГГГ-ММ-ДД</code> в имени каждого файла, 
+        оставит только самую свежую версию для каждого префикса, а устаревшие добавит в список на удаление и сгенерирует исполняемый файл <code>.bat</code>.
+    </p>
+
+    <div class="grid">
+        <div>
+            <label for="inputArea">Исходный список файлов:</label>
+            <textarea id="inputArea" placeholder="Вставьте список строк сюда, например:&#10;10_11_123456 2025-01-01.zip&#10;10_11_123456 2026-01-01.zip"></textarea>
+            <button onclick="processFiles()">Анализировать список</button>
+        </div>
+
+        <div>
+            <label for="keepArea">Останутся (самые новые):</label>
+            <textarea id="keepArea" readonly placeholder="Здесь появятся файлы, которые сохраняются..."></textarea>
+        </div>
+
+        <div>
+            <label for="deleteArea">Будут удалены (устаревшие):</label>
+            <textarea id="deleteArea" readonly placeholder="Здесь появятся файлы для удаления..."></textarea>
+        </div>
+
+        <div>
+            <label for="batArea">Содержимое .BAT файла:</label>
+            <textarea id="batArea" readonly placeholder="Здесь появится готовый скрипт для удаления..."></textarea>
+            <div style="margin-top: 10px;">
+                <button id="downloadBtn" class="btn-download" disabled>Скачать .bat файл</button>
+            </div>
+        </div>
+
+        <div id="unparsedWrapper" class="full-width error-box">
+            <strong>Внимание!</strong> Следующие строки не соответствуют шаблону (пропущены при анализе):
+            <textarea id="unparsedArea" style="height: 100px; margin-top: 10px;" readonly></textarea>
+        </div>
+    </div>
+</div>
+
+<script>
+function processFiles() {
+    const input = document.getElementById('inputArea').value;
+    const lines = input.split(/\r?\n/);
+    
+    const groups = {};
+    const unparsed = [];
+    
+    // Регулярное выражение ищет дату вида ГГГГ-ММ-ДД (например, 2021-08-10) в строке.
+    // Группа 1 ($1) — всё, что идет до даты (префикс).
+    // Группа 2 ($2) — сама дата.
+    const regex = /^(.*?)\s+(\d{4}-\d{2}-\d{2})/;
+    
+    lines.forEach(line => {
+        const trimmed = line.trim();
+        if (!trimmed) return;
+        
+        const match = trimmed.match(regex);
+        if (match) {
+            const prefix = match[1].trim();
+            const dateStr = match[2];
+            
+            if (!groups[prefix]) {
+                groups[prefix] = [];
+            }
+            groups[prefix].push({
+                original: trimmed,
+                dateStr: dateStr,
+                // Преобразуем дату в миллисекунды для корректного сравнения
+                dateVal: new Date(dateStr).getTime()
+            });
+        } else {
+            unparsed.push(trimmed);
+        }
+    });
+    
+    const keep = [];
+    const remove = [];
+    
+    for (const prefix in groups) {
+        const list = groups[prefix];
+        
+        // Сортируем список файлов внутри группы по дате по убыванию (новые идут первыми)
+        list.sort((a, b) => b.dateVal - a.dateVal);
+        
+        // Первый элемент после сортировки — самый новый, его оставляем
+        keep.push(list[0].original);
+        
+        // Все последующие файлы в группе отправляем на удаление
+        for (let i = 1; i < list.length; i++) {
+            remove.push(list[i].original);
+        }
+    }
+    
+    // Вывод результатов в текстовые поля
+    document.getElementById('keepArea').value = keep.join('\n');
+    document.getElementById('deleteArea').value = remove.join('\n');
+    
+    // Генерация bat-скрипта
+    // chcp 65001 включает поддержку кодировки UTF-8 в консоли Windows
+    let batContent = '@echo off\r\nchcp 65001 > nul\r\n';
+    if (remove.length > 0) {
+        remove.forEach(filename => {
+            batContent += `del "${filename}"\r\n`;
+        });
+    } else {
+        batContent += 'echo Нет файлов для удаления.\r\n';
+    }
+    batContent += 'pause\r\n';
+    
+    document.getElementById('batArea').value = batContent;
+    
+    // Настройка кнопки скачивания .bat файла
+    const downloadBtn = document.getElementById('downloadBtn');
+    if (remove.length > 0) {
+        downloadBtn.disabled = false;
+        downloadBtn.onclick = function() {
+            // Используем Blob для скачивания файла с кодировкой UTF-8 без BOM
+            const blob = new Blob([batContent], { type: 'text/plain;charset=utf-8' });
+            const url = URL.createObjectURL(blob);
+            const a = document.createElement('a');
+            a.href = url;
+            a.download = 'delete_old_files.bat';
+            document.body.appendChild(a);
+            a.click();
+            document.body.removeChild(a);
+            URL.revokeObjectURL(url);
+        };
+    } else {
+        downloadBtn.disabled = true;
+    }
+
+    // Отображение нераспознанных строк, если они есть
+    const unparsedArea = document.getElementById('unparsedArea');
+    const unparsedWrapper = document.getElementById('unparsedWrapper');
+    if (unparsed.length > 0) {
+        unparsedArea.value = unparsed.join('\n');
+        unparsedWrapper.style.display = 'block';
+    } else {
+        unparsedWrapper.style.display = 'none';
+    }
+}
+</script>
+
+</body>
+</html>
