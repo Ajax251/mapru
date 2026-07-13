@@ -5365,7 +5365,7 @@ function getPreciseOverlapAreaMsk(wgsTurfPoly1, wgsTurfPoly2, mskSystem) {
 }
 
 async function performOverlapCheck(button) {
-    const type = button.dataset.type; // 'new', 'exist' или 'tp'
+    const type = button.dataset.type; // 'new' или 'exist'
     const index = parseInt(button.dataset.index, 10);
     const originalHtml = button.innerHTML;
     
@@ -5373,31 +5373,14 @@ async function performOverlapCheck(button) {
     button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Анализ...</span>';
 
     try {
-        // 1. Ищем нужный узел и извлекаем его параметры и контуры
+        // 1. Ищем нужный узел и извлекаем контуры
         let targetNode;
         let targetCadNum = null;
         let areaInGKN = null;
         let parentCadNums = []; 
         let cadastralBlock = null;
 
-        if (type === 'tp') {
-            const building = E(lastXmlDoc, 'NewBuilding, ExistBuilding');
-            const construction = E(lastXmlDoc, 'NewConstruction, ExistConstruction');
-            const flat = E(lastXmlDoc, 'NewFlat, ExistFlat');
-            const room = E(lastXmlDoc, 'NewRoom, ExistRoom');
-            const uncompleted = E(lastXmlDoc, 'NewUncompleted, ExistUncompleted');
-            targetNode = building || construction || flat || room || uncompleted;
-            
-            if (!targetNode) throw new Error("Не удалось найти объект технического плана.");
-
-            cadastralBlock = T(targetNode, 'CadastralBlock, CadastralBlocks > CadastralBlock');
-            targetCadNum = A(targetNode, 'CadastralNumber') || T(targetNode, 'CadastralNumber');
-            currentMskSystem = detectMskSystem(cadastralBlock || targetCadNum);
-            
-            // Извлекаем родительские земельные участки под ОКС для их отображения
-            const parentNodes = All(targetNode, 'ParentCadastralNumbers > CadastralNumber, ParentCadastralNumbers CadastralNumber');
-            parentCadNums = Array.from(parentNodes).map(n => n.textContent.trim().toLowerCase());
-        } else if (type === 'new') {
+        if (type === 'new') {
             targetNode = All(lastXmlDoc, 'NewParcel')[index];
             cadastralBlock = T(targetNode, 'CadastralBlock');
             currentMskSystem = detectMskSystem(cadastralBlock);
@@ -5440,7 +5423,7 @@ async function performOverlapCheck(button) {
 
         // 3. Формируем геометрию для поиска в НСПД (переводим МСК -> 3857)
         const searchPolygons3857 = [];
-        let allWgsPoints = []; // Для автоматического расчета масштаба Bbox
+        let allWgsPoints = []; // Для Bbox
         
         const xmlContoursWgs = xmlContoursMsk.map(ring => {
             const wgsRing = [];
@@ -5458,7 +5441,7 @@ async function performOverlapCheck(button) {
             return wgsRing;
         });
 
-        // Отправляем пространственный запрос в API НСПД
+        // Отправляем запрос в НСПД
         const requestBody = {
             "geom": { 
                 "type": "FeatureCollection", 
@@ -5473,7 +5456,7 @@ async function performOverlapCheck(button) {
         const nspdData = await response.json();
         const nspdFeatures = nspdData.features || [];
 
-        // --- ЗАПРОС КВАРТАЛА ИЗ ЕГРН (НСПД) ---
+        // --- ЗАПРОС КВАРТАЛА ИЗ ЕГРН ---
         let quarterGeoJsonWgs84 = null;
         let quarterFetchError = null;
 
@@ -5509,31 +5492,30 @@ async function performOverlapCheck(button) {
 
         // 4. Математический анализ (Turf.js)
         const reportItems = [];
-        const egrnPolygonsRenderData = []; // Набор данных для отрисовки
+        const egrnPolygonsRenderData = []; // Для отрисовки
         
-        // Превращаем первый контур объекта в Turf полигон для проверки вхождения
+        // Превращаем XML контур в Turf полигон для точных проверок (на WGS84)
         const xmlTurfPoly = turf.polygon([xmlContoursWgs[0]]); 
 
         // --- ПРОВЕРКА ПОПАДАНИЯ В КВАРТАЛ ---
         if (quarterGeoJsonWgs84) {
             const qTurfPoly = turf.polygon([quarterGeoJsonWgs84.rings[0]]); // Берем внешний контур квартала
             
-            // Используем геодезическую функцию МСК для планарного вычисления площадей
-            const parcelArea = getPreciseOverlapAreaMsk(xmlTurfPoly, xmlTurfPoly, currentMskSystem); 
+            // Используем геодезическую функцию МСК
+            const parcelArea = getPreciseOverlapAreaMsk(xmlTurfPoly, xmlTurfPoly, currentMskSystem); // Пересечение с самим собой дает точную площадь
             const overlapArea = getPreciseOverlapAreaMsk(xmlTurfPoly, qTurfPoly, currentMskSystem);
             
             const percentage = (overlapArea / parcelArea) * 100;
-            const objectWord = type === 'tp' ? 'Объект' : 'Участок';
             
             if (percentage > 99.9) {
-                reportItems.push(`<div class="overlap-item success"><b>Квартал ${cadastralBlock}</b>${objectWord} полностью находится в границах заявленного кадастрового квартала.</div>`);
+                reportItems.push(`<div class="overlap-item success"><b>Квартал ${cadastralBlock}</b>Участок полностью находится в границах заявленного кадастрового квартала.</div>`);
             } else if (percentage > 0) {
-                reportItems.push(`<div class="overlap-item error"><b>ОШИБКА: Квартал ${cadastralBlock}</b>${objectWord} выходит за границы квартала! (В квартале находится лишь ${percentage.toFixed(1)}% площади).</div>`);
+                reportItems.push(`<div class="overlap-item error"><b>ОШИБКА: Квартал ${cadastralBlock}</b>Участок выходит за границы квартала! (В квартале находится лишь ${percentage.toFixed(1)}% площади участка).</div>`);
             } else {
-                reportItems.push(`<div class="overlap-item error"><b>ОШИБКА: Квартал ${cadastralBlock}</b>${objectWord} <b>ПОЛНОСТЬЮ ВНЕ</b> границ заявленного кадастрового квартала!</div>`);
+                reportItems.push(`<div class="overlap-item error"><b>ОШИБКА: Квартал ${cadastralBlock}</b>Участок <b>ПОЛНОСТЬЮ ВНЕ</b> границ заявленного кадастрового квартала!</div>`);
             }
             
-            egrnPolygonsRenderData.push(quarterGeoJsonWgs84); // Передаем квартал для рендеринга
+            egrnPolygonsRenderData.push(quarterGeoJsonWgs84); // Добавляем квартал для отрисовки на холсте
         } else if (cadastralBlock && cadastralBlock !== '—') {
             reportItems.push(`<div class="overlap-item warning"><b>Квартал ${cadastralBlock}</b>. Не удалось загрузить геометрию квартала (${quarterFetchError}), проверка нахождения в квартале пропущена.</div>`);
         }
@@ -5559,12 +5541,12 @@ async function performOverlapCheck(button) {
                 });
             });
 
-            const egrnTurfPoly = turf.polygon([fWgsRings[0]]);
+            const egrnTurfPoly = turf.polygon([fWgsRings[0]]); // Берем внешний контур
             
-            // Если кадастровый номер совпадает с нашим уточняемым ЗУ
+            // Если КН совпадает с нашим уточняемым
             if (targetCadNum && fCadNum === targetCadNum) {
                 let statusClass = 'success';
-                let msg = `<b>${fCadNum}</b> (Исходный ЗУ в ЕГРН). Площадь по сведениям ЕГРН: ${fArea} кв.м.`;
+                let msg = `<b>${fCadNum}</b> (Исходный ЕГРН). Площадь в ЕГРН: ${fArea} кв.м.`;
                 
                 if (!isNaN(areaInGKN) && Math.abs(areaInGKN - fArea) > 1) {
                     statusClass = 'warning';
@@ -5578,52 +5560,52 @@ async function performOverlapCheck(button) {
                 continue;
             }
             
-            // Если ЗУ является родительским (для ТП) или исходным (для МП)
-            const isParentZu = (type === 'tp' || type === 'new') && fCadNum && parentCadNums.includes(fCadNum.toLowerCase());
-            if (isParentZu) {
-                let statusClass = 'success';
-                let typeText = type === 'tp' ? 'Родительский земельный участок' : 'Исходный земельный участок';
-                let msg = `<b>${fCadNum}</b> (${typeText}).<br><span style="font-size:0.9em;">Объект правомерно располагается в границах этого ЗУ. Площадь ЗУ в ЕГРН: ${fArea} кв.м.</span>`;
-                reportItems.push(`<div class="overlap-item ${statusClass}">${msg}</div>`);
+            if (type === 'new' && fCadNum && parentCadNums.includes(fCadNum.toLowerCase())) {
+                let msg = `<b>${fCadNum}</b> (Исходный земельный участок).<br><span style="font-size:0.9em;">Участок образуется из данного ЗУ. Площадь в ЕГРН: ${fArea} кв.м.</span>`;
+                reportItems.push(`<div class="overlap-item success">${msg}</div>`);
                 
+                // Рендерим его как 'self' (серый пунктир), чтобы он был виден как фон, но не как красная ошибка
                 egrnPolygonsRenderData.push({ rings: fWgsRings, type: 'self', cadNum: fCadNum });
                 continue;
             }
 
-            // Проверка планарного пересечения с неродственными земельными участками
+            // Если КН другой — проверяем наложение
+            // Сразу используем геодезическую функцию (в МСК)
             const overlapArea = getPreciseOverlapAreaMsk(xmlTurfPoly, egrnTurfPoly, currentMskSystem);
 
-            // Минимальный порог пересечения площадей в 1 кв. см
+            // Порог 0.0001 кв.м. (1 кв. см) ловит микро-наложения, игнорируя только математические микро-погрешности <= 0
             if (overlapArea >= 0.0001) {
+                // Проверяем, есть ли он в смежниках/исправляемых участках
                 const isRelated = relatedCadNumbers.includes(fCadNum.toLowerCase());
+                
                 let statusClass = isRelated ? 'warning' : 'error';
                 
+                // Если наложение очень мелкое (меньше 0.01 кв.м), показываем его в квадратных сантиметрах для наглядности
                 let overlapText = overlapArea < 0.01 
                     ? `~${(overlapArea * 10000).toFixed(1)} кв.см.` 
                     : `~${overlapArea.toFixed(2)} кв.м.`;
 
-                let msg = `<b>${fCadNum}</b> Пересечение площади: ${overlapText}`;
+                let msg = `<b>${fCadNum}</b> Наложение: ${overlapText}`;
                 
                 if (isRelated) {
-                    msg += `<br>Участок указан в XML как смежный/исправляемый. Границы корректируются.`;
+                    msg += `<br>Участок указан в XML как смежный/исправляемый. Граница корректируется.`;
                 } else {
-                    let errWord = type === 'tp' ? 'Объект пересекает границы' : 'Участок накладывается на';
-                    msg += `<br><b>ОШИБКА:</b> ${errWord} участок, который <b>НЕ УКАЗАН</b> в XML как смежный или родительский!`;
+                    msg += `<br><b>ОШИБКА:</b> Участок пересекается, но <b>НЕ УКАЗАН</b> в XML как смежный/исправляемый!`;
                 }
 
                 reportItems.push(`<div class="overlap-item ${statusClass}">${msg}</div>`);
                 egrnPolygonsRenderData.push({ rings: fWgsRings, type: 'overlap', cadNum: fCadNum });
             } else {
-                // Добавляем свободного соседа без наложения на схему
+                // Просто сосед (без наложения)
                 egrnPolygonsRenderData.push({ rings: fWgsRings, type: 'neighbor', cadNum: fCadNum });
             }
         }
 
         if (reportItems.length === 0) {
-            reportItems.push(`<div class="overlap-item success"><b>Отлично!</b> Пересечений со сторонними участками в ЕГРН не обнаружено.</div>`);
+            reportItems.push(`<div class="overlap-item success"><b>Отлично!</b> Наложений на другие участки в основном квартале не обнаружено.</div>`);
         }
 
-        // Сохраняем итоговые структуры для рендеринга на HTML5 холсте
+        // Сохраняем данные для Canvas
         currentOverlapRenderData = {
             xmlRingsWgs: xmlContoursWgs,
             egrnPolygons: egrnPolygonsRenderData,
@@ -5631,7 +5613,7 @@ async function performOverlapCheck(button) {
             bboxWgs: allWgsPoints
         };
 
-        // --- ГЕНЕРАЦИЯ ИНТЕРФЕЙСА ДЛЯ РАСШИРЕННОЙ ПРОВЕРКИ КПТ ---
+        // --- ДОБАВЛЕНИЕ ПОИСКА ПО КВАРТАЛУ В ОКНО НАЛОЖЕНИЙ ---
         let zeroQuarterBtnHtml = '';
         if (cadastralBlock && cadastralBlock !== '—') {
             const parts = cadastralBlock.split(':');
@@ -5668,6 +5650,7 @@ async function performOverlapCheck(button) {
         button.innerHTML = originalHtml;
     }
 }
+
 
 
 // --- ФУНКЦИЯ ПРОВЕРКИ КВАРТАЛА ИЗ MAPRUAPP (ДЛЯ ОКНА НАЛОЖЕНИЙ МП) ---
@@ -5960,335 +5943,6 @@ function drawOverlapCanvas() {
     });
 }
 
-
-
-function openPrintableTechPlanVersion() {
-    if (!lastXmlDoc) {
-        alert('Сначала загрузите XML файл технического плана.');
-        return;
-    }
-    const printWindow = window.open('', '_blank');
-    if (!printWindow) {
-        alert('Не удалось открыть новое окно. Пожалуйста, разрешите всплывающие окна в браузере.');
-        return;
-    }
-
-    // Вспомогательные функции для работы со строками
-    const T = (sel, node = lastXmlDoc) => node?.querySelector(sel)?.textContent.trim() || '—';
-    const A = (sel, attr, node = lastXmlDoc) => node?.querySelector(sel)?.getAttribute(attr) || '—';
-    const esc = (s) => (s == null ? '' : String(s)).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
-    const U = (val) => `<span class="filled">${esc(val)}</span>`;
-
-    function formatRuDate(dateStr, openQ = '«', closeQ = '»') {
-        if (!dateStr || dateStr === '—') return '—';
-        const parts = dateStr.split('-');
-        if (parts.length !== 3) return dateStr;
-        const months = ['января', 'февраля', 'марта', 'апреля', 'мая', 'июня', 'июля', 'августа', 'сентября', 'октября', 'ноября', 'декабря'];
-        return `${openQ}${parseInt(parts[2], 10)}${closeQ} ${months[parseInt(parts[1], 10) - 1]} ${parts[0]} г.`;
-    }
-
-    function formatSnils(snilsStr) {
-        if (!snilsStr || snilsStr === '—') return '—';
-        const clean = snilsStr.replace(/\D/g, '');
-        if (clean.length === 11) {
-            return `${clean.slice(0, 3)}-${clean.slice(3, 6)}-${clean.slice(6, 9)} ${clean.slice(9)}`;
-        }
-        return snilsStr;
-    }
-
-    const wallMaterials = {
-        '061001000000': 'Каменные',
-        '061001001000': 'Кирпичные',
-        '061001001001': 'Кирпичные',
-        '061001002000': 'Панельные',
-        '061001003000': 'Блочные',
-        '061001004000': 'Монолитные',
-        '061001005000': 'Деревянные',
-        '061001006000': 'Металлические',
-        '061001007000': 'Шлакобетонные',
-        '061001008000': 'Смешанные',
-        '061001009000': 'Облегченные',
-        '061001010000': 'Из прочих материалов'
-    };
-
-    const tpPurposes = {
-        '204001000000': 'Нежилое',
-        '204002000000': 'Жилое',
-        '204003000000': 'Многоквартирный дом',
-        '204004000000': 'Жилое строение'
-    };
-
-    const building = lastXmlDoc.querySelector('NewBuilding, ExistBuilding');
-    const construction = lastXmlDoc.querySelector('NewConstruction, ExistConstruction');
-    const flat = lastXmlDoc.querySelector('NewFlat, ExistFlat');
-    const room = lastXmlDoc.querySelector('NewRoom, ExistRoom');
-    const uncompleted = lastXmlDoc.querySelector('NewUncompleted, ExistUncompleted');
-    const mainObject = building || construction || flat || room || uncompleted;
-
-    let docTitle = 'ТЕХНИЧЕСКИЙ ПЛАН';
-    if (building) docTitle += ' ЗДАНИЯ';
-    else if (construction) docTitle += ' СООРУЖЕНИЯ';
-    else if (flat || room) docTitle += ' ПОМЕЩЕНИЯ';
-    else if (uncompleted) docTitle += ' ОБЪЕКТА НЕЗАВЕРШЕННОГО СТРОИТЕЛЬСТВА';
-
-    // Кадастровый инженер
-    const engineerFio = [T('Contractor > FamilyName'), T('Contractor > FirstName'), T('Contractor > Patronymic')]
-        .filter(x => x && x !== '—').join(' ');
-    const engineerOgrnip = T('Contractor > OGRNIP');
-    const engineerSnils = formatSnils(T('Contractor > SNILS'));
-    const regNumber = T('Contractor > CadastralEngineerRegistryNumber');
-    const regDate = formatRuDate(T('Contractor > DateEntering'), '"', '"');
-    const phone = T('Contractor > Telephone');
-    const email = T('Contractor > Email');
-    const sroName = T('Contractor > SelfRegulatoryOrganization');
-    const employer = T('Contractor > Address') || T('Contractor > Organization > AddressOrganization');
-    const employerName = T('Contractor > Organization > Name');
-    const contractType = T('AgreementCadWork > Name') !== '—' ? T('AgreementCadWork > Name') : 'Договор';
-    const contractNum = T('AgreementCadWork > NumberAgreement');
-    const contractDate = formatRuDate(T('AgreementCadWork > DateAgreement'));
-    const preparedDate = formatRuDate(A('GeneralCadastralWorks', 'DateCadastral'));
-
-    // Заказчик
-    const clientPerson = lastXmlDoc.querySelector('Clients > Client > Person');
-    const clientName = clientPerson
-        ? [T('FamilyName', clientPerson), T('FirstName', clientPerson), T('Patronymic', clientPerson)].filter(x => x && x !== '—').join(' ')
-        : '—';
-    const clientSnils = formatSnils(T('Clients > Client > Person > SNILS'));
-
-    const clientOrg = lastXmlDoc.querySelector('Clients > Client > Organization, Clients > Client > Governance');
-    const orgName = clientOrg ? T('Name', clientOrg) : '—';
-    const orgOgrn = clientOrg ? T('OGRN', clientOrg) : '—';
-    const orgInn = clientOrg ? T('INN', clientOrg) : '—';
-
-    // Исходные документы
-    const docs = Array.from(lastXmlDoc.querySelectorAll('InputData > Documents > Document'));
-    let docsRows = '';
-    docs.forEach((doc, idx) => {
-        const name = T('Name', doc);
-        const num = T('Number', doc);
-        const dateRaw = T('Date', doc);
-        const date = dateRaw !== '—' ? dateRaw.split('-').reverse().join('.') : '—';
-        const appliedFile = doc.querySelector('AppliedFile');
-        const fileName = appliedFile ? (appliedFile.getAttribute('Name') || '').split('\\').pop() : '';
-        docsRows += `
-            <tr>
-                <td class="tc">${idx + 1}</td>
-                <td>${esc(name)}</td>
-                <td class="tc">${date}</td>
-                <td class="tc">${esc(num)}</td>
-                <td>${fileName ? `Файл: ${esc(fileName)}` : '-'}</td>
-            </tr>`;
-    });
-
-    // Пункты геодезической основы
-    const geobases = Array.from(lastXmlDoc.querySelectorAll('InputData > GeodesicBases > GeodesicBase'));
-    let geobasesRows = '';
-    geobases.forEach((gb, idx) => {
-        const name = T('PName', gb);
-        const pType = T('PType', gb);
-        const pClass = T('PKlass', gb);
-        const csName = gb.getAttribute('Name') || '—';
-        const x = T('OrdX', gb);
-        const y = T('OrdY', gb);
-        geobasesRows += `
-            <tr>
-                <td class="tc">${idx + 1}</td>
-                <td>${esc(pType)}, ${esc(pClass)}</td>
-                <td>${esc(name)}</td>
-                <td class="tc">${esc(csName)}</td>
-                <td class="tc">${esc(x)}</td>
-                <td class="tc">${esc(y)}</td>
-            </tr>`;
-    });
-
-    // Характеристики объекта ТП
-    const cadNumber = mainObject?.getAttribute('CadastralNumber') || mainObject?.querySelector('CadastralNumber')?.textContent?.trim() || '—';
-    const cadBlock = mainObject?.querySelector('CadastralBlock')?.textContent?.trim() || 
-                     mainObject?.querySelector('CadastralBlocks > CadastralBlock')?.textContent?.trim() || '—';
-    const objectName = mainObject?.querySelector('Name')?.textContent?.trim() || 
-                       mainObject?.querySelector('ObjectName')?.textContent?.trim() || '—';
-    
-    const addressEl = mainObject?.querySelector('Address, ObjectAddress');
-    const address = addressEl ? getFullAddress(addressEl) : '—';
-    
-    const floors = mainObject?.querySelector('Floors > Floors')?.textContent?.trim() || '—';
-    const undergroundFloors = mainObject?.querySelector('Floors > Underground')?.textContent?.trim() || '—';
-    const yearBuilt = mainObject?.querySelector('YearBuilt')?.textContent?.trim() || 
-                      mainObject?.querySelector('YearUsed')?.textContent?.trim() || 
-                      mainObject?.querySelector('ExploitationChar > YearBuilt')?.textContent?.trim() || '—';
-    
-    const purposeEl = mainObject?.querySelector('Purpose, AssignationBuilding');
-    let purposeCode = purposeEl ? (purposeEl.getAttribute('Code') || purposeEl.textContent.trim()) : '—';
-    const displayPurpose = tpPurposes[purposeCode] || mainObject?.querySelector('Purpose, AssignationBuilding, AssignationName')?.textContent?.trim() || '—';
-
-    const wallEl = mainObject?.querySelector('Material, ElementsConstruct > Material');
-    const wallCode = wallEl ? wallEl.getAttribute('Wall') : '—';
-    const wallMaterialName = wallMaterials[wallCode] || wallCode || '—';
-
-    const areaValue = mainObject?.querySelector('Area > Area')?.textContent?.trim() || 
-                      mainObject?.querySelector('Areas > Area > Area')?.textContent?.trim() || '—';
-    const areaInaccuracy = mainObject?.querySelector('Area > Inaccuracy')?.textContent?.trim() || 
-                           mainObject?.querySelector('Areas > Area > Inaccuracy')?.textContent?.trim() || '—';
-
-    // Геометрия ОКС
-    let coordRows = '';
-    const spatialEl = mainObject?.querySelector('EntitySpatial');
-    if (spatialEl) {
-        const units = spatialEl.querySelectorAll('SpatialElement > SpelementUnit');
-        units.forEach(unit => {
-            const ord = unit.querySelector('Ordinate');
-            if (ord) {
-                const num = ord.getAttribute('NumGeopoint') || '';
-                coordRows += `
-                    <tr>
-                        <td class="tc"><b>${esc(num)}</b></td>
-                        <td class="tc">${esc(ord.getAttribute('X'))}</td>
-                        <td class="tc">${esc(ord.getAttribute('Y'))}</td>
-                        <td class="tc">${esc(ord.getAttribute('DeltaGeopoint') || '0.10')}</td>
-                        <td>${esc(ord.getAttribute('Formula') || '—')}</td>
-                    </tr>`;
-            }
-        });
-    }
-
-    const conclusion = T('Conclusion');
-
-    const htmlContent = `
-    <!DOCTYPE html>
-    <html lang="ru">
-    <head>
-        <meta charset="UTF-8">
-        <title>Печатная форма - Технический план</title>
-        <style>
-            @page { size: A4; margin: 15mm 12mm; }
-            * { box-sizing: border-box; }
-            body { font-family: "Times New Roman", Times, serif; font-size: 10.5pt; line-height: 1.3; color: #000; margin: 0; padding: 0; }
-            .page { page-break-after: always; border: 1.5px solid #000; padding: 0; margin-bottom: 20px; }
-            .page:last-child { page-break-after: avoid; }
-            h1 { text-align: center; font-size: 13.5pt; margin: 0; padding: 6px 4px; font-weight: bold; border-bottom: 1px solid #000; }
-            h2.section-caption { text-align: center; font-size: 11pt; margin: 0; padding: 5px 4px; font-weight: bold; border-bottom: 1px solid #000; }
-            table { width: 100%; border-collapse: collapse; }
-            table.plain td { border: none; border-bottom: 1px solid #000; padding: 6px 8px; text-align: justify; }
-            table.plain tr:last-child td { border-bottom: none; }
-            table.plain td.section-title { text-align: center; font-weight: bold; }
-            table.grid, table.grid th, table.grid td { border: 1px solid #000; }
-            table.grid th, table.grid td { padding: 5px 6px; vertical-align: middle; font-size: 9.5pt; text-align: left; }
-            table.grid th { font-weight: bold; text-align: center; background: #f2f2f2; }
-            table.grid td.tc, table.grid th.tc { text-align: center; }
-            .filled { text-decoration: underline; }
-            .subhead { font-weight: bold; font-size: 10.5pt; margin: 10px 8px 4px 8px; }
-            .conclusion { white-space: pre-wrap; font-size: 10.5pt; text-align: justify; line-height: 1.4; padding: 10px 12px; word-wrap: break-word; }
-        </style>
-    </head>
-    <body>
-
-        <!-- СТРАНИЦА 1 -->
-        <div class="page">
-            <h1>${docTitle}</h1>
-            <h2 class="section-caption">Общие сведения о кадастровых работах</h2>
-            <table class="plain">
-                <tr><td class="section-title">1. Дата подготовки технического плана: ${preparedDate}</td></tr>
-                <tr><td class="section-title">2. Технический план подготовлен в результате кадастровых работ в связи с:</td></tr>
-                <tr><td>${esc(T('GeneralCadastralWorks > Reason'))}</td></tr>
-                <tr><td class="section-title">3. Сведения о заказчике:</td></tr>
-                <tr><td>Заказчик (физ. лицо): ${U(clientName)} ${clientSnils !== '—' ? `, СНИЛС: ${U(clientSnils)}` : ''}</td></tr>
-                <tr><td>Заказчик (юр. лицо / орган власти): ${U(orgName)} ${orgInn !== '—' ? `, ИНН: ${U(orgInn)}, ОГРН: ${U(orgOgrn)}` : ''}</td></tr>
-                <tr><td class="section-title">4. Сведения о кадастровом инженере:</td></tr>
-                <tr><td>КИ: ${U(engineerFio)} ${engineerOgrnip !== '—' ? `, ОГРНИП: ${U(engineerOgrnip)}` : ''}</td></tr>
-                <tr><td>№ в реестре: ${U(regNumber)} от ${regDate}</td></tr>
-                <tr><td>СРО: ${U(sroName)} (СНИЛС КИ: ${U(engineerSnils)})</td></tr>
-                <tr><td>Юр. лицо (работодатель): ${U(employerName)} ${employer !== '—' ? `(${employer})` : ''}</td></tr>
-                <tr><td>Контакты: тел. ${U(phone)}, email: ${U(email)}</td></tr>
-                <tr><td>Основание выполнения работ: ${U(contractType + ' № ' + contractNum + ' от ' + contractDate)}</td></tr>
-            </table>
-        </div>
-
-        <!-- СТРАНИЦА 2 -->
-        <div class="page">
-            <h1>Исходные данные</h1>
-            <div class="subhead">Перечень использованных документов:</div>
-            <table class="grid">
-                <thead>
-                    <tr>
-                        <th style="width:5%">№</th>
-                        <th style="width:35%">Наименование документа</th>
-                        <th style="width:15%">Дата</th>
-                        <th style="width:15%">Номер</th>
-                        <th style="width:30%">Иные сведения</th>
-                    </tr>
-                </thead>
-                <tbody>${docsRows || '<tr><td colspan="5" class="tc">Документы отсутствуют</td></tr>'}</tbody>
-            </table>
-
-            <div class="subhead" style="margin-top:14px;">Сведения о пунктах геодезической основы:</div>
-            <table class="grid">
-                <thead>
-                    <tr>
-                        <th style="width:5%">№</th>
-                        <th style="width:25%">Вид сети</th>
-                        <th style="width:25%">Название пункта</th>
-                        <th style="width:15%">Система координат</th>
-                        <th style="width:15%">X, м</th>
-                        <th style="width:15%">Y, м</th>
-                    </tr>
-                </thead>
-                <tbody>${geobasesRows || '<tr><td colspan="6" class="tc">Сведения отсутствуют</td></tr>'}</tbody>
-            </table>
-        </div>
-
-        <!-- СТРАНИЦА 3 -->
-        <div class="page">
-            <h1>Характеристики объекта недвижимости</h1>
-            <table class="grid" style="margin-top:10px;">
-                <thead>
-                    <tr>
-                        <th style="width:8%">№</th>
-                        <th style="width:42%">Наименование характеристики</th>
-                        <th style="width:50%">Значение характеристики</th>
-                    </tr>
-                </thead>
-                <tbody>
-                    <tr><td class="tc">1</td><td>Кадастровый номер</td><td><b>${esc(cadNumber)}</b></td></tr>
-                    <tr><td class="tc">2</td><td>Кадастровый квартал</td><td><code>${esc(cadBlock)}</code></td></tr>
-                    <tr><td class="tc">3</td><td>Наименование</td><td>${esc(objectName)}</td></tr>
-                    <tr><td class="tc">4</td><td>Назначение</td><td>${esc(displayPurpose)}</td></tr>
-                    <tr><td class="tc">5</td><td>Адрес / Местоположение</td><td>${esc(address)}</td></tr>
-                    <tr><td class="tc">6</td><td>Материал наружных стен</td><td>${esc(wallMaterialName)}</td></tr>
-                    <tr><td class="tc">7</td><td>Год постройки</td><td class="tc"><b>${esc(yearBuilt)}</b></td></tr>
-                    <tr><td class="tc">8</td><td>Количество этажей (в т.ч. подземных)</td><td>${esc(floors)} ${undergroundFloors && undergroundFloors !== '—' ? `(подземных: ${undergroundFloors})` : ''}</td></tr>
-                    <tr><td class="tc">9</td><td>Площадь, кв.м.</td><td><b>${esc(areaValue)} ± ${esc(areaInaccuracy)}</b></td></tr>
-                </tbody>
-            </table>
-
-            ${coordRows ? `
-            <div class="subhead" style="margin-top:14px;">Координаты характерных точек контура:</div>
-            <table class="grid">
-                <thead>
-                    <tr>
-                        <th style="width:15%">Точка</th>
-                        <th style="width:20%">X, м</th>
-                        <th style="width:20%">Y, м</th>
-                        <th style="width:15%">Погрешность Mt, м</th>
-                        <th style="width:30%">Формула расчета погрешности</th>
-                    </tr>
-                </thead>
-                <tbody>${coordRows}</tbody>
-            </table>` : ''}
-        </div>
-
-        <!-- СТРАНИЦА 4 -->
-        <div class="page">
-            <h1>Заключение кадастрового инженера</h1>
-            <div class="conclusion">${esc(conclusion)}</div>
-        </div>
-
-        </body>
-        </html>
-    `;
-
-    printWindow.document.write(htmlContent);
-    printWindow.document.close();
-}
 
 
 function openPrintableSurveyPlanVersion() {
@@ -7285,16 +6939,9 @@ printButton.addEventListener('click', () => window.print());
         
    
         const printableVersionButton = document.getElementById('printableVersionButton');
-if (printableVersionButton) {
-    printableVersionButton.addEventListener('click', () => {
-        const isTechPlan = lastXmlDoc.documentElement.tagName === 'TP';
-        if (isTechPlan) {
-            openPrintableTechPlanVersion();
-        } else {
-            openPrintableSurveyPlanVersion();
+        if (printableVersionButton) {
+            printableVersionButton.addEventListener('click', openPrintableSurveyPlanVersion);
         }
-    });
-}
 
         document.addEventListener('paste', handlePaste);
         pasteButton.addEventListener('click', async () => {
@@ -7960,29 +7607,11 @@ function displayData(xmlDoc, xmlText) {
     const cadNumber = A(mainObject, 'CadastralNumber') || T(mainObject, 'CadastralNumber');
     const cadBlock = T(mainObject, 'CadastralBlock');
     const objectName = T(mainObject, 'Name, ObjectName');
-    
-    // Преобразование кода назначения в текстовое описание по справочнику
     const purpose = T(mainObject, 'Purpose, AssignationBuilding, AssignationName');
-    let purposeCode = A(E(mainObject, 'Purpose, AssignationBuilding'), 'Code');
-    if (!purposeCode || purposeCode === '—') {
-        purposeCode = T(mainObject, 'Purpose, AssignationBuilding');
-    }
-
-    const tpPurposes = {
-        '204001000000': 'Нежилое',
-        '204002000000': 'Жилое',
-        '204003000000': 'Многоквартирный дом',
-        '204004000000': 'Жилое строение'
-    };
-
-    let displayPurpose = purpose;
-    if (tpPurposes[purposeCode]) {
-        displayPurpose = tpPurposes[purposeCode];
-    }
-
+    const purposeCode = A(E(mainObject, 'Purpose, AssignationBuilding'), 'Code');
     const floors = T(mainObject, 'Floors > Floors');
     const undergroundFloors = T(mainObject, 'Floors > Underground');
-    const yearBuilt = T(mainObject, 'YearBuilt, YearUsed, ExploitationChar > YearBuilt');
+    const yearBuilt = T(mainObject, 'YearBuilt, YearUsed');
     const yearCommissioning = T(mainObject, 'YearCommissioning');
     
     // Площадь
@@ -8007,8 +7636,8 @@ function displayData(xmlDoc, xmlText) {
         mainInfoHtml += `<div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Наименование</div><div class="info-value">${objectName}</div></div>`;
     }
     
-    if (displayPurpose && displayPurpose !== '—') {
-        mainInfoHtml += `<div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Назначение</div><div class="info-value">${displayPurpose}${purposeCode && purposeCode !== '—' && purposeCode !== displayPurpose ? ` <code>${purposeCode}</code>` : ''}</div></div>`;
+    if (purpose && purpose !== '—') {
+        mainInfoHtml += `<div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Назначение</div><div class="info-value">${purpose}${purposeCode && purposeCode !== '—' ? ` <code>${purposeCode}</code>` : ''}</div></div>`;
     }
     
     if (areaValue && areaValue !== '—') {
@@ -8045,13 +7674,15 @@ function displayData(xmlDoc, xmlText) {
     
     mainInfoHtml += `</div>`;
     
-    // Адрес
+   
+   // Адрес
     const addressEl = E(mainObject, 'Address, ObjectAddress');
     if (addressEl) {
         mainInfoHtml += `<div class="subsection"><div class="subsection-title">Адрес</div>${getAddressHtml(addressEl)}</div>`;
     }
+      
     
-    // Земельные участки (ParentCadastralNumbers)
+  // Земельные участки (ParentCadastralNumbers)
     const parentCadNumbers = Array.from(All(mainObject, 'ParentCadastralNumbers CadastralNumber')).map(n => n.textContent.trim());
     const hasCoordsForZuCheck = All(mainObject, 'EntitySpatial').length > 0; // Проверяем наличие координат
 
@@ -8077,9 +7708,8 @@ function displayData(xmlDoc, xmlText) {
     
     // Контуры объекта
     const contours = All(mainObject, 'Contours > Contour, Contours > NewContour, EntitySpatial');
-    let hasCoords = false;
-    
     if (contours.length > 0) {
+        let hasCoords = false;
         contours.forEach(contour => {
             const contourNum = A(contour, 'NumberRecord') || A(contour, 'Definition') || '';
             let contourArea = T(contour, 'Area > Area');
@@ -8102,27 +7732,24 @@ function displayData(xmlDoc, xmlText) {
                 hasCoords = true;
             }
         }
+        
+        mainHtml += `<div class="section">
+            <div class="section-header">
+                ${objectIcon}
+                <h3 class="section-title">${objectType}</h3>
+                ${hasCoords ? `<button class="header-button copy-coords-btn" title="Скопировать координаты">${sectionIcons.copyXY}</button>` : ''}
+            </div>
+            <div class="section-content" style="padding:16px">${mainInfoHtml}</div>
+        </div>`;
+    } else {
+        mainHtml += `<div class="section">
+            <div class="section-header">
+                ${objectIcon}
+                <h3 class="section-title">${objectType}</h3>
+            </div>
+            <div class="section-content" style="padding:16px">${mainInfoHtml}</div>
+        </div>`;
     }
-
-    // Формируем кнопки управления в заголовке, включая проверку наложений для ТП
-    let actionButtons = '';
-    if (hasCoords) {
-        actionButtons += `
-            <button class="check-overlap-btn print-btn contradiction-btn" data-type="tp" data-index="0" style="padding:4px 10px; font-size:0.9rem; margin-right:8px;">
-                <i class="fas fa-search-location"></i><span class="btn-text">Проверить наложения</span>
-            </button>
-            <button class="header-button copy-coords-btn" title="Скопировать координаты">${sectionIcons.copyXY}</button>
-        `;
-    }
-    
-    mainHtml += `<div class="section">
-        <div class="section-header">
-            ${objectIcon}
-            <h3 class="section-title">${objectType}</h3>
-            <div style="margin-left:auto; display:flex;">${actionButtons}</div>
-        </div>
-        <div class="section-content" style="padding:16px">${mainInfoHtml}</div>
-    </div>`;
     
     // === ОБЩАЯ ИНФОРМАЦИЯ О КАДАСТРОВЫХ РАБОТАХ ===
     const generalWorks = E(xmlDoc, 'GeneralCadastralWorks');
@@ -8280,27 +7907,6 @@ function displayData(xmlDoc, xmlText) {
 
 function runTechPlanValidation(xmlDoc, xmlText) {
     let messages = [];
-    
-    // Проверка обязательного заполнения ФИАС для присвоенных адресов (AddressOrLocation="1")
-const addresses = All(xmlDoc, 'Address, ObjectAddress');
-addresses.forEach(addr => {
-    const addrType = addr.getAttribute('AddressOrLocation');
-    if (addrType === '1') {
-        const fias = T(addr, 'FIAS');
-        if (!fias || fias === '—') {
-            let ownerName = 'Объект';
-            const parentParcel = addr.closest('NewParcel, ExistParcel, ExistEZ, SpecifyRelatedParcel');
-            const parentOks = addr.closest('NewBuilding, ExistBuilding, NewConstruction, ExistConstruction, NewFlat, ExistFlat, NewRoom, ExistRoom, NewUncompleted, ExistUncompleted');
-            if (parentParcel) {
-                ownerName = parentParcel.getAttribute('CadastralNumber') || parentParcel.getAttribute('Definition') || 'Земельный участок';
-            } else if (parentOks) {
-                ownerName = parentOks.getAttribute('CadastralNumber') || 'ОКС';
-            }
-            messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>[${ownerName}] Предупреждение по адресу:</strong> Указан тип адреса "Присвоенный в установленном порядке" (AddressOrLocation="1"), но отсутствует уникальный номер ГАР (ФИАС). Рекомендуется заполнить тег &lt;FIAS&gt;.</div>`);
-        }
-    }
-});
-
     
     // --- ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ ПРОВЕРКИ ЦИФРОВЫХ ПОДПИСЕЙ (.sig) ---
     if (currentZipSigErrors && currentZipSigErrors.length > 0) {
@@ -9324,27 +8930,6 @@ if (contours.length > 0) {
 function runValidation(xmlDoc, xmlText) {
     console.log("=== НАЧАЛО RUNVALIDATION ===");
     let messages = [];
-    
-    
-    // Проверка обязательного заполнения ФИАС для присвоенных адресов (AddressOrLocation="1")
-const addresses = All(xmlDoc, 'Address, ObjectAddress');
-addresses.forEach(addr => {
-    const addrType = addr.getAttribute('AddressOrLocation');
-    if (addrType === '1') {
-        const fias = T(addr, 'FIAS');
-        if (!fias || fias === '—') {
-            let ownerName = 'Объект';
-            const parentParcel = addr.closest('NewParcel, ExistParcel, ExistEZ, SpecifyRelatedParcel');
-            const parentOks = addr.closest('NewBuilding, ExistBuilding, NewConstruction, ExistConstruction, NewFlat, ExistFlat, NewRoom, ExistRoom, NewUncompleted, ExistUncompleted');
-            if (parentParcel) {
-                ownerName = parentParcel.getAttribute('CadastralNumber') || parentParcel.getAttribute('Definition') || 'Земельный участок';
-            } else if (parentOks) {
-                ownerName = parentOks.getAttribute('CadastralNumber') || 'ОКС';
-            }
-            messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>[${ownerName}] Предупреждение по адресу:</strong> Указан тип адреса "Присвоенный в установленном порядке" (AddressOrLocation="1"), но отсутствует уникальный номер ГАР (ФИАС). Рекомендуется заполнить тег &lt;FIAS&gt;.</div>`);
-        }
-    }
-});
     
     // --- ОТОБРАЖЕНИЕ РЕЗУЛЬТАТОВ ПРОВЕРКИ ЦИФРОВЫХ ПОДПИСЕЙ (.sig) ---
     if (currentZipSigErrors && currentZipSigErrors.length > 0) {
