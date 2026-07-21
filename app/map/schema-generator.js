@@ -1806,9 +1806,9 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
     <div class="page">
         <div class="header-text">
             <span class="auth-title">Утверждена</span>
-            <input type="text" id="authLine1" class="auth-line" placeholder="Постановление исполнительного комитета" value="${val1}"><br>
-            <input type="text" id="authLine2" class="auth-line" placeholder="Нурлатского муниципального района" value="${val2}"><br>
-            <input type="text" id="authLine3" class="auth-line" placeholder="Республики Татарстан" value="${val3}"><br>
+            <input type="text" id="authLine1" class="auth-line" placeholder="" value="${val1}"><br>
+            <input type="text" id="authLine2" class="auth-line" placeholder="" value="${val2}"><br>
+            <input type="text" id="authLine3" class="auth-line" placeholder="" value="${val3}"><br>
             <span class="auth-note">(наименование документа об утверждении, включая наименование органов гос. власти или органов местного самоопределения)</span>
             <div class="auth-date-no">
                 от <input type="text" id="authDate" class="auth-date-input" placeholder="_____________" value="${valDate}"> № <input type="text" id="authNo" class="auth-no-input" placeholder="_____" value="${valNo}">
