@@ -71,7 +71,7 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
     const sFillOpacity = localStorage.getItem('sch_fillOpacity') || '20';
     const sShowPoints = localStorage.getItem('sch_showPoints') !== 'false';
     const sPointColor = localStorage.getItem('sch_pointColor') || '#FF0000';
-    const sPointFontSize = localStorage.getItem('sch_pointFontSize') || '14';
+    const sPointFontSize = localStorage.getItem('sch_pointFontSize') || '18'; // Изменено с 14 на 18
     const sSkipLoad = window.__schemaDataLoaded;
     const sLoadZouit = localStorage.getItem('sch_loadZouit') !== 'false';
     const sZouitNearby = localStorage.getItem('sch_zouitNearby') === 'true';
@@ -82,7 +82,7 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
     // Опции выносок, сетки и компаса
     const sCalloutLineColor = localStorage.getItem('sch_calloutLineColor') || '#ff3b30';
     const sCalloutFontColor = localStorage.getItem('sch_calloutFontColor') || '#333333';
-    const sCalloutFontSize = localStorage.getItem('sch_calloutFontSize') || '16';
+    const sCalloutFontSize = localStorage.getItem('sch_calloutFontSize') || '20'; // Изменено с 16 на 20
     const sCalloutBgColor = localStorage.getItem('sch_calloutBgColor') || '#ffffff';
     const sCalloutBgOpacity = localStorage.getItem('sch_calloutBgOpacity') || '90';
     const sShowGrid = localStorage.getItem('sch_showGrid') === 'true';
@@ -1001,10 +1001,11 @@ function addSchemaTemporaryLabels(centerGeo, mapType, config) {
     };
     
     const calloutBgRgba = hexToRgba(bgHex, bgAlpha);
-    const calloutFontSize = config.calloutFontSize || 16;
+    const calloutFontSize = config.calloutFontSize || 20; // Изменено с 16 на 20
     const calloutFontColor = config.calloutFontColor || '#333333';
 
-    const styleBase = `background: ${calloutBgRgba}; border: 1.5px solid ${config.calloutLineColor || '#ff3b30'}; padding: 4px 10px; border-radius: 6px; box-shadow: 0 2px 6px rgba(0,0,0,0.15); color: ${calloutFontColor}; font-family: "Times New Roman", Times, serif; white-space: nowrap;`;
+    // Добавлены стили безальтернативного запрета переноса текста
+    const styleBase = `background: ${calloutBgRgba}; border: 1.5px solid ${config.calloutLineColor || '#ff3b30'}; padding: 4px 10px; border-radius: 6px; box-shadow: 0 2px 6px rgba(0,0,0,0.15); color: ${calloutFontColor}; font-family: "Times New Roman", Times, serif; white-space: nowrap !important; display: inline-block !important; width: max-content !important;`;
 
     if (config.municipality) {
         const mStyle = styleBase + ` font-size: ${calloutFontSize * 1.1}px; font-weight: bold; font-style: italic;`;
@@ -1051,8 +1052,8 @@ function addSchemaTemporaryLabels(centerGeo, mapType, config) {
         }
 
         if (zuNameMode === 'inside') {
-            // Отрисовка названия строго внутри полигона (по центру)
-            const zStyle = `position: absolute; transform: translate(-50%, -50%); color: ${calloutFontColor}; font-size: ${calloutFontSize}px; font-weight: bold; text-shadow: -2px -2px 0 #fff, 2px -2px 0 #fff, -2px 2px 0 #fff, 2px 2px 0 #fff, 0 0 6px #fff; font-family: Arial, sans-serif; white-space: nowrap; text-align: center;`;
+            // Отрисовка названия строго внутри полигона (по центру) - Добавлен принудительный запрет переноса текста
+            const zStyle = `position: absolute; transform: translate(-50%, -50%); color: ${calloutFontColor}; font-size: ${calloutFontSize}px; font-weight: bold; text-shadow: -2px -2px 0 #fff, 2px -2px 0 #fff, -2px 2px 0 #fff, 2px 2px 0 #fff, 0 0 6px #fff; font-family: Arial, sans-serif; white-space: nowrap !important; display: inline-block !important; width: max-content !important; text-align: center;`;
             const zLayout = ymaps.templateLayoutFactory.createClass(`<div style="${zStyle}">${labelText}</div>`);
             const p = new ymaps.Placemark(centerGeo, {}, { iconLayout: zLayout, zIndex: 1210 });
             map.geoObjects.add(p);
@@ -1162,7 +1163,7 @@ function processAndDrawSchemaPoints(rings, polygon, config) {
     let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
     let globalPointIndex = 1;
 
-    const ptFontSize = config.pointFontSize || 14;
+    const ptFontSize = config.pointFontSize || 18; // Изменено с 14 на 18
 
     rings.forEach((coords) => {
         let firstPointOfRing = null;
@@ -1192,8 +1193,10 @@ function processAndDrawSchemaPoints(rings, polygon, config) {
                 const dotLayout = ymaps.templateLayoutFactory.createClass(
                     `<div style="width: 10px; height: 10px; background-color: ${config.pointColor}; border-radius: 50%; border: 1px solid white; box-shadow: 0 0 3px rgba(0,0,0,0.5);"></div>`
                 );
+                
+                // Добавлены стили inline-block, max-content и nowrap
                 const textLayout = ymaps.templateLayoutFactory.createClass(
-                    `<div style="color: ${config.pointColor}; font-size: ${ptFontSize}px; font-weight: bold; font-family: Arial; text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff; white-space: nowrap;">${pointName}</div>`
+                    `<div style="color: ${config.pointColor}; font-size: ${ptFontSize}px; font-weight: bold; font-family: Arial; text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff; white-space: nowrap !important; display: inline-block !important; width: max-content !important;">${pointName}</div>`
                 );
 
                 const dot = new ymaps.Placemark(c, {}, { iconLayout: dotLayout, iconOffset: [-5, -5], zIndex: 1140 });
