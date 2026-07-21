@@ -1,4 +1,7 @@
+console.log("%c[Schema Generator] Загружена НОВАЯ версия 2.0 (с защитой от переноса строк и увеличенным шрифтом)", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
+
+
 
 function startSchemaWorkflow(lat, lon, targetPolygon) {
     if (!targetPolygon) return;
