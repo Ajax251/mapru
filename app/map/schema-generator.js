@@ -1856,7 +1856,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
         </div>
 
        <table>
-            <tr><td colspan="3" contenteditable="true"><b>Условный номер земельного участка:</b> ${config.quarter}:${config.zuName}</td></tr>
+            <tr><td colspan="3" contenteditable="true"><b>Условный номер земельного участка:</b> ${config.quarter} ${config.zuName}</td></tr>
             <tr><td colspan="3" contenteditable="true"><b>Площадь земельного участка:</b> ${areaStr} кв.м</td></tr>
             <tr><td colspan="3" contenteditable="true"><b>Территориальная зона:</b> ${config.terrZone || 'Не установлена'}</td></tr>
             <tr><td colspan="3" contenteditable="true"><b>Вид разрешенного использования:</b> ${config.vri || 'Не установлен'}</td></tr>
