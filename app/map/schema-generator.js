@@ -1,5 +1,4 @@
-
-console.log("%c[Schema Generator] Загружена версия 2.20", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.201 (Интерактивные HTML-выноски со стилизацией)", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 function startSchemaWorkflow(lat, lon, targetPolygon) {
@@ -158,7 +157,7 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
                     </label>
                 </div>
 
-                <!-- Столбец 2: Настройки по листам (Сноски и выноски удалены из меню) -->
+                <!-- Столбец 2: Настройки по листам (Сноски и выноски удалены) -->
                 <div>
                     <h4 style="margin: 0 0 10px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px;">Настройки по листам</h4>
                     <div style="background: #f8fafc; border: 1px solid #e2e8f0; padding: 10px; border-radius: 8px; display: flex; flex-direction: column; gap: 10px; font-size: 0.85rem;">
@@ -850,7 +849,7 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
             if (config.satZuNameMode === 'callout' && config.zuName) {
                 const labelPoint = [centerGeo[0] + latDelta * 0.12, centerGeo[1] - lonDelta * 0.14];
                 tempCalloutLine = new ymaps.Polyline([labelPoint, centerGeo], {}, {
-                    strokeColor: config.lineColor || '#ff3b30',
+                    strokeColor: config.calloutLineColor || '#ff3b30',
                     strokeWidth: 2.5,
                     zIndex: 1205,
                     interactivityModel: 'default#transparent'
@@ -905,7 +904,7 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
 
         restoreOriginalVisibilities();
 
-        const geomStats = calculatePreciseGeometry(targetPolygon);
+        const geomStats = calculatePrecideGeometry ? calculatePrecideGeometry(targetPolygon) : calculatePreciseGeometry(targetPolygon);
         const areaStr = Math.round(geomStats.area).toLocaleString('ru-RU');
 
         const imgLegendPoly = generateLegendPolygonImage(config.lineColor, config.fillColor, config.fillOpacity);
@@ -920,113 +919,16 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
 
     } catch (error) {
         showNotification(`Ошибка генерации: ${error.message}`, 'error');
+        console.error(error);
     } finally {
         hideLoader();
     }
 }
 
 function addSchemaTemporaryLabels(centerGeo, mapType, config) {
-    const tempObjects = [];
-    const bounds = map.getBounds();
-    if (!bounds) return tempObjects;
-
-    const latDelta = bounds[1][0] - bounds[0][0];
-    const lonDelta = bounds[1][1] - bounds[0][1];
-
-    const bgHex = config.calloutBgColor || '#ffffff';
-    const bgAlpha = parseFloat(config.calloutBgOpacity !== undefined ? config.calloutBgOpacity : 90) / 100;
-    
-    const hexToRgba = (hex, alpha) => {
-        let c = hex.substring(1);
-        if (c.length === 3) c = c[0]+c[0]+c[1]+c[1]+c[2]+c[2];
-        const r = parseInt(c.substring(0,2), 16);
-        const g = parseInt(c.substring(2,4), 16);
-        const b = parseInt(c.substring(2,4), 16);
-        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-    };
-    
-    const calloutBgRgba = hexToRgba(bgHex, bgAlpha);
-    const calloutFontSize = Math.max(24, config.calloutFontSize || 24);
-    const calloutFontColor = config.calloutFontColor || '#333333';
-
-    // Добавлены стили безальтернативного запрета переноса текста
-    const styleBase = `background: ${calloutBgRgba}; border: 1.5px solid ${config.calloutLineColor || '#ff3b30'}; padding: 4px 10px; border-radius: 6px; box-shadow: 0 2px 6px rgba(0,0,0,0.15); color: ${calloutFontColor}; font-family: "Times New Roman", Times, serif; white-space: nowrap !important; display: inline-block !important; width: max-content !important;`;
-
-    if (config.municipality) {
-        const mStyle = styleBase + ` font-size: ${calloutFontSize * 1.1}px; font-weight: bold; font-style: italic;`;
-        const mLayout = ymaps.templateLayoutFactory.createClass(`<div style="${mStyle}">${config.municipality}</div>`);
-        const p = new ymaps.Placemark([centerGeo[0] + latDelta * 0.22, centerGeo[1]], {}, { iconLayout: mLayout, zIndex: 1200 });
-        map.geoObjects.add(p);
-        tempObjects.push(p);
-    }
-
-    if (config.quarter) {
-        const qStyle = styleBase + ` font-size: ${calloutFontSize}px; font-weight: bold;`;
-        const qLayout = ymaps.templateLayoutFactory.createClass(`<div style="${qStyle}">${config.quarter}</div>`);
-        const p = new ymaps.Placemark([centerGeo[0], centerGeo[1] - lonDelta * 0.25], {}, { iconLayout: qLayout, zIndex: 1200 });
-        map.geoObjects.add(p);
-        tempObjects.push(p);
-    }
-
-    if (config.settlement) {
-        const sStyle = styleBase + ` font-size: ${calloutFontSize}px; font-style: italic;`;
-        const sLayout = ymaps.templateLayoutFactory.createClass(`<div style="${sStyle}">${config.settlement}</div>`);
-        const p = new ymaps.Placemark([centerGeo[0] - latDelta * 0.22, centerGeo[1] + lonDelta * 0.22], {}, { iconLayout: sLayout, zIndex: 1200 });
-        map.geoObjects.add(p);
-        tempObjects.push(p);
-    }
-
-    if (config.terrZone && mapType !== 'satellite') {
-        const tStyle = styleBase + ` font-size: ${calloutFontSize * 0.9}px; font-weight: bold;`;
-        const tLayout = ymaps.templateLayoutFactory.createClass(`<div style="${tStyle}">${config.terrZone}</div>`);
-        const p = new ymaps.Placemark([centerGeo[0] - latDelta * 0.18, centerGeo[1] - lonDelta * 0.2], {}, { iconLayout: tLayout, zIndex: 1200 });
-        map.geoObjects.add(p);
-        tempObjects.push(p);
-    }
-
-    // Выбор режима отрисовки обозначения ЗУ
-    let zuNameMode = 'inside';
-    if (mapType === 'cp') zuNameMode = config.cptZuNameMode || 'inside';
-    else if (mapType === 'pzz') zuNameMode = config.pzzZuNameMode || 'inside';
-    else if (mapType === 'satellite') zuNameMode = config.satZuNameMode || 'inside';
-
-    if (zuNameMode !== 'off' && config.zuName) {
-        let labelText = config.zuName;
-        if (config.quarter && !labelText.includes(config.quarter)) {
-            labelText = ":" + labelText;
-        }
-
-        if (zuNameMode === 'inside') {
-            // Отрисовка названия строго внутри полигона (по центру) - Добавлен принудительный запрет переноса текста
-            const zStyle = `position: absolute; transform: translate(-50%, -50%); color: ${calloutFontColor}; font-size: ${calloutFontSize}px; font-weight: bold; text-shadow: -2px -2px 0 #fff, 2px -2px 0 #fff, -2px 2px 0 #fff, 2px 2px 0 #fff, 0 0 6px #fff; font-family: Arial, sans-serif; white-space: nowrap !important; display: inline-block !important; width: max-content !important; text-align: center;`;
-            const zLayout = ymaps.templateLayoutFactory.createClass(`<div style="${zStyle}">${labelText}</div>`);
-            const p = new ymaps.Placemark(centerGeo, {}, { iconLayout: zLayout, zIndex: 1210 });
-            map.geoObjects.add(p);
-            tempObjects.push(p);
-        } else if (zuNameMode === 'callout') {
-            // Отрисовка с выноской-линией и табличкой
-            const zLayout = ymaps.templateLayoutFactory.createClass(
-                `<div style="position: absolute; transform: translate(-50%, -50%); ${styleBase}">${labelText}</div>`
-            );
-            // Предотвращение выхода за рамки (клиппинга) за счет умеренного смещения
-            const labelPoint = [centerGeo[0] + latDelta * 0.12, centerGeo[1] - lonDelta * 0.14];
-            const p = new ymaps.Placemark(labelPoint, {}, { iconLayout: zLayout, zIndex: 1210 });
-            map.geoObjects.add(p);
-            tempObjects.push(p);
-
-            const lineColor = config.calloutLineColor || '#ff3b30';
-            const line = new ymaps.Polyline([labelPoint, centerGeo], {}, {
-                strokeColor: lineColor,
-                strokeWidth: 2.5,
-                zIndex: 1205,
-                interactivityModel: 'default#transparent'
-            });
-            map.geoObjects.add(line);
-            tempObjects.push(line);
-        }
-    }
-
-    return tempObjects;
+    // В новой архитектуре метки отрисовываются как живые HTML-элементы в openSchemaDocumentWindow,
+    // данная функция оставлена для совместимости API.
+    return [];
 }
 
 function addSchemaCompass(config) {
@@ -1043,13 +945,13 @@ function addSchemaCompass(config) {
     const compassPos = [top - deltaLat * 0.08, right - deltaLon * 0.08];
 
     const compassLayout = ymaps.templateLayoutFactory.createClass(
-        `<div style="position: absolute; width: 40px; height: 40px; transform: translate(-20px, -20px); background: rgba(255,255,255,0.9); border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 1.5px solid ${config.calloutLineColor || '#ff3b30'}; box-shadow: 0 2px 6px rgba(0,0,0,0.15); pointer-events: none;">
+        `<div style="position: absolute; width: 40px; height: 40px; transform: translate(-20px, -20px); background: rgba(255,255,255,0.9); border-radius: 50%; display: flex; align-items: center; justify-content: center; border: 1.5px solid ${config.lineColor || '#ff3b30'}; box-shadow: 0 2px 6px rgba(0,0,0,0.15); pointer-events: none;">
             <svg viewBox="0 0 100 100" style="width: 28px; height: 28px;">
-                <polygon points="50,10 40,50 50,42" fill="${config.calloutLineColor || '#ff3b30'}" />
+                <polygon points="50,10 40,50 50,42" fill="${config.lineColor || '#ff3b30'}" />
                 <polygon points="50,10 60,50 50,42" fill="#b3b3b3" />
                 <polygon points="50,90 40,50 50,58" fill="#555555" />
                 <polygon points="50,90 60,50 50,58" fill="#cccccc" />
-                <text x="50" y="28" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="${config.calloutLineColor || '#ff3b30'}" text-anchor="middle" dominant-baseline="central">С</text>
+                <text x="50" y="28" font-family="Arial, sans-serif" font-size="20" font-weight="bold" fill="${config.lineColor || '#ff3b30'}" text-anchor="middle" dominant-baseline="central">С</text>
             </svg>
         </div>`
     );
@@ -1138,7 +1040,7 @@ function processAndDrawSchemaPoints(rings, polygon, config) {
             if (config.showPoints) {
                 // Сделали кружок точки крупнее и заметнее на схеме (12px)
                 const dotLayout = ymaps.templateLayoutFactory.createClass(
-                    `<div style="width: 12px; height: 12px; background-color: ${config.pointColor}; border-radius: 50%; border: 1px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>`
+                    `<div style="width: 12px; height: 12px; background-color: ${config.pointColor}; border-radius: 50%; border: 1.5px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>`
                 );
                 
                 // Добавлена жесткая ширина 90px во избежание переноса номеров точек в html2canvas
@@ -1191,7 +1093,6 @@ function processAndDrawSchemaPoints(rings, polygon, config) {
 
     return { mskCoordsTable, centerGeo };
 }
-
 
 // Функция расчета процентных координат относительно контейнера карты
 function calculateLabelsData(centerGeo, config) {
@@ -1351,6 +1252,59 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
     }).join('');
 }
 
+async function loadEnvironmentData(centerGeo, polygon, config) {
+    const trueLat = centerGeo[0] + (mapOffsetY * 0.000008983);
+    const trueLon = centerGeo[1] + (mapOffsetX * 0.000008983);
+    const centerPoint = proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
+    
+    const oldBounds = map.getBounds();
+    try {
+        if (config.loadNearby) {
+            const halfSize = config.nearbyRadius; 
+            const box3857 = [
+                [centerPoint[0] - halfSize, centerPoint[1] - halfSize], [centerPoint[0] + halfSize, centerPoint[1] - halfSize],
+                [centerPoint[0] + halfSize, centerPoint[1] + halfSize], [centerPoint[0] - halfSize, centerPoint[1] + halfSize],
+                [centerPoint[0] - halfSize, centerPoint[1] - halfSize]
+            ];
+            const parcels = await searchParcelsByArea(box3857);
+            if (parcels && parcels.length > 0) await drawFoundParcels(parcels, false);
+        }
+
+        const promises = [
+            searchFeaturesByGeometry(polygon, 36369),
+            searchFeaturesByGeometry(polygon, 36383)
+        ];
+
+        if (config.loadZouit) {
+            let zouitSearchObj = polygon;
+            if (config.zouitNearby) {
+                const rings = polygon.geometry.getCoordinates();
+                const turfRings = rings.map(ring => ring.map(c => [c[1], c[0]]));
+                const turfPoly = turf.polygon(turfRings);
+                const bbox = turf.bbox(turfPoly);
+                const bboxPoly = turf.bboxPolygon(bbox);
+                const buffered = turf.buffer(bboxPoly, 50, { units: 'meters' });
+                const ymapsCoords = buffered.geometry.coordinates.map(ring => ring.map(c => [c[1], c[0]]));
+                zouitSearchObj = new ymaps.Polygon(ymapsCoords);
+            }
+            promises.push(searchFeaturesByGeometry(zouitSearchObj, 36940));
+        } else {
+            promises.push(Promise.resolve([]));
+        }
+
+        const [oks, structs, zouits] = await Promise.all(promises);
+
+        if (oks && oks.length > 0) await processAndDrawBuildings(oks);
+        if (structs && structs.length > 0) await processAndDrawStructures(structs);
+        if (zouits && zouits.length > 0) await processAndDrawZouits(zouits);
+        
+    } catch (e) {
+        console.error("Ошибка загрузки окружения:", e);
+    } finally {
+        map.setBounds(oldBounds, {duration: 0});
+    }
+}
+
 function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage, coordsTable, areaStr, terrZoneName, imgLegendPoly, imgLegendPoint, labelsData, config, partsGridStep = 5, partsHeight = 76.7) {
     const sAl1 = localStorage.getItem('sch_al1') || '';
     const sAl2 = localStorage.getItem('sch_al2') || '';
@@ -1455,20 +1409,16 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             flex-direction: column;
             gap: 2px;
             opacity: 0;
-            transform: scale(0.9) translateX(-5px);
-            transform-origin: left center;
-            transition: opacity 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275), transform 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+            transition: opacity 0.2s ease;
             pointer-events: none;
-            background: rgba(255,255,255,0.95);
+            background: rgba(255,255,255,0.9);
             border: 1px solid #ccc;
             border-radius: 4px;
             padding: 2px;
-            box-shadow: 0 3px 10px rgba(0,0,0,0.15);
         }
-        .interactive-label.show-controls .label-controls {
+        .interactive-label:hover .label-controls {
             opacity: 1;
             pointer-events: auto;
-            transform: scale(1) translateX(0);
         }
         .ctrl-btn {
             width: 20px;
@@ -1551,8 +1501,8 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
         <button class="btn-ui" onclick="window.print()"><i class="fas fa-print"></i> Печать в PDF</button>
         <button class="btn-ui btn-html" onclick="saveAsHtml()"><i class="fas fa-file-code"></i> Сохранить HTML</button>
         <button class="btn-ui btn-save" id="btnExportWord"><i class="fas fa-file-word"></i> Скачать DOCX</button>
-        <button class="btn-ui" id="btnSaveStyles" style="background: #10b981; margin-top: 10px;" title="Экспортировать оформление меток в файл"><i class="fas fa-save"></i> Сохранить стили</button>
-        <button class="btn-ui" id="btnLoadStyles" style="background: #3b82f6;" title="Импортировать оформление меток из файла"><i class="fas fa-file-import"></i> Загрузить стили</button>
+        <button class="btn-ui" id="btnSaveStyles" style="background: #10b981; margin-top: 10px;" title="Сохранить текущее оформление меток в файл"><i class="fas fa-save"></i> Сохранить стили</button>
+        <button class="btn-ui" id="btnLoadStyles" style="background: #3b82f6;" title="Загрузить оформление меток из файла"><i class="fas fa-file-import"></i> Загрузить стили</button>
         <input type="file" id="fileLoadStyles" accept=".json" style="display: none;">
     </div>
 
@@ -1703,7 +1653,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
 
             const jsonString = JSON.stringify(stylesConfig, null, 2);
             const blob = new Blob([jsonString], {type: "application/json;charset=utf-8"});
-            saveAs(blob, "оформление_меток_схемы.json");
+            saveAs(blob, "стили_меток_схемы.json");
         }
 
         // Функция импорта стилей меток из загруженного JSON-файла
@@ -2163,6 +2113,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
     win.document.write(htmlContent);
     win.document.close();
 }
+
 
 function addSchemaGrid(config) {
     const tempObjects = [];
