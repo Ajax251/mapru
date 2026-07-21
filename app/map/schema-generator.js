@@ -1893,7 +1893,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 "Схема расположения образуемого земельного участка на карте градостроительного зонирования " + (config.municipality || '') +
             "</div>" +
             "<div class='map-frame' data-page-type='pzz' style='margin-bottom: 25px;'>" +
-                (pzzImage ? ("<img src='" + pzzImage + "' alt=''><svg class='callout-svg' style='position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;'></svg>" + pzzLabelsHtml) : ("<div style='padding: 40px; text-align: center; color: #777; font-style: italic; border: 1px dashed #999; width:100%; box-sizing:border-box;'>Растр ПЗЗ (.rst) для квартала " + config.quarter + " не найден в облаке. Снимок пропущен.</div>")) +
+                (pzzImage ? ("<img src='" + pzzImage + "' alt=''><svg class='callout-svg' style='position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;'></svg>" + pzzLabelsHtml) : ("<div style='padding: 40px; text-align: center; color: #777; font-style: italic; border: 1px dashed #999; width:100%; box-sizing:border-box;'>Растр ПЗЗ (.rst) для квартала " + config.quarter + " не найден. Снимок пропущен.</div>")) +
             "</div>"
         ) : "") +
         (config.includeSat ? (
@@ -2560,7 +2560,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                         ]}));
                     } else {
                         s2Children.push(new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
-                            new docx.TextRun({ text: "[Растр ПЗЗ не найден в облаке]", size: 20, italic: true })
+                            new docx.TextRun({ text: "[Растр ПЗЗ не найден]", size: 20, italic: true })
                         ]}));
                     }
                 }
