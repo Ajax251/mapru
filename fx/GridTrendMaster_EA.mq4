@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Grid Backtester EA"
 #property link      ""
-#property version   "1.01"
+#property version   "1.02"
 #property strict
 
 //--- Единицы измерения параметров
@@ -238,27 +238,30 @@ void ProcessLevelCrossing(double level, string direction, double gridStepVal, do
 {
    int steps = (int)MathRound(takeProfitVal / gridStepVal);
    string stepsText = IntegerToString(steps);
+   int trackerIdx = GetTrackerIndex(level);
 
    if(direction == "UP")
    {
-      // А. Обычная BUY сетка
-      string gridComment = DoubleToString(level, _Digits) + "/" + stepsText + " BUY";
-      if(!IsOrderOpen(gridComment, OP_BUY))
-      {
-         double ask = MarketInfo(_Symbol, MODE_ASK);
-         double tp  = NormalizeDouble(ask + takeProfitVal, _Digits);
-         int ticket = OrderSend(_Symbol, OP_BUY, InpLotSize, ask, InpSlippage, 0, tp, gridComment, InpMagicNumber, 0, clrBlue);
-         if(ticket < 0)
-            Print("Ошибка открытия Grid BUY [", gridComment, "]: ", GetLastError());
-      }
-
-      // Б. Трендовый BUY ордер со звездочкой (*)
-      string trendComment = DoubleToString(level, _Digits) + "* BUY";
-      int trackerIdx = GetTrackerIndex(level);
       double minP = trackers[trackerIdx].minPrice;
 
+      // А. Обычная BUY сетка (Проверка: цена опускалась до (level - gridStepVal) или ниже)
+      if(minP > 0 && minP <= level - gridStepVal)
+      {
+         string gridComment = DoubleToString(level, _Digits) + "/" + stepsText + " BUY";
+         if(!IsOrderOpen(gridComment, OP_BUY))
+         {
+            double ask = MarketInfo(_Symbol, MODE_ASK);
+            double tp  = NormalizeDouble(ask + takeProfitVal, _Digits);
+            int ticket = OrderSend(_Symbol, OP_BUY, InpLotSize, ask, InpSlippage, 0, tp, gridComment, InpMagicNumber, 0, clrBlue);
+            if(ticket < 0)
+               Print("Ошибка открытия Grid BUY [", gridComment, "]: ", GetLastError());
+         }
+      }
+
+      // Б. Трендовый BUY ордер со звездочкой (*) (Проверка: цена опускалась до (level - trendStepVal) или ниже)
       if(minP > 0 && minP <= level - trendStepVal)
       {
+         string trendComment = DoubleToString(level, _Digits) + "* BUY";
          if(!IsOrderOpen(trendComment, OP_BUY))
          {
             double ask = MarketInfo(_Symbol, MODE_ASK);
@@ -270,24 +273,26 @@ void ProcessLevelCrossing(double level, string direction, double gridStepVal, do
    }
    else if(direction == "DOWN")
    {
-      // А. Обычная SELL сетка
-      string gridComment = DoubleToString(level, _Digits) + "/" + stepsText + " SELL";
-      if(!IsOrderOpen(gridComment, OP_SELL))
-      {
-         double bid = MarketInfo(_Symbol, MODE_BID);
-         double tp  = NormalizeDouble(bid - takeProfitVal, _Digits);
-         int ticket = OrderSend(_Symbol, OP_SELL, InpLotSize, bid, InpSlippage, 0, tp, gridComment, InpMagicNumber, 0, clrRed);
-         if(ticket < 0)
-            Print("Ошибка открытия Grid SELL [", gridComment, "]: ", GetLastError());
-      }
-
-      // Б. Трендовый SELL ордер со звездочкой (*)
-      string trendComment = DoubleToString(level, _Digits) + "* SELL";
-      int trackerIdx = GetTrackerIndex(level);
       double maxP = trackers[trackerIdx].maxPrice;
 
+      // А. Обычная SELL сетка (Проверка: цена поднималась до (level + gridStepVal) или выше)
+      if(maxP > 0 && maxP >= level + gridStepVal)
+      {
+         string gridComment = DoubleToString(level, _Digits) + "/" + stepsText + " SELL";
+         if(!IsOrderOpen(gridComment, OP_SELL))
+         {
+            double bid = MarketInfo(_Symbol, MODE_BID);
+            double tp  = NormalizeDouble(bid - takeProfitVal, _Digits);
+            int ticket = OrderSend(_Symbol, OP_SELL, InpLotSize, bid, InpSlippage, 0, tp, gridComment, InpMagicNumber, 0, clrRed);
+            if(ticket < 0)
+               Print("Ошибка открытия Grid SELL [", gridComment, "]: ", GetLastError());
+         }
+      }
+
+      // Б. Трендовый SELL ордер со звездочкой (*) (Проверка: цена поднималась до (level + trendStepVal) или выше)
       if(maxP > 0 && maxP >= level + trendStepVal)
       {
+         string trendComment = DoubleToString(level, _Digits) + "* SELL";
          if(!IsOrderOpen(trendComment, OP_SELL))
          {
             double bid = MarketInfo(_Symbol, MODE_BID);
