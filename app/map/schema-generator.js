@@ -1,4 +1,4 @@
-console.log("%c[Schema Generator] Загружена версия 2.16 ", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.15 ", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 
@@ -676,6 +676,14 @@ async function silentLoadRasterForSchema(quarterNumber) {
 async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
     showLoader('Подготовка Схемы КПТ (1/4)...');
 
+    // Очистка старых шаблонов позиций во избежание конфликтов и сдвигов
+    for (let i = localStorage.length - 1; i >= 0; i--) {
+        const key = localStorage.key(i);
+        if (key && key.startsWith('sch_tpl_')) {
+            localStorage.removeItem(key);
+        }
+    }
+
     const originalMode = localStorage.getItem('mapMode') || 'map';
     const originalCenter = map.getCenter();
     const originalZoom = map.getZoom();
@@ -1004,14 +1012,14 @@ function addSchemaTemporaryLabels(centerGeo, mapType, config) {
     const bgHex = config.calloutBgColor || '#ffffff';
     const bgAlpha = parseFloat(config.calloutBgOpacity !== undefined ? config.calloutBgOpacity : 90) / 100;
     
- const hexToRgba = (hex, alpha) => {
-    let c = hex.substring(1);
-    if (c.length === 3) c = c[0]+c[0]+c[1]+c[1]+c[2]+c[2];
-    const r = parseInt(c.substring(0,2), 16);
-    const g = parseInt(c.substring(2,4), 16);
-    const b = parseInt(c.substring(4,6), 16);
-    return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-};
+    const hexToRgba = (hex, alpha) => {
+        let c = hex.substring(1);
+        if (c.length === 3) c = c[0]+c[0]+c[1]+c[1]+c[2]+c[2];
+        const r = parseInt(c.substring(0,2), 16);
+        const g = parseInt(c.substring(2,4), 16);
+        const b = parseInt(c.substring(4,6), 16);
+        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
+    };
     
     const calloutBgRgba = hexToRgba(bgHex, bgAlpha);
     
@@ -1300,30 +1308,28 @@ function calculateLabelsData(centerGeo, config) {
         };
     };
 
-    // Рассчитываем координаты центра один раз для всех меток
-    const pctInside = getRelativePct(centerGeo);
-
     if (config.municipality) {
         const pct = getRelativePct([centerGeo[0] + latDelta * 0.22, centerGeo[1]]);
-        labelsData.push({ text: config.municipality, type: 'municipality', pctX: pct.x, pctY: pct.y, pctX_inside: pctInside.x, pctY_inside: pctInside.y });
+        labelsData.push({ text: config.municipality, type: 'municipality', pctX: pct.x, pctY: pct.y });
     }
     if (config.quarter) {
         const pct = getRelativePct([centerGeo[0], centerGeo[1] - lonDelta * 0.25]);
-        labelsData.push({ text: config.quarter, type: 'quarter', pctX: pct.x, pctY: pct.y, pctX_inside: pctInside.x, pctY_inside: pctInside.y });
+        labelsData.push({ text: config.quarter, type: 'quarter', pctX: pct.x, pctY: pct.y });
     }
     if (config.settlement) {
         const pct = getRelativePct([centerGeo[0] - latDelta * 0.22, centerGeo[1] + lonDelta * 0.22]);
-        labelsData.push({ text: config.settlement, type: 'settlement', pctX: pct.x, pctY: pct.y, pctX_inside: pctInside.x, pctY_inside: pctInside.y });
+        labelsData.push({ text: config.settlement, type: 'settlement', pctX: pct.x, pctY: pct.y });
     }
     if (config.terrZone) {
         const pct = getRelativePct([centerGeo[0] - latDelta * 0.18, centerGeo[1] - lonDelta * 0.2]);
-        labelsData.push({ text: config.terrZone, type: 'terrZone', pctX: pct.x, pctY: pct.y, pctX_inside: pctInside.x, pctY_inside: pctInside.y });
+        labelsData.push({ text: config.terrZone, type: 'terrZone', pctX: pct.x, pctY: pct.y });
     }
     if (config.zuName) {
         let labelText = config.zuName;
         if (config.quarter && !labelText.includes(config.quarter)) {
             labelText = ":" + labelText;
         }
+        const pctInside = getRelativePct(centerGeo);
         const pctCallout = getRelativePct([centerGeo[0] + latDelta * 0.12, centerGeo[1] - lonDelta * 0.14]);
         
         labelsData.push({ 
@@ -1357,14 +1363,16 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
 
         if (!showLabel) return '';
 
-        // Настройки по умолчанию
-        let fontSize = calloutFontSize;
-        if (l.type === 'municipality') fontSize = Math.round(calloutFontSize * 1.1);
-        if (l.type === 'terrZone') fontSize = Math.round(calloutFontSize * 0.9);
+        // Принудительно устанавливаем крупный размер шрифта для схемы (минимальный порог 28px)
+        const baseFontSize = Math.max(28, config.calloutFontSize || 28);
+        let fontSize = baseFontSize;
+        if (l.type === 'municipality') fontSize = Math.round(baseFontSize * 1.1);
+        if (l.type === 'terrZone') fontSize = Math.round(baseFontSize * 0.9);
 
-        // По умолчанию фон у меток ВЫКЛЮЧЕН на основной схеме (КПТ)
-        let isNoBg = (pageType === 'cp');
+        // По умолчанию фон у меток ВЫКЛЮЧЕН только на основной схеме (КПТ)
+        const isNoBg = (pageType === 'cp');
 
+        // Цвет выноски по умолчанию: белый для спутника, красный для остальных (КПТ и ПЗЗ)
         let defaultLineColor = '#ff3b30';
         if (pageType === 'satellite') {
             defaultLineColor = '#ffffff';
@@ -1372,10 +1380,9 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
             defaultLineColor = config.calloutLineColor;
         }
 
-        let finalFontColor = isNoBg ? defaultLineColor : calloutFontColor;
-        let hasCalloutClass = (l.type !== 'zuName' || zuNameMode === 'callout') ? 'has-callout' : '';
+        // Если фон отключен по умолчанию, делаем шрифт такого же цвета, как линия выноски
+        const finalFontColor = isNoBg ? defaultLineColor : calloutFontColor;
 
-        // Поиск базовых (дефолтных) процентных координат центра
         let pctX = l.pctX;
         let pctY = l.pctY;
         if (l.type === 'zuName') {
@@ -1388,6 +1395,12 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
             }
         }
 
+        // Метки имеют активную выноску по умолчанию, кроме имени строго внутри полигона
+        const hasCalloutClass = (l.type !== 'zuName' || zuNameMode === 'callout') ? 'has-callout' : '';
+
+        // ВЫЧИСЛЕНИЕ ШИРИНЫ ДЛЯ ИНТЕРАКТИВНОЙ МЕТКИ (Предотвращает перенос строк в html2canvas)
+        const w = Math.ceil((text.length * (fontSize * 0.65)) + 40);
+
         return `
             <div class="interactive-label ${isNoBg ? 'no-bg' : ''} ${hasCalloutClass}" 
                  style="left: ${pctX}%; top: ${pctY}%;" 
@@ -1395,7 +1408,7 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
                  data-anchor-x="${l.pctX_inside}" 
                  data-anchor-y="${l.pctY_inside}" 
                  data-default-color="${defaultLineColor}">
-                <span contenteditable="true" class="label-text" title="Двойной клик — изменить текст, зажать — перетащить" style="font-size: ${fontSize}px; background: ${calloutBgRgba}; border: 1.5px solid ${config.calloutLineColor || '#ff3b30'}; color: ${finalFontColor};">${text}</span>
+                <span contenteditable="true" class="label-text" title="Двойной клик — изменить текст, зажать — перетащить" style="font-size: ${fontSize}px; background: ${calloutBgRgba}; border: 1.5px solid ${config.calloutLineColor || '#ff3b30'}; color: ${finalFontColor}; white-space: nowrap !important; display: inline-block !important; width: ${w}px !important; text-align: center;">${text}</span>
                 <div class="label-controls">
                     <button class="ctrl-btn size-up" data-tooltip="Увеличить шрифт">+</button>
                     <button class="ctrl-btn size-down" data-tooltip="Уменьшить шрифт">-</button>
@@ -2147,17 +2160,18 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             });
         }
 
-       // Логика перемещения, масштабирования и управления живыми метками на страницах
+      // Логика перемещения, масштабирования и управления живыми метками на страницах
         document.querySelectorAll('.interactive-label').forEach(label => {
             let isDragging = false;
             let startX, startY;
             let startLeft, startTop;
-            let hideTimeout;
+            let hideTimeout; // Индивидуальный таймаут скрытия для каждой метки
 
             const span = label.querySelector('.label-text');
             const controls = label.querySelector('.label-controls');
             const colorPicker = label.querySelector('.color-picker');
 
+            // --- УПРАВЛЕНИЕ ОТОБРАЖЕНИЕМ ПАНЕЛИ С ЗАДЕРЖКОЙ ---
             const showControls = () => {
                 clearTimeout(hideTimeout);
                 label.classList.add('show-controls');
@@ -2167,7 +2181,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 clearTimeout(hideTimeout);
                 hideTimeout = setTimeout(() => {
                     label.classList.remove('show-controls');
-                }, 1000);
+                }, 1000); // 1 секунда задержки перед скрытием
             };
 
             label.addEventListener('mouseenter', showControls);
@@ -2199,13 +2213,12 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 label.style.left = (startLeft + dx) + '%';
                 label.style.top = (startTop + dy) + '%';
                 
+                // Обновляем линии при движении метки
                 updatePageCallouts(label.parentElement);
             });
 
             document.addEventListener('mouseup', () => {
-                if (isDragging) {
-                    isDragging = false;
-                }
+                isDragging = false;
             });
 
             span.addEventListener('dblclick', (e) => {
@@ -2213,18 +2226,32 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 span.focus();
             });
 
-            // --- КНОПКИ УПРАВЛЕНИЯ (БЕЗ СОХРАНЕНИЯ ШАБЛОНОВ) ---
+            // --- КНОПКИ УПРАВЛЕНИЯ ---
             label.querySelector('.size-up').onclick = (ev) => {
                 ev.stopPropagation();
                 const currentSize = parseInt(window.getComputedStyle(span).fontSize);
-                span.style.fontSize = (currentSize + 2) + 'px';
+                const newSize = currentSize + 2;
+                span.style.fontSize = newSize + 'px';
+                
+                // Пересчитываем ширину контейнера под новый размер шрифта для исключения переносов
+                const textLength = span.textContent.length;
+                const newWidth = Math.ceil((textLength * (newSize * 0.65)) + 40);
+                span.style.width = newWidth + 'px';
+                
                 updatePageCallouts(label.parentElement);
             };
 
             label.querySelector('.size-down').onclick = (ev) => {
                 ev.stopPropagation();
                 const currentSize = parseInt(window.getComputedStyle(span).fontSize);
-                span.style.fontSize = Math.max(10, currentSize - 2) + 'px';
+                const newSize = Math.max(10, currentSize - 2);
+                span.style.fontSize = newSize + 'px';
+                
+                // Пересчитываем ширину контейнера под новый размер шрифта
+                const textLength = span.textContent.length;
+                const newWidth = Math.ceil((textLength * (newSize * 0.65)) + 40);
+                span.style.width = newWidth + 'px';
+                
                 updatePageCallouts(label.parentElement);
             };
 
@@ -2249,6 +2276,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 }
             };
 
+            // Вкл/Выкл выноску
             label.querySelector('.toggle-callout').onclick = (ev) => {
                 ev.stopPropagation();
                 label.classList.toggle('has-callout');
