@@ -1,4 +1,4 @@
-console.log("%c[Schema Generator] Загружена версия 2.201 (Интерактивные HTML-выноски со стилизацией)", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.202 (Интерактивные HTML-выноски со стилизацией)", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 function startSchemaWorkflow(lat, lon, targetPolygon) {
@@ -1114,7 +1114,7 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
 
         restoreOriginalVisibilities();
 
-        const geomStats = calculatePrecideGeometry ? calculatePrecideGeometry(targetPolygon) : calculatePreciseGeometry(targetPolygon);
+        const geomStats = typeof calculatePreciseGeometry !== 'undefined' ? calculatePreciseGeometry(targetPolygon) : { area: 0, perimeter: 0 };
         const areaStr = Math.round(geomStats.area).toLocaleString('ru-RU');
 
         const imgLegendPoly = generateLegendPolygonImage(config.lineColor, config.fillColor, config.fillOpacity);
