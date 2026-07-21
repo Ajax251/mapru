@@ -1,4 +1,4 @@
-console.log("%c[Schema Generator] Загружена НОВАЯ версия 2.0 (с защитой от переноса строк и увеличенным шрифтом)", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.1 ", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 
@@ -1004,14 +1004,22 @@ function addSchemaTemporaryLabels(centerGeo, mapType, config) {
     };
     
     const calloutBgRgba = hexToRgba(bgHex, bgAlpha);
-    const calloutFontSize = config.calloutFontSize || 20; // Изменено с 16 на 20
+    
+    // Принудительно устанавливаем крупный размер шрифта для схемы (минимальный порог 32px)
+    const calloutFontSize = Math.max(32, config.calloutFontSize || 32);
     const calloutFontColor = config.calloutFontColor || '#333333';
 
-    // Добавлены стили безальтернативного запрета переноса текста
-    const styleBase = `background: ${calloutBgRgba}; border: 1.5px solid ${config.calloutLineColor || '#ff3b30'}; padding: 4px 10px; border-radius: 6px; box-shadow: 0 2px 6px rgba(0,0,0,0.15); color: ${calloutFontColor}; font-family: "Times New Roman", Times, serif; white-space: nowrap !important; display: inline-block !important; width: max-content !important;`;
+    // Вспомогательная функция для расчета точной ширины блока в пикселях.
+    // Это критически важно для html2canvas, который ломает "width: max-content" на картах.
+    const getWidth = (text, size) => Math.ceil((text.length * (size * 0.65)) + 40);
+
+    // Базовый стиль без свойства width (ширина будет задана индивидуально для каждого блока)
+    const styleBase = `position: absolute !important; overflow: visible !important; background: ${calloutBgRgba}; border: 2px solid ${config.calloutLineColor || '#ff3b30'}; padding: 6px 14px; border-radius: 8px; box-shadow: 0 3px 8px rgba(0,0,0,0.2); color: ${calloutFontColor}; font-family: "Times New Roman", Times, serif; white-space: nowrap !important; display: inline-block !important;`;
 
     if (config.municipality) {
-        const mStyle = styleBase + ` font-size: ${calloutFontSize * 1.1}px; font-weight: bold; font-style: italic;`;
+        const size = Math.round(calloutFontSize * 1.1);
+        const w = getWidth(config.municipality, size);
+        const mStyle = styleBase + ` font-size: ${size}px; font-weight: bold; font-style: italic; width: ${w}px !important;`;
         const mLayout = ymaps.templateLayoutFactory.createClass(`<div style="${mStyle}">${config.municipality}</div>`);
         const p = new ymaps.Placemark([centerGeo[0] + latDelta * 0.22, centerGeo[1]], {}, { iconLayout: mLayout, zIndex: 1200 });
         map.geoObjects.add(p);
@@ -1019,7 +1027,9 @@ function addSchemaTemporaryLabels(centerGeo, mapType, config) {
     }
 
     if (config.quarter) {
-        const qStyle = styleBase + ` font-size: ${calloutFontSize}px; font-weight: bold;`;
+        const size = calloutFontSize;
+        const w = getWidth(config.quarter, size);
+        const qStyle = styleBase + ` font-size: ${size}px; font-weight: bold; width: ${w}px !important;`;
         const qLayout = ymaps.templateLayoutFactory.createClass(`<div style="${qStyle}">${config.quarter}</div>`);
         const p = new ymaps.Placemark([centerGeo[0], centerGeo[1] - lonDelta * 0.25], {}, { iconLayout: qLayout, zIndex: 1200 });
         map.geoObjects.add(p);
@@ -1027,7 +1037,9 @@ function addSchemaTemporaryLabels(centerGeo, mapType, config) {
     }
 
     if (config.settlement) {
-        const sStyle = styleBase + ` font-size: ${calloutFontSize}px; font-style: italic;`;
+        const size = calloutFontSize;
+        const w = getWidth(config.settlement, size);
+        const sStyle = styleBase + ` font-size: ${size}px; font-style: italic; width: ${w}px !important;`;
         const sLayout = ymaps.templateLayoutFactory.createClass(`<div style="${sStyle}">${config.settlement}</div>`);
         const p = new ymaps.Placemark([centerGeo[0] - latDelta * 0.22, centerGeo[1] + lonDelta * 0.22], {}, { iconLayout: sLayout, zIndex: 1200 });
         map.geoObjects.add(p);
@@ -1035,7 +1047,9 @@ function addSchemaTemporaryLabels(centerGeo, mapType, config) {
     }
 
     if (config.terrZone && mapType !== 'satellite') {
-        const tStyle = styleBase + ` font-size: ${calloutFontSize * 0.9}px; font-weight: bold;`;
+        const size = Math.round(calloutFontSize * 0.9);
+        const w = getWidth(config.terrZone, size);
+        const tStyle = styleBase + ` font-size: ${size}px; font-weight: bold; width: ${w}px !important;`;
         const tLayout = ymaps.templateLayoutFactory.createClass(`<div style="${tStyle}">${config.terrZone}</div>`);
         const p = new ymaps.Placemark([centerGeo[0] - latDelta * 0.18, centerGeo[1] - lonDelta * 0.2], {}, { iconLayout: tLayout, zIndex: 1200 });
         map.geoObjects.add(p);
@@ -1054,19 +1068,19 @@ function addSchemaTemporaryLabels(centerGeo, mapType, config) {
             labelText = ":" + labelText;
         }
 
+        const size = calloutFontSize;
+        const w = getWidth(labelText, size);
+
         if (zuNameMode === 'inside') {
-            // Отрисовка названия строго внутри полигона (по центру) - Добавлен принудительный запрет переноса текста
-            const zStyle = `position: absolute; transform: translate(-50%, -50%); color: ${calloutFontColor}; font-size: ${calloutFontSize}px; font-weight: bold; text-shadow: -2px -2px 0 #fff, 2px -2px 0 #fff, -2px 2px 0 #fff, 2px 2px 0 #fff, 0 0 6px #fff; font-family: Arial, sans-serif; white-space: nowrap !important; display: inline-block !important; width: max-content !important; text-align: center;`;
+            const zStyle = `position: absolute !important; overflow: visible !important; transform: translate(-50%, -50%); color: ${calloutFontColor}; font-size: ${size}px; font-weight: bold; text-shadow: -2px -2px 0 #fff, 2px -2px 0 #fff, -2px 2px 0 #fff, 2px 2px 0 #fff, 0 0 6px #fff; font-family: Arial, sans-serif; white-space: nowrap !important; display: inline-block !important; width: ${w}px !important; text-align: center;`;
             const zLayout = ymaps.templateLayoutFactory.createClass(`<div style="${zStyle}">${labelText}</div>`);
             const p = new ymaps.Placemark(centerGeo, {}, { iconLayout: zLayout, zIndex: 1210 });
             map.geoObjects.add(p);
             tempObjects.push(p);
         } else if (zuNameMode === 'callout') {
-            // Отрисовка с выноской-линией и табличкой
             const zLayout = ymaps.templateLayoutFactory.createClass(
-                `<div style="position: absolute; transform: translate(-50%, -50%); ${styleBase}">${labelText}</div>`
+                `<div style="position: absolute !important; overflow: visible !important; transform: translate(-50%, -50%); ${styleBase} width: ${w}px !important;">${labelText}</div>`
             );
-            // Предотвращение выхода за рамки (клиппинга) за счет умеренного смещения
             const labelPoint = [centerGeo[0] + latDelta * 0.12, centerGeo[1] - lonDelta * 0.14];
             const p = new ymaps.Placemark(labelPoint, {}, { iconLayout: zLayout, zIndex: 1210 });
             map.geoObjects.add(p);
@@ -1166,7 +1180,8 @@ function processAndDrawSchemaPoints(rings, polygon, config) {
     let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
     let globalPointIndex = 1;
 
-    const ptFontSize = config.pointFontSize || 18; // Изменено с 14 на 18
+    // Гарантируем крупный шрифт точек (минимальный порог 26px для схемы)
+    const ptFontSize = Math.max(26, config.pointFontSize || 26);
 
     rings.forEach((coords) => {
         let firstPointOfRing = null;
@@ -1193,17 +1208,18 @@ function processAndDrawSchemaPoints(rings, polygon, config) {
             if (i === 0) firstPointOfRing = tableEntry;
 
             if (config.showPoints) {
+                // Сделали кружок точки крупнее и заметнее на схеме (12px)
                 const dotLayout = ymaps.templateLayoutFactory.createClass(
-                    `<div style="width: 10px; height: 10px; background-color: ${config.pointColor}; border-radius: 50%; border: 1px solid white; box-shadow: 0 0 3px rgba(0,0,0,0.5);"></div>`
+                    `<div style="width: 12px; height: 12px; background-color: ${config.pointColor}; border-radius: 50%; border: 1.5px solid white; box-shadow: 0 0 4px rgba(0,0,0,0.5);"></div>`
                 );
                 
-                // Добавлены стили inline-block, max-content и nowrap
+                // Добавлена жесткая ширина 90px во избежание переноса номеров точек в html2canvas
                 const textLayout = ymaps.templateLayoutFactory.createClass(
-                    `<div style="color: ${config.pointColor}; font-size: ${ptFontSize}px; font-weight: bold; font-family: Arial; text-shadow: -1px -1px 0 #fff, 1px -1px 0 #fff, -1px 1px 0 #fff, 1px 1px 0 #fff; white-space: nowrap !important; display: inline-block !important; width: max-content !important;">${pointName}</div>`
+                    `<div style="position: absolute !important; overflow: visible !important; color: ${config.pointColor}; font-size: ${ptFontSize}px; font-weight: bold; font-family: Arial; text-shadow: -2px -2px 0 #fff, 2px -2px 0 #fff, -2px 2px 0 #fff, 2px 2px 0 #fff; white-space: nowrap !important; display: inline-block !important; width: 90px !important; text-align: left;">${pointName}</div>`
                 );
 
-                const dot = new ymaps.Placemark(c, {}, { iconLayout: dotLayout, iconOffset: [-5, -5], zIndex: 1140 });
-                const label = new ymaps.Placemark(c, {}, { iconLayout: textLayout, iconOffset: [8, -12], zIndex: 1150 });
+                const dot = new ymaps.Placemark(c, {}, { iconLayout: dotLayout, iconOffset: [-6, -6], zIndex: 1140 });
+                const label = new ymaps.Placemark(c, {}, { iconLayout: textLayout, iconOffset: [12, -14], zIndex: 1150 });
                 
                 dot.properties.set({ 'isSchemaPoint': true, 'relatedPolygon': polygon });
                 label.properties.set({ 'isSchemaPoint': true, 'relatedPolygon': polygon });
