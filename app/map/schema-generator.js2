@@ -1,4 +1,4 @@
-console.log("%c[Schema Generator] Загружена версия 2.11 ", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.1 ", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 
@@ -791,31 +791,12 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
         showLoader('Создание снимка карты КПТ...');
         map.setCenter(centerGeo); 
         setLayerVisibilityForPage({ showZu: config.cptShowZu, showZouit: config.cptShowZouit });
-        
-        const bounds = map.getBounds();
-        const latDelta = bounds[1][0] - bounds[0][0];
-        const lonDelta = bounds[1][1] - bounds[0][1];
-
-        // 1. Рассчитываем процентные координаты меток для HTML-слоя
-        const labelsData = calculateLabelsData(centerGeo, config);
-
-        // 2. Если условный номер в режиме выноски, рисуем линию-указатель на карте (будет впечена в растр)
-        let tempCalloutLine = null;
-        if (config.cptZuNameMode === 'callout' && config.zuName) {
-            const labelPoint = [centerGeo[0] + latDelta * 0.12, centerGeo[1] - lonDelta * 0.14];
-            tempCalloutLine = new ymaps.Polyline([labelPoint, centerGeo], {}, {
-                strokeColor: config.calloutLineColor || '#ff3b30',
-                strokeWidth: 2.5,
-                zIndex: 1205,
-                interactivityModel: 'default#transparent'
-            });
-            map.geoObjects.add(tempCalloutLine);
-        }
+        const tempLabelsCP = addSchemaTemporaryLabels(centerGeo, 'cp', config);
         
         await new Promise(r => setTimeout(r, 500));
         const mapImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement);
         
-        if (tempCalloutLine) map.geoObjects.remove(tempCalloutLine);
+        tempLabelsCP.forEach(obj => map.geoObjects.remove(obj));
 
         let pzzImageBase64 = null;
         let rasterLoadedSuccessfully = false;
@@ -851,21 +832,11 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
                     });
                 }
 
-                if (config.pzzZuNameMode === 'callout' && config.zuName) {
-                    const labelPoint = [centerGeo[0] + latDelta * 0.12, centerGeo[1] - lonDelta * 0.14];
-                    tempCalloutLine = new ymaps.Polyline([labelPoint, centerGeo], {}, {
-                        strokeColor: config.calloutLineColor || '#ff3b30',
-                        strokeWidth: 2.5,
-                        zIndex: 1205,
-                        interactivityModel: 'default#transparent'
-                    });
-                    map.geoObjects.add(tempCalloutLine);
-                }
-
+                const tempLabelsPZZ = addSchemaTemporaryLabels(centerGeo, 'pzz', config);
                 await new Promise(r => setTimeout(r, 2000));
                 pzzImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement);
                 
-                if (tempCalloutLine) map.geoObjects.remove(tempCalloutLine);
+                tempLabelsPZZ.forEach(obj => map.geoObjects.remove(obj));
                 rasterOverlay.options.set('visible', false);
 
                 if (!config.pzzShowPoints) {
@@ -915,21 +886,11 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
                 });
             }
 
-            if (config.satZuNameMode === 'callout' && config.zuName) {
-                const labelPoint = [centerGeo[0] + latDelta * 0.12, centerGeo[1] - lonDelta * 0.14];
-                tempCalloutLine = new ymaps.Polyline([labelPoint, centerGeo], {}, {
-                    strokeColor: config.calloutLineColor || '#ff3b30',
-                    strokeWidth: 2.5,
-                    zIndex: 1205,
-                    interactivityModel: 'default#transparent'
-                });
-                map.geoObjects.add(tempCalloutLine);
-            }
-
+            const tempLabelsSat = addSchemaTemporaryLabels(centerGeo, 'satellite', config);
             await new Promise(r => setTimeout(r, 3500));
             satelliteImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement);
 
-            if (tempCalloutLine) map.geoObjects.remove(tempCalloutLine);
+            tempLabelsSat.forEach(obj => map.geoObjects.remove(obj));
             satStyle.remove();
 
             if (!config.satShowPoints) {
@@ -944,15 +905,44 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
         if (config.includeParts) {
             showLoader('Отрисовка чертежа контура...');
             const partsData = generatePartsSchemaImage(targetPolygon, config);
+            
+            // Защита на случай дублирования функций: если вернулся объект или сырая строка base64
             if (partsData && typeof partsData === 'object' && partsData.image) {
                 partsImageBase64 = partsData.image;
                 partsGridStep = partsData.gridStep;
                 partsHeight = partsData.heightMeters;
             } else {
                 partsImageBase64 = partsData;
+                try {
+                    // Резервный расчет размеров прямо в функции
+                    const coords = targetPolygon.geometry.getCoordinates()[0];
+                    if (coords && coords.length >= 3) {
+                        let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+                        coords.forEach(c => {
+                            minLat = Math.min(minLat, c[0]); maxLat = Math.max(maxLat, c[0]);
+                            minLon = Math.min(minLon, c[1]); maxLon = Math.max(maxLon, c[1]);
+                        });
+                        const centerLat = (minLat + maxLat) / 2;
+                        const latScale = 111132.95 - 559.82 * Math.cos(2 * centerLat * Math.PI / 180);
+                        const lonScale = 111412.84 * Math.cos(centerLat * Math.PI / 180);
+                        
+                        const localY = coords.map(c => (c[0] - minLat) * latScale);
+                        partsHeight = parseFloat((Math.max(...localY) - Math.min(...localY)).toFixed(1));
+                        
+                        const localX = coords.map(c => (c[1] - minLon) * lonScale);
+                        const widthMeters = Math.max(...localX) - Math.min(...localX);
+                        if (widthMeters > 500) partsGridStep = 100;
+                        else if (widthMeters > 150) partsGridStep = 20;
+                        else if (widthMeters > 50) partsGridStep = 10;
+                        else partsGridStep = 5;
+                    }
+                } catch (e) {
+                    console.error("Ошибка авторасчета размеров:", e);
+                }
             }
         }
 
+        // Публикация в глобальные области видимости для защиты шаблона документа
         window.partsGridStep = partsGridStep;
         window.partsHeight = partsHeight;
         config.partsGridStep = partsGridStep;
@@ -981,7 +971,7 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
 
         openSchemaDocumentWindow(
             mapImageBase64, pzzImageBase64, satelliteImageBase64, partsImageBase64,
-            mskCoordsTable, areaStr, config.terrZone, imgLegendPoly, imgLegendPoint, labelsData, config,
+            mskCoordsTable, areaStr, config.terrZone, imgLegendPoly, imgLegendPoint, config,
             partsGridStep, partsHeight
         );
         showNotification('Схема успешно сформирована', 'success');
@@ -1248,120 +1238,6 @@ function processAndDrawSchemaPoints(rings, polygon, config) {
     const centerGeo = [(minLat + maxLat) / 2, (minLon + maxLon) / 2];
     return { mskCoordsTable, centerGeo };
 }
-
-
-// Функция расчета процентных координат относительно контейнера карты
-function calculateLabelsData(centerGeo, config) {
-    const labelsData = [];
-    const bounds = map.getBounds();
-    if (!bounds) return labelsData;
-
-    const latDelta = bounds[1][0] - bounds[0][0];
-    const lonDelta = bounds[1][1] - bounds[0][1];
-
-    const mapElement = document.getElementById('map');
-    const mapRect = mapElement.getBoundingClientRect();
-    const projection = map.options.get('projection');
-    const zoom = map.getZoom();
-
-    const getRelativePct = (geoCoords) => {
-        const globalPx = projection.toGlobalPixels(geoCoords, zoom);
-        const pagePx = map.converter.globalToPage(globalPx);
-        const relX = pagePx[0] - mapRect.left;
-        const relY = pagePx[1] - mapRect.top;
-        return {
-            x: (relX / mapRect.width) * 100,
-            y: (relY / mapRect.height) * 100
-        };
-    };
-
-    if (config.municipality) {
-        const pct = getRelativePct([centerGeo[0] + latDelta * 0.22, centerGeo[1]]);
-        labelsData.push({ text: config.municipality, type: 'municipality', pctX: pct.x, pctY: pct.y });
-    }
-    if (config.quarter) {
-        const pct = getRelativePct([centerGeo[0], centerGeo[1] - lonDelta * 0.25]);
-        labelsData.push({ text: config.quarter, type: 'quarter', pctX: pct.x, pctY: pct.y });
-    }
-    if (config.settlement) {
-        const pct = getRelativePct([centerGeo[0] - latDelta * 0.22, centerGeo[1] + lonDelta * 0.22]);
-        labelsData.push({ text: config.settlement, type: 'settlement', pctX: pct.x, pctY: pct.y });
-    }
-    if (config.terrZone) {
-        const pct = getRelativePct([centerGeo[0] - latDelta * 0.18, centerGeo[1] - lonDelta * 0.2]);
-        labelsData.push({ text: config.terrZone, type: 'terrZone', pctX: pct.x, pctY: pct.y });
-    }
-    if (config.zuName) {
-        let labelText = config.zuName;
-        if (config.quarter && !labelText.includes(config.quarter)) {
-            labelText = ":" + labelText;
-        }
-        const pctInside = getRelativePct(centerGeo);
-        const pctCallout = getRelativePct([centerGeo[0] + latDelta * 0.12, centerGeo[1] - lonDelta * 0.14]);
-        
-        labelsData.push({ 
-            text: labelText, 
-            type: 'zuName', 
-            pctX_inside: pctInside.x, 
-            pctY_inside: pctInside.y,
-            pctX_callout: pctCallout.x,
-            pctY_callout: pctCallout.y
-        });
-    }
-
-    return labelsData;
-}
-
-// Функция генерации HTML-разметки для набора интерактивных меток на конкретной странице
-function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRgba, calloutFontSize, calloutFontColor) {
-    return labelsData.map(l => {
-        if (pageType === 'satellite' && l.type === 'terrZone') return '';
-        
-        let text = l.text;
-        let showLabel = true;
-        let zuNameMode = 'inside';
-        
-        if (pageType === 'cp') zuNameMode = config.cptZuNameMode || 'inside';
-        else if (pageType === 'pzz') zuNameMode = config.pzzZuNameMode || 'inside';
-        else if (pageType === 'satellite') zuNameMode = config.satZuNameMode || 'inside';
-
-        if (l.type === 'zuName' && zuNameMode === 'off') {
-            showLabel = false;
-        }
-
-        if (!showLabel) return '';
-
-        let fontSize = calloutFontSize;
-        if (l.type === 'municipality') fontSize = Math.round(calloutFontSize * 1.1);
-        if (l.type === 'terrZone') fontSize = Math.round(calloutFontSize * 0.9);
-
-        let pctX = l.pctX;
-        let pctY = l.pctY;
-        if (l.type === 'zuName') {
-            if (zuNameMode === 'inside') {
-                pctX = l.pctX_inside;
-                pctY = l.pctY_inside;
-            } else if (zuNameMode === 'callout') {
-                pctX = l.pctX_callout;
-                pctY = l.pctY_callout;
-            }
-        }
-
-        return `
-            <div class="interactive-label" style="left: ${pctX}%; top: ${pctY}%;" data-type="${l.type}">
-                <span contenteditable="true" class="label-text" style="font-size: ${fontSize}px; background: ${calloutBgRgba}; border: 1.5px solid ${config.calloutLineColor || '#ff3b30'}; color: ${calloutFontColor};">${text}</span>
-                <div class="label-controls">
-                    <button class="ctrl-btn size-up" title="Увеличить">+</button>
-                    <button class="ctrl-btn size-down" title="Уменьшить">-</button>
-                    <button class="ctrl-btn toggle-bg" title="Фон/Граница"><i class="fas fa-eye-slash"></i></button>
-                    <button class="ctrl-btn delete-lbl" title="Удалить">&times;</button>
-                </div>
-            </div>
-        `;
-    }).join('');
-}
-
-
 
 function addVisibleZouitLabelsForSchema() {
     const addedLabels = [];
@@ -1731,11 +1607,12 @@ function generatePartsSchemaImage(targetPolygon, config) {
     };
 }
 
-function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage, coordsTable, areaStr, terrZoneName, imgLegendPoly, imgLegendPoint, labelsData, config, partsGridStep = 5, partsHeight = 76.7) {
+function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage, coordsTable, areaStr, terrZoneName, imgLegendPoly, imgLegendPoint, config, partsGridStep = 5, partsHeight = 76.7) {
     const sAl1 = localStorage.getItem('sch_al1') || '';
     const sAl2 = localStorage.getItem('sch_al2') || '';
     const sAl3 = localStorage.getItem('sch_al3') || '';
 
+    // Разделение единой строки документа утверждения на три строки для заполнения шаблона
     function splitApprovalDoc(docText) {
         if (!docText) return ['', '', ''];
         const words = docText.split(' ');
@@ -1763,32 +1640,11 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
         </tr>
     `).join('');
 
-    const bgHex = config.calloutBgColor || '#ffffff';
-    const bgAlpha = parseFloat(config.calloutBgOpacity !== undefined ? config.calloutBgOpacity : 90) / 100;
-    
-    const hexToRgba = (hex, alpha) => {
-        let c = hex.substring(1);
-        if (c.length === 3) c = c[0]+c[0]+c[1]+c[1]+c[2]+c[2];
-        const r = parseInt(c.substring(0,2), 16);
-        const g = parseInt(c.substring(2,4), 16);
-        const b = parseInt(c.substring(4,6), 16);
-        return `rgba(${r}, ${g}, ${b}, ${alpha})`;
-    };
-    
-    const calloutBgRgba = hexToRgba(bgHex, bgAlpha);
-    const calloutFontSize = Math.max(24, config.calloutFontSize || 24);
-    const calloutFontColor = config.calloutFontColor || '#333333';
-
-    const cptLabelsHtml = generateInteractiveLabelsHtml(labelsData, 'cp', config, calloutBgRgba, calloutFontSize, calloutFontColor);
-    const pzzLabelsHtml = config.includePzz ? generateInteractiveLabelsHtml(labelsData, 'pzz', config, calloutBgRgba, calloutFontSize, calloutFontColor) : '';
-    const satLabelsHtml = config.includeSat ? generateInteractiveLabelsHtml(labelsData, 'satellite', config, calloutBgRgba, calloutFontSize, calloutFontColor) : '';
-
     const htmlContent = `<!DOCTYPE html>
 <html lang="ru">
 <head>
     <meta charset="UTF-8">
     <title>Схема СРЗУ - Печать</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
     <script src="https://unpkg.com/docx@7.8.2/build/index.js"></script>
     <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
     <style>
@@ -1801,10 +1657,8 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
         table { width: 100%; border-collapse: collapse; margin-bottom: 15px; font-size: 10.5pt; }
         th, td { border: 1px solid #000; padding: 5px 6px; text-align: left; }
         th { background-color: #e6f2ff; text-align: center; font-weight: bold; }
-        
-        /* Рамка карты сделана относительной для позиционирования живых меток */
-        .map-frame { width: 100%; height: 380px; border: 1.5px solid #000; box-sizing: border-box; display: flex; justify-content: center; align-items: center; overflow: hidden; background: #fafafa; position: relative; }
-        .map-frame img { width: 100%; height: 100%; object-fit: contain; pointer-events: none; }
+        .map-frame { width: 100%; height: 380px; border: 1.5px solid #000; box-sizing: border-box; display: flex; justify-content: center; align-items: center; overflow: hidden; background: #fafafa; }
+        .map-frame img { width: 100%; height: 100%; object-fit: contain; }
         
         .badge-bar { display: flex; justify-content: center; gap: 15px; margin-top: 15px; }
         .badge { background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 20px; padding: 6px 14px; font-size: 10pt; font-weight: bold; color: #334155; display: flex; align-items: center; gap: 6px; box-shadow: 0 1px 3px rgba(0,0,0,0.05); }
@@ -1817,80 +1671,10 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
         .btn-html { background: #f59e0b; }
         .btn-html:hover { background: #d97706; }
 
-        /* Стиль живой интерактивной метки */
-        .interactive-label {
-            position: absolute;
-            transform: translate(-50%, -50%);
-            cursor: move;
-            user-select: none;
-            z-index: 10;
-            display: inline-block;
-            font-family: "Times New Roman", Times, serif;
-        }
-        .interactive-label .label-text {
-            display: inline-block;
-            padding: 4px 10px;
-            border-radius: 6px;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.15);
-            white-space: nowrap;
-            outline: none;
-        }
-        
-        /* Состояние выключенного фона у метки */
-        .interactive-label.no-bg .label-text {
-            background: transparent !important;
-            border-color: transparent !important;
-            box-shadow: none !important;
-        }
-        
-        /* Кнопки управления меткой */
-        .interactive-label .label-controls {
-            position: absolute;
-            left: 100%;
-            top: 0;
-            margin-left: 5px;
-            display: flex;
-            flex-direction: column;
-            gap: 2px;
-            opacity: 0;
-            transition: opacity 0.2s ease;
-            pointer-events: none;
-            background: rgba(255,255,255,0.9);
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            padding: 2px;
-        }
-        .interactive-label:hover .label-controls {
-            opacity: 1;
-            pointer-events: auto;
-        }
-        .ctrl-btn {
-            width: 20px;
-            height: 20px;
-            font-size: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            border: 1px solid #ccc;
-            background: #fff;
-            border-radius: 3px;
-        }
-        .ctrl-btn:hover {
-            background: #eee;
-        }
-
         @media print {
             body { background: white; padding: 0; }
             .page { box-shadow: none; margin: 0; padding: 15mm; width: 100%; }
             .btn-panel { display: none !important; }
-            .label-controls { display: none !important; }
-            .interactive-label .label-text {
-                border-color: ${config.calloutLineColor || '#ff3b30'} !important;
-            }
-            .interactive-label.no-bg .label-text {
-                border-color: transparent !important;
-            }
         }
     </style>
 </head>
@@ -1930,7 +1714,6 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
 
         <div class="map-frame">
             <img src="${mapImage}" alt="">
-            ${cptLabelsHtml}
         </div>
         <div style="text-align: center;"><input type="text" id="scaleText" class="scale-input" value="${config.scaleText}"></div>
 
@@ -1952,7 +1735,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 Схема расположения образуемого земельного участка на карте градостроительного зонирования ${config.municipality || ''}
             </div>
             <div class="map-frame" style="height: 380px; margin-bottom: 25px;">
-                ${pzzImage ? `<img src="${pzzImage}" alt="">${pzzLabelsHtml}` : `<div style="padding: 40px; text-align: center; color: #777; font-style: italic; border: 1px dashed #999; width:100%; box-sizing:border-box;">Растр ПЗЗ (.rst) для квартала ${config.quarter} не найден в облаке. Снимок пропущен.</div>`}
+                ${pzzImage ? `<img src="${pzzImage}" alt="">` : `<div style="padding: 40px; text-align: center; color: #777; font-style: italic; border: 1px dashed #999; width:100%; box-sizing:border-box;">Растр ПЗЗ (.rst) для квартала ${config.quarter} не найден в облаке. Снимок пропущен.</div>`}
             </div>
         ` : ''}
 
@@ -1962,7 +1745,6 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             </div>
             <div class="map-frame" style="height: 380px;">
                 <img src="${satelliteImage}" alt="">
-                ${satLabelsHtml}
             </div>
         ` : ''}
     </div>
@@ -2015,71 +1797,6 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             var blob = new Blob([html], {type: "text/html;charset=utf-8"});
             saveAs(blob, "Схема_расположения.html");
         }
-
-        // Логика перемещения, масштабирования и управления живыми метками на страницах
-        document.querySelectorAll('.interactive-label').forEach(label => {
-            let isDragging = false;
-            let startX, startY;
-            let startLeft, startTop;
-
-            const span = label.querySelector('.label-text');
-
-            label.addEventListener('mousedown', (e) => {
-                if (e.target.closest('.ctrl-btn') || (e.target === span && document.activeElement === span)) return;
-                
-                isDragging = true;
-                startX = e.clientX;
-                startY = e.clientY;
-                
-                startLeft = parseFloat(label.style.left);
-                startTop = parseFloat(label.style.top);
-                
-                e.preventDefault();
-            });
-
-            document.addEventListener('mousemove', (e) => {
-                if (!isDragging) return;
-                const parentRect = label.parentElement.getBoundingClientRect();
-                
-                const dx = ((e.clientX - startX) / parentRect.width) * 100;
-                const dy = ((e.clientY - startY) / parentRect.height) * 100;
-                
-                label.style.left = (startLeft + dx) + '%';
-                label.style.top = (startTop + dy) + '%';
-            });
-
-            document.addEventListener('mouseup', () => {
-                isDragging = false;
-            });
-
-            label.querySelector('.size-up').onclick = (ev) => {
-                ev.stopPropagation();
-                const currentSize = parseInt(window.getComputedStyle(span).fontSize);
-                span.style.fontSize = (currentSize + 2) + 'px';
-            };
-
-            label.querySelector('.size-down').onclick = (ev) => {
-                ev.stopPropagation();
-                const currentSize = parseInt(window.getComputedStyle(span).fontSize);
-                span.style.fontSize = Math.max(10, currentSize - 2) + 'px';
-            };
-
-            label.querySelector('.toggle-bg').onclick = (ev) => {
-                ev.stopPropagation();
-                label.classList.toggle('no-bg');
-                const icon = label.querySelector('.toggle-bg i');
-                if (label.classList.contains('no-bg')) {
-                    icon.className = 'fas fa-eye';
-                } else {
-                    icon.className = 'fas fa-eye-slash';
-                }
-            };
-
-            label.querySelector('.delete-lbl').onclick = (ev) => {
-                ev.stopPropagation();
-                label.remove();
-            };
-        });
 
         document.getElementById('btnExportWord').addEventListener('click', async function() {
             var mapImgData = "${mapImage}";
@@ -2241,7 +1958,6 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
     win.document.write(htmlContent);
     win.document.close();
 }
-
 
 function addSchemaGrid(config) {
     const tempObjects = [];
