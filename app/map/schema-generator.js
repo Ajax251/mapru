@@ -126,6 +126,36 @@ function generateLegendPointImage(color) {
     return canvas.toDataURL('image/png');
 }
 
+
+// Функция получения полного условного номера для таблиц и текстовых блоков
+function getFormattedZuName(quarter, zuName) {
+    if (!zuName) return '';
+    let clean = zuName.trim().replace(/^:+/, ''); // Удаляем двоеточия в начале
+    if (!clean) return '';
+    
+    // Если уже содержит квартал или является полным кадастровым номером
+    if ((quarter && clean.includes(quarter)) || (clean.match(/:/g) || []).length >= 2) {
+        return clean;
+    }
+    if (quarter) {
+        return `${quarter}:${clean}`;
+    }
+    return clean;
+}
+
+// Функция получения текста метки на карте (например: ":ЗУ1" или "16:56:000000:16:ЗУ1")
+function getFormattedZuLabelText(quarter, zuName) {
+    if (!zuName) return '';
+    let clean = zuName.trim().replace(/^:+/, ''); // Удаляем двоеточия в начале
+    if (!clean) return '';
+    
+    // Если уже полный кадастровый номер
+    if ((quarter && clean.includes(quarter)) || (clean.match(/:/g) || []).length >= 2) {
+        return clean;
+    }
+    return `:${clean}`;
+}
+
 function generatePartsSchemaImage(targetPolygon, config) {
     const canvas = document.createElement('canvas');
     canvas.width = 600;
@@ -272,18 +302,7 @@ function generatePartsSchemaImage(targetPolygon, config) {
         ctx.restore();
     }
 
-    let dynamicZuName = config.zuName;
-    if (config.quarter && !dynamicZuName.includes(config.quarter)) {
-        dynamicZuName = `${config.quarter}:${dynamicZuName}`;
-    }
-
-    ctx.font = 'bold 12px Arial';
-    ctx.fillStyle = '#ff3b30';
-    ctx.textBaseline = 'middle';
-    ctx.strokeStyle = '#ffffff';
-    ctx.lineWidth = 3;
-    ctx.strokeText(dynamicZuName, canvas.width/2, canvas.height/2);
-    ctx.fillText(dynamicZuName, canvas.width/2, canvas.height/2);
+  
 
     return {
         image: canvas.toDataURL('image/png'),
@@ -1374,10 +1393,8 @@ function calculateLabelsData(centerGeo, config) {
         labelsData.push({ text: config.terrZone, type: 'terrZone', pctX: pct.x, pctY: pct.y, pctX_inside: pct.x, pctY_inside: pct.y });
     }
     if (config.zuName) {
-        let labelText = config.zuName;
-        if (config.quarter && !labelText.includes(config.quarter)) {
-            labelText = ":" + labelText;
-        }
+        // Использование безопасного формирования текста метки без двойных двоеточий
+        const labelText = getFormattedZuLabelText(config.quarter, config.zuName);
         const pctInside = getRelativePct(centerGeo);
         const pctCallout = getRelativePct([centerGeo[0] + latDelta * 0.12, centerGeo[1] - lonDelta * 0.14]);
         
@@ -1453,7 +1470,8 @@ async function loadEnvironmentData(centerGeo, polygon, config) {
 function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRgba) {
     return labelsData.map(l => {
         if (pageType === 'satellite' && l.type === 'terrZone') return '';
-        
+        if (pageType === 'parts' && l.type !== 'zuName') return ''; // На чертеже частей отображаем только метку ЗУ
+
         let text = l.text;
         let showLabel = true;
         let zuNameMode = 'inside';
@@ -1461,6 +1479,7 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
         if (pageType === 'cp') zuNameMode = config.cptZuNameMode || 'inside';
         else if (pageType === 'pzz') zuNameMode = config.pzzZuNameMode || 'inside';
         else if (pageType === 'satellite') zuNameMode = config.satZuNameMode || 'inside';
+        else if (pageType === 'parts') zuNameMode = 'inside';
 
         if (l.type === 'zuName' && zuNameMode === 'off') {
             showLabel = false;
@@ -1505,7 +1524,10 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
         let pctX = l.pctX;
         let pctY = l.pctY;
         if (l.type === 'zuName') {
-            if (zuNameMode === 'inside') {
+            if (pageType === 'parts') {
+                pctX = 50;
+                pctY = 50;
+            } else if (zuNameMode === 'inside') {
                 pctX = l.pctX_inside;
                 pctY = l.pctY_inside;
             } else if (zuNameMode === 'callout') {
@@ -1520,8 +1542,8 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
             <div class="interactive-label ${isNoBg ? 'no-bg' : ''} ${hasCalloutClass}" 
                  style="left: ${pctX}%; top: ${pctY}%;" 
                  data-type="${l.type}" 
-                 data-anchor-x="${l.pctX_inside}" 
-                 data-anchor-y="${l.pctY_inside}" 
+                 data-anchor-x="${pageType === 'parts' ? 50 : l.pctX_inside}" 
+                 data-anchor-y="${pageType === 'parts' ? 50 : l.pctY_inside}" 
                  data-default-color="${defaultLineColor}">
                 <span contenteditable="true" class="label-text" title="Двойной клик — изменить текст, зажать — перетащить" style="font-size: ${fontSize}px; background: ${calloutBgRgba}; border: 1.5px solid ${config.lineColor || '#ff3b30'}; color: ${finalFontColor}; white-space: nowrap !important; display: inline-block !important; width: ${w}px !important; text-align: center;">${text}</span>
                 <div class="label-controls">
@@ -1537,7 +1559,25 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
     }).join('');
 }
 
+
+
 function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage, coordsTable, areaStr, terrZoneName, imgLegendPoly, imgLegendPoint, labelsData, config, partsGridStep = 5, partsHeight = 76.7) {
+    // Вспомогательная функция для получения корректного номера ЗУ без дублирования двоеточий и квартала
+    function getFormattedZuName(quarter, zuName) {
+        if (!zuName) return '';
+        let clean = zuName.trim().replace(/^:+/, ''); // Удаляем ведущие двоеточия
+        if (!clean) return '';
+        if ((quarter && clean.includes(quarter)) || (clean.match(/:/g) || []).length >= 2) {
+            return clean;
+        }
+        if (quarter) {
+            return `${quarter}:${clean}`;
+        }
+        return clean;
+    }
+
+    const fullZuName = getFormattedZuName(config.quarter, config.zuName);
+
     const sAl1 = localStorage.getItem('sch_al1') || '';
     const sAl2 = localStorage.getItem('sch_al2') || '';
     const sAl3 = localStorage.getItem('sch_al3') || '';
@@ -1578,6 +1618,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
     const cptLabelsHtml = generateInteractiveLabelsHtml(labelsData, 'cp', config, calloutBgRgba);
     const pzzLabelsHtml = config.includePzz ? generateInteractiveLabelsHtml(labelsData, 'pzz', config, calloutBgRgba) : '';
     const satLabelsHtml = config.includeSat ? generateInteractiveLabelsHtml(labelsData, 'satellite', config, calloutBgRgba) : '';
+    const partsLabelsHtml = config.includeParts ? generateInteractiveLabelsHtml(labelsData, 'parts', config, calloutBgRgba) : '';
 
     const htmlContent = `<!DOCTYPE html>
 <html lang="ru">
@@ -1650,7 +1691,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
         th, td { border: 1px solid #000; padding: 5px 6px; text-align: left; }
         th { background-color: #e6f2ff; text-align: center; font-weight: bold; }
         
-       .map-frame { 
+        .map-frame { 
             width: 100%; 
             height: auto;
             border: 1.5px solid #000; 
@@ -1677,7 +1718,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
         .btn-html { background: #f59e0b; }
         .btn-html:hover { background: #d97706; }
 
-    .interactive-label {
+        .interactive-label {
             position: absolute;
             transform: translate(-50%, -50%);
             cursor: move;
@@ -1797,7 +1838,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             transform: translateX(-50%) scale(1);
         }
 
-@media print {
+        @media print {
             @page {
                 size: A4 portrait;
                 margin: 0;
@@ -1855,8 +1896,8 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             Схема расположения земельного участка или земельных участков на кадастровом плане территории
         </div>
 
-       <table>
-            <tr><td colspan="3" contenteditable="true"><b>Условный номер земельного участка:</b> ${config.quarter} ${config.zuName}</td></tr>
+        <table>
+            <tr><td colspan="3" contenteditable="true"><b>Условный номер земельного участка:</b> ${fullZuName}</td></tr>
             <tr><td colspan="3" contenteditable="true"><b>Площадь земельного участка:</b> ${areaStr} кв.м</td></tr>
             <tr><td colspan="3" contenteditable="true"><b>Территориальная зона:</b> ${config.terrZone || 'Не установлена'}</td></tr>
             <tr><td colspan="3" contenteditable="true"><b>Вид разрешенного использования:</b> ${config.vri || 'Не установлен'}</td></tr>
@@ -1914,8 +1955,10 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             "<div class='title' style='font-size: 13pt;'>" +
                 "Схема частей образуемого земельного участка" +
             "</div>" +
-            "<div class='map-frame' style='border: 1.5px solid #000; background: #ffffff;'>" +
-                "<img src='" + partsImage + "' style='object-fit: contain;'>" +
+            "<div class='map-frame' data-page-type='parts' style='border: 1.5px solid #000; background: #ffffff; position: relative; overflow: hidden;'>" +
+                "<img src='" + partsImage + "' style='object-fit: contain; width: 100%; height: auto; display: block; pointer-events: none;'>" +
+                "<svg class='callout-svg' style='position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;'></svg>" +
+                partsLabelsHtml +
             "</div>" +
             "<div class='badge-bar'>" +
                 "<div class='badge'> Сетка: " + partsGridStep + " м</div>" +
@@ -2264,7 +2307,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
 
         window.addEventListener('resize', updateAllCallouts);
 
-       document.getElementById('btnExportWord').onclick = async function() {
+        document.getElementById('btnExportWord').onclick = async function() {
             // Функция рендеринга контейнера карты вместе с наложенными метками и SVG-выносками
             async function captureFrame(frameEl) {
                 if (!frameEl) return null;
@@ -2317,9 +2360,17 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 satHeight = Math.round(500 * (satDims.h / satDims.w));
             }
 
-            var partsImgData = "${partsImage || ''}";
+            var partsImgData = "";
             var partsHeight = 420;
-            if (partsImgData) {
+            const partsFrame = document.querySelector('.map-frame[data-page-type="parts"]');
+            if (partsFrame) {
+                partsImgData = await captureFrame(partsFrame);
+                if (partsImgData) {
+                    var partsDims = await getImageDimensions(partsImgData);
+                    partsHeight = Math.round(500 * (partsDims.h / partsDims.w));
+                }
+            } else if ("${partsImage || ''}") {
+                partsImgData = "${partsImage || ''}";
                 var partsDims = await getImageDimensions(partsImgData);
                 partsHeight = Math.round(500 * (partsDims.h / partsDims.w));
             }
@@ -2408,7 +2459,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                                     spacing: { before: 80, after: 80 },
                                     children: [
                                         new docx.TextRun({ text: "Условный номер земельного участка: ", bold: true, size: 22 }),
-                                        new docx.TextRun({ text: "${config.quarter}:${config.zuName}", size: 22 })
+                                        new docx.TextRun({ text: "${fullZuName}", size: 22 })
                                     ]
                                 })
                             ],
