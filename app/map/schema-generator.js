@@ -143,7 +143,7 @@ function getFormattedZuName(quarter, zuName) {
     return clean;
 }
 
-// Функция получения текста метки на карте (например: ":ЗУ1" или "16:56:000000:16:ЗУ1")
+// Функция получения текста метки на карте (например: ":ЗУ1" или "01:01:000000:1:ЗУ1")
 function getFormattedZuLabelText(quarter, zuName) {
     if (!zuName) return '';
     let clean = zuName.trim().replace(/^:+/, ''); // Удаляем двоеточия в начале
