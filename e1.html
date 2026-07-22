@@ -20,7 +20,7 @@
     <script src="app/map/3d-viewer.js"></script>
     <script src="app/map/export-html-map.js"></script>
     <script src="https://unpkg.com/docx@7.8.2/build/index.js"></script>
-    <script src="app/map/schema-generator.js"></script>
+<script src="app/map/schema-generator.js?v=2.0"></script>
     <script src="app/map/pzz-module.js"></script>
  <style>
     body {
@@ -6501,9 +6501,50 @@ async function importRasterFromCloud() {
     let quarterNumber = currentQuarterNumber;
 
     if (!quarterNumber) {
-        quarterNumber = await promptForQuarterNumber();
+        // Анализируем все объекты на карте для определения кадастрового квартала
+        let inferredQuarter = '';
+        const cnRegex = /^\d{2}:\d{2}:\d{6,7}:\d+$/;
+        const quarters = [];
+
+        polygons.forEach(obj => {
+            if (!obj) return;
+            let cn = obj.properties?.get('cadastralNumber');
+            if (!cn) {
+                const featureData = obj.properties?.get('featureData');
+                if (featureData && featureData.properties) {
+                    cn = featureData.properties.descr || 
+                         featureData.properties.options?.cad_num || 
+                         featureData.properties.options?.cad_number;
+                }
+            }
+            if (cn && typeof cn === 'string') {
+                cn = cn.trim().replace(/\s*\(\d+\/\d+\)$/, ''); // Очистка от возможных суффиксов контуров
+                if (cnRegex.test(cn)) {
+                    const parts = cn.split(':');
+                    if (parts.length >= 3) {
+                        quarters.push(parts.slice(0, 3).join(':'));
+                    }
+                }
+            }
+        });
+
+        // Если найдены кварталы, определяем наиболее часто встречающийся
+        if (quarters.length > 0) {
+            const freqMap = {};
+            let maxCount = 0;
+            quarters.forEach(q => {
+                freqMap[q] = (freqMap[q] || 0) + 1;
+                if (freqMap[q] > maxCount) {
+                    maxCount = freqMap[q];
+                    inferredQuarter = q;
+                }
+            });
+        }
+
+        // Передаем определенный квартал в качестве значения по умолчанию для предзаполнения поля ввода
+        quarterNumber = await promptForQuarterNumber(inferredQuarter);
     }
-    
+
     if (!quarterNumber) {
         showNotification('Импорт отменен', 'info');
         return;
@@ -6513,7 +6554,6 @@ async function importRasterFromCloud() {
 
     try {
         const filename = quarterNumber.replace(/:/g, '_') + '.rst';
-        // Запрашиваем файл с того же эндпоинта, что и для *.nspd
         const response = await fetch(`${STORAGE_API_URL}/nspd/${filename}`);
 
         if (!response.ok) {
@@ -6525,8 +6565,6 @@ async function importRasterFromCloud() {
         }
 
         const zipBlob = await response.blob();
-        
-        // Передаем blob в существующую логику импорта
         await processImportedZipBlob(zipBlob);
 
     } catch (error) {
@@ -6536,6 +6574,7 @@ async function importRasterFromCloud() {
         hideLoader();
     }
 }
+
 
 
 async function promptForQuarterNumber(defaultValue = '') {
@@ -8608,6 +8647,53 @@ function checkMoOffset(currentCenterGeo, forceCheck = false, showForceSuccess = 
     }
 }
     
+    
+    window.zoomToContour = function(cadastralNumber, contourIndex) {
+    // Ищем на карте конкретный полигон по КН и индексу контура
+    const targetPolygon = polygons.find(p =>
+        p instanceof ymaps.Polygon &&
+        p.properties?.get('cadastralNumber') === cadastralNumber &&
+        p.properties?.get('contourIndex') === contourIndex
+    );
+
+    if (targetPolygon) {
+        const bounds = targetPolygon.geometry.getBounds();
+        if (bounds) {
+            // Добавляем отступы вокруг контура для удобного обзора
+            const latPadding = Math.max((bounds[1][0] - bounds[0][0]) * 0.4, 0.0003);
+            const lonPadding = Math.max((bounds[1][1] - bounds[0][1]) * 0.4, 0.0003);
+            
+            const paddedBounds = [
+                [bounds[0][0] - latPadding, bounds[0][1] - lonPadding],
+                [bounds[1][0] + latPadding, bounds[1][1] + lonPadding]
+            ];
+
+            map.setBounds(paddedBounds, { checkZoomRange: true, duration: 500 });
+
+            // Временная яркая подсветка контура (красная рамка + желтая заливка)
+            const oldFill = targetPolygon.options.get('fillColor');
+            const oldStroke = targetPolygon.options.get('strokeColor');
+            const oldWidth = targetPolygon.options.get('strokeWidth');
+
+            targetPolygon.options.set({
+                fillColor: '#FFFF00A6',
+                strokeColor: '#FF0000',
+                strokeWidth: 4
+            });
+
+            setTimeout(() => {
+                targetPolygon.options.set({
+                    fillColor: oldFill,
+                    strokeColor: oldStroke,
+                    strokeWidth: oldWidth
+                });
+            }, 1800);
+        }
+    } else {
+        showNotification('Контур не найден на карте', 'warning');
+    }
+};
+
 
 function initMap() {
     // Загружаем сохраненный центр и масштаб из localStorage
@@ -8904,7 +8990,7 @@ map.events.add('click', function (e) {
             <i class="fas fa-list-ol"></i>Связанные ОКС на ЗУ
         </div>
         <div class="custom-context-menu-item" id="schema-location-menu-item">
-            <i class="fas fa-map" style="color: #e74c3c;"></i>Схема (СРЗУ)
+            <i class="fas fa-map" style="color: #e74c3c;"></i>Схема
         </div>
         <div class="custom-context-menu-item" id="export-current-polygon-to-kml-menu-item">
             <i class="fas fa-file-export"></i> Экспорт в KML Google Earth
@@ -9020,7 +9106,7 @@ map.events.add('click', function (e) {
 
 
 <div class="custom-context-menu-item" id="map-main-menu-item">
-    <i class="far fa-copy"></i>Карта
+    <i class="fas fa-map"></i>Карта
     <div class="custom-context-submenu">
         <div class="custom-context-menu-item" id="theme-export-item">
             <i class="fas fa-file-excel"></i>Данные
@@ -9033,36 +9119,8 @@ map.events.add('click', function (e) {
             <i class="fas fa-cube"></i>Экран в 3D
         </div>
         <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
-        <div class="custom-context-menu-item" id="copy-coords-menu-item">
-            <i class="fas fa-map-marker-alt"></i>GPS-координаты
-        </div>
-        
-        <div class="custom-context-menu-item" id="fias-menu-item">
-    <i class="fas fa-search-location"></i>ФИАС
-</div>
-
         <div class="custom-context-menu-item" id="geo-photo-menu-item">
-            <i class="fas fa-camera"></i>Фото с GPS
-        </div>
-        <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
-        <div class="custom-context-menu-item" id="open-mapmini-menu-item">
-            <i class="fas fa-map"></i>Карта Мини
-        </div>
-
-<div class="custom-context-menu-item" id="open-multimap-menu-item">
-    <i class="fas fa-th-large" style="color: #4ade80;"></i>МультиКарта
-</div>
-        
-<div class="custom-context-menu-item" id="google-pano-menu-item">
-    <i class="fas fa-street-view" style="color: #fbbf24;"></i>Панорамы Google
-</div>
-<div class="custom-context-menu-item" id="yandex-pano-menu-item">
-    <i class="fas fa-map-marker-alt" style="color: #ef4444;"></i>Панорамы Яндекс
-</div>
-        
-        <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
-        <div class="custom-context-menu-item" id="copy-all-epsg3857-menu-item">
-            <i class="fas fa-ruler-combined"></i>EPSG:3857
+            <i class="fas fa-camera"></i>Фото на карте
         </div>
         <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
         <div class="custom-context-menu-item" id="arbitrary-response-menu-item">
@@ -9074,6 +9132,47 @@ map.events.add('click', function (e) {
         </div>
         <div class="custom-context-menu-item" id="import-map-json-menu-item">
             <i class="fas fa-file-import"></i>Импорт
+        </div>
+    </div>
+</div>
+
+
+<div class="custom-context-menu-item" id="services-main-menu-item">
+    <i class="fas fa-external-link-alt"></i>Сервисы
+    <div class="custom-context-submenu">
+      
+        <div class="custom-context-menu-item" id="fias-menu-item">
+            <i class="fas fa-search-location"></i>ФИАС
+        </div>
+        <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
+        
+        <div class="custom-context-menu-item" id="open-mapmini-menu-item">
+            <i class="fas fa-map"></i>Карта Мини
+        </div>
+        <div class="custom-context-menu-item" id="open-multimap-menu-item">
+            <i class="fas fa-th-large" style="color: #4ade80;"></i>МультиКарта
+        </div>
+        <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
+        
+        <div class="custom-context-menu-item" id="yandex-pano-menu-item">
+    <i class="fas fa-street-view" style="color: #ef4444;"></i>Яндекс Улицы
+</div>
+
+
+
+<div class="custom-context-menu-item" id="google-pano-menu-item">
+    <i class="fas fa-street-view" style="color: #4285F4;"></i>Google Улицы
+</div>
+
+    
+        <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
+        
+              <div class="custom-context-menu-item" id="copy-coords-menu-item">
+            <i class="fas fa-map-marker-alt"></i>GPS
+        </div>
+        
+        <div class="custom-context-menu-item" id="copy-all-epsg3857-menu-item">
+            <i class="fas fa-ruler-combined"></i>EPSG:3857
         </div>
     </div>
 </div>
@@ -12039,10 +12138,12 @@ async function processAndDrawParcels(features, source) {
                      rightType: rightType
                 };
 
-                const polygonProperties = {
-                     hintContent: hintContent,
-                     cadastralNumber: cadastralNumber,
-                     address: address,
+             const polygonProperties = {
+     hintContent: hintContent,
+     cadastralNumber: cadastralNumber,
+     contourIndex: contourIndex, 
+     totalContours: totalContours,
+     address: address,
                      areaText: areaText,
                      costIndex: costIndex,
                      vri: vri,
@@ -14357,12 +14458,52 @@ function generatePopoverContent(feature) {
         }
     };
 
-    if (type === 'zu') {
-        title = `ЗУ: ${p.descr || 'Без номера'}`;
-        addRow('Адрес', o.readable_address);
-        addRow('Площадь', getAreaText(o));
-        addRow('Категория', o.land_record_category_type);
-        addRow('ВРИ', o.permitted_use_established_by_document);
+   if (type === 'zu') {
+    const cn = p.descr || p.options?.cad_num;
+    title = `ЗУ: ${cn || 'Без номера'}`;
+    addRow('Адрес', o.readable_address);
+    addRow('Площадь', getAreaText(o));
+
+    // --- НАЧАЛО ИЗМЕНЕНИЙ: Вывод списка контуров ---
+    if (cn) {
+        // Ищем все полигоны данного участка на карте
+        const contours = polygons.filter(obj => 
+            obj instanceof ymaps.Polygon && 
+            obj.properties?.get('cadastralNumber') === cn
+        );
+
+        if (contours.length > 1) {
+            // Сортируем контуры по их индексу (1, 2, 3...)
+            contours.sort((a, b) => (a.properties.get('contourIndex') || 0) - (b.properties.get('contourIndex') || 0));
+
+            const contourButtons = contours.map(cPoly => {
+                const idx = cPoly.properties.get('contourIndex') ?? 0;
+                const stats = calculatePreciseGeometry(cPoly);
+                const areaText = stats.area > 0 ? ` (~${Math.round(stats.area).toLocaleString('ru-RU')} м²)` : '';
+
+                return `<button onclick="zoomToContour('${cn}', ${idx})" style="
+                    background: #eff6ff;
+                    border: 1px solid #3b82f6;
+                    color: #1d4ed8;
+                    border-radius: 4px;
+                    padding: 3px 8px;
+                    margin: 2px;
+                    cursor: pointer;
+                    font-size: 11px;
+                    font-weight: 600;
+                    transition: all 0.2s;
+                " onmouseenter="this.style.background='#3b82f6';this.style.color='#fff';" onmouseleave="this.style.background='#eff6ff';this.style.color='#1d4ed8';">
+                    №${idx + 1}${areaText}
+                </button>`;
+            }).join('');
+
+            addRow('Контуры', `<div style="display:flex; flex-wrap:wrap; gap:2px;">${contourButtons}</div>`);
+        }
+    }
+    // --- КОНЕЦ ИЗМЕНЕНИЙ ---
+
+    addRow('Категория', o.land_record_category_type);
+    addRow('ВРИ', o.permitted_use_established_by_document);
         addRow('Собственность', o.ownership_type);
         addRow('Тип права', o.right_type);
         addRow('Стоимость', o.cost_value ? `${parseFloat(o.cost_value).toLocaleString('ru-RU')} руб.` : null);
@@ -16455,10 +16596,12 @@ async function drawFeatureFromNspd(feature) {
 
             if (allProcessedRings.length === 0) continue;
 
-            const polygonProperties = {
-                hintContent: hintContent,
-                cadastralNumber: cadastralNumber,
-                address: address,
+         const polygonProperties = {
+    hintContent: hintContent,
+    cadastralNumber: cadastralNumber,
+    contourIndex: contourIndex, 
+    totalContours: totalContours, 
+    address: address,
                 areaText: areaText,
                 costIndex: costIndex,
                 vri: vri,
@@ -33116,8 +33259,8 @@ async function switchPanoramaService(service, isAutoFallback = false) {
                 await loadGoogleMapsApi();
                 
                 hideLoader();
-                btnYandex.classList.remove('active');
-                btnGoogle.add('active');
+              btnYandex.classList.remove('active');
+btnGoogle.classList.add('active');
                 containerYandex.style.display = 'none';
                 containerGoogle.style.display = 'block';
                 
