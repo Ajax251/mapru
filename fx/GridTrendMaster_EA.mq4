@@ -395,8 +395,8 @@ void CheckCounterClose(double minProfitVal)
             if(!OrderSelect(j, SELECT_BY_POS, MODE_TRADES)) continue;
             if(OrderSymbol() != _Symbol || OrderMagicNumber() != InpMagicNumber) continue;
 
-            int type2 = OrderType();
-            if(type1 == type2) continue;
+            string c2 = OrderComment();
+if(StringFind(c2, "*") < 0) continue;
 
             int ticket2       = OrderTicket();
             double openPrice2 = OrderOpenPrice();
