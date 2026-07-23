@@ -4,7 +4,7 @@
 //+------------------------------------------------------------------+
 #property copyright "Grid Backtester EA"
 #property link      ""
-#property version   "1.05"
+#property version   "1.03"
 #property strict
 
 //--- Единицы измерения параметров
@@ -47,6 +47,7 @@ double       prevPrice = 0;
 //+------------------------------------------------------------------+
 int OnInit()
 {
+   // Определение размера пункта
    if(InpStepUnit == UNIT_PIPS)
    {
       if(_Digits == 3 || _Digits == 5)
@@ -62,7 +63,7 @@ int OnInit()
    prevPrice = 0;
    ArrayFree(trackers);
 
-   Print("[INIT] Советник инициализирован. Символ: ", _Symbol, ", Digits: ", _Digits, ", Размер пункта: ", DoubleToString(pipPoint, _Digits));
+   Print("Советник успешно инициализирован. Размер пункта = ", pipPoint);
    return(INIT_SUCCEEDED);
 }
 
@@ -82,6 +83,7 @@ void OnTick()
 {
    if(!IsTradeAllowed()) return;
 
+   // Перевод параметров в абсолютные значения цены
    double gridStepVal   = InpGridStep * pipPoint;
    double trendStepVal  = InpTrendStep * pipPoint;
    double takeProfitVal = InpTakeProfit * pipPoint;
@@ -91,12 +93,11 @@ void OnTick()
 
    double currentPrice = MarketInfo(_Symbol, MODE_BID);
 
+   // Первичный запуск на первом тике
    if(prevPrice == 0)
    {
       prevPrice = currentPrice;
       UpdateAllTrackers(currentPrice, gridStepVal);
-      PrintFormat("[INIT] Начальная цена: %s. Шаг сетки в цене: %s",
-                  DoubleToString(currentPrice, _Digits), DoubleToString(gridStepVal, _Digits));
       return;
    }
 
@@ -141,7 +142,7 @@ void OnTick()
    }
 
    // Отображение информационной панели на графике
-   DisplayInfo(gridStepVal, trendStepVal);
+   DisplayInfo();
 }
 
 //+------------------------------------------------------------------+
@@ -240,129 +241,71 @@ void ProcessLevelCrossing(double level, string direction, double gridStepVal, do
    string stepsText = IntegerToString(steps);
    int trackerIdx = GetTrackerIndex(level);
 
+   // Расчет объема лота для трендовых ордеров (*)
    double trendLotSize = NormalizeDouble(InpLotSize * InpTrendLotMult, 2);
-   double curBid = MarketInfo(_Symbol, MODE_BID);
-   double curAsk = MarketInfo(_Symbol, MODE_ASK);
-
-   string levelStr = DoubleToString(level, _Digits);
-   string askStr   = DoubleToString(curAsk, _Digits);
-   string bidStr   = DoubleToString(curBid, _Digits);
-
-   Print("==================================================");
-   PrintFormat("[СОБЫТИЕ] Пересечение уровня %s (%s) | Ask: %s | Bid: %s",
-               levelStr, direction, askStr, bidStr);
 
    if(direction == "UP")
    {
       double minP = trackers[trackerIdx].minPrice;
-      double reqMinGrid  = level - gridStepVal;
-      double reqMinTrend = level - trendStepVal;
 
-      // А. Обычная BUY сетка
-      if(minP > 0 && minP <= reqMinGrid)
+      // А. Обычная BUY сетка (Проверка: цена опускалась до (level - gridStepVal) или ниже)
+      if(minP > 0 && minP <= level - gridStepVal)
       {
-         string gridComment = levelStr + "/" + stepsText + " BUY";
+         string gridComment = DoubleToString(level, _Digits) + "/" + stepsText + " BUY";
          if(!IsOrderOpen(gridComment, OP_BUY))
          {
-            double tp = NormalizeDouble(curAsk + takeProfitVal, _Digits);
-            int ticket = OrderSend(_Symbol, OP_BUY, InpLotSize, curAsk, InpSlippage, 0, tp, gridComment, InpMagicNumber, 0, clrBlue);
-            if(ticket > 0)
-               PrintFormat(">>> УСПЕШНО: Открыт Grid BUY #%d [Уровень: %s, Лот: %.2f, TP: %s]",
-                           ticket, levelStr, InpLotSize, DoubleToString(tp, _Digits));
-            else
-               PrintFormat("!!! ОШИБКА открытия Grid BUY [%s]: Код ошибки = %d", gridComment, GetLastError());
+            double ask = MarketInfo(_Symbol, MODE_ASK);
+            double tp  = NormalizeDouble(ask + takeProfitVal, _Digits);
+            int ticket = OrderSend(_Symbol, OP_BUY, InpLotSize, ask, InpSlippage, 0, tp, gridComment, InpMagicNumber, 0, clrBlue);
+            if(ticket < 0)
+               Print("Ошибка открытия Grid BUY [", gridComment, "]: ", GetLastError());
          }
-         else
-         {
-            PrintFormat("[ИНФО] Grid BUY на уровне %s уже открыт.", levelStr);
-         }
-      }
-      else
-      {
-         PrintFormat("[ИНФО] Grid BUY на уровне %s НЕ открыт. Зафиксирован мин: %s (требовался откат <= %s)",
-                     levelStr, DoubleToString(minP, _Digits), DoubleToString(reqMinGrid, _Digits));
       }
 
-      // Б. Трендовый BUY ордер со звездочкой (*)
-      if(minP > 0 && minP <= reqMinTrend)
+      // Б. Трендовый BUY ордер со звездочкой (*) (Открывается увеличенным лотом)
+      if(minP > 0 && minP <= level - trendStepVal)
       {
-         string trendComment = levelStr + "* BUY";
+         string trendComment = DoubleToString(level, _Digits) + "* BUY";
          if(!IsOrderOpen(trendComment, OP_BUY))
          {
-            int ticket = OrderSend(_Symbol, OP_BUY, trendLotSize, curAsk, InpSlippage, 0, 0, trendComment, InpMagicNumber, 0, clrGreen);
-            if(ticket > 0)
-               PrintFormat(">>> УСПЕШНО: Открыт Trend BUY (*) #%d [Уровень: %s, Лот: %.2f]",
-                           ticket, levelStr, trendLotSize);
-            else
-               PrintFormat("!!! ОШИБКА открытия Trend BUY [%s]: Код ошибки = %d", trendComment, GetLastError());
+            double ask = MarketInfo(_Symbol, MODE_ASK);
+            int ticket = OrderSend(_Symbol, OP_BUY, trendLotSize, ask, InpSlippage, 0, 0, trendComment, InpMagicNumber, 0, clrGreen);
+            if(ticket < 0)
+               Print("Ошибка открытия Trend BUY [", trendComment, "]: ", GetLastError());
          }
-         else
-         {
-            PrintFormat("[ИНФО] Trend BUY (*) на уровне %s уже открыт.", levelStr);
-         }
-      }
-      else
-      {
-         PrintFormat("[ИНФО] Trend BUY (*) на уровне %s НЕ открыт. Зафиксирован мин: %s (требовался глубокий откат <= %s)",
-                     levelStr, DoubleToString(minP, _Digits), DoubleToString(reqMinTrend, _Digits));
       }
    }
    else if(direction == "DOWN")
    {
       double maxP = trackers[trackerIdx].maxPrice;
-      double reqMaxGrid  = level + gridStepVal;
-      double reqMaxTrend = level + trendStepVal;
 
-      // А. Обычная SELL сетка
-      if(maxP > 0 && maxP >= reqMaxGrid)
+      // А. Обычная SELL сетка (Проверка: цена поднималась до (level + gridStepVal) или выше)
+      if(maxP > 0 && maxP >= level + gridStepVal)
       {
-         string gridComment = levelStr + "/" + stepsText + " SELL";
+         string gridComment = DoubleToString(level, _Digits) + "/" + stepsText + " SELL";
          if(!IsOrderOpen(gridComment, OP_SELL))
          {
-            double tp = NormalizeDouble(curBid - takeProfitVal, _Digits);
-            int ticket = OrderSend(_Symbol, OP_SELL, InpLotSize, curBid, InpSlippage, 0, tp, gridComment, InpMagicNumber, 0, clrRed);
-            if(ticket > 0)
-               PrintFormat(">>> УСПЕШНО: Открыт Grid SELL #%d [Уровень: %s, Лот: %.2f, TP: %s]",
-                           ticket, levelStr, InpLotSize, DoubleToString(tp, _Digits));
-            else
-               PrintFormat("!!! ОШИБКА открытия Grid SELL [%s]: Код ошибки = %d", gridComment, GetLastError());
+            double bid = MarketInfo(_Symbol, MODE_BID);
+            double tp  = NormalizeDouble(bid - takeProfitVal, _Digits);
+            int ticket = OrderSend(_Symbol, OP_SELL, InpLotSize, bid, InpSlippage, 0, tp, gridComment, InpMagicNumber, 0, clrRed);
+            if(ticket < 0)
+               Print("Ошибка открытия Grid SELL [", gridComment, "]: ", GetLastError());
          }
-         else
-         {
-            PrintFormat("[ИНФО] Grid SELL на уровне %s уже открыт.", levelStr);
-         }
-      }
-      else
-      {
-         PrintFormat("[ИНФО] Grid SELL на уровне %s НЕ открыт. Зафиксирован макс: %s (требовался откат >= %s)",
-                     levelStr, DoubleToString(maxP, _Digits), DoubleToString(reqMaxGrid, _Digits));
       }
 
-      // Б. Трендовый SELL ордер со звездочкой (*)
-      if(maxP > 0 && maxP >= reqMaxTrend)
+      // Б. Трендовый SELL ордер со звездочкой (*) (Открывается увеличенным лотом)
+      if(maxP > 0 && maxP >= level + trendStepVal)
       {
-         string trendComment = levelStr + "* SELL";
+         string trendComment = DoubleToString(level, _Digits) + "* SELL";
          if(!IsOrderOpen(trendComment, OP_SELL))
          {
-            int ticket = OrderSend(_Symbol, OP_SELL, trendLotSize, curBid, InpSlippage, 0, 0, trendComment, InpMagicNumber, 0, clrOrange);
-            if(ticket > 0)
-               PrintFormat(">>> УСПЕШНО: Открыт Trend SELL (*) #%d [Уровень: %s, Лот: %.2f]",
-                           ticket, levelStr, trendLotSize);
-            else
-               PrintFormat("!!! ОШИБКА открытия Trend SELL [%s]: Код ошибки = %d", trendComment, GetLastError());
+            double bid = MarketInfo(_Symbol, MODE_BID);
+            int ticket = OrderSend(_Symbol, OP_SELL, trendLotSize, bid, InpSlippage, 0, 0, trendComment, InpMagicNumber, 0, clrOrange);
+            if(ticket < 0)
+               Print("Ошибка открытия Trend SELL [", trendComment, "]: ", GetLastError());
          }
-         else
-         {
-            PrintFormat("[ИНФО] Trend SELL (*) на уровне %s уже открыт.", levelStr);
-         }
-      }
-      else
-      {
-         PrintFormat("[ИНФО] Trend SELL (*) на уровне %s НЕ открыт. Зафиксирован макс: %s (требовался глубокий откат >= %s)",
-                     levelStr, DoubleToString(maxP, _Digits), DoubleToString(reqMaxTrend, _Digits));
       }
    }
-   Print("==================================================");
 }
 
 //+------------------------------------------------------------------+
@@ -383,7 +326,7 @@ void CheckCounterClose(double minProfitVal)
          if(OrderSymbol() != _Symbol || OrderMagicNumber() != InpMagicNumber) continue;
 
          string c1 = OrderComment();
-         if(StringFind(c1, "*") < 0) continue;
+         if(StringFind(c1, "*") < 0) continue; // Требуется наличие ордера со звездочкой
 
          int ticket1       = OrderTicket();
          int type1         = OrderType();
@@ -396,7 +339,7 @@ void CheckCounterClose(double minProfitVal)
             if(OrderSymbol() != _Symbol || OrderMagicNumber() != InpMagicNumber) continue;
 
             int type2 = OrderType();
-            if(type1 == type2) continue;
+            if(type1 == type2) continue; // Ордера должны быть разнонаправленными (BUY + SELL)
 
             int ticket2       = OrderTicket();
             double openPrice2 = OrderOpenPrice();
@@ -412,8 +355,8 @@ void CheckCounterClose(double minProfitVal)
 
             if(buyProfit >= minProfitVal && sellProfit >= minProfitVal)
             {
-               PrintFormat("[ВСТРЕЧНОЕ ЗАКРЫТИЕ] Ордер #%d и Ордер #%d. BUY Профит: %s, SELL Профит: %s",
-                           ticket1, ticket2, DoubleToString(buyProfit, _Digits), DoubleToString(sellProfit, _Digits));
+               PrintFormat("Встречное закрытие: Ордер #%d и Ордер #%d. BUY Профит: %.5f, SELL Профит: %.5f",
+                           ticket1, ticket2, buyProfit, sellProfit);
 
                CloseOrder(ticket1);
                CloseOrder(ticket2);
@@ -443,7 +386,7 @@ bool CloseOrder(int ticket)
 //+------------------------------------------------------------------+
 //| Вывод информации на график                                       |
 //+------------------------------------------------------------------+
-void DisplayInfo(double gridStepVal, double trendStepVal)
+void DisplayInfo()
 {
    int totalOrders = 0;
    double totalProfit = 0;
@@ -460,47 +403,13 @@ void DisplayInfo(double gridStepVal, double trendStepVal)
       }
    }
 
-   double curBid = MarketInfo(_Symbol, MODE_BID);
-
-   // Расчет ближайших уровней сетки
-   double lowerLevel = MathFloor(curBid / gridStepVal) * gridStepVal;
-   double upperLevel = lowerLevel + gridStepVal;
-
-   double nextUp, nextDown;
-   if(MathAbs(curBid - lowerLevel) < _Point * 0.5)
-   {
-      nextUp   = lowerLevel + gridStepVal;
-      nextDown = lowerLevel - gridStepVal;
-   }
-   else
-   {
-      nextUp   = upperLevel;
-      nextDown = lowerLevel;
-   }
-
-   int idxUp   = GetTrackerIndex(nextUp);
-   int idxDown = GetTrackerIndex(nextDown);
-
-   double minP_Up   = trackers[idxUp].minPrice;
-   double maxP_Down = trackers[idxDown].maxPrice;
-
-   double reqMin_Up   = nextUp - gridStepVal;
-   double reqMax_Down = nextDown + gridStepVal;
-
-   string statusUp   = (minP_Up > 0 && minP_Up <= reqMin_Up) ? "ГОТОВ К BUY" : ("Нужен откат <= " + DoubleToString(reqMin_Up, _Digits));
-   string statusDown = (maxP_Down > 0 && maxP_Down >= reqMax_Down) ? "ГОТОВ К SELL" : ("Нужен откат >= " + DoubleToString(reqMax_Down, _Digits));
-
    string text = "=====================================\n";
    text += "   УНИВЕРСАЛЬНЫЙ СЕТОЧНЫЙ СОВЕТНИК   \n";
    text += "=====================================\n";
-   text += StringFormat("Символ: %s | Цена: %s\n", _Symbol, DoubleToString(curBid, _Digits));
-   text += StringFormat("Лот: %.2f | Лот *: %.2f\n", InpLotSize, InpLotSize * InpTrendLotMult);
-   text += StringFormat("Шаг сетки в цене: %s (в единицах: %.1f)\n", DoubleToString(gridStepVal, _Digits), InpGridStep);
-   text += "-------------------------------------\n";
-   text += StringFormat("Следующий уровень ВВЕРХ: %s\n", DoubleToString(nextUp, _Digits));
-   text += StringFormat("  Мин. цена: %s | Статус: %s\n", DoubleToString(minP_Up, _Digits), statusUp);
-   text += StringFormat("Следующий уровень ВНИЗ: %s\n", DoubleToString(nextDown, _Digits));
-   text += StringFormat("  Макс. цена: %s | Статус: %s\n", DoubleToString(maxP_Down, _Digits), statusDown);
+   text += StringFormat("Символ: %s | Базовый лот: %.2f (Лот *: %.2f)\n", _Symbol, InpLotSize, InpLotSize * InpTrendLotMult);
+   text += StringFormat("Единица: %s\n", EnumToString(InpStepUnit));
+   text += StringFormat("Шаг сетки: %.1f | Шаг тренда: %.1f\n", InpGridStep, InpTrendStep);
+   text += StringFormat("TakeProfit: %.1f | MinProfit: %.1f\n", InpTakeProfit, InpMinProfit);
    text += "-------------------------------------\n";
    text += StringFormat("Открытых ордеров: %d\n", totalOrders);
    text += StringFormat("Плавающая прибыль: %.2f %s\n", totalProfit, AccountCurrency());
