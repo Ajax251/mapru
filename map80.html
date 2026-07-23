@@ -4269,7 +4269,6 @@ const GATEWAY_TARGET_PATTERNS = [
         let isMiddleZoomed = false;
         
         let googlePanoPlayer = null;
-        let googlePanoHouseMarkers = [];
 
         
         let ownershipColorMap = new Map(); // Map<"Ownership|RightType", colorHex>
@@ -8514,22 +8513,13 @@ if (houseNumbersCheckbox) {
     const isHouseNumbersOn = localStorage.getItem('isHouseNumbersEnabled') !== 'false';
     houseNumbersCheckbox.checked = isHouseNumbersOn;
 
-houseNumbersCheckbox.addEventListener('change', (e) => {
+    houseNumbersCheckbox.addEventListener('change', (e) => {
         const isEnabled = e.target.checked;
         localStorage.setItem('isHouseNumbersEnabled', isEnabled);
         
         // Обновляем слои карты
         const currentMode = localStorage.getItem('mapMode') || 'map';
         setMapMode(currentMode);
-
-        // Синхронизируем метки на панораме Google, если она открыта
-        if (googlePanoPlayer && currentPanoCoords) {
-            if (isEnabled) {
-                updateGooglePanoHouseNumbers(currentPanoCoords.mapLat, currentPanoCoords.mapLon);
-            } else {
-                clearGooglePanoHouseMarkers();
-            }
-        }
     });
 }
 
@@ -33291,120 +33281,6 @@ function loadGoogleMapsApi() {
     });
 }
 
-
-
-// Очистка всех меток с панорамы Google
-function clearGooglePanoHouseMarkers() {
-    googlePanoHouseMarkers.forEach(m => m.setMap(null));
-    googlePanoHouseMarkers = [];
-}
-
-// Создание SVG-плашки номера дома в стиле Яндекса (фиолетово-синяя с белым кантом)
-// Создание SVG-плашки номера дома с поддержкой динамического зума
-function createHouseNumberSvgIcon(numberStr, zoomLevel = 1) {
-    const num = String(numberStr).trim();
-    
-    // Коэффициент масштабирования в зависимости от зума панорамы (Street View)
-    const zoom = Math.max(1, zoomLevel || 1);
-    const scale = 1 + (zoom - 1) * 0.45; // Увеличение на 45% за каждый шаг зума
-
-    const baseHeight = 36;   // Базовая высота (была 28)
-    const baseFontSize = 16; // Базовый шрифт (был 13)
-    
-    const height = Math.round(baseHeight * scale);
-    const fontSize = Math.round(baseFontSize * scale);
-    const strokeWidth = Math.round(2.5 * Math.min(scale, 1.4));
-    const width = Math.max(Math.round(36 * scale), Math.round(num.length * 10 * scale + 18 * scale));
-
-    const svg = `<svg xmlns="http://www.w3.org/2000/svg" width="${width}" height="${height}" viewBox="0 0 ${width} ${height}">
-        <rect x="${strokeWidth/2}" y="${strokeWidth/2}" width="${width - strokeWidth}" height="${height - strokeWidth}" rx="${(height - strokeWidth) / 2}" fill="#3b82f6" stroke="#ffffff" stroke-width="${strokeWidth}"/>
-        <text x="50%" y="54%" dominant-baseline="middle" text-anchor="middle" fill="#ffffff" font-family="Arial, sans-serif" font-weight="bold" font-size="${fontSize}">${num}</text>
-    </svg>`;
-    
-    return {
-        url: 'data:image/svg+xml;charset=UTF-8,' + encodeURIComponent(svg),
-        scaledSize: new google.maps.Size(width, height),
-        anchor: new google.maps.Point(width / 2, height / 2)
-    };
-}
-
-// Функция мгновенного обновления размера меток при изменении зума панорамы
-function refreshGooglePanoHouseMarkersSize() {
-    if (!googlePanoPlayer || !googlePanoHouseMarkers.length) return;
-    const currentZoom = googlePanoPlayer.getZoom() || 1;
-    googlePanoHouseMarkers.forEach(marker => {
-        if (marker.houseNum) {
-            marker.setIcon(createHouseNumberSvgIcon(marker.houseNum, currentZoom));
-        }
-    });
-}
-
-async function updateGooglePanoHouseNumbers(mapLat, mapLon) {
-    clearGooglePanoHouseMarkers();
-
-    // Проверяем, включен ли чекбокс "Номера домов"
-    const isHouseNumbersOn = localStorage.getItem('isHouseNumbersEnabled') !== 'false';
-    if (!isHouseNumbersOn || !googlePanoPlayer || !window.google) return;
-
-    const housesMap = new Map();
-
-    // 1. Собираем дома из уже загруженных объектов на карте
-    polygons.forEach(obj => {
-        if (obj instanceof ymaps.Polygon) {
-            const featureData = obj.properties.get('featureData');
-            const opts = featureData?.properties?.options || {};
-            const addr = opts.readable_address || obj.properties.get('address') || '';
-            const match = addr.match(/(?:д(?:ом)?\.?|№)\s*([\d\wА-Яа-я/-]+)/i) || addr.match(/,\s*([\d]+[а-яА-Яa-zA-A/-]*)$/);
-            if (match) {
-                const bounds = obj.geometry.getBounds();
-                if (bounds) {
-                    const center = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
-                    housesMap.set(`${center[0].toFixed(6)},${center[1].toFixed(6)}`, match[1]);
-                }
-            }
-        }
-    });
-
-    // 2. Запрашиваем ближайшие дома у Яндекс.Геокодера
-    try {
-        const res = await ymaps.geocode([mapLat, mapLon], {
-            kind: 'house',
-            results: 15
-        });
-
-        res.geoObjects.each(geoObj => {
-            const coords = geoObj.geometry.getCoordinates();
-            const houseName = geoObj.getPremiseNumber() || geoObj.properties.get('name');
-            if (houseName && /^\d/.test(houseName)) {
-                housesMap.set(`${coords[0].toFixed(6)},${coords[1].toFixed(6)}`, houseName);
-            }
-        });
-    } catch (e) {
-        console.warn("Ошибка получения номеров домов для панорамы:", e);
-    }
-
-    const currentZoom = googlePanoPlayer.getZoom() || 1;
-
-    // 3. Рисуем 3D-маркеры на панораме Google
-    housesMap.forEach((houseNum, key) => {
-        const [hLat, hLon] = key.split(',').map(Number);
-        
-        // Переводим координаты Яндекс-карты в истинные WGS84 для Google
-        const [trueLat, trueLon] = getTrueWgs84Coords(hLat, hLon);
-
-        const marker = new google.maps.Marker({
-            position: { lat: trueLat, lng: trueLon },
-            map: googlePanoPlayer,
-            icon: createHouseNumberSvgIcon(houseNum, currentZoom),
-            title: `Дом ${houseNum}`
-        });
-
-        marker.houseNum = houseNum; // Сохраняем номер дома для масштабирования при зуме
-        googlePanoHouseMarkers.push(marker);
-    });
-}
-
-
 // Главная функция загрузки панорам
 
 
@@ -33473,16 +33349,11 @@ btnGoogle.classList.add('active');
                     }
                 };
 
-              const onPanoPositionChanged = () => {
-                    syncGooglePanoState();
-                    updateGooglePanoHouseNumbers(currentPanoCoords.mapLat, currentPanoCoords.mapLon);
-                };
-
                 if (googlePanoPlayer) {
                     googlePanoPlayer.setPosition({ lat: lat, lng: lon });
-                    setTimeout(onPanoPositionChanged, 200);
+                    setTimeout(syncGooglePanoState, 200);
                 } else {
-         googlePanoPlayer = new google.maps.StreetViewPanorama(
+                    googlePanoPlayer = new google.maps.StreetViewPanorama(
                         document.getElementById('pano-container-google'),
                         {
                             position: { lat: lat, lng: lon },
@@ -33495,9 +33366,8 @@ btnGoogle.classList.add('active');
                         }
                     );
                     googlePanoPlayer.addListener('pov_changed', syncGooglePanoState);
-                    googlePanoPlayer.addListener('position_changed', onPanoPositionChanged);
-                    googlePanoPlayer.addListener('zoom_changed', refreshGooglePanoHouseMarkersSize); 
-                    setTimeout(onPanoPositionChanged, 300);
+                    googlePanoPlayer.addListener('position_changed', syncGooglePanoState);
+                    setTimeout(syncGooglePanoState, 300);
                 }
             } catch (err) {
                 console.error("Ошибка инициализации панорамы Google:", err);
@@ -33667,9 +33537,6 @@ document.addEventListener('mouseup', function() {
 
 function closePanoramaModal() {
     document.getElementById('pano-modal-overlay').style.display = 'none';
-    
-    // Очищаем 3D-метки домов
-    clearGooglePanoHouseMarkers();
     
     // Очищаем и выгружаем контейнер Google
     const containerGoogle = document.getElementById('pano-container-google');
