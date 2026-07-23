@@ -429,16 +429,34 @@ button.action:active { transform: scale(.98); }
     -webkit-print-color-adjust: exact !important;
     print-color-adjust: exact !important;
   }
-  .app-layout { display: block !important; padding: 0 !important; margin: 0 !important; }
-  body * { visibility: hidden; }
-  .no-print { display: none !important; }
-  .preview-container, .preview-container * { visibility: visible; }
-  .page-caption { display: none !important; }
-  .preview-container { padding: 0; margin: 0; gap: 0; overflow: visible !important; }
-  .page-scale-wrapper { width: 100% !important; height: 100vh !important; page-break-after: always; margin: 0 !important; transform: none !important; }
-  .page { width: 100% !important; height: 100% !important; transform: none !important; box-shadow: none !important; position: relative !important; }
-  .page-bg { display: block !important; }
-  @page { size: auto; margin: 0; }
+  body * {
+    visibility: hidden !important;
+  }
+  #printArea, #printArea * {
+    visibility: visible !important;
+  }
+  #printArea {
+    position: absolute !important;
+    left: 0 !important;
+    top: 0 !important;
+    width: 100% !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  .print-page-img {
+    display: block !important;
+    width: 100vw !important;
+    height: 100vh !important;
+    object-fit: contain !important;
+    page-break-after: always !important;
+    break-after: page !important;
+    margin: 0 !important;
+    padding: 0 !important;
+  }
+  @page {
+    size: auto;
+    margin: 0;
+  }
 }
 </style>
 </head>
@@ -742,7 +760,7 @@ button.action:active { transform: scale(.98); }
 
       <div class="btn-container" style="margin-top:16px;">
         <button class="action btn-all" onclick="exportAll(this)">⬇ Скачать все листы</button>
-        <button class="action btn-print" onclick="window.print()">🖨 Печать (A3/A4)</button>
+     <button class="action btn-print" onclick="printProject()">🖨 Печать (A3/A4)</button>
       </div>
     </div>
   </div>
@@ -1307,12 +1325,81 @@ async function loadProjectPkt(input) {
   input.value = '';
 }
 
+// 1. Вспомогательная функция: обрезка градиентных WordArt по форме текста перед скачиванием/печатью
+async function fixGradientTextForExport(el, scale) {
+  if (!el || !el.textContent.trim()) return;
+
+  const wa = $('waSelect').value;
+  if (!gradientEffects.includes(wa)) return;
+
+  const rect = el.getBoundingClientRect();
+  const width = el.offsetWidth || rect.width;
+  const height = el.offsetHeight || rect.height;
+  if (width <= 0 || height <= 0) return;
+
+  // Рендерим плашку градиента
+  const bgWrap = document.createElement('div');
+  bgWrap.style.cssText = `position:fixed; left:-9999px; top:0; width:${width}px; height:${height}px; overflow:hidden; z-index:-9999;`;
+  const bgNode = el.cloneNode(true);
+  bgNode.style.webkitTextFillColor = 'transparent';
+  bgNode.style.color = 'transparent';
+  bgNode.style.margin = '0';
+  bgNode.style.transform = 'none';
+  bgWrap.appendChild(bgNode);
+  document.body.appendChild(bgWrap);
+
+  const bgCanvas = await html2canvas(bgNode, { scale: scale, backgroundColor: null, useCORS: true, logging: false });
+  document.body.removeChild(bgWrap);
+
+  // Рендерим черную маску формы букв
+  const maskWrap = document.createElement('div');
+  maskWrap.style.cssText = `position:fixed; left:-9999px; top:0; width:${width}px; height:${height}px; overflow:hidden; z-index:-9999;`;
+  const maskNode = el.cloneNode(true);
+  maskNode.style.background = 'none';
+  maskNode.style.backgroundImage = 'none';
+  maskNode.style.webkitBackgroundClip = 'initial';
+  maskNode.style.backgroundClip = 'initial';
+  maskNode.style.webkitTextFillColor = '#000000';
+  maskNode.style.color = '#000000';
+  maskNode.style.margin = '0';
+  maskNode.style.transform = 'none';
+  maskNode.style.filter = 'none';
+  maskNode.style.textShadow = 'none';
+  maskWrap.appendChild(maskNode);
+  document.body.appendChild(maskWrap);
+
+  const maskCanvas = await html2canvas(maskNode, { scale: scale, backgroundColor: null, useCORS: true, logging: false });
+  document.body.removeChild(maskWrap);
+
+  // Применяем кадрирование (destination-in)
+  const finalCanvas = document.createElement('canvas');
+  finalCanvas.width = bgCanvas.width;
+  finalCanvas.height = bgCanvas.height;
+  const ctx = finalCanvas.getContext('2d');
+
+  ctx.drawImage(bgCanvas, 0, 0);
+  ctx.globalCompositeOperation = 'destination-in';
+  ctx.drawImage(maskCanvas, 0, 0);
+
+  const imgData = finalCanvas.toDataURL('image/png');
+
+  // Подставляем точный PNG градиентного текста в качестве фона
+  el.style.backgroundImage = `url("${imgData}")`;
+  el.style.backgroundSize = '100% 100%';
+  el.style.backgroundPosition = 'center';
+  el.style.backgroundRepeat = 'no-repeat';
+  el.style.webkitBackgroundClip = 'initial';
+  el.style.backgroundClip = 'initial';
+  el.style.webkitTextFillColor = 'transparent';
+  el.style.color = 'transparent';
+}
+
+// 2. Обновленная функция экспорта в JPG/PNG
 async function exportAll(btn) {
   const original = btn.textContent;
   btn.disabled = true;
 
   try {
-    // Ждем полной загрузки веб-шрифтов Google Fonts
     if (document.fonts && document.fonts.ready) {
       await document.fonts.ready;
     }
@@ -1328,14 +1415,11 @@ async function exportAll(btn) {
       const target = $('page' + i);
       if (!target) continue;
 
-      // Получаем вычисленные цвета текста из реального DOM
-      const origText = target.querySelector('.text-content');
-      const origSub = target.querySelector('.subtitle-content');
-      
-      const textStyle = origText ? window.getComputedStyle(origText) : null;
-      const subStyle = origSub ? window.getComputedStyle(origSub) : null;
+      const textNode = target.querySelector('.text-content');
+      const subNode = target.querySelector('.subtitle-content');
+      await fixGradientTextForExport(textNode, scale);
+      await fixGradientTextForExport(subNode, scale);
 
-      // Создаем изолированный контейнер в реальном размере (без transform: scale)
       const tempContainer = document.createElement('div');
       tempContainer.style.cssText = `
         position: fixed;
@@ -1358,38 +1442,10 @@ async function exportAll(btn) {
         box-shadow: none !important;
       `;
 
-      // Принудительно поднимаем слой текста выше фона
       const cloneWrap = clone.querySelector('.text-wrapper');
       if (cloneWrap) {
         cloneWrap.style.position = 'relative';
         cloneWrap.style.zIndex = '100';
-      }
-
-      // Возвращаем видимый цвет тексту с эффектами WordArt
-      const cloneText = clone.querySelector('.text-content');
-      if (cloneText) {
-        cloneText.style.webkitTextFillColor = 'initial';
-        cloneText.style.webkitBackgroundClip = 'initial';
-        cloneText.style.backgroundClip = 'initial';
-        
-        let textColor = textStyle ? textStyle.color : '';
-        if (!textColor || textColor === 'transparent' || textColor === 'rgba(0, 0, 0, 0)') {
-          textColor = $('useThemeColor').checked ? '#000000' : $('textColor').value;
-        }
-        cloneText.style.color = textColor;
-      }
-
-      const cloneSub = clone.querySelector('.subtitle-content');
-      if (cloneSub) {
-        cloneSub.style.webkitTextFillColor = 'initial';
-        cloneSub.style.webkitBackgroundClip = 'initial';
-        cloneSub.style.backgroundClip = 'initial';
-
-        let subColor = subStyle ? subStyle.color : '';
-        if (!subColor || subColor === 'transparent' || subColor === 'rgba(0, 0, 0, 0)') {
-          subColor = $('useThemeColor').checked ? '#000000' : $('textColor').value;
-        }
-        cloneSub.style.color = subColor;
       }
 
       tempContainer.appendChild(clone);
@@ -1406,6 +1462,7 @@ async function exportAll(btn) {
       });
 
       document.body.removeChild(tempContainer);
+      applyAll();
 
       const mime = fmt === 'png' ? 'image/png' : 'image/jpeg';
       const link = document.createElement('a');
@@ -1419,8 +1476,91 @@ async function exportAll(btn) {
     console.error(e);
     alert('Ошибка экспорта: ' + e.message);
   } finally {
+    applyAll();
     btn.textContent = original;
     btn.disabled = false;
+  }
+}
+
+// 3. Растровая печать (создает 100% точную растровую копию предпросмотра)
+async function printProject() {
+  const printBtn = document.querySelector('.btn-print');
+  const origText = printBtn ? printBtn.textContent : '';
+  if (printBtn) {
+    printBtn.disabled = true;
+    printBtn.textContent = 'Подготовка к печати…';
+  }
+
+  try {
+    if (document.fonts && document.fonts.ready) {
+      await document.fonts.ready;
+    }
+
+    let printArea = $('printArea');
+    if (!printArea) {
+      printArea = document.createElement('div');
+      printArea.id = 'printArea';
+      document.body.appendChild(printArea);
+    }
+    printArea.innerHTML = '';
+
+    const aspectClass = $('aspectRatioSelect').value;
+    const baseW = aspectClass === 'aspect-a4-portrait' ? 1000 : aspectClass === 'aspect-square' ? 1000 : aspectClass === 'aspect-story' ? 1080 : 1414;
+    const baseH = aspectClass === 'aspect-a4-portrait' ? 1414 : aspectClass === 'aspect-square' ? 1000 : aspectClass === 'aspect-story' ? 1920 : 1000;
+
+    for (let i = 0; i < pages.length; i++) {
+      const target = $('page' + i);
+      if (!target) continue;
+
+      const textNode = target.querySelector('.text-content');
+      const subNode = target.querySelector('.subtitle-content');
+      await fixGradientTextForExport(textNode, 2);
+      await fixGradientTextForExport(subNode, 2);
+
+      const tempContainer = document.createElement('div');
+      tempContainer.style.cssText = `position:fixed; left:-9999px; top:0; width:${baseW}px; height:${baseH}px; z-index:-9999; overflow:hidden;`;
+
+      const clone = target.cloneNode(true);
+      clone.style.cssText = `width:${baseW}px !important; height:${baseH}px !important; transform:none !important; position:relative !important; top:0 !important; left:0 !important; box-shadow:none !important;`;
+
+      const cloneWrap = clone.querySelector('.text-wrapper');
+      if (cloneWrap) {
+        cloneWrap.style.position = 'relative';
+        cloneWrap.style.zIndex = '100';
+      }
+
+      tempContainer.appendChild(clone);
+      document.body.appendChild(tempContainer);
+
+      await new Promise(r => setTimeout(r, 80));
+
+      const canvas = await html2canvas(clone, {
+        scale: 2,
+        useCORS: true,
+        allowTaint: true,
+        logging: false,
+        backgroundColor: null
+      });
+
+      document.body.removeChild(tempContainer);
+      applyAll();
+
+      const img = document.createElement('img');
+      img.src = canvas.toDataURL('image/png');
+      img.className = 'print-page-img';
+      printArea.appendChild(img);
+    }
+
+    window.print();
+  } catch (e) {
+    console.error(e);
+    alert('Ошибка подготовки к печати: ' + e.message);
+  } finally {
+    applyAll();
+    if (printBtn) {
+      printBtn.textContent = origText;
+      printBtn.disabled = false;
+    }
   }
 }
 
