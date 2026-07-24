@@ -4652,7 +4652,6 @@ const FIXED_CATEGORY_COLORS = {
 
 
 let nspdRequestQueue = Promise.resolve();
-let geocoderPinkMarker = null;
 
 const MIN_NSPD_INTERVAL = 700; 
 
@@ -33992,9 +33991,6 @@ function renderGooglePanoCadastralMarkers() {
     const currentZoom = googlePanoPlayer.getZoom() || 1;
     const addedCns = new Set();
 
-    // 1. Собираем все доступные кандидаты объектов
-    const candidates = [];
-
     polygons.forEach(obj => {
         if (!(obj instanceof ymaps.Polygon)) return;
 
@@ -34002,6 +33998,7 @@ function renderGooglePanoCadastralMarkers() {
         const isStructure = obj.properties.get('isStructure') || obj.properties.get('featureData')?.properties?.categoryName === 'Сооружения';
         const isParcel = !isBuilding && !isStructure;
 
+        // Фильтрация чекбоксами
         if (isParcel && !panoFilterZU) return;
         if (isBuilding && !panoFilterOKS) return;
         if (isStructure && !panoFilterStr) return;
@@ -34023,70 +34020,44 @@ function renderGooglePanoCadastralMarkers() {
         const dist = getDistanceMeters(panoLat, panoLon, trueLat, trueLon);
         if (dist > 120) return; 
 
-        const bearing = getBearing(panoLat, panoLon, trueLat, trueLon);
         const type = isBuilding ? 'oks' : (isStructure ? 'structure' : 'zu');
+        addedCns.add(cn);
 
-        candidates.push({
-            cn, type, centerMapLat, centerMapLon, trueLat, trueLon, dist, bearing
-        });
-    });
-
-    // 2. Сортируем кандидатов от ближних к дальним
-    candidates.sort((a, b) => a.dist - b.dist);
-
-    // 3. Отсекаем объекты, заблокированные более ближними домами/объектами (угловой сектор 14°)
-    const blockedSectors = [];
-
-    candidates.forEach(cand => {
-        const isOccluded = blockedSectors.some(sec => {
-            let diff = Math.abs(cand.bearing - sec.centerBearing);
-            if (diff > 180) diff = 360 - diff;
-            return diff < sec.width;
+        const marker = new google.maps.Marker({
+            position: { lat: trueLat, lng: trueLon },
+            map: googlePanoPlayer,
+            icon: createCadastralNumberSvgIcon(cn, type, currentZoom, false),
+            title: `${type === 'zu' ? 'ЗУ' : (type === 'oks' ? 'ОКС' : 'Сооружение')}: ${cn}`
         });
 
-        if (!isOccluded && !addedCns.has(cand.cn)) {
-            addedCns.add(cand.cn);
+        marker.cn = cn;
+        marker.cnType = type;
 
-            // Добавляем сектор этого объекта в список заблокированных для заднего плана
-            blockedSectors.push({
-                centerBearing: cand.bearing,
-                width: cand.type === 'oks' ? 12 : 8 // Здания перекрывают 12° обзора, остальные 8°
-            });
+        // СОБЫТИЯ НАВЕДЕНИЯ МЫШИ (Увеличение плашки до читаемого размера)
+        marker.addListener('mouseover', () => {
+            const zoom = googlePanoPlayer ? (googlePanoPlayer.getZoom() || 1) : 1;
+            marker.setIcon(createCadastralNumberSvgIcon(marker.cn, marker.cnType, zoom, true));
+            marker.setZIndex(google.maps.Marker.MAX_ZINDEX); // Выносим поверх остальных элементов
+        });
+        
+  
+        marker.addListener('dblclick', (e) => {
+            if (e && typeof e.stop === 'function') e.stop();
+            movePanoCameraToNearestPoint(trueLat, trueLon);
+        });
 
-            const marker = new google.maps.Marker({
-                position: { lat: cand.trueLat, lng: cand.trueLon },
-                map: googlePanoPlayer,
-                icon: createCadastralNumberSvgIcon(cand.cn, cand.type, currentZoom, false),
-                title: `${cand.type === 'zu' ? 'ЗУ' : (cand.type === 'oks' ? 'ОКС' : 'Сооружение')}: ${cand.cn}`
-            });
+        marker.addListener('mouseout', () => {
+            const zoom = googlePanoPlayer ? (googlePanoPlayer.getZoom() || 1) : 1;
+            marker.setIcon(createCadastralNumberSvgIcon(marker.cn, marker.cnType, zoom, false));
+            marker.setZIndex(null);
+        });
 
-            marker.cn = cand.cn;
-            marker.cnType = cand.type;
+      marker.addListener('click', () => {
+            const details = findLoadedCadastralDetails(centerMapLat, centerMapLon, '', '');
+            showPanoInfoCard({ fullAddress: cn, distance: Math.round(dist) }, details.buildingInfo, details.parcelInfo, details.structureInfo);
+        });
 
-            marker.addListener('mouseover', () => {
-                const zoom = googlePanoPlayer ? (googlePanoPlayer.getZoom() || 1) : 1;
-                marker.setIcon(createCadastralNumberSvgIcon(marker.cn, marker.cnType, zoom, true));
-                marker.setZIndex(google.maps.Marker.MAX_ZINDEX);
-            });
-
-            marker.addListener('mouseout', () => {
-                const zoom = googlePanoPlayer ? (googlePanoPlayer.getZoom() || 1) : 1;
-                marker.setIcon(createCadastralNumberSvgIcon(marker.cn, marker.cnType, zoom, false));
-                marker.setZIndex(null);
-            });
-
-            marker.addListener('click', () => {
-                const details = findLoadedCadastralDetails(cand.trueLat, cand.trueLon, '', '');
-                showPanoInfoCard({ fullAddress: cand.cn, distance: Math.round(cand.dist), lat: cand.trueLat, lon: cand.trueLon }, details.buildingInfo, details.parcelInfo, details.structureInfo);
-            });
-
-            marker.addListener('dblclick', (e) => {
-                if (e && typeof e.stop === 'function') e.stop();
-                movePanoCameraToNearestPoint(cand.trueLat, cand.trueLon);
-            });
-
-            googlePanoCadastralMarkers.push(marker);
-        }
+        googlePanoCadastralMarkers.push(marker);
     });
 }
 
@@ -34142,10 +34113,10 @@ function openEgrnPage(cn) {
 
 
 function hidePanoInfoCard() {
-    hideGeocoderPinkDot(); // Скрываем розовую точку
     const card = document.getElementById('pano-info-card');
     if (card) card.style.display = 'none';
 }
+
 
 
 
@@ -34166,11 +34137,6 @@ function openEgrnPage(cn) {
 }
 
 function showPanoInfoCard(item, buildingInfo, parcelInfo, structureInfo) {
-    // Отображаем розовую точку Геокодера на 2D-карте
-    if (item.lat && item.lon) {
-        showGeocoderPinkDot(item.lat, item.lon, item.fullAddress || item.houseNum || '');
-    }
-
     const card = document.getElementById('pano-info-card');
     if (!card) return;
 
@@ -34410,216 +34376,91 @@ function extractCleanHouseNumber(rawHouse, fullAddr) {
     return cleanMatch ? cleanMatch[0] : (h.length <= 6 ? h : null);
 }
 
-
-function showGeocoderPinkDot(mapLat, mapLon, text = '') {
-    hideGeocoderPinkDot();
-    if (!map || !mapLat || !mapLon) return;
-
-    geocoderPinkMarker = new ymaps.Placemark([mapLat, mapLon], {
-        hintContent: `Точка Геокодера: ${text}`
-    }, {
-        preset: 'islands#pinkDotIcon',
-        zIndex: 10000
-    });
-
-    map.geoObjects.add(geocoderPinkMarker);
-}
-
-// Скрытие розовой точки
-function hideGeocoderPinkDot() {
-    if (geocoderPinkMarker && map) {
-        map.geoObjects.remove(geocoderPinkMarker);
-        geocoderPinkMarker = null;
-    }
-}
-
 // Поиск детальных параметров здания (ОКС) и участка (ЗУ) среди объектов на карте
 function findLoadedCadastralDetails(hLat, hLon, houseNum, fullAddr) {
-    // Переводим входные WGS84 координаты в систему сдвинутых полигонов карты
-    const mapCheckLat = hLat - (mapOffsetY * 0.000008983);
-    const mapCheckLon = hLon - (mapOffsetX * 0.000008983);
-
     let parcelInfo = null;
     let buildingInfo = null;
     let structureInfo = null;
 
-    let matchedParcelPoly = null;
-    let matchedBuildingPoly = null;
-    let matchedStructurePoly = null;
-
-    // Вспомогательная функция точной проверки попадания через Turf.js
-    function checkPointInPoly(polyObj, checkLat, checkLon) {
-        try {
-            const coords = polyObj.geometry.getCoordinates();
-            if (!coords || !coords[0]) return false;
-            
-            const turfRings = coords.map(ring => ring.map(c => [c[1], c[0]]));
-            const turfPoly = turf.polygon(turfRings);
-            const turfPt = turf.point([checkLon, checkLat]);
-
-            return turf.booleanPointInPolygon(turfPt, turfPoly);
-        } catch (e) {
-            try {
-                return polyObj.geometry.contains([checkLat, checkLon]);
-            } catch(err) {
-                return false;
-            }
-        }
-    }
-
-    // 1. Поиск Земельного Участка (ЗУ)
-    let minParcelDist = Infinity;
-
-    polygons.forEach((obj) => {
+    polygons.forEach(obj => {
         if (!(obj instanceof ymaps.Polygon)) return;
-        const featureData = obj.properties.get('featureData');
-        if (!featureData) return;
 
-        const props = featureData.properties || {};
-        const isB = obj.properties.get('isBuilding') || props.categoryName === 'Здания';
-        const isS = obj.properties.get('isStructure') || props.categoryName === 'Сооружения';
-        if (isB || isS) return; // Игнорируем контуры зданий и сооружений
-
-        const isInside = checkPointInPoly(obj, mapCheckLat, mapCheckLon);
-        const bounds = obj.geometry.getBounds();
-        let dist = Infinity;
-        if (bounds) {
-            const cLat = (bounds[0][0] + bounds[1][0]) / 2;
-            const cLon = (bounds[0][1] + bounds[1][1]) / 2;
-            dist = getDistanceMeters(mapCheckLat, mapCheckLon, cLat, cLon);
-        }
-
-        if (isInside) {
-            matchedParcelPoly = obj;
-            minParcelDist = 0;
-        } else if (minParcelDist > 0 && dist < 15 && dist < minParcelDist) {
-            minParcelDist = dist;
-            matchedParcelPoly = obj;
-        }
-    });
-
-    // 2. Поиск Зданий (ОКС) и Сооружений
-    // 2A. Проверяем точное попадание точки внутрь контура Здания/Сооружения
-    polygons.forEach((obj) => {
-        if (!(obj instanceof ymaps.Polygon)) return;
         const featureData = obj.properties.get('featureData');
         if (!featureData) return;
 
         const props = featureData.properties || {};
         const opts = props.options || {};
-        const isB = obj.properties.get('isBuilding') || props.categoryName === 'Здания' || opts.build_record_area;
-        const isS = obj.properties.get('isStructure') || props.categoryName === 'Сооружения' || opts.params_extension;
+        const cn = obj.properties.get('cadastralNumber') || props.descr || opts.cad_num || opts.cad_number;
 
-        if (!isB && !isS) return;
-
-        const isInside = checkPointInPoly(obj, mapCheckLat, mapCheckLon);
-        if (isInside) {
-            if (isB) matchedBuildingPoly = obj;
-            if (isS) matchedStructurePoly = obj;
-        }
-    });
-
-    // 2B. Если точка не попала прямо внутрь здания, но ЗУ найден — ищем здание, лежащее ВНУТРИ этого ЗУ
-    if (matchedParcelPoly) {
-        polygons.forEach((obj) => {
-            if (!(obj instanceof ymaps.Polygon)) return;
-            const featureData = obj.properties.get('featureData');
-            if (!featureData) return;
-
-            const props = featureData.properties || {};
-            const opts = props.options || {};
-            const isB = obj.properties.get('isBuilding') || props.categoryName === 'Здания' || opts.build_record_area;
-            const isS = obj.properties.get('isStructure') || props.categoryName === 'Сооружения' || opts.params_extension;
-
-            if (!isB && !isS) return;
-
-            const bounds = obj.geometry.getBounds();
-            if (bounds) {
-                const bCenterLat = (bounds[0][0] + bounds[1][0]) / 2;
-                const bCenterLon = (bounds[0][1] + bounds[1][1]) / 2;
-
-                const isBuildingInsideZu = checkPointInPoly(matchedParcelPoly, bCenterLat, bCenterLon);
-
-                if (isBuildingInsideZu) {
-                    if (isB && !matchedBuildingPoly) matchedBuildingPoly = obj;
-                    if (isS && !matchedStructurePoly) matchedStructurePoly = obj;
+        let isMatch = false;
+        try {
+            if (obj.geometry.contains([hLat, hLon])) {
+                isMatch = true;
+            } else {
+                const bounds = obj.geometry.getBounds();
+                if (bounds) {
+                    const cLat = (bounds[0][0] + bounds[1][0]) / 2;
+                    const cLon = (bounds[0][1] + bounds[1][1]) / 2;
+                    if (getDistanceMeters(hLat, hLon, cLat, cLon) < 25) {
+                        isMatch = true;
+                    }
                 }
             }
-        });
-    }
+        } catch(e) {}
 
-    // 3. Формирование итоговых структур данных
-    if (matchedParcelPoly) {
-        const fd = matchedParcelPoly.properties.get('featureData');
-        const props = fd?.properties || {};
-        const opts = props.options || {};
-        const cn = matchedParcelPoly.properties.get('cadastralNumber') || props.descr || opts.cad_num;
-        parcelInfo = {
-            cn: cn,
-            address: opts.readable_address || null,
-            ownership: opts.ownership_type || null,
-            right: opts.right_type || null,
-            areaText: (typeof getAreaText === 'function') ? getAreaText(opts) : (opts.area ? `${opts.area} м²` : null),
-            status: opts.status || null,
-            vri: opts.permitted_use_established_by_document || null,
-            category: opts.land_record_category_type || null
-        };
-    }
+        if (isMatch) {
+            const isBuilding = obj.properties.get('isBuilding') || props.categoryName === 'Здания' || opts.build_record_area;
+            const isStructure = obj.properties.get('isStructure') || props.categoryName === 'Сооружения' || opts.params_extension;
 
-    if (matchedBuildingPoly) {
-        const fd = matchedBuildingPoly.properties.get('featureData');
-        const props = fd?.properties || {};
-        const opts = props.options || {};
-        const cn = matchedBuildingPoly.properties.get('cadastralNumber') || props.descr || opts.cad_num;
-        buildingInfo = {
-            cn: cn,
-            address: opts.readable_address || null,
-            purpose: opts.purpose || opts.building_name || null,
-            area: opts.build_record_area || opts.params_area || null,
-            floors: opts.floors || null,
-            materials: opts.materials || null,
-            year: opts.year_built || opts.params_year_built || null
-        };
-    }
-
-    if (matchedStructurePoly) {
-        const fd = matchedStructurePoly.properties.get('featureData');
-        const props = fd?.properties || {};
-        const opts = props.options || {};
-        const cn = matchedStructurePoly.properties.get('cadastralNumber') || props.descr || opts.cad_number;
-        structureInfo = {
-            cn: cn,
-            name: opts.params_name || props.descr || null,
-            address: opts.address_readable_address || opts.readable_address || null,
-            purpose: opts.params_purpose || null,
-            extension: opts.params_extension || null,
-            year: opts.params_year_built || null
-        };
-    }
+            if (isStructure && !structureInfo) {
+                structureInfo = {
+                    cn: cn,
+                    name: opts.params_name || props.descr || null,
+                    address: opts.address_readable_address || opts.readable_address || null,
+                    purpose: opts.params_purpose || null,
+                    extension: opts.params_extension || null,
+                    year: opts.params_year_built || null
+                };
+            } else if (isBuilding && !buildingInfo) {
+                buildingInfo = {
+                    cn: cn,
+                    address: opts.readable_address || null,
+                    purpose: opts.purpose || opts.building_name || null,
+                    area: opts.build_record_area || opts.params_area || null,
+                    floors: opts.floors || null,
+                    materials: opts.materials || null,
+                    year: opts.year_built || opts.params_year_built || null
+                };
+            } else if (!isBuilding && !isStructure && !parcelInfo) {
+                parcelInfo = {
+                    cn: cn,
+                    address: opts.readable_address || null,
+                    ownership: opts.ownership_type || null,
+                    right: opts.right_type || null,
+                    areaText: (typeof getAreaText === 'function') ? getAreaText(opts) : (opts.area ? `${opts.area} м²` : null),
+                    status: opts.status || null,
+                    vri: opts.permitted_use_established_by_document || null,
+                    category: opts.land_record_category_type || null
+                };
+            }
+        }
+    });
 
     return { parcelInfo, buildingInfo, structureInfo };
 }
 
-
-// Расчет направления (азимута) от точки 1 к точке 2 в градусах (0..360)
-function getBearing(lat1, lon1, lat2, lon2) {
-    const dLon = (lon2 - lon1) * Math.PI / 180;
-    const y = Math.sin(dLon) * Math.cos(lat2 * Math.PI / 180);
-    const x = Math.cos(lat1 * Math.PI / 180) * Math.sin(lat2 * Math.PI / 180) -
-              Math.sin(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.cos(dLon);
-    let brng = Math.atan2(y, x) * 180 / Math.PI;
-    return (brng + 360) % 360;
-}
-
+// Обновленная функция отрисовки домов на панораме
+// Полная обновленная функция отрисовки меток домов на панораме Google
 async function updateGooglePanoHouseNumbers(mapLat, mapLon) {
     // 1. Очищаем прошлые маркеры с панорамы
     clearGooglePanoHouseMarkers();
 
-    if (googlePanoHouseMode === 0 || !googlePanoPlayer || !window.google || !currentPanoCoords) return;
+    // Если режим скрыт (0) или панорама не загружена — ничего не делаем
+    if (googlePanoHouseMode === 0 || !googlePanoPlayer || !window.google) return;
 
     const housesMap = new Map();
 
-    // 2. Геокодируем близлежащие дома
+    // 2. Геокодируем близлежащие дома через Яндекс.Геокодер
     try {
         const res = await ymaps.geocode([mapLat, mapLon], {
             kind: 'house',
@@ -34673,13 +34514,73 @@ async function updateGooglePanoHouseNumbers(mapLat, mapLon) {
 
     const currentZoom = googlePanoPlayer.getZoom() || 1;
 
-    // 4. Создаем маркеры домов
+    // 4. Перебираем дома, сопоставляем с объектами на карте и создаем маркеры
     housesMap.forEach((item, key) => {
         const [trueLat, trueLon] = getTrueWgs84Coords(item.lat, item.lon);
         const isNearest = (key === nearestKey);
 
+        let buildingInfo = null;
+        let parcelInfo = null;
+
+        // Поиск информации о здании и участке среди загруженных объектов
+        polygons.forEach(obj => {
+            if (!(obj instanceof ymaps.Polygon)) return;
+
+            const featureData = obj.properties.get('featureData');
+            if (!featureData) return;
+
+            const props = featureData.properties || {};
+            const opts = props.options || {};
+            const cn = obj.properties.get('cadastralNumber') || props.descr || opts.cad_num || opts.cad_number;
+
+            let isMatch = false;
+            try {
+                if (obj.geometry.contains([item.lat, item.lon])) {
+                    isMatch = true;
+                } else {
+                    const bounds = obj.geometry.getBounds();
+                    if (bounds) {
+                        const cLat = (bounds[0][0] + bounds[1][0]) / 2;
+                        const cLon = (bounds[0][1] + bounds[1][1]) / 2;
+                        if (getDistanceMeters(item.lat, item.lon, cLat, cLon) < 25) {
+                            isMatch = true;
+                        }
+                    }
+                }
+            } catch(e) {}
+
+            if (isMatch) {
+                const isBuilding = obj.properties.get('isBuilding') || props.categoryName === 'Здания' || opts.build_record_area;
+
+                if (isBuilding && !buildingInfo) {
+                    buildingInfo = {
+                        cn: cn,
+                        address: opts.readable_address || null,
+                        purpose: opts.purpose || opts.building_name || null,
+                        area: opts.build_record_area || opts.params_area || null,
+                        floors: opts.floors || null,
+                        materials: opts.materials || null,
+                        year: opts.year_built || opts.params_year_built || null
+                    };
+                } else if (!isBuilding && !parcelInfo) {
+                    parcelInfo = {
+                        cn: cn,
+                        address: opts.readable_address || null,
+                        ownership: opts.ownership_type || null,
+                        right: opts.right_type || null,
+                        areaText: (typeof getAreaText === 'function') ? getAreaText(opts) : (opts.area ? `${opts.area} м²` : null),
+                        status: opts.status || null,
+                        vri: opts.permitted_use_established_by_document || null,
+                        category: opts.land_record_category_type || null
+                    };
+                }
+            }
+        });
+
+        // Форматируем понятный и чистый адрес (Улица, Дом)
         const cleanAddress = getCleanStreetAndHouse(item.fullAddress, item.houseNum);
 
+        // Создаем маркер Google Maps
         const marker = new google.maps.Marker({
             position: { lat: trueLat, lng: trueLon },
             map: googlePanoPlayer,
@@ -34687,44 +34588,31 @@ async function updateGooglePanoHouseNumbers(mapLat, mapLon) {
             title: cleanAddress
         });
 
-        // Наведение мыши
+        // СОБЫТИЕ: Наведение мыши (Увеличение плашки + Красивое раскрытие Улицы и Дома)
         marker.addListener('mouseover', () => {
-            const zoom = googlePanoPlayer ? (googlePanoPlayer.getZoom() || 1) : 1;
+            const zoom = googlePanoPlayer.getZoom() || 1;
             marker.setIcon(createHouseNumberSvgIcon(item.houseNum, zoom, item.isNearest, true, cleanAddress));
-            marker.setZIndex(google.maps.Marker.MAX_ZINDEX);
+            marker.setZIndex(google.maps.Marker.MAX_ZINDEX); // Выносим активную метку на передний план
+        });
+        
+        // ДВОЙНОЙ КЛИК: Физическое перемещение Pegman к дому
+        marker.addListener('dblclick', (e) => {
+            if (e && typeof e.stop === 'function') e.stop();
+            movePanoCameraToNearestPoint(trueLat, trueLon);
         });
 
+        // СОБЫТИЕ: Уход мыши (Возврат плашки к стандартному номеру дома)
         marker.addListener('mouseout', () => {
-            const zoom = googlePanoPlayer ? (googlePanoPlayer.getZoom() || 1) : 1;
+            const zoom = googlePanoPlayer.getZoom() || 1;
             marker.setIcon(createHouseNumberSvgIcon(item.houseNum, zoom, item.isNearest, false, null));
             marker.setZIndex(null);
         });
 
-        // ИСПРАВЛЕНИЕ: Динамический вызов findLoadedCadastralDetails В МОМЕНТ КЛИКА!
+        // СОБЫТИЕ: Клик по метке (Открытие информационной плашки при режиме >= 2)
         marker.addListener('click', () => {
             if (googlePanoHouseMode >= 2) {
-                // Вызываем поиск данных live с выводом логов в консоль
-                const details = findLoadedCadastralDetails(item.lat, item.lon, item.houseNum, item.fullAddress);
-                
-                showPanoInfoCard(
-                    { 
-                        fullAddress: item.fullAddress, 
-                        houseNum: item.houseNum, 
-                        distance: item.distance, 
-                        lat: item.lat, 
-                        lon: item.lon 
-                    }, 
-                    details.buildingInfo, 
-                    details.parcelInfo, 
-                    details.structureInfo
-                );
+                showPanoInfoCard(item, buildingInfo, parcelInfo);
             }
-        });
-
-        // Двойной клик — шаг вперед к дому
-        marker.addListener('dblclick', (e) => {
-            if (e && typeof e.stop === 'function') e.stop();
-            movePanoCameraToNearestPoint(trueLat, trueLon);
         });
 
         marker.houseNum = item.houseNum;
@@ -34733,13 +34621,16 @@ async function updateGooglePanoHouseNumbers(mapLat, mapLon) {
         googlePanoHouseMarkers.push(marker);
     });
 
-    // Перерисовка контуров и фоновая загрузка
+    // 5. Перерисовываем контуры (если активен режим "Контуры")
     renderGooglePanoContours();
 
+    // 6. Подгружаем дополнительные объекты поблизости, если включен расширенный режим
     if (googlePanoHouseMode >= 2) {
+         renderGooglePanoCadastralMarkers();
         fetchNearbyCategoryData(mapLat, mapLon);
     }
 }
+// Главная функция загрузки панорам
 
 
 async function switchPanoramaService(service, isAutoFallback = false) {
@@ -35032,7 +34923,6 @@ document.addEventListener('mouseup', function() {
 });
 
 function closePanoramaModal() {
-    hideGeocoderPinkDot(); // Скрываем розовую точку при закрытии окна панорам
     document.getElementById('pano-modal-overlay').style.display = 'none';
     
     cancelPanoFetch();
