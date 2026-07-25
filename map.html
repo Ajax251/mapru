@@ -15118,7 +15118,6 @@ function generatePopoverContent(feature) {
     return `${headerHtml}<table>${rows}</table>${panoBlockHtml}`;
 }
 
-
 async function generateObjectPassportHtml() {
     const feature = window.currentPopoverFeature;
     if (!feature) {
@@ -15135,7 +15134,7 @@ async function generateObjectPassportHtml() {
         const cn = o.cad_num || o.cad_number || o.reg_numb_border || p.descr || 'Без номера';
         const today = new Date().toLocaleDateString('ru-RU');
 
-        // Фоновая подгрузка связанных ОКС, чтобы таблица была полностью заполнена
+        // Фоновая подгрузка связанных ОКС для детального наполнения таблицы
         const linkedCns = feature._linkedOksCache || [];
         if (type === 'zu' && linkedCns.length > 0) {
             for (let i = 0; i < linkedCns.length; i++) {
@@ -15227,7 +15226,7 @@ async function generateObjectPassportHtml() {
                 const centerGlobalPx = proj.toGlobalPixels(center, zoom);
                 const centerPagePx = map.converter.globalToPage(centerGlobalPx);
 
-                //  Центр кропа с учетом коэффициента масштабирования
+                // Центр кропа с учетом коэффициента масштабирования
                 const centerX = centerPagePx[0] * scaleFactor;
                 const centerY = centerPagePx[1] * scaleFactor;
 
@@ -15255,26 +15254,132 @@ async function generateObjectPassportHtml() {
             }
         }
 
+        // Вычисление географического центра объекта в качестве резервных координат
+        let targetLat = null;
+        let targetLon = null;
+
+        if (currentPanoCoords) {
+            targetLat = currentPanoCoords.trueLat;
+            targetLon = currentPanoCoords.trueLon;
+        } else {
+            let coords3857 = null;
+            const geom = feature.geometry;
+            if (geom) {
+                if (geom.type === 'Point') {
+                    coords3857 = geom.coordinates;
+                } else if (geom.type === 'Polygon') {
+                    const ring = geom.coordinates[0];
+                    let sumX = 0, sumY = 0;
+                    ring.forEach(c => { sumX += c[0]; sumY += c[1]; });
+                    coords3857 = [sumX / ring.length, sumY / ring.length];
+                } else if (geom.type === 'MultiPolygon') {
+                    const ring = geom.coordinates[0][0];
+                    let sumX = 0, sumY = 0;
+                    ring.forEach(c => { sumX += c[0]; sumY += c[1]; });
+                    coords3857 = [sumX / ring.length, sumY / ring.length];
+                }
+            }
+            if (coords3857) {
+                const wgs = proj4('EPSG:3857', 'EPSG:4326', coords3857); // [lon, lat]
+                targetLat = wgs[1];
+                targetLon = wgs[0];
+            }
+        }
+
+   let googleUrl = '';
+            // 1. Формирование надежной кроссплатформенной ссылки Google Улиц (Street View)
+            if (googlePanoPlayer) {
+                const pos = googlePanoPlayer.getPosition();
+                const pov = googlePanoPlayer.getPov();
+                if (pos && pov) {
+                    const heading = Math.round(pov.heading || 0);
+                    const pitch = Math.round(pov.pitch || 0);
+                    googleUrl = `https://maps.google.com/maps?q=&layer=c&cbll=${pos.lat()},${pos.lng()}&cbp=12,${heading},0,0,${pitch}`;
+                }
+            }
+
+        let yandexUrl = '';
+        // 2. Попытка получить ссылку из active плеера Яндекса
+        if (yandexPanoPlayer) {
+            const pano = yandexPanoPlayer.getPanorama();
+            const dir = yandexPanoPlayer.getDirection();
+            if (pano && dir) {
+                const pos = pano.getPosition(); // [lat, lon]
+                yandexUrl = `https://yandex.ru/maps/?panorama[point]=${pos[1]},${pos[0]}&panorama[direction]=${dir[0]},${dir[1]}`;
+            }
+        }
+        if (!yandexUrl && targetLat && targetLon) {
+            yandexUrl = `https://yandex.ru/maps/?panorama[point]=${targetLon},${targetLat}`;
+        }
+
         let googleImgHtml = '';
         let yandexImgHtml = '';
         
         const googleBox = document.getElementById('popover-pano-google');
-        if (googleBox) {
-            const img = googleBox.querySelector('img');
-            if (img && img.src) {
-                // Автоматически подменяем технический размер 220x130 на чёткий 640x400
-                const highResSrc = img.src.replace('size=220x130', 'size=640x400');
-                googleImgHtml = `<img src="${highResSrc}" style="width:100%; border-radius:6px; border:1px solid #ccc;">`;
+            if (googleBox) {
+                const img = googleBox.querySelector('img');
+                if (img && img.src) {
+                    const imgSrc = img.src;
+
+                    // 3. Если плеер не был открыт, извлекаем координаты и ракурс из ссылки картинки-превью
+                    if (!googleUrl) {
+                        try {
+                            const urlObj = new URL(imgSrc);
+                            const locationParam = urlObj.searchParams.get('location');
+                            const headingParam = Math.round(parseFloat(urlObj.searchParams.get('heading')) || 0);
+                            const pitchParam = Math.round(parseFloat(urlObj.searchParams.get('pitch')) || 0);
+                            
+                            if (locationParam) {
+                                const [latVal, lonVal] = locationParam.split(',');
+                                googleUrl = `https://maps.google.com/maps?q=&layer=c&cbll=${latVal},${lonVal}&cbp=12,${headingParam},0,0,${pitchParam}`;
+                            }
+                        } catch (err) {
+                            console.error("Ошибка парсинга параметров панорамы Google:", err);
+                        }
+                    }
+
+                    // Окончательный резервный вариант по координатам центра
+                    if (!googleUrl && targetLat && targetLon) {
+                        googleUrl = `https://maps.google.com/maps?q=&layer=c&cbll=${targetLat},${targetLon}&cbp=12,0,0,0,0`;
+                    }
+
+                    const highResSrc = imgSrc.replace('size=220x130', 'size=640x400');
+                    googleImgHtml = `
+                        <div class="pano-card">
+                            <div class="pano-title">Google Панорама</div>
+                            <a href="${googleUrl || '#'}" target="_blank" title="Открыть интерактивную панораму Google Улиц в новом окне">
+                                <img src="${highResSrc}" style="width:100%; border-radius:6px; border:1px solid #ccc; transition: transform 0.2s ease, box-shadow 0.2s ease; cursor: pointer;" 
+                                     onmouseover="this.style.transform='scale(1.015)';this.style.boxShadow='0 4px 12px rgba(0,0,0,0.15)';" 
+                                     onmouseout="this.style.transform='scale(1)';this.style.boxShadow='none';">
+                            </a>
+                        </div>`;
+                }
             }
-        }
         
         const yandexBox = document.getElementById('popover-pano-yandex');
         if (yandexBox) {
             const img = yandexBox.querySelector('img');
             if (img && img.src) {
-                yandexImgHtml = `<img src="${img.src}" style="width:100%; border-radius:6px; border:1px solid #ccc;">`;
+                yandexImgHtml = `
+                    <div class="pano-card">
+                        <div class="pano-title">Яндекс Панорама</div>
+                        <a href="${yandexUrl || '#'}" target="_blank" title="Открыть интерактивную панораму Яндекс в новом окне">
+                            <img src="${img.src}" style="width:100%; border-radius:6px; border:1px solid #ccc; transition: transform 0.2s ease, box-shadow 0.2s ease; cursor: pointer;" 
+                                 onmouseover="this.style.transform='scale(1.015)';this.style.boxShadow='0 4px 12px rgba(0,0,0,0.15)';" 
+                                 onmouseout="this.style.transform='scale(1)';this.style.boxShadow='none';">
+                        </a>
+                    </div>`;
             } else {
-                yandexImgHtml = `<div style="padding:30px; text-align:center; background:#f1f5f9; border-radius:6px; color:#64748b;">Панорама доступна на карте</div>`;
+                yandexImgHtml = `
+                    <div class="pano-card">
+                        <div class="pano-title">Яндекс Панорама</div>
+                        <a href="${yandexUrl || '#'}" target="_blank" title="Открыть Яндекс Карты в новом окне">
+                            <div style="padding:30px; text-align:center; background:#f1f5f9; border-radius:6px; color:#64748b; border:1px solid #ccc; transition: transform 0.2s ease; cursor: pointer;"
+                                 onmouseover="this.style.transform='scale(1.015)';" onmouseout="this.style.transform='scale(1)';">
+                                 Панорама доступна на карте
+                            </div>
+                        </a>
+                    </div>`;
             }
         }
 
@@ -15302,24 +15407,34 @@ async function generateObjectPassportHtml() {
 
           if (linkedCns.length > 0) {
                     linkedCns.forEach(oksCn => {
-                        let foundFeature = buildingFeaturesData.find(f => 
-                            f.properties?.options?.cad_num === oksCn || f.properties?.descr === oksCn
-                        ) || structureFeaturesData.find(f => 
-                            f.properties?.options?.cad_number === oksCn || f.properties?.descr === oksCn
-                        );
+                        const normOksCn = normalizeCadastralNumber(oksCn);
+                        
+                        let foundFeature = buildingFeaturesData.find(f => {
+                            const fCn1 = f.properties?.options?.cad_num || '';
+                            const fCn2 = f.properties?.descr || '';
+                            return normalizeCadastralNumber(fCn1) === normOksCn || normalizeCadastralNumber(fCn2) === normOksCn;
+                        }) || structureFeaturesData.find(f => {
+                            const fCn1 = f.properties?.options?.cad_number || f.properties?.options?.cad_num || '';
+                            const fCn2 = f.properties?.descr || '';
+                            return normalizeCadastralNumber(fCn1) === normOksCn || normalizeCadastralNumber(fCn2) === normOksCn;
+                        });
 
                         if (!foundFeature) {
-                            const matchedPoly = polygons.find(p => p instanceof ymaps.Polygon && p.properties.get('cadastralNumber') === oksCn);
-                            if (matchedPoly) foundFeature = matchedPoly.properties.get('featureData');
+                            const matchedObj = polygons.find(p => {
+                                const pCn = p.properties?.get('cadastralNumber') || '';
+                                return normalizeCadastralNumber(pCn) === normOksCn;
+                            });
+                            if (matchedObj) foundFeature = matchedObj.properties.get('featureData');
                         }
 
                         const opts = foundFeature?.properties?.options || {};
                         const name = opts.purpose || opts.name || opts.building_name || opts.params_name || 'Здание / Сооружение';
-                        const areaVal = opts.build_record_area || opts.area;
-                        const area = areaVal ? `${areaVal} м²` : (opts.params_extension ? `${opts.params_extension} м` : '-');
+                        const areaVal = opts.build_record_area || opts.area || opts.params_area || opts.params_extension;
+                        const isStructure = !!(opts.params_extension || opts.params_purpose || foundFeature?.properties?.category === 36383);
+                        const areaUnit = isStructure && opts.params_extension ? 'м' : 'м²';
+                        const area = areaVal ? `${areaVal} ${areaUnit}` : '-';
                         const year = opts.year_built || opts.params_year_built || '-';
                         
-                        // Парсинг даты регистрации из полей ЕГРН
                         const regDateVal = opts.build_record_registration_date || opts.registration_date;
                         let regDateStr = '';
                         if (regDateVal) {
@@ -15327,8 +15442,6 @@ async function generateObjectPassportHtml() {
                                 regDateStr = `Дата рег: ${new Date(regDateVal).toLocaleDateString('ru-RU')}`;
                             } catch(e) {}
                         }
-
-                        // Структурирование расширенного списка характеристик
                         const statusVal = opts.common_data_status || opts.status;
                         const statusStr = statusVal ? `Статус: ${statusVal}` : '';
                         const floorsStr = opts.floors ? `Этажей: ${opts.floors}` : '';
@@ -15350,7 +15463,7 @@ async function generateObjectPassportHtml() {
                 }
         } else if (type === 'oks') {
             addReportRow('Наименование / Назначение', o.name || o.params_name || o.building_name || o.purpose);
-            addReportRow('Площадь', o.build_record_area ? `${o.build_record_area} м²` : null);
+            addReportRow('Площадь', (o.build_record_area || o.area) ? `${o.build_record_area || o.area} м²` : null);
             addReportRow('Год постройки', o.year_built);
             addReportRow('Этажность', o.floors);
             addReportRow('Материал стен', o.materials);
@@ -15466,8 +15579,8 @@ async function generateObjectPassportHtml() {
         ${(googleImgHtml || yandexImgHtml) ? `
         <div class="section-title">Уличная съемка (Панорамы)</div>
         <div class="pano-grid">
-            ${googleImgHtml ? `<div class="pano-card"><div class="pano-title">Google Street View</div>${googleImgHtml}</div>` : ''}
-            ${yandexImgHtml ? `<div class="pano-card"><div class="pano-title">Яндекс Панорама</div>${yandexImgHtml}</div>` : ''}
+            ${googleImgHtml}
+            ${yandexImgHtml}
         </div>
         ` : ''}
     </div>
@@ -15485,6 +15598,7 @@ async function generateObjectPassportHtml() {
         hideLoader();
     }
 }
+
 
 function showDashboardPopover(feature, pageX, pageY) {
     if (!feature) {
@@ -15545,19 +15659,28 @@ async function loadLinkedOksForPopover(feature) {
         }
     }
 
-    // Фоновая дозагрузка детальной информации по всем связанным ОКС для инфопанели
+    // Фоновая дозагрузка детальной информации по всем связанным ОКС
     if (list && list.length > 0) {
         for (let i = 0; i < list.length; i++) {
             const oksCn = list[i];
-            let foundFeature = buildingFeaturesData.find(f => 
-                f.properties?.options?.cad_num === oksCn || f.properties?.descr === oksCn
-            ) || structureFeaturesData.find(f => 
-                f.properties?.options?.cad_number === oksCn || f.properties?.descr === oksCn
-            );
+            const normOksCn = normalizeCadastralNumber(oksCn);
+            
+            let foundFeature = buildingFeaturesData.find(f => {
+                const fCn1 = f.properties?.options?.cad_num || '';
+                const fCn2 = f.properties?.descr || '';
+                return normalizeCadastralNumber(fCn1) === normOksCn || normalizeCadastralNumber(fCn2) === normOksCn;
+            }) || structureFeaturesData.find(f => {
+                const fCn1 = f.properties?.options?.cad_number || f.properties?.options?.cad_num || '';
+                const fCn2 = f.properties?.descr || '';
+                return normalizeCadastralNumber(fCn1) === normOksCn || normalizeCadastralNumber(fCn2) === normOksCn;
+            });
 
             if (!foundFeature) {
-                const matchedPoly = polygons.find(p => p instanceof ymaps.Polygon && p.properties.get('cadastralNumber') === oksCn);
-                if (matchedPoly) foundFeature = matchedPoly.properties.get('featureData');
+                const matchedObj = polygons.find(p => {
+                    const pCn = p.properties?.get('cadastralNumber') || '';
+                    return normalizeCadastralNumber(pCn) === normOksCn;
+                });
+                if (matchedObj) foundFeature = matchedObj.properties.get('featureData');
             }
 
             if (!foundFeature) {
@@ -15587,26 +15710,40 @@ function renderLinkedOksInPopover(el, list) {
         return;
     }
     const items = list.map(oksCn => {
-        let foundFeature = buildingFeaturesData.find(f => 
-            f.properties?.options?.cad_num === oksCn || f.properties?.descr === oksCn
-        ) || structureFeaturesData.find(f => 
-            f.properties?.options?.cad_number === oksCn || f.properties?.descr === oksCn
-        );
+        const normOksCn = normalizeCadastralNumber(oksCn);
+        
+        let foundFeature = buildingFeaturesData.find(f => {
+            const fCn1 = f.properties?.options?.cad_num || '';
+            const fCn2 = f.properties?.descr || '';
+            return normalizeCadastralNumber(fCn1) === normOksCn || normalizeCadastralNumber(fCn2) === normOksCn;
+        }) || structureFeaturesData.find(f => {
+            const fCn1 = f.properties?.options?.cad_number || f.properties?.options?.cad_num || '';
+            const fCn2 = f.properties?.descr || '';
+            return normalizeCadastralNumber(fCn1) === normOksCn || normalizeCadastralNumber(fCn2) === normOksCn;
+        });
+
+        if (!foundFeature) {
+            const matchedObj = polygons.find(p => {
+                const pCn = p.properties?.get('cadastralNumber') || '';
+                return normalizeCadastralNumber(pCn) === normOksCn;
+            });
+            if (matchedObj) foundFeature = matchedObj.properties.get('featureData');
+        }
 
         let detailsText = '';
         if (foundFeature) {
             const opts = foundFeature.properties?.options || {};
             const name = opts.purpose || opts.name || opts.building_name || opts.params_name || '';
-            const areaVal = opts.build_record_area || opts.area;
-            const area = areaVal ? `${areaVal} м²` : (opts.params_extension ? `${opts.params_extension} м` : '');
+            const areaVal = opts.build_record_area || opts.area || opts.params_area || opts.params_extension;
+            const isStructure = !!(opts.params_extension || opts.params_purpose || foundFeature.properties?.category === 36383);
+            const areaUnit = isStructure && opts.params_extension ? 'м' : 'м²';
+            const area = areaVal ? `${areaVal} ${areaUnit}` : '';
             
-            // Расширенная техническая информация
             const year = opts.year_built || opts.params_year_built ? `${opts.year_built || opts.params_year_built} г.` : '';
             const floors = opts.floors ? `${opts.floors} эт.` : '';
             const cost = opts.cost_value ? `${Math.round(parseFloat(opts.cost_value)).toLocaleString('ru-RU')} руб.` : '';
             const status = opts.common_data_status || opts.status || '';
 
-            // Группировка данных для компактного и структурированного вывода
             const basicInfo = [name, area].filter(Boolean).join(', ');
             const techInfo = [year, floors].filter(Boolean).join(', ');
             const legalInfo = [cost, status ? `Статус: ${status}` : null].filter(Boolean).join(' | ');
@@ -32278,12 +32415,21 @@ function renderRecentMskTags(container, select) {
 }
 
 
+function normalizeCadastralNumber(cn) {
+    if (!cn || typeof cn !== 'string') return '';
+    return cn.trim().replace(/\s+/g, '');
+}
+
 async function handleObjectInfoAction(lat, lon) {
     let existingPoly = findPolygonAtPoint(lat, lon);
     if (existingPoly && existingPoly.properties.get('featureData')) {
         const featureData = existingPoly.properties.get('featureData');
         const globalPx = map.options.get('projection').toGlobalPixels([lat, lon], map.getZoom());
         const pagePx = map.converter.globalToPage(globalPx);
+        
+        // Задержка предотвращает моментальное закрытие всплывающего окна
+        // из-за всплытия клика по контекстному меню до body
+        await new Promise(resolve => setTimeout(resolve, 50));
         
         showDashboardPopover(featureData, pagePx[0], pagePx[1]);
 
