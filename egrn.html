@@ -1539,6 +1539,75 @@ body {
     box-shadow: none;
 }
 
+/* Фиксированное превью Google Улиц в правом нижнем углу СТРАНИЦЫ */
+.sv-preview-container {
+    position: fixed; /* Теперь зафиксировано относительно окна браузера */
+    bottom: 25px;    /* Отступ от нижнего края страницы */
+    right: 25px;     /* Отступ от правого края страницы */
+    top: auto;
+    left: auto;
+    z-index: 1000;   /* Поверх всех остальных элементов */
+    width: 160px;
+    height: 105px;
+    border-radius: 8px;
+    overflow: hidden;
+    box-shadow: 0 6px 18px rgba(0,0,0,0.35);
+    background: #e0e0e0;
+    border: 2px solid #ffffff;
+    display: none;
+    transition: transform 0.2s ease;
+}
+
+.sv-preview-card {
+    width: 100%;
+    height: 100%;
+    position: relative;
+    cursor: pointer;
+    text-decoration: none;
+    display: block;
+}
+
+.sv-preview-card:hover {
+    transform: scale(1.05);
+}
+
+.sv-preview-card img {
+    width: 100%;
+    height: 100%;
+    object-fit: cover;
+    display: block;
+}
+
+.sv-preview-no-data {
+    width: 100%;
+    height: 100%;
+    display: flex;
+    align-items: center;
+    justify-content: center;
+    text-align: center;
+    padding: 6px;
+    box-sizing: border-box;
+    font-size: 11px;
+    font-weight: 500;
+    color: #666;
+    background: #e5e7eb;
+    user-select: none;
+}
+
+/* Мобильная адаптация */
+@media (max-width: 768px) {
+    .sv-preview-container {
+        bottom: 15px;
+        right: 15px;
+        width: 110px;
+        height: 75px;
+        border-radius: 6px;
+    }
+    .sv-preview-no-data {
+        font-size: 9px;
+        padding: 3px;
+    }
+}
 
 
 </style>
@@ -1622,12 +1691,13 @@ body {
             </button>
         </div>
     </div>
-   <div class="scheme-container">
- <div class="toggle-container">
-    <input type="checkbox" id="distanceToggle" class="toggle" onclick="toggleDistanceLabels()">
+<div class="scheme-container">
+  
+   
 
-</div>
-
+    <div class="toggle-container">
+        <input type="checkbox" id="distanceToggle" class="toggle" onclick="toggleDistanceLabels()">
+    </div>
     <canvas id="schemeCanvas"></canvas>
 </div>
 </div>
@@ -1851,6 +1921,7 @@ body {
     </div>
 </div>
 
+ <div id="svPreviewContainer" class="sv-preview-container"></div>
     <div id="notification-container"></div>
     
 <div id="mskSelectionModal" class="modal">
@@ -1873,6 +1944,9 @@ body {
     const FORCE_SUPABASE_PROXY = 2; // 2 = Mapruapp по умолчанию
     const VERCEL_SUPABASE_PROXY = 'https://supred.vercel.app/supabase-api';
     const MAPRU_SUPABASE_PROXY = 'https://mapruapp.ru/api/sync';
+    
+    let currentFeature = null;
+let currentLandParcelList = null;
 
     const fallbackFetch = async (url, options) => {
         if (FORCE_SUPABASE_PROXY === 1) {
@@ -2209,10 +2283,149 @@ function displayZoneData(feature, searchType) {
 }
 
 
+const GOOGLE_API_KEY = 'AIzaSyDnDnljPCWG6b7t5YZBQu93VeLeqTJ5DFo';
+
+// Расчет азимута (направления камеры на объект)
+function calculateBearing(lat1, lon1, lat2, lon2) {
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const y = Math.sin(dLon) * Math.cos(lat2 * Math.PI / 180);
+    const x = Math.cos(lat1 * Math.PI / 180) * Math.sin(lat2 * Math.PI / 180) -
+              Math.sin(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) * Math.cos(dLon);
+    return (Math.atan2(y, x) * 180 / Math.PI + 360) % 360;
+}
+
+// Расчет расстояния в метрах
+function haversineDistanceMeters(lat1, lon1, lat2, lon2) {
+    const R = 6371000;
+    const dLat = (lat2 - lat1) * Math.PI / 180;
+    const dLon = (lon2 - lon1) * Math.PI / 180;
+    const a = Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+              Math.cos(lat1 * Math.PI / 180) * Math.cos(lat2 * Math.PI / 180) *
+              Math.sin(dLon / 2) * Math.sin(dLon / 2);
+    return R * 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+}
+
+// Расчет центральной точки объекта (WGS84)
+function getObjectCenterWGS84() {
+    if (!currentCoords || currentCoords.length === 0) return null;
+    let points = [];
+
+    function extractPoints(arr) {
+        if (typeof arr[0] === 'number' && typeof arr[1] === 'number') {
+            points.push(arr);
+        } else if (Array.isArray(arr)) {
+            arr.forEach(extractPoints);
+        }
+    }
+    extractPoints(currentCoords);
+
+    // Если 1 точка или меньше — это условная координата/точка, пропускаем
+    if (points.length <= 1) return null;
+
+    let sumX = 0, sumY = 0;
+    points.forEach(p => { sumX += p[0]; sumY += p[1]; });
+    const avgX = sumX / points.length;
+    const avgY = sumY / points.length;
+
+    const wgs = convertToWGS84(avgX, avgY); // [lon, lat]
+    return { lat: wgs[1], lon: wgs[0] };
+}
+
+// Загрузка превью Google Улиц
+async function loadGoogleStreetViewPreview() {
+    const container = document.getElementById('svPreviewContainer');
+    if (!container) return;
+
+    let center = getObjectCenterWGS84();
+
+    // ЕСЛИ У ОКС НЕТ КООРДИНАТ (или это условная точка), ИЩЕМ СВЯЗАННЫЙ ЗУ
+    if (!center && currentLandParcelList && currentLandParcelList.length > 0) {
+        const linkedZuCadNum = currentLandParcelList[0]; // Берем первый связанный ЗУ
+        try {
+            const path = `/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(linkedZuCadNum)}`;
+            const res = await fetchWithFallback(path);
+            if (res.ok) {
+                const zuData = await res.json();
+                const zuFeature = zuData?.data?.features?.[0];
+                if (zuFeature && zuFeature.geometry && zuFeature.geometry.coordinates && zuFeature.geometry.type !== 'Point') {
+                    center = getCenterFromGeometryWGS84(zuFeature.geometry.coordinates);
+                }
+            }
+        } catch (e) {
+            console.warn('Не удалось загрузить координаты связанного ЗУ:', e);
+        }
+    }
+
+    if (!center) {
+        container.style.display = 'none';
+        container.innerHTML = '';
+        return;
+    }
+
+    container.style.display = 'block';
+    container.innerHTML = '<div class="sv-preview-no-data">Загрузка...</div>';
+
+    try {
+        const metaUrl = `https://maps.googleapis.com/maps/api/streetview/metadata?location=${center.lat},${center.lon}&key=${GOOGLE_API_KEY}`;
+        const res = await fetch(metaUrl);
+        const data = await res.json();
+
+        if (data.status === 'OK' && data.location) {
+            const panoLat = data.location.lat;
+            const panoLon = data.location.lng;
+
+            const dist = haversineDistanceMeters(panoLat, panoLon, center.lat, center.lon);
+
+            // Проверка порога 50 метров
+            if (dist <= 50) {
+                const heading = Math.round(calculateBearing(panoLat, panoLon, center.lat, center.lon));
+                const imgUrl = `https://maps.googleapis.com/maps/api/streetview?size=320x210&location=${panoLat},${panoLon}&heading=${heading}&pitch=5&key=${GOOGLE_API_KEY}`;
+                const mapUrl = `https://www.google.com/maps?q=&layer=c&cbll=${panoLat},${panoLon}&cbp=12,${heading},0,0,5`;
+
+                container.innerHTML = `
+                    <a href="${mapUrl}" target="_blank" class="sv-preview-card" title="Открыть Google Улицы (~${Math.round(dist)}м)">
+                        <img src="${imgUrl}" alt="Google Street View">
+                    </a>
+                `;
+                return;
+            }
+        }
+
+        container.innerHTML = '<div class="sv-preview-no-data">Панорама недоступна</div>';
+    } catch (e) {
+        container.innerHTML = '<div class="sv-preview-no-data">Панорама недоступна</div>';
+    }
+}
+
+
 function isZoneNumber(text) {
   
     const pattern = /^\d{2}[.:]\d{2}-\d+\.\d+$/;
     return pattern.test(text.trim());
+}
+
+function getCenterFromGeometryWGS84(coords) {
+    if (!coords || coords.length === 0) return null;
+    let points = [];
+
+    function extractPoints(arr) {
+        if (typeof arr[0] === 'number' && typeof arr[1] === 'number') {
+            points.push(arr);
+        } else if (Array.isArray(arr)) {
+            arr.forEach(extractPoints);
+        }
+    }
+    extractPoints(coords);
+
+    if (points.length <= 1) return null;
+
+    let sumX = 0, sumY = 0;
+    points.forEach(p => { sumX += p[0]; sumY += p[1]; });
+    const avgX = sumX / points.length;
+    const avgY = sumY / points.length;
+
+    const wgs = convertToWGS84(avgX, avgY); // [lon, lat]
+    return { lat: wgs[1], lon: wgs[0] };
 }
 
 
@@ -2273,72 +2486,7 @@ function extractDataForTerritorialZoneCsv(options, properties, geometry = null) 
 
 
 // Новая функция для отрисовки дополнительного объекта на холсте БЕЗ его очистки
-function drawAdditionalObjectOnScheme(geometry, color) {
-    const canvas = document.getElementById('schemeCanvas');
-    const ctx = canvas.getContext('2d');
 
-    // Проверяем, есть ли сохраненные параметры масштабирования
-    if (!schemeParams.scale) {
-        showNotification('Сначала нужно отобразить основную схему', 'error');
-        return;
-    }
-
-    ctx.lineWidth = 2;
-    ctx.strokeStyle = color;
-    // Создаем полупрозрачный цвет для заливки из основного цвета
-    const fillColor = color + '4D'; // Добавляем прозрачность (например, 30% -> 4D в hex)
-    ctx.fillStyle = fillColor;
-
-
-    // Функция для отрисовки одного контура (полигона или линии)
-const drawLineContour = (coords) => {
-    ctx.beginPath();
-    coords.forEach((coord, index) => {
-        const x = schemeParams.offsetX + (coord[0] - schemeParams.minX) * schemeParams.scale;
-        const y = canvas.height - (schemeParams.offsetY + (coord[1] - schemeParams.minY) * schemeParams.scale);
-        if (index === 0) ctx.moveTo(x, y);
-        else ctx.lineTo(x, y);
-    });
-    ctx.stroke();
-};
-
-const drawPolygonContour = (rings) => {
-    ctx.beginPath();
-    rings.forEach(ring => {
-        ring.forEach((coord, index) => {
-            const x = schemeParams.offsetX + (coord[0] - schemeParams.minX) * schemeParams.scale;
-            const y = canvas.height - (schemeParams.offsetY + (coord[1] - schemeParams.minY) * schemeParams.scale);
-            if (index === 0) ctx.moveTo(x, y);
-            else ctx.lineTo(x, y);
-        });
-        ctx.closePath();
-    });
-    ctx.stroke();
-    ctx.fill('evenodd');
-};
-
-const { type, coordinates } = geometry;
-
-if (type === "Point") {
-    showNotification('Объект без координат', 'warning');
-    return;
-}
-
-if (type === "Polygon") {
-    drawPolygonContour(coordinates);
-} else if (type === "MultiPolygon") {
-    // Каждый полигон отдельно!
-    coordinates.forEach(polygon => {
-        drawPolygonContour(polygon);
-    });
-} else if (type === "LineString") {
-    drawLineContour(coordinates);
-} else if (type === "MultiLineString") {
-    coordinates.forEach(line => drawLineContour(line));
-}
-
- 
-}
 
 
 async function fetchAndDrawLinkedObject(cadNum) {
@@ -4384,6 +4532,20 @@ function handleSuccessfulResponse(data) {
                 }
             }
         }
+        
+        
+   // Внутри handleSuccessfulResponse(data):
+currentFeature = feature;
+currentLandParcelList = landParcelList;
+
+
+loadGoogleStreetViewPreview();
+
+// Если объект не имел полигональных координат (например, Point или без геометрии):
+if (!geometry || geometry.type === "Point") {
+    // Автоматически запускаем проверку панорамы через связанный ЗУ
+    loadGoogleStreetViewPreview();
+}
 
         // Передаем roomsList в функцию отрисовки
         updatePropertyData(options, properties, oknList, landParcelList, geometry, roomsList);
@@ -4462,6 +4624,12 @@ function updateTableMskRow(mskName) {
 async function fetchData() {
       userSelectedMsk = null;
     document.getElementById('archiveInfo').style.display = 'none';
+
+const svContainer = document.getElementById('svPreviewContainer');
+if (svContainer) {
+    svContainer.style.display = 'none';
+    svContainer.innerHTML = '';
+}
 
     const cadastralNumberInput = document.getElementById('cadastralNumber');
     const inputValue = cadastralNumberInput.value.trim();
@@ -5461,6 +5629,8 @@ function drawScheme() {
             });
         }
     }
+
+loadGoogleStreetViewPreview();
 }
 
 
@@ -5532,6 +5702,13 @@ function clearCanvas() {
     const canvas = document.getElementById('schemeCanvas');
     const ctx = canvas.getContext('2d');
     ctx.clearRect(0, 0, canvas.width, canvas.height);
+    
+    // ДОБАВЛЕНО: Скрытие блока превью при очистке
+    const container = document.getElementById('svPreviewContainer');
+    if (container) {
+        container.style.display = 'none';
+        container.innerHTML = '';
+    }
 }
 
 
