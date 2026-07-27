@@ -17679,17 +17679,69 @@ function formatCadastralNumber(input) {
     }
 }
 
+
+
+async function fetchLinkedZuForOks(feature) {
+    if (!feature) return null;
+    const objdocId = feature.id || feature.properties?.options?.objdocId;
+    const registersId = feature.properties?.options?.registersId;
+
+    if (!objdocId || !registersId) return null;
+
+    const url = `https://nspd.gov.ru/api/geoportal/v1/tab-values-data?tabClass=landLinks&objdocId=${objdocId}&registersId=${registersId}`;
+
+    try {
+        const response = await fetchNspd(url);
+        if (!response.ok) return null;
+        const data = await response.json();
+        if (data && Array.isArray(data.value) && data.value.length > 0) {
+            return data.value[0]; // Возвращает КН связанного ЗУ (например, "16:41:110101:82")
+        }
+    } catch (e) {
+        console.error("Ошибка при получении связанного ЗУ для ОКС:", e);
+    }
+    return null;
+}
+
 async function drawFeatureFromNspd(feature) {
     if (!map || !feature || !feature.geometry) return null;
 
     let mainDrawnPolygon = null; 
 
-    const inputText = feature.properties.descr;
+ const inputText = feature?.properties?.descr || feature?.properties?.options?.cad_num;
+if (inputText) {
     autoUpdateMskSettings(inputText);
+}
     let centerCoords = null;
     let allFeatureBounds = [];
     let labelContentText = inputText;
     const isEgrnPointWithNoGeometry = feature.geometry.type === "Point" && feature.properties && feature.properties.categoryName === "Земельные участки ЕГРН";
+
+  
+    if (feature.geometry.type === "Point" && !isEgrnPointWithNoGeometry) {
+        const category = feature.properties?.category;
+        const categoryName = feature.properties?.categoryName;
+        const isBuilding = category === 36369 || categoryName === "Здания" || !!feature.properties?.options?.build_record_type_value;
+
+        if (isBuilding) {
+            const oksCn = feature.properties.descr || feature.properties.options?.cad_num || inputText;
+            const linkedZuCn = await fetchLinkedZuForOks(feature);
+
+            if (linkedZuCn) {
+                const zuFeature = await fetchCadastralData(linkedZuCn);
+                if (zuFeature && zuFeature.geometry) {
+                    showNotification(
+                        `Контур ОКС ${oksCn} не найден (точечный объект). Выполнен поиск по связанному ЗУ: ${linkedZuCn}`,
+                        'info',
+                        'info-circle',
+                        7000
+                    );
+                    return await drawFeatureFromNspd(zuFeature);
+                }
+            }
+        }
+    }
+   
 
     const processContour = (contour) => {
         return contour.map(coord => {
@@ -17893,22 +17945,36 @@ async function drawFeatureFromNspd(feature) {
         polygons.push(labelPlacemark);
     }
 
-    if (allFeatureBounds.length > 0) {
+   if (allFeatureBounds.length > 0) {
         let minLat = Infinity, minLng = Infinity, maxLat = -Infinity, maxLng = -Infinity;
         allFeatureBounds.forEach(bounds => {
             minLat = Math.min(minLat, bounds[0][0]); minLng = Math.min(minLng, bounds[0][1]);
             maxLat = Math.max(maxLat, bounds[1][0]); maxLng = Math.max(maxLng, bounds[1][1]);
         });
         if (isFinite(minLat)) {
-            const latMargin = (maxLat - minLat) * 0.1 || 0.001;
-            const lonMargin = (maxLng - minLng) * 0.1 || 0.001;
+            const isYandex = !isGoogleLayerActive; // Проверка, что стоит Яндекс карта
+            
+            // Для Яндекс-карт делаем отступы больше, чтобы объект был дальше
+            const marginFactor = isYandex ? 0.35 : 0.1;
+            const minMargin = isYandex ? 0.002 : 0.001;
+
+            const latMargin = (maxLat - minLat) * marginFactor || minMargin;
+            const lonMargin = (maxLng - minLng) * marginFactor || minMargin;
+
             map.setBounds([
                 [minLat - latMargin, minLng - lonMargin],
                 [maxLat + latMargin, maxLng + lonMargin]
-            ], { checkZoomRange: true, duration: 200 });
+            ], { checkZoomRange: true, duration: 200 }).then(() => {
+                // Если на Яндекс-карте зум получился слишком близким (больше 17), отдаляем
+                if (isYandex && map.getZoom() > 17) {
+                    map.setZoom(17, { duration: 150 });
+                }
+            });
         }
     } else if (labelPlacemark) {
-        map.setCenter(labelPlacemark.geometry.getCoordinates(), 17);
+        const isYandex = !isGoogleLayerActive;
+        const targetZoom = isYandex ? 16 : 17; // Для точек на Яндексе ставим зум 16
+        map.setCenter(labelPlacemark.geometry.getCoordinates(), targetZoom);
     }
 
     addToHistory(inputText);
@@ -26007,14 +26073,16 @@ async function findParcelInArchive(targetCadastralNumber) {
         const targetPolygon = drawnObjects.find(obj => obj instanceof ymaps.Polygon);
         
         // 3. Если полигон найден, устанавливаем границы карты по нему
-        if (targetPolygon) {
+ if (targetPolygon) {
             const bounds = targetPolygon.geometry.getBounds();
             
-            // Проверяем, что границы корректны
             if (bounds && bounds[0] && bounds[1]) {
-                // Добавляем небольшой отступ (padding) для лучшего вида
-                const latPadding = (bounds[1][0] - bounds[0][0]) * 0.15 || 0.0005;
-                const lonPadding = (bounds[1][1] - bounds[0][1]) * 0.15 || 0.0005;
+                const isYandex = !isGoogleLayerActive;
+                const factor = isYandex ? 0.35 : 0.15;
+                const minPad = isYandex ? 0.002 : 0.0005;
+
+                const latPadding = (bounds[1][0] - bounds[0][0]) * factor || minPad;
+                const lonPadding = (bounds[1][1] - bounds[0][1]) * factor || minPad;
 
                 const paddedBounds = [
                     [bounds[0][0] - latPadding, bounds[0][1] - lonPadding],
@@ -26024,6 +26092,10 @@ async function findParcelInArchive(targetCadastralNumber) {
                 map.setBounds(paddedBounds, {
                     checkZoomRange: true, 
                     duration: 500 
+                }).then(() => {
+                    if (isYandex && map.getZoom() > 17) {
+                        map.setZoom(17, { duration: 150 });
+                    }
                 });
             }
         }
