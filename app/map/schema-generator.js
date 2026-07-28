@@ -1,4 +1,4 @@
-console.log("%c[Schema Generator] Загружена версия 2.34", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.341", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 
@@ -1820,13 +1820,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             border-radius: 3px;
         }
         
-        .ctrl-btn.active {
-            background: #2563eb !important;
-            color: #ffffff !important;
-            border-color: #1d4ed8 !important;
-        }
-        
-        
+   
         .ctrl-btn.active {
             background: #2563eb !important;
             color: #ffffff !important;
@@ -2229,7 +2223,9 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 const template = {
                     fontSize: fontSize,
                     color: color,
-                    noBg: noBg
+                    noBg: noBg,
+                    fontWeight: span.style.fontWeight || 'normal',
+                    fontStyle: span.style.fontStyle || 'normal'
                 };
                 
                 localStorage.setItem('sch_style_' + pageType + '_' + labelType, JSON.stringify(template));
@@ -2331,6 +2327,30 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 };
             }
 
+            // Переключатель Жирного шрифта
+            const btnBold = label.querySelector('.toggle-bold');
+            if (btnBold) {
+                btnBold.onclick = (ev) => {
+                    ev.stopPropagation();
+                    const isBold = span.style.fontWeight === 'bold';
+                    span.style.fontWeight = isBold ? 'normal' : 'bold';
+                    btnBold.classList.toggle('active', !isBold);
+                    saveLabelStyleTemplate();
+                };
+            }
+
+            // Переключатель Курсива
+            const btnItalic = label.querySelector('.toggle-italic');
+            if (btnItalic) {
+                btnItalic.onclick = (ev) => {
+                    ev.stopPropagation();
+                    const isItalic = span.style.fontStyle === 'italic';
+                    span.style.fontStyle = isItalic ? 'normal' : 'italic';
+                    btnItalic.classList.toggle('active', !isItalic);
+                    saveLabelStyleTemplate();
+                };
+            }
+
             if (colorPicker) {
                 colorPicker.addEventListener('input', (ev) => {
                     span.style.color = ev.target.value;
@@ -2399,6 +2419,8 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
         }
 
         document.querySelectorAll('.interactive-label').forEach(initInteractiveLabel);
+
+        updateAllCallouts();
             let isDragging = false;
             let startX, startY;
             let startLeft, startTop;
