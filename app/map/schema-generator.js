@@ -1,4 +1,4 @@
-console.log("%c[Schema Generator] Загружена версия 2.33", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.34", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 
@@ -1540,6 +1540,18 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
 
         const w = Math.ceil((text.length * (fontSize * 0.54)) + 16);
 
+  
+        let fontWeight = 'normal';
+        let fontStyle = 'normal';
+        if (savedStyle) {
+            fontSize = savedStyle.fontSize;
+            finalFontColor = savedStyle.color;
+            isNoBg = savedStyle.noBg;
+            if (savedStyle.fontWeight) fontWeight = savedStyle.fontWeight;
+            if (savedStyle.fontStyle) fontStyle = savedStyle.fontStyle;
+        }
+
+       
         return `
             <div class="interactive-label ${isNoBg ? 'no-bg' : ''} ${hasCalloutClass}" 
                  style="left: ${pctX}%; top: ${pctY}%;" 
@@ -1547,12 +1559,15 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
                  data-anchor-x="${pageType === 'parts' ? 50 : l.pctX_inside}" 
                  data-anchor-y="${pageType === 'parts' ? 50 : l.pctY_inside}" 
                  data-default-color="${defaultLineColor}">
-                <span contenteditable="true" class="label-text" title="Двойной клик — изменить текст, зажать — перетащить" style="font-size: ${fontSize}px; background: ${calloutBgRgba}; border: 1.5px solid ${config.lineColor || '#ff3b30'}; color: ${finalFontColor}; white-space: nowrap !important; display: inline-block !important; width: ${w}px !important; text-align: center;">${text}</span>
+                <span contenteditable="true" class="label-text" title="Двойной клик — изменить текст, зажать — перетащить" style="font-size: ${fontSize}px; font-weight: ${fontWeight}; font-style: ${fontStyle}; background: ${calloutBgRgba}; border: 1.5px solid ${config.lineColor || '#ff3b30'}; color: ${finalFontColor}; white-space: nowrap !important; display: inline-block !important; width: ${w}px !important; text-align: center;">${text}</span>
                 <div class="label-controls">
                     <button class="ctrl-btn size-up" data-tooltip="Увеличить шрифт">+</button>
                     <button class="ctrl-btn size-down" data-tooltip="Уменьшить шрифт">-</button>
+                    <button class="ctrl-btn toggle-bold ${fontWeight === 'bold' ? 'active' : ''}" data-tooltip="Жирный"><i class="fas fa-bold"></i></button>
+                    <button class="ctrl-btn toggle-italic ${fontStyle === 'italic' ? 'active' : ''}" data-tooltip="Курсив"><i class="fas fa-italic"></i></button>
                     <input type="color" class="color-picker" data-tooltip="Цвет шрифта" value="${finalFontColor}">
                     <button class="ctrl-btn toggle-bg" data-tooltip="Фон/Граница"><i class="fas ${isNoBg ? 'fa-eye' : 'fa-eye-slash'}"></i></button>
+                    <button class="ctrl-btn copy-lbl" data-tooltip="Копировать"><i class="fas fa-copy"></i></button>
                     <button class="ctrl-btn toggle-callout" data-tooltip="Вкл/Выкл выноску"><i class="fas fa-slash"></i></button>
                     <button class="ctrl-btn delete-lbl" data-tooltip="Удалить метку">&times;</button>
                 </div>
@@ -1804,6 +1819,20 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             background: #fff;
             border-radius: 3px;
         }
+        
+        .ctrl-btn.active {
+            background: #2563eb !important;
+            color: #ffffff !important;
+            border-color: #1d4ed8 !important;
+        }
+        
+        
+        .ctrl-btn.active {
+            background: #2563eb !important;
+            color: #ffffff !important;
+            border-color: #1d4ed8 !important;
+        }
+        
         .ctrl-btn:hover {
             background: #eee;
         }
@@ -2032,10 +2061,12 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 const labelType = label.dataset.type;
                 const span = label.querySelector('.label-text');
                 
-                const styleObj = {
+              const styleObj = {
                     fontSize: parseInt(window.getComputedStyle(span).fontSize, 10),
                     color: span.style.color || label.dataset.defaultColor,
-                    noBg: label.classList.contains('no-bg')
+                    noBg: label.classList.contains('no-bg'),
+                    fontWeight: span.style.fontWeight || 'normal',
+                    fontStyle: span.style.fontStyle || 'normal'
                 };
                 
                 if (!stylesConfig[pageType]) stylesConfig[pageType] = {};
@@ -2064,7 +2095,16 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                         const labelEl = document.querySelector('.map-frame[data-page-type="' + pageType + '"] .interactive-label[data-type="' + labelType + '"]');
                         if (labelEl) {
                             const span = labelEl.querySelector('.label-text');
-                            span.style.fontSize = styleObj.fontSize + 'px';
+                           span.style.fontSize = styleObj.fontSize + 'px';
+                            span.style.color = styleObj.color;
+                            span.style.fontWeight = styleObj.fontWeight || 'normal';
+                            span.style.fontStyle = styleObj.fontStyle || 'normal';
+
+                            const btnBold = labelEl.querySelector('.toggle-bold');
+                            if (btnBold) btnBold.classList.toggle('active', styleObj.fontWeight === 'bold');
+
+                            const btnItalic = labelEl.querySelector('.toggle-italic');
+                            if (btnItalic) btnItalic.classList.toggle('active', styleObj.fontStyle === 'italic');
                             span.style.color = styleObj.color;
                             
                             const cp = labelEl.querySelector('.color-picker');
@@ -2165,7 +2205,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             });
         }
 
-        document.querySelectorAll('.interactive-label').forEach(label => {
+       function initInteractiveLabel(label) {
             let isDragging = false;
             let startX, startY;
             let startLeft, startTop;
@@ -2194,6 +2234,225 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 
                 localStorage.setItem('sch_style_' + pageType + '_' + labelType, JSON.stringify(template));
             };
+
+            const showControls = () => {
+                clearTimeout(hideTimeout);
+                label.classList.add('show-controls');
+            };
+
+            const hideControlsWithDelay = () => {
+                clearTimeout(hideTimeout);
+                if (document.activeElement === span) {
+                    return;
+                }
+                hideTimeout = setTimeout(() => {
+                    if (document.activeElement !== span) {
+                        label.classList.remove('show-controls');
+                    }
+                }, 4000); 
+            };
+
+            label.addEventListener('mouseenter', showControls);
+            label.addEventListener('mouseleave', hideControlsWithDelay);
+            if (controls) {
+                controls.addEventListener('mouseenter', showControls);
+                controls.addEventListener('mouseleave', hideControlsWithDelay);
+            }
+
+            span.addEventListener('focus', showControls);
+            span.addEventListener('blur', hideControlsWithDelay);
+
+            label.addEventListener('mousedown', (e) => {
+                if (e.target.closest('.ctrl-btn') || e.target.closest('.color-picker') || (e.target === span && document.activeElement === span)) return;
+                
+                isDragging = true;
+                startX = e.clientX;
+                startY = e.clientY;
+                
+                startLeft = parseFloat(label.style.left);
+                startTop = parseFloat(label.style.top);
+                
+                e.preventDefault();
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (!isDragging) return;
+                const parentRect = label.parentElement.getBoundingClientRect();
+                
+                const dx = ((e.clientX - startX) / parentRect.width) * 100;
+                const dy = ((e.clientY - startY) / parentRect.height) * 100;
+                
+                label.style.left = (startLeft + dx) + '%';
+                label.style.top = (startTop + dy) + '%';
+                
+                updatePageCallouts(label.parentElement);
+            });
+
+            document.addEventListener('mouseup', () => {
+                isDragging = false;
+            });
+
+            span.addEventListener('dblclick', (e) => {
+                e.stopPropagation();
+                span.focus();
+            });
+
+            const btnUp = label.querySelector('.size-up');
+            if (btnUp) {
+                btnUp.onclick = (ev) => {
+                    ev.stopPropagation();
+                    const currentSize = parseInt(window.getComputedStyle(span).fontSize);
+                    const newSize = currentSize + 2;
+                    span.style.fontSize = newSize + 'px';
+                    
+                    const textLength = span.textContent.length;
+                    const newWidth = Math.ceil((textLength * (newSize * 0.54)) + 16);
+                    span.style.width = newWidth + 'px';
+                    
+                    updatePageCallouts(label.parentElement);
+                    saveLabelStyleTemplate(); 
+                };
+            }
+
+            const btnDown = label.querySelector('.size-down');
+            if (btnDown) {
+                btnDown.onclick = (ev) => {
+                    ev.stopPropagation();
+                    const currentSize = parseInt(window.getComputedStyle(span).fontSize);
+                    const newSize = Math.max(10, currentSize - 2);
+                    span.style.fontSize = newSize + 'px';
+                    
+                    const textLength = span.textContent.length;
+                    const newWidth = Math.ceil((textLength * (newSize * 0.54)) + 16);
+                    span.style.width = newWidth + 'px';
+                    
+                    updatePageCallouts(label.parentElement);
+                    saveLabelStyleTemplate(); 
+                };
+            }
+
+            if (colorPicker) {
+                colorPicker.addEventListener('input', (ev) => {
+                    span.style.color = ev.target.value;
+                    updatePageCallouts(label.parentElement);
+                });
+                colorPicker.addEventListener('change', () => {
+                    saveLabelStyleTemplate(); 
+                });
+                colorPicker.addEventListener('mousedown', (ev) => {
+                    ev.stopPropagation();
+                });
+            }
+
+            const btnToggleBg = label.querySelector('.toggle-bg');
+            if (btnToggleBg) {
+                btnToggleBg.onclick = (ev) => {
+                    ev.stopPropagation();
+                    label.classList.toggle('no-bg');
+                    const icon = label.querySelector('.toggle-bg i');
+                    if (label.classList.contains('no-bg')) {
+                        icon.className = 'fas fa-eye';
+                    } else {
+                        icon.className = 'fas fa-eye-slash';
+                    }
+                    saveLabelStyleTemplate(); 
+                };
+            }
+
+            // Кнопка Копировать (Дублировать метку)
+            const btnCopy = label.querySelector('.copy-lbl');
+            if (btnCopy) {
+                btnCopy.onclick = (ev) => {
+                    ev.stopPropagation();
+                    const parent = label.parentElement;
+                    const cloned = label.cloneNode(true);
+                    
+                    // Сдвигаем дублированную метку немного в сторону
+                    const curLeft = parseFloat(label.style.left) || 50;
+                    const curTop = parseFloat(label.style.top) || 50;
+                    cloned.style.left = (curLeft + 3) + '%';
+                    cloned.style.top = (curTop + 3) + '%';
+                    
+                    parent.appendChild(cloned);
+                    initInteractiveLabel(cloned);
+                    updatePageCallouts(parent);
+                };
+            }
+
+            const btnToggleCallout = label.querySelector('.toggle-callout');
+            if (btnToggleCallout) {
+                btnToggleCallout.onclick = (ev) => {
+                    ev.stopPropagation();
+                    label.classList.toggle('has-callout');
+                    updatePageCallouts(label.parentElement);
+                };
+            }
+
+            const btnDelete = label.querySelector('.delete-lbl');
+            if (btnDelete) {
+                btnDelete.onclick = (ev) => {
+                    ev.stopPropagation();
+                    label.remove();
+                    updatePageCallouts(label.parentElement);
+                };
+            }
+        }
+
+        document.querySelectorAll('.interactive-label').forEach(initInteractiveLabel);
+            let isDragging = false;
+            let startX, startY;
+            let startLeft, startTop;
+            let hideTimeout; 
+
+            const span = label.querySelector('.label-text');
+            const controls = label.querySelector('.label-controls');
+            const colorPicker = label.querySelector('.color-picker');
+
+      const saveLabelStyleTemplate = () => {
+                const frame = label.closest('.map-frame');
+                if (!frame) return;
+                
+                const pageType = frame.dataset.pageType;
+                const labelType = label.dataset.type;
+                
+                const fontSize = parseInt(window.getComputedStyle(span).fontSize, 10);
+                const color = span.style.color || label.dataset.defaultColor;
+                const noBg = label.classList.contains('no-bg');
+                
+                const template = {
+                    fontSize: fontSize,
+                    color: color,
+                    noBg: noBg,
+                    fontWeight: span.style.fontWeight || 'normal',
+                    fontStyle: span.style.fontStyle || 'normal'
+                };
+                
+                localStorage.setItem('sch_style_' + pageType + '_' + labelType, JSON.stringify(template));
+            };
+
+            // Переключатель Жирного шрифта
+            const btnBold = label.querySelector('.toggle-bold');
+            if (btnBold) {
+                btnBold.onclick = (ev) => {
+                    ev.stopPropagation();
+                    const isBold = span.style.fontWeight === 'bold';
+                    span.style.fontWeight = isBold ? 'normal' : 'bold';
+                    btnBold.classList.toggle('active', !isBold);
+                    saveLabelStyleTemplate();
+                };
+            }
+
+            // Переключатель Курсива
+            const btnItalic = label.querySelector('.toggle-italic');
+            if (btnItalic) {
+                btnItalic.onclick = (ev) => {
+                    ev.stopPropagation();
+                    const isItalic = span.style.fontStyle === 'italic';
+                    span.style.fontStyle = isItalic ? 'normal' : 'italic';
+                    btnItalic.classList.toggle('active', !isItalic);
+                    saveLabelStyleTemplate();
+                };
+            }
 
             const showControls = () => {
                 clearTimeout(hideTimeout);
