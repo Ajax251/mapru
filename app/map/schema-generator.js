@@ -1,4 +1,4 @@
-console.log("%c[Schema Generator] Загружена версия 2.341", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.342", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 
@@ -1470,6 +1470,21 @@ async function loadEnvironmentData(centerGeo, polygon, config) {
 
 // Функция генерации интерактивных выносок
 function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRgba) {
+
+
+function toHexColor(col) {
+    if (!col) return '#333333';
+    col = col.trim();
+    if (col.startsWith('#')) {
+        return col.length === 4 ? '#' + col[1] + col[1] + col[2] + col[2] + col[3] + col[3] : col;
+    }
+    const m = col.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
+    if (m) {
+        return '#' + [m[1], m[2], m[3]].map(x => parseInt(x, 10).toString(16).padStart(2, '0')).join('');
+    }
+    return '#333333';
+}
+
     return labelsData.map(l => {
         if (pageType === 'satellite' && l.type === 'terrZone') return '';
         if (pageType === 'parts' && l.type !== 'zuName') return ''; // На чертеже частей отображаем только метку ЗУ
@@ -1565,7 +1580,7 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
                     <button class="ctrl-btn size-down" data-tooltip="Уменьшить шрифт">-</button>
                     <button class="ctrl-btn toggle-bold ${fontWeight === 'bold' ? 'active' : ''}" data-tooltip="Жирный"><i class="fas fa-bold"></i></button>
                     <button class="ctrl-btn toggle-italic ${fontStyle === 'italic' ? 'active' : ''}" data-tooltip="Курсив"><i class="fas fa-italic"></i></button>
-                    <input type="color" class="color-picker" data-tooltip="Цвет шрифта" value="${finalFontColor}">
+                    <input type="color" class="color-picker" data-tooltip="Цвет шрифта" value="${toHexColor(finalFontColor)}">
                     <button class="ctrl-btn toggle-bg" data-tooltip="Фон/Граница"><i class="fas ${isNoBg ? 'fa-eye' : 'fa-eye-slash'}"></i></button>
                     <button class="ctrl-btn copy-lbl" data-tooltip="Копировать"><i class="fas fa-copy"></i></button>
                     <button class="ctrl-btn toggle-callout" data-tooltip="Вкл/Выкл выноску"><i class="fas fa-slash"></i></button>
@@ -2297,7 +2312,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             if (btnUp) {
                 btnUp.onclick = (ev) => {
                     ev.stopPropagation();
-                    const currentSize = parseInt(window.getComputedStyle(span).fontSize);
+                    const currentSize = parseInt(window.getComputedStyle(span).fontSize, 10);
                     const newSize = currentSize + 2;
                     span.style.fontSize = newSize + 'px';
                     
@@ -2314,7 +2329,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             if (btnDown) {
                 btnDown.onclick = (ev) => {
                     ev.stopPropagation();
-                    const currentSize = parseInt(window.getComputedStyle(span).fontSize);
+                    const currentSize = parseInt(window.getComputedStyle(span).fontSize, 10);
                     const newSize = Math.max(10, currentSize - 2);
                     span.style.fontSize = newSize + 'px';
                     
@@ -2421,6 +2436,8 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
         document.querySelectorAll('.interactive-label').forEach(initInteractiveLabel);
 
         updateAllCallouts();
+
+        window.addEventListener('resize', updateAllCallouts);
             let isDragging = false;
             let startX, startY;
             let startLeft, startTop;
