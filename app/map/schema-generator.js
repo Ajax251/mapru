@@ -1,23 +1,22 @@
 
-console.log("%c[Schema Generator] Загружена версия 2.35", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.351", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 // Вспомогательная функция конвертации любых цветовых строк в #HEX для элементов <input type="color">
-function toHexColor(colorStr) {
-    if (!colorStr) return '#333333';
-    let str = String(colorStr).trim();
-    if (str.startsWith('#')) {
-        if (str.length === 4) {
-            return '#' + str[1] + str[1] + str[2] + str[2] + str[3] + str[3];
-        }
-        return str.substring(0, 7);
+function toHexColor(col) {
+    if (!col) return '#333333';
+    col = String(col).trim();
+    if (col.startsWith('#')) {
+        return col.length === 4 ? '#' + col[1] + col[1] + col[2] + col[2] + col[3] + col[3] : col.substring(0, 7);
     }
-    const match = str.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
-    if (match) {
-        const r = parseInt(match[1], 10).toString(16).padStart(2, '0');
-        const g = parseInt(match[2], 10).toString(16).padStart(2, '0');
-        const b = parseInt(match[3], 10).toString(16).padStart(2, '0');
-        return `#${r}${g}${b}`;
+    if (col.startsWith('rgb')) {
+        var nums = col.replace(/[^0-9,]/g, '').split(',');
+        if (nums.length >= 3) {
+            var r = parseInt(nums[0], 10).toString(16).padStart(2, '0');
+            var g = parseInt(nums[1], 10).toString(16).padStart(2, '0');
+            var b = parseInt(nums[2], 10).toString(16).padStart(2, '0');
+            return '#' + r + g + b;
+        }
     }
     return '#333333';
 }
@@ -2001,18 +2000,23 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
     ) : ""}
 
     <script>
-        function toHexColor(col) {
-            if (!col) return '#333333';
-            col = String(col).trim();
-            if (col.startsWith('#')) {
-                return col.length === 4 ? '#' + col[1] + col[1] + col[2] + col[2] + col[3] + col[3] : col.substring(0, 7);
-            }
-            const m = col.match(/^rgba?\((\d+),\s*(\d+),\s*(\d+)/i);
-            if (m) {
-                return '#' + [m[1], m[2], m[3]].map(x => parseInt(x, 10).toString(16).padStart(2, '0')).join('');
-            }
-            return '#333333';
+      function toHexColor(col) {
+    if (!col) return '#333333';
+    col = String(col).trim();
+    if (col.startsWith('#')) {
+        return col.length === 4 ? '#' + col[1] + col[1] + col[2] + col[2] + col[3] + col[3] : col.substring(0, 7);
+    }
+    if (col.startsWith('rgb')) {
+        var nums = col.replace(/[^0-9,]/g, '').split(',');
+        if (nums.length >= 3) {
+            var r = parseInt(nums[0], 10).toString(16).padStart(2, '0');
+            var g = parseInt(nums[1], 10).toString(16).padStart(2, '0');
+            var b = parseInt(nums[2], 10).toString(16).padStart(2, '0');
+            return '#' + r + g + b;
         }
+    }
+    return '#333333';
+}
 
         const al1 = document.getElementById('authLine1');
         const al2 = document.getElementById('authLine2');
