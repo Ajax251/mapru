@@ -1,5 +1,5 @@
 
-console.log("%c[Schema Generator] Загружена версия 2.355", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.356", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 // Вспомогательная функция конвертации любых цветовых строк в #HEX для элементов <input type="color">
@@ -2967,7 +2967,7 @@ line.setAttribute('y2', endY_pct + '%');
         }
         
         
-        // --- ДОБАВЛЕНИЕ ПРОИЗВОЛЬНОЙ ТЕКСТОВОЙ НАДПИСИ ---
+      // --- ДОБАВЛЕНИЕ ПРОИЗВОЛЬНОЙ ТЕКСТОВОЙ НАДПИСИ ---
         function createCustomTextLabel(textText) {
             const page = getCurrentPage();
             const targetContainer = page.querySelector('.map-frame') || page;
@@ -2984,20 +2984,18 @@ line.setAttribute('y2', endY_pct + '%');
             const fontSize = 24;
             const w = Math.ceil((textText.length * (fontSize * 0.54)) + 16);
 
-            label.innerHTML = `
-                <span contenteditable="true" class="label-text" title="Двойной клик — изменить текст, зажать — перетащить" style="font-size: ${fontSize}px; font-weight: bold; font-style: normal; background: rgba(255, 255, 255, 0.95); border: 1.5px solid #ff3b30; color: #ff3b30; white-space: nowrap !important; display: inline-block !important; width: ${w}px !important; text-align: center;">${textText}</span>
-                <div class="label-controls">
-                    <button class="ctrl-btn size-up" data-tooltip="Увеличить шрифт">+</button>
-                    <button class="ctrl-btn size-down" data-tooltip="Уменьшить шрифт">-</button>
-                    <button class="ctrl-btn toggle-bold active" data-tooltip="Жирный"><i class="fas fa-bold"></i></button>
-                    <button class="ctrl-btn toggle-italic" data-tooltip="Курсив"><i class="fas fa-italic"></i></button>
-                    <input type="color" class="color-picker" data-tooltip="Цвет шрифта" value="#ff3b30">
-                    <button class="ctrl-btn toggle-bg" data-tooltip="Фон/Граница"><i class="fas fa-eye"></i></button>
-                    <button class="ctrl-btn copy-lbl" data-tooltip="Копировать"><i class="fas fa-copy"></i></button>
-                    <button class="ctrl-btn toggle-callout" data-tooltip="Вкл/Выкл выноску"><i class="fas fa-slash"></i></button>
-                    <button class="ctrl-btn delete-lbl" data-tooltip="Удалить метку">&times;</button>
-                </div>
-            `;
+            label.innerHTML = '<span contenteditable="true" class="label-text" title="Двойной клик — изменить текст, зажать — перетащить" style="font-size: ' + fontSize + 'px; font-weight: bold; font-style: normal; background: rgba(255, 255, 255, 0.95); border: 1.5px solid #ff3b30; color: #ff3b30; white-space: nowrap !important; display: inline-block !important; width: ' + w + 'px !important; text-align: center;">' + textText + '</span>' +
+                '<div class="label-controls">' +
+                    '<button class="ctrl-btn size-up" data-tooltip="Увеличить шрифт">+</button>' +
+                    '<button class="ctrl-btn size-down" data-tooltip="Уменьшить шрифт">-</button>' +
+                    '<button class="ctrl-btn toggle-bold active" data-tooltip="Жирный"><i class="fas fa-bold"></i></button>' +
+                    '<button class="ctrl-btn toggle-italic" data-tooltip="Курсив"><i class="fas fa-italic"></i></button>' +
+                    '<input type="color" class="color-picker" data-tooltip="Цвет шрифта" value="#ff3b30">' +
+                    '<button class="ctrl-btn toggle-bg" data-tooltip="Фон/Граница"><i class="fas fa-eye"></i></button>' +
+                    '<button class="ctrl-btn copy-lbl" data-tooltip="Копировать"><i class="fas fa-copy"></i></button>' +
+                    '<button class="ctrl-btn toggle-callout" data-tooltip="Вкл/Выкл выноску"><i class="fas fa-slash"></i></button>' +
+                    '<button class="ctrl-btn delete-lbl" data-tooltip="Удалить метку">&times;</button>' +
+                '</div>';
 
             targetContainer.appendChild(label);
             initInteractiveLabel(label);
