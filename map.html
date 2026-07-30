@@ -7677,7 +7677,7 @@ async function drawFeatures(geoCoordinates) {
             const complexRings = [parent.coords, ...holes];
             
             // Отрисовка Полигона с дырками
-            const polygonObj = new ymaps.Polygon(complexRings, {
+         const polygonObj = new ymaps.Polygon(complexRings, {
                 isManuallyDrawn: true,
                 isFromCoordInput: true, // <-- ДОБАВЛЕН ФЛАГ
                 hintContent: 'Полигон'
@@ -7686,6 +7686,7 @@ async function drawFeatures(geoCoordinates) {
                 strokeWidth: polygonStyle.width,
                 strokeOpacity: manualObjectOpacity,
                 fillColor: '#00000000', // Изначально прозрачный
+                fillRule: 'evenodd',    // <-- Добавлено
                 zIndex: 900
             });
 
@@ -8248,12 +8249,12 @@ async function terrZoneMenuItemHandler(contextMenu, map, polygons, polygonStyle,
         const labelContent = `${cadastralNumber} - ${name} (${registrationDate})`;
 
         for (let polygonIndex = 0; polygonIndex < polygonsCoords.length; polygonIndex++) {
-            const polygonCoords = polygonsCoords[polygonIndex];
+            const polygonRings = polygonsCoords[polygonIndex];
+            if (!Array.isArray(polygonRings) || polygonRings.length === 0) continue;
 
-            for (let contourIndex = 0; contourIndex < polygonCoords.length; contourIndex++) {
-                const contour = polygonCoords[contourIndex];
-                if (!Array.isArray(contour)) continue;
-
+            // Обрабатываем все контуры полигона (внешний + дырки) вместе
+            const allProcessedRings = polygonRings.map(contour => {
+                if (!Array.isArray(contour)) return null;
                 const coords = [];
                 for (const coord of contour) {
                     if (!Array.isArray(coord) || coord.length !== 2) continue;
@@ -8264,51 +8265,53 @@ async function terrZoneMenuItemHandler(contextMenu, map, polygons, polygonStyle,
                         }
                     } catch (e) { }
                 }
+                if (coords.length < 3) return null;
+                return coords.map(coord => [
+                    coord[0] - mapOffsetY * 0.000008983,
+                    coord[1] - mapOffsetX * 0.000008983
+                ]);
+            }).filter(r => r !== null);
 
-                if (coords.length > 0) {
-                    const offsetCoords = coords.map(coord => [
-                        coord[0] - mapOffsetY * 0.000008983,
-                        coord[1] - mapOffsetX * 0.000008983
-                    ]);
+            if (allProcessedRings.length > 0) {
+                const polygonObj = new ymaps.Polygon(allProcessedRings, {
+                    featureData: feature,
+                    cadastralNumber: cadastralNumber
+                }, {
+                    strokeColor: '#0000FF',
+                    strokeWidth: polygonStyle.width,
+                    strokeOpacity: 0.8,
+                    fillColor: '#00000000',
+                    fillRule: 'evenodd', // КРИТИЧЕСКИ ВАЖНО ДЛЯ ДЫРОК
+                    hintEnabled: false,
+                    hasBalloon: false,
+                    interactivityModel: 'default#transparent'
+                });
 
-                    const polygonObj = new ymaps.Polygon([offsetCoords], {
-                        featureData: feature,
-                        cadastralNumber: cadastralNumber
-                    }, {
-                        strokeColor: '#0000FF',
-                        strokeWidth: polygonStyle.width,
-                        strokeOpacity: 0.8,
-                        fillColor: '#00000000',
-                        hintEnabled: false,
-                        hasBalloon: false,
-                        interactivityModel: 'default#transparent'
-                    });
+                map.geoObjects.add(polygonObj);
+                polygons.push(polygonObj);
 
-                    map.geoObjects.add(polygonObj);
-                    polygons.push(polygonObj);
+                const bounds = polygonObj.geometry.getBounds();
+                if (!combinedBounds) {
+                    combinedBounds = bounds;
+                } else {
+                    combinedBounds[0][0] = Math.min(combinedBounds[0][0], bounds[0][0]);
+                    combinedBounds[0][1] = Math.min(combinedBounds[0][1], bounds[0][1]);
+                    combinedBounds[1][0] = Math.max(combinedBounds[1][0], bounds[1][0]);
+                    combinedBounds[1][1] = Math.max(combinedBounds[1][1], bounds[1][1]);
+                }
 
-                    const bounds = polygonObj.geometry.getBounds();
-                    if (!combinedBounds) {
-                        combinedBounds = bounds;
-                    } else {
-                        combinedBounds[0][0] = Math.min(combinedBounds[0][0], bounds[0][0]);
-                        combinedBounds[0][1] = Math.min(combinedBounds[0][1], bounds[0][1]);
-                        combinedBounds[1][0] = Math.max(combinedBounds[1][0], bounds[1][0]);
-                        combinedBounds[1][1] = Math.max(combinedBounds[1][1], bounds[1][1]);
-                    }
+                const outerRingCoords = allProcessedRings[0].map(c => [c[1], c[0]]);
+                const turfContour = turf.polygon([outerRingCoords]);
+                const clickPoint = turf.point([lon, lat]);
+                const isPointInContour = turf.booleanPointInPolygon(clickPoint, turfContour);
 
-                    const turfContour = turf.polygon([coords.map(coord => [coord[1], coord[0]])]);
-                    const clickPoint = turf.point([lon, lat]);
-                    const isPointInContour = turf.booleanPointInPolygon(clickPoint, turfContour);
-
-                    if (isPointInContour) {
-                        const centroidFeature = turf.centroid(turfContour);
-                        const centroidCoordsGeo = centroidFeature.geometry.coordinates;
-                        clickedContourCentroid = [
-                            centroidCoordsGeo[1] - mapOffsetY * 0.000008983,
-                            centroidCoordsGeo[0] - mapOffsetX * 0.000008983
-                        ];
-                    }
+                if (isPointInContour) {
+                    const centroidFeature = turf.centroid(turfContour);
+                    const centroidCoordsGeo = centroidFeature.geometry.coordinates;
+                    clickedContourCentroid = [
+                        centroidCoordsGeo[1] - mapOffsetY * 0.000008983,
+                        centroidCoordsGeo[0] - mapOffsetX * 0.000008983
+                    ];
                 }
             }
         }
@@ -9415,11 +9418,14 @@ map.events.add('click', function (e) {
                  const targetFill = `${strokeColor}33`; // Цвет линии + 20% прозрачности (hex 33)
                  
                  // Если полигон уже залит этим цветом — делаем его прозрачным
-                 if (currentFill && currentFill.toLowerCase() === targetFill.toLowerCase()) {
+                if (currentFill && currentFill.toLowerCase() === targetFill.toLowerCase()) {
                      targetObject.options.set('fillColor', '#00000000');
                  } else {
-                     // Иначе — заливаем
-                     targetObject.options.set('fillColor', targetFill);
+                     // Иначе — заливаем с правилом evenodd
+                     targetObject.options.set({
+                         fillColor: targetFill,
+                         fillRule: 'evenodd'
+                     });
                  }
              }
         }
@@ -11350,90 +11356,76 @@ function loadGradientColors() {
 
 
 function copyPolygonWithMap(originalPolygon, strokeColor, opacityHex) {
-    // Получаем координаты исходного полигона
-    const originalCoords = originalPolygon.geometry.getCoordinates()[0];
+    // Берём ВСЕ кольца полигона (внешнее + все внутренние дырки)
+    const originalCoords = originalPolygon.geometry.getCoordinates();
     const bounds = originalPolygon.geometry.getBounds();
 
-    // Получаем текущие стили оригинального полигона
     const originalFillColor = originalPolygon.options.get('fillColor') || '#00000000';
     const originalStrokeWidth = originalPolygon.options.get('strokeWidth') || 2;
-    const originalStrokeOpacity = originalPolygon.options.get('strokeOpacity') || 0.8;
 
-    // Создаем копию полигона с текущими стилями или новыми из модального окна
-  const copiedPolygon = new ymaps.Polygon([originalCoords], {
-        isManuallyDrawn: true // <--- ДОБАВЛЕНО
+    const copiedPolygon = new ymaps.Polygon(originalCoords, {
+        isManuallyDrawn: true
     }, {
-        strokeColor: strokeColor, // Новый цвет линии из модального окна
-        strokeWidth: originalStrokeWidth, // Сохраняем толщину линии
-       strokeOpacity: manualObjectOpacity, // Сохраняем прозрачность линии
-        fillColor: originalFillColor, // Сохраняем заливку (если была)
+        strokeColor: strokeColor,
+        strokeWidth: originalStrokeWidth,
+        strokeOpacity: manualObjectOpacity,
+        fillColor: originalFillColor,
+        fillRule: 'evenodd', // Добавлено правило заливки дырок
         hintEnabled: false,
         hasBalloon: false,
         interactivityModel: 'default#transparent',
-        draggable: true, // Делаем полигон перетаскиваемым
-        zIndex: 900 // <--- ДОБАВЛЕНО
+        draggable: true,
+        zIndex: 900
     });
 
-    // Добавляем копию полигона на карту
     map.geoObjects.add(copiedPolygon);
-
-    // Сохраняем копию в polygons для дальнейшего управления
     polygons.push(copiedPolygon);
 
-    // Переменные для перетаскивания
     let isDragging = false;
-    let startPixelCoords = null; // Пиксельные координаты начала перетаскивания
-    let originalGeoCoords = null; // Географические координаты полигона при начале перетаскивания
+    let startPixelCoords = null;
+    let originalGeoCoords = null;
 
     copiedPolygon.events.add('dragstart', function (e) {
         isDragging = true;
-        // Получаем пиксельные координаты начала перетаскивания
         startPixelCoords = e.get('pixelCoordinates');
-        // Сохраняем исходные географические координаты полигона
-        originalGeoCoords = copiedPolygon.geometry.getCoordinates()[0].slice();
+        originalGeoCoords = JSON.parse(JSON.stringify(copiedPolygon.geometry.getCoordinates()));
     });
 
     copiedPolygon.events.add('drag', function (e) {
         if (!isDragging || !startPixelCoords || !originalGeoCoords) return;
 
-        // Получаем текущие пиксельные координаты курсора
         const currentPixelCoords = e.get('pixelCoordinates');
-
-        // Вычисляем смещение в пикселях
         const deltaPixelX = currentPixelCoords[0] - startPixelCoords[0];
         const deltaPixelY = currentPixelCoords[1] - startPixelCoords[1];
 
-        // Преобразуем пиксельное смещение в географические координаты
         const projection = map.options.get('projection');
         const zoomLevel = map.getZoom();
 
-        // Получаем центр полигона как базовую точку
         const centerGeo = [
             (bounds[0][0] + bounds[1][0]) / 2,
             (bounds[0][1] + bounds[1][1]) / 2
         ];
         const centerPixel = projection.toGlobalPixels(centerGeo, zoomLevel);
 
-        // Вычисляем новые пиксельные координаты центра
         const newCenterPixel = [
             centerPixel[0] + deltaPixelX,
             centerPixel[1] + deltaPixelY
         ];
 
-        // Преобразуем новые пиксельные координаты обратно в географические
         const newCenterGeo = projection.fromGlobalPixels(newCenterPixel, zoomLevel);
 
-        // Вычисляем смещение в географических координатах
         const deltaLat = newCenterGeo[0] - centerGeo[0];
         const deltaLon = newCenterGeo[1] - centerGeo[1];
 
-        // Применяем смещение ко всем координатам полигона
-        const newCoords = originalGeoCoords.map(coord => [
-            coord[0] + deltaLat,
-            coord[1] + deltaLon
-        ]);
+        // Сдвигаем все кольца (и внешнее, и дырки)
+        const newCoords = originalGeoCoords.map(ring => 
+            ring.map(coord => [
+                coord[0] + deltaLat,
+                coord[1] + deltaLon
+            ])
+        );
 
-        copiedPolygon.geometry.setCoordinates([newCoords]);
+        copiedPolygon.geometry.setCoordinates(newCoords);
     });
 
     copiedPolygon.events.add('dragend', function () {
@@ -11442,7 +11434,6 @@ function copyPolygonWithMap(originalPolygon, strokeColor, opacityHex) {
         originalGeoCoords = null;
     });
 
-    // Уведомление о копировании
     showNotification('Объект скопирован для перемещения', 'success', 'check-circle');
 }
 
@@ -17970,16 +17961,17 @@ async function drawFeatureFromNspd(feature) {
                 isStructure: isStructure
             };
 
-            const polygon = new ymaps.Polygon(allProcessedRings, polygonProperties, {
-                strokeColor: strokeColor,
-                strokeWidth: polygonStyle.width,
-                strokeOpacity: 0.8,
-                fillColor: '#00000000',
-                hintLayout: customHintLayout,
-                hintOpenTimeout: 100,
-                hintCloseTimeout: 50,
-                cursor: 'pointer'
-            });
+       const polygon = new ymaps.Polygon(allProcessedRings, polygonProperties, {
+    strokeColor: strokeColor,
+    strokeWidth: polygonStyle.width,
+    strokeOpacity: 0.8,
+    fillColor: '#00000000',
+    fillRule: 'evenodd',
+    hintLayout: customHintLayout,
+    hintOpenTimeout: 100,
+    hintCloseTimeout: 50,
+    cursor: 'pointer'
+});
 
             polygon.events.add('click', function (e) {
                 if (e.get('altKey')) { polygon.options.set('fillColor', strokeColor + "33"); }
@@ -21538,7 +21530,10 @@ function applyGlobalFill() {
                 }
                 
                 // Ставим этот цвет на заливку с 15% прозрачности (HEX 26)
-                obj.options.set('fillColor', `${strokeColor}26`);
+                obj.options.set({
+                    fillColor: `${strokeColor}26`,
+                    fillRule: 'evenodd'
+                });
             } else {
                 // Если настройка выключена - убираем заливку
                 obj.options.set('fillColor', '#00000000');
@@ -22551,23 +22546,24 @@ async function processAndDrawZouits(features) {
 
                  if (allProcessedRings.length === 0) continue;
 
-                 const zouitPolygon = new ymaps.Polygon(allProcessedRings, 
-                    {
-                        cadastralNumber: regNumber,
-                        name: nameRaw,
-                        hintContent: hintContent,
-                        isZouit: true,
-                        featureData: feature
-                    }, 
-                    {
-                        strokeColor: strokeColor,
-                        strokeWidth: polygonStyle.width - 1,
-                        strokeOpacity: loadedObjectOpacity,
-                        fillColor: `${strokeColor}33`,
-                        cursor: 'pointer',
-                        hintLayout: customHintLayout
-                    }
-                 );
+             const zouitPolygon = new ymaps.Polygon(allProcessedRings, 
+    {
+        cadastralNumber: regNumber,
+        name: nameRaw,
+        hintContent: hintContent,
+        isZouit: true,
+        featureData: feature
+    }, 
+    {
+        strokeColor: strokeColor,
+        strokeWidth: polygonStyle.width - 1,
+        strokeOpacity: loadedObjectOpacity,
+        fillColor: `${strokeColor}33`,
+        fillRule: 'evenodd', 
+        cursor: 'pointer',
+        hintLayout: customHintLayout
+    }
+);
 
                 zouitPolygon.events.add('dblclick', async () => {
                     try { await navigator.clipboard.writeText(regNumber); showNotification(`Скопировано: ${regNumber}`, 'success'); }
@@ -25025,10 +25021,11 @@ function openColorEditorModal(targetObject) {
             strokeWidth: newWidth
         };
 
-        if (isPolygon) {
+      if (isPolygon) {
             const fillEnabled = fillToggle.checked;
             options.fillColor = fillEnabled ? `${newColor}${opHex}` : '#00000000';
             options.strokeColor = newColor;
+            options.fillRule = 'evenodd'; 
         }
         
         targetObject.options.set(options);
@@ -27580,18 +27577,14 @@ function showArbitraryResponseModal() {
 }
 
 // Функция №2: Основная логика обработки и отрисовки данных из модального окна
-async function processAndDrawArbitraryFeatures(data, hideLabels) { // Добавлен второй аргумент
+async function processAndDrawArbitraryFeatures(data, hideLabels) {
     let features = null;
 
-    // --- НАЧАЛО ИЗМЕНЕНИЙ: Умный поиск массива features ---
     if (data && Array.isArray(data.features)) {
-        // Случай 1: features находится на верхнем уровне
         features = data.features;
     } else if (data && data.data && Array.isArray(data.data.features)) {
-        // Случай 2: features вложен в объект "data"
         features = data.data.features;
     }
-    // --- КОНЕЦ ИЗМЕНЕНИЙ ---
 
     if (!features || features.length === 0) {
         showNotification('JSON не содержит массива "features" или он пуст', 'error');
@@ -27606,9 +27599,8 @@ async function processAndDrawArbitraryFeatures(data, hideLabels) { // Добав
         try {
             if (!feature.geometry || !feature.geometry.coordinates) continue;
 
-            const strokeColor = '#00BFFF'; // DeepSkyBlue для произвольных объектов
+            const strokeColor = '#00BFFF';
             const labelPreset = 'islands#darkblueStretchyIcon';
-            // Улучшенное формирование метки
             const labelContent = `${feature.properties?.label || ''} - ${feature.properties?.descr || 'Произвольный объект'}`.replace(/^- | -$/, '').trim();
 
             const isMultiPolygon = feature.geometry.type === 'MultiPolygon';
@@ -27633,6 +27625,7 @@ async function processAndDrawArbitraryFeatures(data, hideLabels) { // Добав
                 const polygonObj = new ymaps.Polygon(allProcessedRings, {}, {
                    strokeColor: strokeColor,
                    fillColor: `${strokeColor}4D`,
+                   fillRule: 'evenodd', // КРИТИЧЕСКИ ВАЖНО ДЛЯ ДЫРОК
                    strokeWidth: polygonStyle.width,
                    strokeOpacity: 0.9,
                    hintContent: labelContent,
@@ -27652,7 +27645,6 @@ async function processAndDrawArbitraryFeatures(data, hideLabels) { // Добав
                        combinedBounds[1][1] = Math.max(combinedBounds[1][1], bounds[1][1]);
                    }
                    
-                   // --- НАЧАЛО ИЗМЕНЕНИЙ: Проверяем флаг hideLabels ---
                    if (!hideLabels) {
                        const centerGeo = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
                        const textPlacemark = new ymaps.Placemark(centerGeo, {
@@ -27665,7 +27657,6 @@ async function processAndDrawArbitraryFeatures(data, hideLabels) { // Добав
                        map.geoObjects.add(textPlacemark);
                        polygons.push(textPlacemark);
                    }
-                   // --- КОНЕЦ ИЗМЕНЕНИЙ ---
                }
             }
         } catch (e) {
