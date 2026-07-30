@@ -1,5 +1,5 @@
 
-console.log("%c[Schema Generator] Загружена версия 2.356", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.354", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 // Вспомогательная функция конвертации любых цветовых строк в #HEX для элементов <input type="color">
@@ -2967,18 +2967,18 @@ line.setAttribute('y2', endY_pct + '%');
         }
         
         
-      // --- ДОБАВЛЕНИЕ ПРОИЗВОЛЬНОЙ ТЕКСТОВОЙ НАДПИСИ ---
+// --- ДОБАВЛЕНИЕ ПРОИЗВОЛЬНОЙ ТЕКСТОВОЙ НАДПИСИ ---
         function createCustomTextLabel(textText) {
             const page = getCurrentPage();
-            const targetContainer = page.querySelector('.map-frame') || page;
+            const targetContainer = page; // Привязываем напрямую к странице (.page)
 
             const label = document.createElement('div');
             label.className = 'interactive-label no-bg';
             label.style.left = '50%';
-            label.style.top = '8%';
+            label.style.top = '20%';
             label.dataset.type = 'customText';
             label.dataset.anchorX = '50';
-            label.dataset.anchorY = '8';
+            label.dataset.anchorY = '20';
             label.dataset.defaultColor = '#ff3b30';
 
             const fontSize = 24;
