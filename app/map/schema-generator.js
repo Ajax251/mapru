@@ -2208,7 +2208,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             };
         }
 
-        // --- ВСТАВКА ИЗОБРАЖЕНИЯ ИЗ БУФЕРА ОБМЕНА ---
+     // --- ВСТАВКА ИЗОБРАЖЕНИЯ ИЗ БУФЕРА ОБМЕНА ---
         function getCurrentPage() {
             const pages = document.querySelectorAll('.page');
             if (!pages.length) return document.body;
@@ -2231,13 +2231,11 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             wrapper.className = 'pasted-img-wrapper';
             wrapper.style.cssText = 'position: absolute; top: 150px; left: 150px; width: 200px; z-index: 500; cursor: move; user-select: none; touch-action: none;';
 
-            wrapper.innerHTML = `
-                <img src="${imgDataUrl}" style="width: 100%; height: auto; display: block; pointer-events: none; border: 1px dashed rgba(0,0,0,0.2);">
-                <div class="img-ctrls" style="position: absolute; top: -26px; right: 0; display: flex; gap: 2px; background: rgba(255,255,255,0.95); padding: 2px; border-radius: 4px; border: 1px solid #ccc; opacity: 0; transition: opacity 0.2s;">
-                    <button class="ctrl-btn del-img" title="Удалить" style="width:20px;height:20px;line-height:1;border:none;background:#ef4444;color:#fff;border-radius:3px;cursor:pointer;">&times;</button>
-                </div>
-                <div class="resize-handle" title="Потяните для изменения размера (пропорции сохраняются)" style="position: absolute; right: -6px; bottom: -6px; width: 12px; height: 12px; background: #3b82f6; border: 2px solid #fff; border-radius: 50%; cursor: nwse-resize;"></div>
-            `;
+            wrapper.innerHTML = '<img src="' + imgDataUrl + '" style="width: 100%; height: auto; display: block; pointer-events: none; border: 1px dashed rgba(0,0,0,0.2);">' +
+                '<div class="img-ctrls" style="position: absolute; top: -26px; right: 0; display: flex; gap: 2px; background: rgba(255,255,255,0.95); padding: 2px; border-radius: 4px; border: 1px solid #ccc; opacity: 0; transition: opacity 0.2s;">' +
+                    '<button class="ctrl-btn del-img" title="Удалить" style="width:20px;height:20px;line-height:1;border:none;background:#ef4444;color:#fff;border-radius:3px;cursor:pointer;">&times;</button>' +
+                '</div>' +
+                '<div class="resize-handle" title="Потяните для изменения размера (пропорции сохраняются)" style="position: absolute; right: -6px; bottom: -6px; width: 12px; height: 12px; background: #3b82f6; border: 2px solid #fff; border-radius: 50%; cursor: nwse-resize;"></div>';
 
             page.appendChild(wrapper);
 
@@ -3088,121 +3086,7 @@ function addSchemaGrid(config) {
 }
 
 
-// --- ВСТАВКА ИЗОБРАЖЕНИЯ ИЗ БУФЕРА ОБМЕНА ---
-function getCurrentPage() {
-    const pages = document.querySelectorAll('.page');
-    if (!pages.length) return document.body;
-    let currentPage = pages[0];
-    let minDiff = Infinity;
-    pages.forEach(page => {
-        const rect = page.getBoundingClientRect();
-        const diff = Math.abs(rect.top);
-        if (diff < minDiff) {
-            minDiff = diff;
-            currentPage = page;
-        }
-    });
-    return currentPage;
-}
 
-function insertPastedImageToCurrentPage(imgDataUrl) {
-    const page = getCurrentPage();
-    const wrapper = document.createElement('div');
-    wrapper.className = 'pasted-img-wrapper';
-    wrapper.style.cssText = 'position: absolute; top: 150px; left: 150px; width: 200px; z-index: 500; cursor: move; user-select: none; touch-action: none;';
-
-    wrapper.innerHTML = `
-        <img src="${imgDataUrl}" style="width: 100%; height: auto; display: block; pointer-events: none; border: 1px dashed rgba(0,0,0,0.2);">
-        <div class="img-ctrls" style="position: absolute; top: -26px; right: 0; display: flex; gap: 2px; background: rgba(255,255,255,0.95); padding: 2px; border-radius: 4px; border: 1px solid #ccc; opacity: 0; transition: opacity 0.2s;">
-            <button class="ctrl-btn del-img" title="Удалить" style="width:20px;height:20px;line-height:1;border:none;background:#ef4444;color:#fff;border-radius:3px;cursor:pointer;">&times;</button>
-        </div>
-        <div class="resize-handle" title="Потяните для изменения размера (пропорции сохраняются)" style="position: absolute; right: -6px; bottom: -6px; width: 12px; height: 12px; background: #3b82f6; border: 2px solid #fff; border-radius: 50%; cursor: nwse-resize;"></div>
-    `;
-
-    page.appendChild(wrapper);
-
-    // Показ/скрытие кнопок управления при наведении
-    wrapper.addEventListener('mouseenter', () => wrapper.querySelector('.img-ctrls').style.opacity = '1');
-    wrapper.addEventListener('mouseleave', () => wrapper.querySelector('.img-ctrls').style.opacity = '0');
-
-    // Удаление
-    wrapper.querySelector('.del-img').onclick = (e) => {
-        e.stopPropagation();
-        wrapper.remove();
-    };
-
-    // Перемещение по листу
-    let isDragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
-    wrapper.addEventListener('mousedown', (e) => {
-        if (e.target.classList.contains('resize-handle') || e.target.closest('.img-ctrls')) return;
-        isDragging = true;
-        startX = e.clientX;
-        startY = e.clientY;
-        const rect = wrapper.getBoundingClientRect();
-        const pageRect = page.getBoundingClientRect();
-        startLeft = rect.left - pageRect.left;
-        startTop = rect.top - pageRect.top;
-        e.preventDefault();
-    });
-
-    // Изменение размера (сохранение пропорций обеспечено за счет height: auto у img)
-    let isResizing = false, resizeStartX = 0, resizeStartWidth = 0;
-    const resizeHandle = wrapper.querySelector('.resize-handle');
-    resizeHandle.addEventListener('mousedown', (e) => {
-        e.stopPropagation();
-        e.preventDefault();
-        isResizing = true;
-        resizeStartX = e.clientX;
-        resizeStartWidth = wrapper.offsetWidth;
-    });
-
-    document.addEventListener('mousemove', (e) => {
-        if (isDragging) {
-            const dx = e.clientX - startX;
-            const dy = e.clientY - startY;
-            wrapper.style.left = (startLeft + dx) + 'px';
-            wrapper.style.top = (startTop + dy) + 'px';
-        } else if (isResizing) {
-            const dx = e.clientX - resizeStartX;
-            const newW = Math.max(40, resizeStartWidth + dx);
-            wrapper.style.width = newW + 'px';
-        }
-    });
-
-    document.addEventListener('mouseup', () => {
-        isDragging = false;
-        isResizing = false;
-    });
-}
-
-// Обработчик клика по кнопке "Вставить из буфера"
-const btnPasteImage = document.getElementById('btnPasteImage');
-if (btnPasteImage) {
-    btnPasteImage.onclick = async function() {
-        try {
-            const clipboardItems = await navigator.clipboard.read();
-            let imageBlob = null;
-            for (const item of clipboardItems) {
-                const imageType = item.types.find(type => type.startsWith('image/'));
-                if (imageType) {
-                    imageBlob = await item.getType(imageType);
-                    break;
-                }
-            }
-            if (!imageBlob) {
-                alert("В буфере обмена не найдено изображение.");
-                return;
-            }
-            const reader = new FileReader();
-            reader.onload = function(e) {
-                insertPastedImageToCurrentPage(e.target.result);
-            };
-            reader.readAsDataURL(imageBlob);
-        } catch (err) {
-            alert("Не удалось прочитать изображение из буфера обмена. Проверьте разрешения браузера.");
-        }
-    };
-}
 
 async function executeMskConversion() {
     const sourceText = document.getElementById('msk-coords-input').value.trim();
