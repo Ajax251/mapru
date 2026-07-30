@@ -1,5 +1,5 @@
 
-console.log("%c[Schema Generator] Загружена версия 2.353", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.354", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 // Вспомогательная функция конвертации любых цветовых строк в #HEX для элементов <input type="color">
@@ -1940,6 +1940,8 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             }
             .btn-panel { display: none !important; }
             .label-controls { display: none !important; }
+            .img-ctrls, .resize-handle { display: none !important; }
+            .pasted-img-wrapper img { border: none !important; }
             .interactive-label .label-text {
                 border-color: ${config.lineColor || '#ff3b30'} !important;
                 -webkit-print-color-adjust: exact !important;
@@ -1951,12 +1953,6 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 print-color-adjust: exact !important;
             }
         }
-        
-        @media print {
-    .img-ctrls, .resize-handle { display: none !important; }
-    .pasted-img-wrapper img { border: none !important; }
-}
-
     </style>
 </head>
 <body>
@@ -2212,6 +2208,117 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             };
         }
 
+        // --- ВСТАВКА ИЗОБРАЖЕНИЯ ИЗ БУФЕРА ОБМЕНА ---
+        function getCurrentPage() {
+            const pages = document.querySelectorAll('.page');
+            if (!pages.length) return document.body;
+            let currentPage = pages[0];
+            let minDiff = Infinity;
+            pages.forEach(page => {
+                const rect = page.getBoundingClientRect();
+                const diff = Math.abs(rect.top);
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    currentPage = page;
+                }
+            });
+            return currentPage;
+        }
+
+        function insertPastedImageToCurrentPage(imgDataUrl) {
+            const page = getCurrentPage();
+            const wrapper = document.createElement('div');
+            wrapper.className = 'pasted-img-wrapper';
+            wrapper.style.cssText = 'position: absolute; top: 150px; left: 150px; width: 200px; z-index: 500; cursor: move; user-select: none; touch-action: none;';
+
+            wrapper.innerHTML = `
+                <img src="${imgDataUrl}" style="width: 100%; height: auto; display: block; pointer-events: none; border: 1px dashed rgba(0,0,0,0.2);">
+                <div class="img-ctrls" style="position: absolute; top: -26px; right: 0; display: flex; gap: 2px; background: rgba(255,255,255,0.95); padding: 2px; border-radius: 4px; border: 1px solid #ccc; opacity: 0; transition: opacity 0.2s;">
+                    <button class="ctrl-btn del-img" title="Удалить" style="width:20px;height:20px;line-height:1;border:none;background:#ef4444;color:#fff;border-radius:3px;cursor:pointer;">&times;</button>
+                </div>
+                <div class="resize-handle" title="Потяните для изменения размера (пропорции сохраняются)" style="position: absolute; right: -6px; bottom: -6px; width: 12px; height: 12px; background: #3b82f6; border: 2px solid #fff; border-radius: 50%; cursor: nwse-resize;"></div>
+            `;
+
+            page.appendChild(wrapper);
+
+            wrapper.addEventListener('mouseenter', () => wrapper.querySelector('.img-ctrls').style.opacity = '1');
+            wrapper.addEventListener('mouseleave', () => wrapper.querySelector('.img-ctrls').style.opacity = '0');
+
+            wrapper.querySelector('.del-img').onclick = (e) => {
+                e.stopPropagation();
+                wrapper.remove();
+            };
+
+            let isDragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+            wrapper.addEventListener('mousedown', (e) => {
+                if (e.target.classList.contains('resize-handle') || e.target.closest('.img-ctrls')) return;
+                isDragging = true;
+                startX = e.clientX;
+                startY = e.clientY;
+                const rect = wrapper.getBoundingClientRect();
+                const pageRect = page.getBoundingClientRect();
+                startLeft = rect.left - pageRect.left;
+                startTop = rect.top - pageRect.top;
+                e.preventDefault();
+            });
+
+            let isResizing = false, resizeStartX = 0, resizeStartWidth = 0;
+            const resizeHandle = wrapper.querySelector('.resize-handle');
+            resizeHandle.addEventListener('mousedown', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                isResizing = true;
+                resizeStartX = e.clientX;
+                resizeStartWidth = wrapper.offsetWidth;
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (isDragging) {
+                    const dx = e.clientX - startX;
+                    const dy = e.clientY - startY;
+                    wrapper.style.left = (startLeft + dx) + 'px';
+                    wrapper.style.top = (startTop + dy) + 'px';
+                } else if (isResizing) {
+                    const dx = e.clientX - resizeStartX;
+                    const newW = Math.max(40, resizeStartWidth + dx);
+                    wrapper.style.width = newW + 'px';
+                }
+            });
+
+            document.addEventListener('mouseup', () => {
+                isDragging = false;
+                isResizing = false;
+            });
+        }
+
+        const btnPasteImage = document.getElementById('btnPasteImage');
+        if (btnPasteImage) {
+            btnPasteImage.onclick = async function() {
+                try {
+                    const clipboardItems = await navigator.clipboard.read();
+                    let imageBlob = null;
+                    for (const item of clipboardItems) {
+                        const imageType = item.types.find(type => type.startsWith('image/'));
+                        if (imageType) {
+                            imageBlob = await item.getType(imageType);
+                            break;
+                        }
+                    }
+                    if (!imageBlob) {
+                        alert("В буфере обмена не найдено изображение.");
+                        return;
+                    }
+                    const reader = new FileReader();
+                    reader.onload = function(e) {
+                        insertPastedImageToCurrentPage(e.target.result);
+                    };
+                    reader.readAsDataURL(imageBlob);
+                } catch (err) {
+                    alert("Не удалось прочитать изображение из буфера обмена. Проверьте разрешения браузера.");
+                }
+            };
+        }
+
         function updatePageCallouts(frame) {
             if (!frame) return;
             const svg = frame.querySelector('.callout-svg');
@@ -2252,10 +2359,10 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                     }
                     
                     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-                    line.setAttribute('x1', \`\${anchorX_pct}%\`);
-                    line.setAttribute('y1', \`\${anchorY_pct}%\`);
-                    line.setAttribute('x2', \`\${endX_pct}%\`);
-                    line.setAttribute('y2', \`\${endY_pct}%\`);
+                    line.setAttribute('x1', `${anchorX_pct}%`);
+                    line.setAttribute('y1', `${anchorY_pct}%`);
+                    line.setAttribute('x2', `${endX_pct}%`);
+                    line.setAttribute('y2', `${endY_pct}%`);
                     line.setAttribute('stroke', lineColor);
                     line.setAttribute('stroke-width', '2');
                     
@@ -2404,7 +2511,6 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 };
             }
 
-            // Переключатель Жирного шрифта
             const btnBold = label.querySelector('.toggle-bold');
             if (btnBold && span) {
                 btnBold.onclick = (ev) => {
@@ -2416,7 +2522,6 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 };
             }
 
-            // Переключатель Курсива
             const btnItalic = label.querySelector('.toggle-italic');
             if (btnItalic && span) {
                 btnItalic.onclick = (ev) => {
@@ -2458,7 +2563,6 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 };
             }
 
-            // Кнопка Копировать (Дублировать метку)
             const btnCopy = label.querySelector('.copy-lbl');
             if (btnCopy) {
                 btnCopy.onclick = (ev) => {
