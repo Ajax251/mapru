@@ -2357,10 +2357,10 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                     }
                     
                     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-                    line.setAttribute('x1', `${anchorX_pct}%`);
-                    line.setAttribute('y1', `${anchorY_pct}%`);
-                    line.setAttribute('x2', `${endX_pct}%`);
-                    line.setAttribute('y2', `${endY_pct}%`);
+                 line.setAttribute('x1', anchorX_pct + '%');
+line.setAttribute('y1', anchorY_pct + '%');
+line.setAttribute('x2', endX_pct + '%');
+line.setAttribute('y2', endY_pct + '%');
                     line.setAttribute('stroke', lineColor);
                     line.setAttribute('stroke-width', '2');
                     
