@@ -3075,7 +3075,7 @@ line.setAttribute('y2', endY_pct + '%');
         }
         
         
-        const btnExportSchemaCoords = document.getElementById('btnExportSchemaCoords');
+    const btnExportSchemaCoords = document.getElementById('btnExportSchemaCoords');
         if (btnExportSchemaCoords) {
             btnExportSchemaCoords.onclick = function() {
                 const trs = Array.from(document.querySelectorAll('table tr'));
@@ -3097,11 +3097,11 @@ line.setAttribute('y2', endY_pct + '%');
                         startPt = pt;
                         startX = x;
                         startY = y;
-                        currentBlock.push(`${x}\t${y}`);
+                        currentBlock.push(x + '\\t' + y);
                     } else {
-                        currentBlock.push(`${x}\t${y}`);
+                        currentBlock.push(x + '\\t' + y);
                         if ((pt === startPt || (x === startX && y === startY)) && currentBlock.length > 1) {
-                            blocks.push(currentBlock.join('\n'));
+                            blocks.push(currentBlock.join('\\n'));
                             currentBlock = [];
                             startPt = null; startX = null; startY = null;
                         }
@@ -3109,10 +3109,10 @@ line.setAttribute('y2', endY_pct + '%');
                 });
 
                 if (currentBlock.length > 0) {
-                    blocks.push(currentBlock.join('\n'));
+                    blocks.push(currentBlock.join('\\n'));
                 }
 
-                const textToCopy = blocks.join('\n\n');
+                const textToCopy = blocks.join('\\n\\n');
 
                 if (navigator.clipboard && navigator.clipboard.writeText) {
                     navigator.clipboard.writeText(textToCopy);
