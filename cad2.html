@@ -722,7 +722,6 @@
   <div class="sbtn on" id="sbOsnap" title="Объектная привязка (F3)">ПРИВЯЗКА</div>
   <div class="sbtn on" id="sbLabels" title="Показать/скрыть текстовые надписи (F4)">НАДПИСИ</div>
    <div class="sbtn on" id="sbScale" title="Показать/скрыть линейный масштаб на чертеже (F10)">МАСШТАБ</div>
-   <div class="sbtn on" id="sbVertices" title="Показать/скрыть поворотные точки объектов (F11)">ТОЧКИ</div>
   <div class="grow"></div>
   <div class="msg" id="statusMsg">Инициализация ядра LibreDWG...</div>
 </div>
@@ -772,7 +771,6 @@ let lastClickTime = 0;
 let selectionBeforeDblClick = null; 
 let showScaleBar = true; 
 let drawPrintScaleBar = true; 
-let showVertices = true; 
 
 const GRAB_POINT_RADIUS_SCREEN = 8;
 const ADD_POINT_THRESHOLD_SCREEN = 8;
@@ -832,73 +830,6 @@ function formatAutoSwappedCoords(x, y) {
     return `${y.toFixed(decs)}\t${x.toFixed(decs)}`;
   }
   return `${x.toFixed(decs)}\t${y.toFixed(decs)}`;
-}
-
-// Извлечение поворотных точек/узлов для любого типа объекта
-function getAllEntityVertices(e) {
-  if (!e) return [];
-  if (e.type === 'LINE') {
-    return [{x: e.x1, y: e.y1}, {x: e.x2, y: e.y2}];
-  } else if (e.type === 'LWPOLYLINE' && e.pts) {
-    return e.pts;
-  } else if (e.type === 'CIRCLE') {
-    return [{x: e.cx, y: e.cy}];
-  } else if (e.type === 'ARC') {
-    return [
-      {x: e.cx, y: e.cy},
-      {x: e.cx + e.r * Math.cos(e.a1), y: e.cy + e.r * Math.sin(e.a1)},
-      {x: e.cx + e.r * Math.cos(e.a2), y: e.cy + e.r * Math.sin(e.a2)}
-    ];
-  } else if (e.type === 'ELLIPSE') {
-    return [{x: e.cx, y: e.cy}];
-  } else if (e.type === 'POINT' || e.type === 'TEXT') {
-    return [{x: e.x, y: e.y}];
-  }
-  return [];
-}
-
-// Отрисовка поворотных точек поверх объектов
-// Маркер: изящный мини-узел (акцентная точка радиусом 1.6px с тонким контрастным ободком)
-function drawVertices() {
-  if (!showVertices || isPrinting) return;
-  
-  ctx.save();
-  for (const e of entities) {
-    const lay = layers[e.layer];
-    if (lay && !lay.visible) continue;
-
-    const verts = getAllEntityVertices(e);
-    if (!verts.length) continue;
-
-    const ci = (e.color != null && e.color !== 256) ? e.color : (lay ? lay.color : null);
-    let col = e.colorHex || aciToHex(ci);
-
-    for (const v of verts) {
-      const [sx, sy] = w2s(v.x, v.y);
-      if (sx < -10 || sy < -10 || sx > canvas.width + 10 || sy > canvas.height + 10) continue;
-
-      ctx.beginPath();
-      ctx.arc(sx, sy, 1.6 * dpr, 0, Math.PI * 2);
-      ctx.fillStyle = col;
-      ctx.fill();
-      ctx.strokeStyle = darkBg ? '#ffffff' : '#000000';
-      ctx.lineWidth = 0.5 * dpr;
-      ctx.stroke();
-    }
-  }
-  ctx.restore();
-}
-
-// Переключение видимости точек
-function toggleVertices() {
-  showVertices = !showVertices;
-  const btn = $('sbVertices');
-  if (btn) {
-    btn.classList.toggle('on', showVertices);
-  }
-  localStorage.setItem('cad-show-vertices', showVertices);
-  log(`Поворотные точки объектов: ${showVertices ? 'ВКЛЮЧЕНЫ' : 'ВЫКЛЮЧЕНЫ'}. Горячая клавиша: F11.`, 'ok');
-  render();
 }
 
 async function selectFile(mode) {
@@ -1091,8 +1022,6 @@ let scale = 1, ox = 0, oy = 0;
 let isPrinting = false;
 let dpr = window.devicePixelRatio || 1;
 let darkBg = true;
-
-let gridMode = 'normal';
 let showGrid = true, snapStep=false, ortho=false, osnap=true;
 let gridSize = 10;
 
@@ -1497,7 +1426,6 @@ const ci=(e.color!=null && e.color!==256)?e.color:(lay?lay.color:null);
     drawEntity(e);
   }
   drawPending();
-    drawVertices();
   
 scale = origScale; ox = origOx; oy = origOy;
   
@@ -1877,96 +1805,16 @@ function getNiceScaleNumber(u) {
   return niceFraction * Math.pow(10, exponent);
 }
 
-// Расчёт адаптивного шага координатной сетки (от 1см до 100км)
-function getAdaptiveGridStep() {
-  const possibleSteps = [0.01, 0.05, 0.1, 0.5, 1, 5, 10, 50, 100, 200, 500, 1000, 5000, 10000, 50000, 100000];
-  const targetPixelSize = 40 * dpr;
-  let bestStep = 10;
-  if (scale <= 0) return bestStep;
-  for (const step of possibleSteps) {
-    const pixelSize = step * scale;
-    if (pixelSize >= targetPixelSize) {
-      bestStep = step;
-      break;
-    }
-    bestStep = step;
-  }
-  if (bestStep * scale < 10 * dpr && possibleSteps.indexOf(bestStep) < possibleSteps.length - 1) {
-    bestStep = possibleSteps[possibleSteps.indexOf(bestStep) + 1];
-  }
-  return bestStep;
-}
-
-function drawGrid(W, H) {
-  if (gridMode === 'off') return;
-
-  const step = (gridMode === 'coord') ? getAdaptiveGridStep() : gridSize;
-  const pxStep = step * scale;
-  if (pxStep < 4) return;
-
-  ctx.save();
-  ctx.strokeStyle = darkBg ? '#161a1f' : '#e8e8ee';
-  ctx.lineWidth = 1;
-
-  const [w0x] = s2w(0, 0);
-  const startX = Math.floor(w0x / step) * step;
-
+function drawGrid(W,H){
+  if (!showGrid) return; 
+  const step=gridSize*scale; if(step<6)return;
+  ctx.strokeStyle=darkBg?'#161a1f':'#e8e8ee'; ctx.lineWidth=1;
+  const [w0x,w0y]=s2w(0,0); const startX=Math.floor(w0x/gridSize)*gridSize;
   ctx.beginPath();
-  for (let x = startX; ; x += step) {
-    const [sx] = w2s(x, 0);
-    if (sx > W) break;
-    if (sx < 0) continue;
-    ctx.moveTo(sx, 0);
-    ctx.lineTo(sx, H);
-  }
-
-  const [, wTopY] = s2w(0, 0);
-  const startY = Math.ceil(wTopY / step) * step;
-  for (let y = startY; ; y -= step) {
-    const [, sy] = w2s(0, y);
-    if (sy > H) break;
-    if (sy < 0) continue;
-    ctx.moveTo(0, sy);
-    ctx.lineTo(W, sy);
-  }
-
+  for(let x=startX;;x+=gridSize){const [sx]=w2s(x,0);if(sx>W)break;if(sx<0)continue;ctx.moveTo(sx,0);ctx.lineTo(sx,H);}
+  const [,wTopY]=s2w(0,0);const startY=Math.ceil(wTopY/gridSize)*gridSize;
+  for(let y=startY;;y-=gridSize){const [,sy]=w2s(0,y);if(sy>H)break;if(sy<0)continue;ctx.moveTo(0,sy);ctx.lineTo(W,sy);}
   ctx.stroke();
-  ctx.restore();
-}
-
-function cycleGridMode() {
-  if (gridMode === 'normal') {
-    gridMode = 'coord';
-  } else if (gridMode === 'coord') {
-    gridMode = 'off';
-  } else {
-    gridMode = 'normal';
-  }
-  showGrid = (gridMode !== 'off');
-
-  const btn = $('sbGrid');
-  let stateStr = '';
-
-  switch (gridMode) {
-    case 'normal':
-      btn.className = 'sbtn on';
-      btn.textContent = 'СЕТКА';
-      stateStr = 'Обычная сетка';
-      break;
-    case 'coord':
-      btn.className = 'sbtn on';
-      btn.textContent = 'СЕТКА [КООРД]';
-      stateStr = 'Координатная адаптивная сетка (1см — 100км)';
-      break;
-    case 'off':
-      btn.className = 'sbtn';
-      btn.textContent = 'СЕТКА [ОТКЛ]';
-      stateStr = 'Выключена';
-      break;
-  }
-
-  log(`Сетка: ${stateStr}. Горячая клавиша: F7.`, 'ok');
-  render();
 }
 
 function drawAxes(){
@@ -2146,8 +1994,6 @@ function setStatus(msg){$('statusMsg').textContent=msg;}
 $('modalJpg').onclick = () => {
   exportPrintLayoutToImage('jpg');
 };
-
-$('sbVertices').onclick = toggleVertices;
 
 $('modalPng').onclick = () => {
   exportPrintLayoutToImage('png');
@@ -3415,12 +3261,8 @@ window.addEventListener('keydown',e=>{
   else if(e.ctrlKey&&e.key.toLowerCase()==='p'){e.preventDefault();window.print();}
   else if(e.key==='Delete'){eraseSelection();}
   else if(e.key==='Escape'){pending=[];selection.clear();setTool('select');}
-  else if(e.key==='F7'){ e.preventDefault(); cycleGridMode(); }
+  else if(e.key==='F7'){showGrid=!showGrid;$('sbGrid').classList.toggle('on',showGrid);render();}
   else if(e.key==='F8'){ortho=!ortho;$('sbOrtho').classList.toggle('on',ortho);}
-  else if (e.key === 'F11') {
-  e.preventDefault();
-  toggleVertices();
-}
   else if(e.key==='F9'){snapStep=!snapStep;$('sbSnap').classList.toggle('on',snapStep);}
   else if (e.key === 'F10') {
     e.preventDefault();
@@ -3479,7 +3321,7 @@ function runCommand(v){
     case 'JSON':exportJSON();break;
     case 'UNDO':case 'U':undo();break;
     case 'REDO':redo();break;
-    case 'GRID': cycleGridMode(); break;
+    case 'GRID':showGrid=!showGrid;$('sbGrid').classList.toggle('on',showGrid);render();break;
     case 'ORTHO':ortho=!ortho;$('sbOrtho').classList.toggle('on',ortho);break;
     case 'HELP':case '?':cmdHelp();break;
     default:log('Неизвестная команда: '+v,'err');
@@ -3689,37 +3531,13 @@ function handleAction(act){
     case 'zoomext':zoomExtents();break;
     case 'zoomin':zoomBy(1.2);break;
     case 'zoomout':zoomBy(1/1.2);break;
-    case 'togglegrid': cycleGridMode(); break;
+    case 'togglegrid':showGrid=!showGrid;$('sbGrid').classList.toggle('on',showGrid);render();break;
     case 'togglebg':toggleBg();break;
     case 'newlayer':newLayerDialog();break;
     case 'about':openModal('О программе','<b>CAD Студия</b><br>Клиентский просмотрщик и редактор чертежей DWG/DXF<br>Рендер на HTML5 Canvas, ядро LibreDWG (WebAssembly).<br>Экспорт: DXF, SVG, PNG, JPG, HTML, JSON.<br><br>',()=>{});break;
    case 'cmdhelp':cmdHelp(true);break;
   }
 }
-
-
-function zoomToEntities(items) {
-  const arr = Array.isArray(items) ? items : [items];
-  const bb = bbox(arr);
-  if (!bb) return;
-
-  const W = canvas.width, H = canvas.height;
-  const marginFactor = 0.8;
-
-  if (bb.w <= 0 && bb.h <= 0) {
-    if (scale < 10) scale = 50 * dpr;
-  } else {
-    const sx = W / (bb.w || 1);
-    const sy = H / (bb.h || 1);
-    scale = Math.min(sx, sy) * marginFactor;
-  }
-
-  const cx = (bb.mnx + bb.mxx) / 2;
-  const cy = (bb.mny + bb.mxy) / 2;
-  ox = W / 2 - cx * scale;
-  oy = H / 2 + cy * scale;
-}
-
 
 function zoomToEntity(e) {
   const bb = bbox([e]);
@@ -3801,7 +3619,13 @@ function cycleTextLabels() {
 // Привязываем функцию к клику по кнопке в статус-баре
 $('sbLabels').onclick = cycleTextLabels;
 
-$('sbGrid').onclick = cycleGridMode;
+$('sbGrid').onclick = () => {
+  showGrid = !showGrid;
+  $('sbGrid').classList.toggle('on', showGrid);
+  const stateStr = showGrid ? 'ВКЛЮЧЕНА' : 'ВЫКЛЮЧЕНА';
+  log(`Координатная сетка: ${stateStr}. Отображает вспомогательную сетку на холсте с заданным интервалом для визуальной оценки размеров и расстояний на чертеже. Горячая клавиша: F7.`, 'ok');
+  render();
+};
 
 $('sbSnap').onclick = () => {
   snapStep = !snapStep;
@@ -5307,58 +5131,21 @@ function getVisibleCoordinates() {
 async function pasteFromClipboard() {
   try {
     const text = await navigator.clipboard.readText();
-    let payload = null;
-    try {
-      payload = JSON.parse(text);
-    } catch (e) {
-      // Игнорируем ошибку парсинга JSON, если в буфере обычный текст с координатами
-    }
-
+    const payload = JSON.parse(text);
     if (payload && payload.type === "MLIGHTCAD_CLIPBOARD" && Array.isArray(payload.data)) {
       snapshot();
       let uid = Date.now();
       const offset = 10;
-      const newEnts = [];
       payload.data.forEach(e => {
         const clone = JSON.parse(JSON.stringify(e));
         clone.id = 'e' + (uid++) + Math.floor(Math.random() * 1000);
         translate(clone, offset, offset);
         entities.push(clone);
-        newEnts.push(clone);
       });
-      selection = new Set(newEnts.map(x => x.id));
       buildLayers();
       refreshUI();
-      zoomToEntities(newEnts); // Центрирование на вставленные объекты
       render();
       log('Объекты успешно вставлены', 'ok');
-      return;
-    }
-
-    const pts = parseCoordsText(text);
-    if (pts && pts.length > 0) {
-      snapshot();
-      const offset = 10;
-      const newEnts = [];
-      if (pts.length === 1) {
-        newEnts.push(mk({ type: 'POINT', x: pts[0].x, y: pts[0].y }));
-      } else {
-        pts.forEach(p => newEnts.push(mk({ type: 'POINT', x: p.x, y: p.y })));
-        const isClosed = pts.length > 2 &&
-          Math.abs(pts[0].x - pts[pts.length - 1].x) < 0.01 &&
-          Math.abs(pts[0].y - pts[pts.length - 1].y) < 0.01;
-        newEnts.push(mk({ type: 'LWPOLYLINE', pts: pts, closed: isClosed }));
-      }
-      newEnts.forEach(e => {
-        translate(e, offset, offset);
-        entities.push(e);
-      });
-      selection = new Set(newEnts.map(x => x.id));
-      buildLayers();
-      refreshUI();
-      zoomToEntities(newEnts); // Центрирование на вставленные объекты
-      render();
-      log('Координаты из буфера обмена успешно вставлены', 'ok');
     } else {
       log('Некорректный формат данных в буфере обмена', 'err');
     }
@@ -5370,50 +5157,19 @@ async function pasteFromClipboard() {
 async function pasteAtOriginalCoordinates() {
   try {
     const text = await navigator.clipboard.readText();
-    let payload = null;
-    try {
-      payload = JSON.parse(text);
-    } catch (e) {}
-
+    const payload = JSON.parse(text);
     if (payload && payload.type === "MLIGHTCAD_CLIPBOARD" && Array.isArray(payload.data)) {
       snapshot();
       let uid = Date.now();
-      const newEnts = [];
       payload.data.forEach(e => {
         const clone = JSON.parse(JSON.stringify(e));
         clone.id = 'e' + (uid++) + Math.floor(Math.random() * 1000);
         entities.push(clone);
-        newEnts.push(clone);
       });
-      selection = new Set(newEnts.map(x => x.id));
       buildLayers();
       refreshUI();
-      zoomToEntities(newEnts); // Центрирование на новые объекты
       render();
       log('Объекты вставлены в исходные координаты', 'ok');
-      return;
-    }
-
-    const pts = parseCoordsText(text);
-    if (pts && pts.length > 0) {
-      snapshot();
-      const newEnts = [];
-      if (pts.length === 1) {
-        newEnts.push(mk({ type: 'POINT', x: pts[0].x, y: pts[0].y }));
-      } else {
-        pts.forEach(p => newEnts.push(mk({ type: 'POINT', x: p.x, y: p.y })));
-        const isClosed = pts.length > 2 &&
-          Math.abs(pts[0].x - pts[pts.length - 1].x) < 0.01 &&
-          Math.abs(pts[0].y - pts[pts.length - 1].y) < 0.01;
-        newEnts.push(mk({ type: 'LWPOLYLINE', pts: pts, closed: isClosed }));
-      }
-      newEnts.forEach(e => entities.push(e));
-      selection = new Set(newEnts.map(x => x.id));
-      buildLayers();
-      refreshUI();
-      zoomToEntities(newEnts); // Центрирование на новые объекты
-      render();
-      log('Координаты вставлены в исходные координаты', 'ok');
     } else {
       log('Некорректный формат данных в буфере обмена', 'err');
     }
@@ -5768,11 +5524,6 @@ function boot(){
   refreshUI();
   resize();
   scale=4*dpr;ox=canvas.width/2;oy=canvas.height/2;
-  const savedVertices = localStorage.getItem('cad-show-vertices');
-if (savedVertices !== null) {
-  showVertices = (savedVertices === 'true');
-  if ($('sbVertices')) $('sbVertices').classList.toggle('on', showVertices);
-}
   setTool('pan'); 
   render();
   cmdHelp(false);
