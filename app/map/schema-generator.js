@@ -1958,8 +1958,9 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
 <body>
 
 <div class="btn-panel">
-        <button class="btn-ui" onclick="window.print()" style="background: #6366f1;"><i class="fas fa-print"></i> Печать в PDF</button>
-        <button class="btn-ui btn-html" onclick="saveAsHtml()" style="background: #f70000;"><i class="fas fa-file-code"></i> Сохранить HTML</button>
+
+        <button class="btn-ui" onclick="window.print()" style="background: #f70000;"><i class="fas fa-print"></i> Печать в PDF</button>
+        <button class="btn-ui btn-html" onclick="saveAsHtml()" style="background: #6366f1;"><i class="fas fa-file-code"></i> Сохранить HTML</button>
         <button class="btn-ui btn-save" id="btnExportWord" style="background: #10b981;"><i class="fas fa-file-word"></i> Скачать DOCX</button>
         <button class="btn-ui" id="btnSaveStyles" style="background: #06b6d4; margin-top: 10px;" title="Сохранить текущее оформление меток в файл"><i class="fas fa-save"></i> Сохранить стили</button>
         <button class="btn-ui" id="btnLoadStyles" style="background: #3b82f6;" title="Загрузить оформление меток из файла"><i class="fas fa-file-import"></i> Загрузить стили</button>
