@@ -3126,7 +3126,7 @@ line.setAttribute('y2', endY_pct + '%');
                     textarea.remove();
                 }
 
-                window.open('sh.html', '_blank');
+                window.open('vsemap.ru/sh.html', '_blank');
             };
         }
 
