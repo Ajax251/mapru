@@ -1488,24 +1488,6 @@ document.addEventListener('DOMContentLoaded', () => {
     const All = (el, sel) => el.querySelectorAll(sel);
     const T = (el, sel) => el?.querySelector(sel)?.textContent.trim() || '—';
     const A = (el, attr) => el?.getAttribute(attr) || '—';
-    
-    
-    const getAccessInfo = (node) => {
-    if (!node) return '—';
-    const passNode = node.querySelector('ProvidingPassCadastralNumbers');
-    if (!passNode) return '—';
-    
-    const cadNums = Array.from(passNode.querySelectorAll('CadastralNumber'))
-        .map(n => n.textContent.trim())
-        .filter(Boolean);
-    const other = passNode.querySelector('Other')?.textContent.trim();
-    
-    const result = [];
-    if (cadNums.length > 0) result.push(cadNums.join(', '));
-    if (other && other !== '—') result.push(other);
-    
-    return result.length > 0 ? result.join('; ') : '—';
-};
 
     const getFullAddress = (addrEl) => {
         if (!addrEl) return '—';
@@ -1692,14 +1674,13 @@ zipFilesMap.clear();
         return result;
     }
 
-function convert3857ToMsk(coord, mskSystem) {
-    if (!mskSystem || typeof proj4 === 'undefined') return null;
-    const { offsetX = 0, offsetY = 0 } = mskSystem;
-    const [lon, lat] = proj4('EPSG:3857', mskSystem.value, coord);
-    const x = Math.round((lat + offsetX) * 100) / 100;
-    const y = Math.round((lon + offsetY) * 100) / 100;
-    return { x, y };
-}
+    function convert3857ToMsk(coord, mskSystem) {
+        if (!mskSystem || typeof proj4 === 'undefined') return null;
+        const { offsetX = 0, offsetY = 0 } = mskSystem;
+        const [lon, lat] = proj4('EPSG:3857', mskSystem.value, coord);
+        return { x: lat + offsetX, y: lon + offsetY };
+    }
+    
     
 function extractContoursFromTechPlan() {
     if (!lastXmlDoc) return { contours: [], isLinear: false };
@@ -4808,28 +4789,28 @@ function findProblematicOverlappingPoints(poly1, poly2) {
 
 function copyModalCoordinates() {
     if (!relatedParcelCheckData) return;
-    const { mainContours, resultContour, egrnContour, xmlData, otherCorrectedParcels } = relatedParcelCheckData;
+    const { mainContours, resultContour, otherCorrectedParcels } = relatedParcelCheckData;
     let textToCopy = '';
 
-    const formatContourText = (contour, title = '') => {
+    const formatContourText = (contour) => {
         if (!contour || contour.length === 0) return '';
-        let result = title ? title + '\n' : '';
+        let result = '';
         const closedContour = [...contour];
         const first = closedContour[0];
         const last = closedContour[closedContour.length - 1];
-
+        
+        // Автоматическое замыкание контура
         if (Math.abs(first.x - last.x) > 0.001 || Math.abs(first.y - last.y) > 0.001) {
             closedContour.push(first);
         }
-
+        
         closedContour.forEach(pt => {
-            const x = Number(pt.x).toFixed(2);
-            const y = Number(pt.y).toFixed(2);
-            result += `${x}\t${y}\n`;
+            result += `${pt.x}\t${pt.y}\n`;
         });
         return result.trim() + '\n';
     };
 
+    // 1. Уточняемый ЗУ
     if (mainContours && mainContours.length > 0) {
         mainContours.forEach(contour => {
             const fmt = formatContourText(contour);
@@ -4837,6 +4818,7 @@ function copyModalCoordinates() {
         });
     }
 
+    // 2. Текущий смежник (Результат изменений)
     if (resultContour && resultContour.length > 0) {
         resultContour.forEach(contour => {
             const fmt = formatContourText(contour);
@@ -4844,20 +4826,11 @@ function copyModalCoordinates() {
         });
     }
 
-    if (egrnContour && egrnContour.length > 0) {
-        const cadTitle = xmlData && xmlData.cadNumber ? xmlData.cadNumber : '';
-        egrnContour.forEach((contour, idx) => {
-            const title = idx === 0 ? cadTitle : '';
-            const fmt = formatContourText(contour, title);
-            if (fmt) textToCopy += fmt + '\n';
-        });
-    }
-
+    // 3. Другие смежники из XML
     if (otherCorrectedParcels && otherCorrectedParcels.length > 0) {
         otherCorrectedParcels.forEach(oc => {
-            const title = oc.cadNumber || '';
-            oc.contours.forEach((contour, idx) => {
-                const fmt = formatContourText(contour, idx === 0 ? title : '');
+            oc.contours.forEach(contour => {
+                const fmt = formatContourText(contour);
                 if (fmt) textToCopy += fmt + '\n';
             });
         });
@@ -4901,16 +4874,20 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
         const mskSystem = detectMskSystem(xmlData.cadNumber);
         if (!mskSystem) throw new Error('Не определена система координат');
         
+        // Запрос актуальных границ смежника из ЕГРН (НСПД)
         const egrnContours = await fetchEgrnCoordinates(xmlData.cadNumber);
+        
+        // Извлечение проектных границ основного/уточняемого участка из XML
         const mainContoursXml = extractMainParcelContoursFromXml();
         
+        // --- СОБИРАЕМ ДРУГИЕ ИЗМЕНЯЕМЫЕ СМЕЖНЫЕ ЗУ ДЛЯ ОТОБРАЖЕНИЯ И ИСКЛЮЧЕНИЯ НАЛОЖЕНИЙ ---
         const otherCorrectedParcels = [];
         const allRelatedNodes = All(lastXmlDoc, 'SpecifyRelatedParcel');
         const allApproxNodes = All(lastXmlDoc, 'SpecifyParcelApproximal > ExistParcel');
         
         const currentCadNumLower = xmlData.cadNumber.toLowerCase();
         
-        let checkCounter = 0;
+     let checkCounter = 0;
 
         for (const node of allRelatedNodes) {
             const cn = A(node, 'CadastralNumber');
@@ -4941,24 +4918,30 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
         let hasOverlap = false;
         let comparisonResults = null;
         let neighboringOverlaps = [];
-        const problemPoints = [];
+        const problemPoints = []; // Массив для хранения красных проблемных точек
+
+        console.log("=== НАЧАЛО АНАЛИЗА СМЕЖНОГО ЗУ ===");
+        console.log("Смежный участок:", xmlData.cadNumber);
+        console.log("Целевой уточняемый участок:", mainParcelCadNumber);
 
         if (xmlData.isAllBorder) {
+            // --- ЛОГИКА ДЛЯ ПЛОЩАДНОГО ОПИСАНИЯ СМЕЖНИКА (ExistParcel / AllBorder) ---
             const comp = compareFullBoundaries(xmlData.contours, egrnContours);
             comparisonResults = comp.comparisonResults;
             resultContour = xmlData.contours;
 
             const geomArea = calculateTotalArealGeometryArea(xmlData.contours);
 
+            // 1. Проверка наложения уточняемого участка на этот смежный ЗУ по проектным координатам XML
             let overlapArea = 0;
             if (mainContoursXml.length > 0) {
                 overlapArea = checkPlanarOverlap(mainContoursXml, xmlData.contours);
-                if (overlapArea > 0.0001) {
+                if (overlapArea > 0.01) {
                     hasOverlap = true;
-                    const areaStr = overlapArea < 0.01 ? `${(overlapArea * 10000).toFixed(1)} кв.см.` : `${overlapArea.toFixed(2)} кв.м.`;
-                    errors.push(`ОШИБКА НАЛОЖЕНИЯ: Граница смежного ЗУ ${xmlData.cadNumber} по проектным координатам пересекается с уточняемым ЗУ ${mainParcelCadNumber}! Площадь пересечения: ${areaStr}`);
+                    errors.push(`ОШИБКА НАЛОЖЕНИЯ: Граница смежного ЗУ ${xmlData.cadNumber} по проектным координатам пересекается с уточняемым ЗУ ${mainParcelCadNumber}! Площадь пересечения: ${overlapArea.toFixed(2)} кв.м.`);
                 }
                 
+                // Ищем проблемные точки пересечения
                 xmlData.contours.forEach(subContour => {
                     mainContoursXml.forEach(mainContour => {
                         const pts = findProblematicOverlappingPoints(subContour, mainContour);
@@ -4967,6 +4950,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
                 });
             }
 
+            // Ищем пересечения с другими изменяемыми смежными участками из XML
             if (xmlData.contours && otherCorrectedParcels.length > 0) {
                 otherCorrectedParcels.forEach(other => {
                     other.contours.forEach(otherContour => {
@@ -5034,6 +5018,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             `;
 
         } else {
+            // --- ЛОГИКА ДЛЯ КУСОЧНОГО ИЗМЕНЕНИЯ ГРАНИЦЫ (ChangeBorder) ---
             if (!egrnContours?.length) throw new Error(`Смежный ЗУ ${xmlData.cadNumber} не найден в ЕГРН`);
             const egrnContour = egrnContours[0];
 
@@ -5044,6 +5029,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             errors = res.errors;
             appliedChanges = res.appliedChanges;
             
+            // Проверка наложения с уточняемым ЗУ
             if (resultContour && mainContoursXml.length > 0) {
                 for (const mainContour of mainContoursXml) {
                     if (checkPolygonsOverlap(resultContour, mainContour)) {
@@ -5055,6 +5041,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
                 }
             }
 
+            // Проверка наложения с другими изменяемыми смежными ЗУ из XML
             if (resultContour && otherCorrectedParcels.length > 0) {
                 otherCorrectedParcels.forEach(other => {
                     other.contours.forEach(otherContour => {
@@ -5087,6 +5074,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             }
         }
 
+        // Логирование обнаруженных пересечений
         if (problemPoints.length > 0) {
             console.log(`Обнаружено наложений: ${problemPoints.length} шт.`);
             problemPoints.forEach((p, i) => {
@@ -5096,6 +5084,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             console.log("Геометрических пересечений наложения не обнаружено.");
         }
 
+        // Встречный анализ наложений на сторонние участки в ЕГРН
         if (resultContour && resultContour.length > 0) {
             try {
                 const intersectedFeatures = await searchIntersectingObjects(resultContour, NSPD_CATEGORY_ZU, mskSystem);
@@ -5119,7 +5108,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
 
                     if (neighborContours.length > 0) {
                         const overlapWithNeighbor = checkPlanarOverlap(resultContour, neighborContours);
-                        if (overlapWithNeighbor > 0.0001) {
+                        if (overlapWithNeighbor > 0.01) {
                             neighboringOverlaps.push({
                                 cadNumber: fCadNum,
                                 area: overlapWithNeighbor,
@@ -5140,14 +5129,13 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             warningBlock.style.borderColor = 'var(--error-color)';
             warningBlock.style.backgroundColor = '#fef2f2';
             
-            let warningList = neighboringOverlaps.map(no => {
-                const areaStr = no.area < 0.01 ? `${(no.area * 10000).toFixed(1)} кв.см.` : `${no.area.toFixed(2)} кв.м.`;
-                return `<li style="color:#991b1b; padding: 3px 0;">
+            let warningList = neighboringOverlaps.map(no => 
+                `<li style="color:#991b1b; padding: 3px 0;">
                     <i class="fas fa-exclamation-triangle"></i> 
                     Новые границы смежного ЗУ накладываются на соседний участок ЕГРН <b>${no.cadNumber}</b>. 
-                    Площадь наложения: <b style="color:var(--error-color);">${areaStr}</b>
-                </li>`;
-            }).join('');
+                    Площадь наложения: <b style="color:var(--error-color);">${no.area.toFixed(2)} кв.м.</b>
+                </li>`
+            ).join('');
 
             warningBlock.innerHTML = `
                 <div class="error-title" style="color:#991b1b;">
@@ -7014,7 +7002,7 @@ function openPrintableSurveyPlanVersion() {
         const categoryCode = parcel.querySelector('Category')?.getAttribute('Category') || '—';
         const categoryName = landCategories[categoryCode] || '—';
         const vri = parcel.querySelector('PermittedUseEstablished')?.getAttribute('ByDocument') || '—';
-        const access = getAccessInfo(parcel);
+        const access = parcel.querySelector('ProvidingPassCadastralNumbers > Other')?.textContent || parcel.querySelector('ProvidingPassCadastralNumbers > CadastralNumber')?.textContent || '—';
         const address = getFullAddress(parcel.querySelector('Address'));
         
         const minArea = parcel.querySelector('MinArea > Area')?.textContent || '—';
@@ -7187,7 +7175,7 @@ function openPrintableSurveyPlanVersion() {
         const formula = parcel.querySelector('Area > Formula')?.textContent || '—';
         const areaGkn = parcel.querySelector('AreaInGKN')?.textContent || '—';
         const deltaArea = parcel.querySelector('DeltaArea')?.textContent || '—';
-        const access = getAccessInfo(parcel);
+        const access = parcel.querySelector('ProvidingPassCadastralNumbers > Other')?.textContent || parcel.querySelector('ProvidingPassCadastralNumbers > CadastralNumber')?.textContent || '—';
         const categoryCode = parcel.querySelector('Category')?.getAttribute('Category') || '—';
         const categoryName = landCategories[categoryCode] || '—';
         
@@ -9743,7 +9731,7 @@ sectionContent += `<div class="info-grid" style="margin-top: 16px;">
     <div class="info-card"><div class="info-label">Площадь, кв.м.</div><div class="info-value">${areaVal} (±${areaInacc})</div></div>
     <div class="info-card"><div class="info-label">Категория земель</div><div class="info-value">${categoryName} <code>${categoryCode}</code></div></div>
     <div class="info-card"><div class="info-label">Вид разрешенного использования</div><div class="info-value">${A(E(newParcel, 'PermittedUseEstablished, PermittedUsesLand > PermittedUseEstablished'), 'ByDocument')}</div></div>
-    <div class="info-card"><div class="info-label">Обеспечение доступа</div><div class="info-value">${getAccessInfo(newParcel)}</div></div>
+    <div class="info-card"><div class="info-label">Обеспечение доступа</div><div class="info-value">${T(newParcel, 'ProvidingPassCadastralNumbers > Other, ProvidingPassCadastralNumbers > CadastralNumber')}</div></div>
     <div class="info-card"><div class="info-label">Минимальная площадь, кв.м.</div><div class="info-value">${minArea}</div></div>
     <div class="info-card"><div class="info-label">Максимальная площадь, кв.м.</div><div class="info-value">${maxArea}</div></div>
 </div>`;
@@ -9969,7 +9957,7 @@ if (contours.length > 0) {
         let sectionContent = `<div class="info-grid">
             <div class="info-card"><div class="info-label">Кадастровый номер измененного ЗУ</div><div class="info-value"><code>${cadNum}</code></div></div>
             <div class="info-card"><div class="info-label">Кадастровый квартал</div><div class="info-value">${T(changeParcel, 'CadastralBlock')}</div></div>
-         <div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Обеспечение доступа</div><div class="info-value">${getAccessInfo(changeParcel)}</div></div>
+            <div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Обеспечение доступа</div><div class="info-value">${T(changeParcel, 'ProvidingPassCadastralNumbers > Other, ProvidingPassCadastralNumbers > CadastralNumber')}</div></div>
         </div>`;
 
         // ОКС сохраняемые на измененном ЗУ
@@ -10141,7 +10129,7 @@ if (contours.length > 0) {
             <div class="info-card"><div class="info-label">Уточненная площадь, кв.м.</div><div class="info-value">${T(parcel, 'Area > Area')} (погрешность ±${T(parcel, 'Area > Inaccuracy')})</div></div>
             <div class="info-card"><div class="info-label">Площадь по ЕГРН, кв.м.</div><div class="info-value">${T(parcel, 'AreaInGKN')}</div></div>
             <div class="info-card"><div class="info-label">Разница площадей, кв.м.</div><div class="info-value">${T(parcel, 'DeltaArea')}</div></div>
-            <div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Обеспечение доступа</div><div class="info-value">${getAccessInfo(parcel)}</div></div>
+            <div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Обеспечение доступа</div><div class="info-value">${T(parcel, 'ProvidingPassCadastralNumbers > Other')}</div></div>
         </div>`;
 
         if (T(parcel, 'Area > Formula') !== '—') {
