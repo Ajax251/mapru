@@ -1554,6 +1554,132 @@ async function processZipInternalVerification(zipFile, container) {
     }
 }
 
+function extractSigningTimeFromSigText(sigText) {
+    try {
+        const cleanBase64 = sigText.replace(/-----[^-]+-----|\s+/g, '');
+        const binaryString = atob(cleanBase64);
+        const len = binaryString.length;
+        const bytes = new Uint8Array(len);
+        for (let i = 0; i < len; i++) {
+            bytes[i] = binaryString.charCodeAt(i);
+        }
+
+        const oid = [0x06, 0x09, 0x2A, 0x86, 0x48, 0x86, 0xF7, 0x0D, 0x01, 0x09, 0x05];
+        let foundIdx = -1;
+
+        for (let i = 0; i <= bytes.length - oid.length; i++) {
+            let match = true;
+            for (let j = 0; j < oid.length; j++) {
+                if (bytes[i + j] !== oid[j]) {
+                    match = false;
+                    break;
+                }
+            }
+            if (match) {
+                foundIdx = i;
+                break;
+            }
+        }
+
+        if (foundIdx !== -1) {
+            for (let i = foundIdx + oid.length; i < Math.min(foundIdx + oid.length + 30, bytes.length); i++) {
+                if (bytes[i] === 0x17 || bytes[i] === 0x24) {
+                    const strLen = bytes[i + 1];
+                    let dateStr = "";
+                    for (let k = 0; k < strLen; k++) {
+                        dateStr += String.fromCharCode(bytes[i + 2 + k]);
+                    }
+                    let year, month, day, hour, min, sec;
+                    if (bytes[i] === 0x17) {
+                        year = parseInt("20" + dateStr.substr(0, 2), 10);
+                        month = parseInt(dateStr.substr(2, 2), 10) - 1;
+                        day = parseInt(dateStr.substr(4, 2), 10);
+                        hour = parseInt(dateStr.substr(6, 2), 10);
+                        min = parseInt(dateStr.substr(8, 2), 10);
+                        sec = parseInt(dateStr.substr(10, 2), 10);
+                    } else {
+                        year = parseInt(dateStr.substr(0, 4), 10);
+                        month = parseInt(dateStr.substr(4, 2), 10) - 1;
+                        day = parseInt(dateStr.substr(6, 2), 10);
+                        hour = parseInt(dateStr.substr(8, 2), 10);
+                        min = parseInt(dateStr.substr(10, 2), 10);
+                        sec = parseInt(dateStr.substr(12, 2), 10);
+                    }
+                    const dt = new Date(Date.UTC(year, month, day, hour, min, sec));
+                    if (!isNaN(dt.getTime())) {
+                        return dt.toLocaleString('ru-RU');
+                    }
+                }
+            }
+        }
+    } catch (e) {}
+    return null;
+}
+
+async function extractFullCertDetails(cert, signer, customSignDate) {
+    const details = [];
+
+    const safeGet = async (fn, fallback = '—') => {
+        try { return await fn(); } catch (e) { return fallback; }
+    };
+
+    let signTime = customSignDate || '—';
+    if (signTime === '—' && signer) {
+        signTime = await safeGet(async () => {
+            const date = await signer.SigningTime;
+            return new Date(date).toLocaleString('ru-RU');
+        });
+    }
+    details.push({ name: 'Дата и время подписи', val: signTime });
+
+    const subject = await safeGet(async () => await cert.SubjectName, '');
+    const issuer = await safeGet(async () => await cert.IssuerName, '');
+
+    const sn = extractCertField(subject, 'SN');
+    const g = extractCertField(subject, 'G');
+    const cn = extractCertField(subject, 'CN');
+    const fio = (sn || g) ? `${sn} ${g}`.trim() : cn;
+
+    details.push({ name: 'Владелец (ФИО)', val: fio || '—' });
+    details.push({ name: 'Организация', val: extractCertField(subject, 'O') || '—' });
+    details.push({ name: 'Подразделение', val: extractCertField(subject, 'OU') || '—' });
+    details.push({ name: 'Должность', val: extractCertField(subject, 'T') || extractCertField(subject, 'TITLE') || '—' });
+    
+    const inn = extractCertField(subject, 'INN') || extractCertField(subject, 'ИНН') || extractCertField(subject, '1.2.643.3.131.1.1');
+    const ogrn = extractCertField(subject, 'OGRN') || extractCertField(subject, 'ОГРН') || extractCertField(subject, 'OGRNIP');
+    const snils = extractCertField(subject, 'SNILS') || extractCertField(subject, 'СНИЛС') || extractCertField(subject, '1.2.643.100.1');
+    const email = extractCertField(subject, 'E') || extractCertField(subject, 'EMAIL');
+
+    if (inn) details.push({ name: 'ИНН', val: inn });
+    if (ogrn) details.push({ name: 'ОГРН / ОГРНИП', val: ogrn });
+    if (snils) details.push({ name: 'СНИЛС', val: snils });
+    if (email) details.push({ name: 'E-mail', val: email });
+
+    const issuerCN = extractCertField(issuer, 'CN') || extractCertField(issuer, 'O') || issuer;
+    details.push({ name: 'Издатель (УЦ)', val: issuerCN || '—' });
+
+    const validFrom = await safeGet(async () => new Date(await cert.ValidFromDate).toLocaleString('ru-RU'));
+    const validTo = await safeGet(async () => new Date(await cert.ValidToDate).toLocaleString('ru-RU'));
+    details.push({ name: 'Действителен с', val: validFrom });
+    details.push({ name: 'Действителен по', val: validTo });
+
+    const serial = await safeGet(async () => await cert.SerialNumber);
+    const thumbprint = await safeGet(async () => await cert.Thumbprint);
+    details.push({ name: 'Серийный номер', val: serial });
+    details.push({ name: 'Отпечаток (Thumbprint)', val: thumbprint });
+
+    const algoInfo = await safeGet(async () => {
+        const pubKey = await cert.PublicKey();
+        const algo = await pubKey.Algorithm;
+        const val = await algo.Value;
+        const name = await algo.FriendlyName;
+        return ALGO_MAP[val] || name || val;
+    });
+    details.push({ name: 'Открытый ключ', val: algoInfo });
+
+    return details;
+}
+
 async function verifyDocWithSignatures(docItem, container) {
     const docFile = docItem.file;
     const sigFiles = docItem.signatures;
@@ -1614,45 +1740,38 @@ async function verifyDocWithSignatures(docItem, container) {
                             const date = await signer.SigningTime;
                             if (date) {
                                 const d = (date instanceof Date) ? date : new Date(date);
-                                if (!isNaN(d.getTime())) {
-                                    signDate = d.toLocaleString('ru-RU');
-                                }
+                                if (!isNaN(d.getTime())) signDate = d.toLocaleString('ru-RU');
                             }
                         } catch (dErr) {}
 
                         if (signDate === '—') {
                             try {
-                                let attrs = null;
-                                try { attrs = await signer.AuthenticatedAttributes2; } catch (e) { attrs = await signer.AuthenticatedAttributes; }
-                                if (attrs) {
-                                    const attrCount = await attrs.Count;
-                                    for (let a = 1; a <= attrCount; a++) {
-                                        const attr = await attrs.Item(a);
-                                        const name = await attr.Name;
-                                        let oidVal = "";
-                                        try {
-                                            const oid = await attr.OID;
-                                            if (oid) oidVal = await oid.Value;
-                                        } catch (e) {}
-
-                                        if (name === 0 || oidVal === "1.2.840.113549.1.9.5") {
-                                            const val = await attr.Value;
-                                            if (val) {
-                                                const d = (val instanceof Date) ? val : new Date(val);
-                                                if (!isNaN(d.getTime())) {
-                                                    signDate = d.toLocaleString('ru-RU');
-                                                } else {
-                                                    signDate = String(val);
-                                                }
-                                                break;
-                                            }
-                                        }
-                                    }
+                                const date = await signer.SignatureTimeStampTime;
+                                if (date) {
+                                    const d = (date instanceof Date) ? date : new Date(date);
+                                    if (!isNaN(d.getTime())) signDate = d.toLocaleString('ru-RU');
                                 }
                             } catch (e) {}
                         }
 
-                        const fullDetails = await extractFullCertDetails(cert, signer);
+                        if (signDate === '—') {
+                            const parsedDate = extractSigningTimeFromSigText(sigText);
+                            if (parsedDate) {
+                                signDate = parsedDate;
+                            }
+                        }
+
+                        if (signDate === '—') {
+                            try {
+                                const vFrom = await cert.ValidFromDate;
+                                if (vFrom) {
+                                    const d = new Date(vFrom);
+                                    if (!isNaN(d.getTime())) signDate = d.toLocaleDateString('ru-RU');
+                                }
+                            } catch (e) {}
+                        }
+
+                        const fullDetails = await extractFullCertDetails(cert, signer, signDate);
                         
                         if (hasChainWarning) {
                             fullDetails.unshift({ 
@@ -1884,76 +2003,6 @@ const ALGO_MAP = {
 };
 
 
-async function extractFullCertDetails(cert, signer) {
-    const details = [];
-
-    const safeGet = async (fn, fallback = '—') => {
-        try { return await fn(); } catch (e) { return fallback; }
-    };
-
-    
-    if (signer) {
-        const signTime = await safeGet(async () => {
-            const date = await signer.SigningTime;
-            return new Date(date).toLocaleString('ru-RU');
-        });
-        details.push({ name: 'Дата и время подписи', val: signTime });
-    }
-
-    
-    const subject = await safeGet(async () => await cert.SubjectName, '');
-    const issuer = await safeGet(async () => await cert.IssuerName, '');
-
-    
-    const sn = extractCertField(subject, 'SN');
-    const g = extractCertField(subject, 'G');
-    const cn = extractCertField(subject, 'CN');
-    const fio = (sn || g) ? `${sn} ${g}`.trim() : cn;
-
-    details.push({ name: 'Владелец (ФИО)', val: fio || '—' });
-    details.push({ name: 'Организация', val: extractCertField(subject, 'O') || '—' });
-    details.push({ name: 'Подразделение', val: extractCertField(subject, 'OU') || '—' });
-    details.push({ name: 'Должность', val: extractCertField(subject, 'T') || extractCertField(subject, 'TITLE') || '—' });
-    
-    
-    const inn = extractCertField(subject, 'INN') || extractCertField(subject, 'ИНН') || extractCertField(subject, '1.2.643.3.131.1.1');
-    const ogrn = extractCertField(subject, 'OGRN') || extractCertField(subject, 'ОГРН') || extractCertField(subject, 'OGRNIP');
-    const snils = extractCertField(subject, 'SNILS') || extractCertField(subject, 'СНИЛС') || extractCertField(subject, '1.2.643.100.1');
-    const email = extractCertField(subject, 'E') || extractCertField(subject, 'EMAIL');
-
-    if (inn) details.push({ name: 'ИНН', val: inn });
-    if (ogrn) details.push({ name: 'ОГРН / ОГРНИП', val: ogrn });
-    if (snils) details.push({ name: 'СНИЛС', val: snils });
-    if (email) details.push({ name: 'E-mail', val: email });
-
-    
-    const issuerCN = extractCertField(issuer, 'CN') || extractCertField(issuer, 'O') || issuer;
-    details.push({ name: 'Издатель (УЦ)', val: issuerCN || '—' });
-
-    
-    const validFrom = await safeGet(async () => new Date(await cert.ValidFromDate).toLocaleString('ru-RU'));
-    const validTo = await safeGet(async () => new Date(await cert.ValidToDate).toLocaleString('ru-RU'));
-    details.push({ name: 'Действителен с', val: validFrom });
-    details.push({ name: 'Действителен по', val: validTo });
-
-    
-    const serial = await safeGet(async () => await cert.SerialNumber);
-    const thumbprint = await safeGet(async () => await cert.Thumbprint);
-    details.push({ name: 'Серийный номер', val: serial });
-    details.push({ name: 'Отпечаток (Thumbprint)', val: thumbprint });
-
-    
-    const algoInfo = await safeGet(async () => {
-        const pubKey = await cert.PublicKey();
-        const algo = await pubKey.Algorithm;
-        const val = await algo.Value;
-        const name = await algo.FriendlyName;
-        return ALGO_MAP[val] || name || val;
-    });
-    details.push({ name: 'Открытый ключ', val: algoInfo });
-
-    return details;
-}
 
 
 function openDetailsModal(id) {
