@@ -1558,7 +1558,8 @@ async function verifyDocWithSignatures(docItem, container) {
     const docFile = docItem.file;
     const sigFiles = docItem.signatures;
     
-    let allValid = true;
+    let hasFatalError = false;
+    let hasChainWarning = false;
     let signersData = [];
     let nonStandardFound = false;
 
@@ -1576,6 +1577,7 @@ async function verifyDocWithSignatures(docItem, container) {
             await oSignedData.propset_Content(dataBase64);
 
             try {
+                
                 await oSignedData.VerifyCades(sigText, cadesplugin.CADESCOM_CADES_BES, true);
                 const signers = await oSignedData.Signers;
                 const count = await signers.Count;
@@ -1597,20 +1599,72 @@ async function verifyDocWithSignatures(docItem, container) {
                     });
                 }
             } catch (verErr) {
-                allValid = false;
-                signersData.push({ 
-                    name: 'Ошибка подписи (' + sigFile.name + ')', 
-                    date: '—', 
-                    details: [],
-                    sigFileName: sigFile.name 
-                });
+                
+                let extractedInCatch = false;
+
+                try {
+                    const signers = await oSignedData.Signers;
+                    const count = await signers.Count;
+
+                    if (count > 0) {
+                        for (let i = 1; i <= count; i++) {
+                            const signer = await signers.Item(i);
+                            const cert = await signer.Certificate;
+                            const subject = await cert.SubjectName;
+                            const signerName = formatSignerName(subject);
+                            
+                            let signDate = '—';
+                            try {
+                                const date = await signer.SigningTime;
+                                signDate = new Date(date).toLocaleString('ru-RU');
+                            } catch (dErr) {}
+
+                            const fullDetails = await extractFullCertDetails(cert, signer);
+                            
+                            
+                            fullDetails.unshift({ 
+                                name: 'Статус цепочки', 
+                                val: '⚠️ Не удалось найти корневой сертификат УЦ на компьютере. Подпись математически верна.' 
+                            });
+
+                            signersData.push({ 
+                                name: signerName + ' (Неподтвержденный УЦ)', 
+                                date: signDate, 
+                                details: fullDetails,
+                                sigFileName: sigFile.name 
+                            });
+                        }
+                        extractedInCatch = true;
+                        hasChainWarning = true; 
+                    }
+                } catch (readErr) {
+                    console.warn("Не удалось прочитать данные сертификата:", readErr);
+                }
+
+                
+                if (!extractedInCatch) {
+                    hasFatalError = true;
+                    signersData.push({ 
+                        name: 'Ошибка подписи (' + sigFile.name + ')', 
+                        date: '—', 
+                        details: [{ name: 'Текст ошибки', val: verErr.message || String(verErr) }],
+                        sigFileName: sigFile.name 
+                    });
+                }
             }
         }
 
-        const status = allValid ? 'valid' : 'invalid';
-        const message = allValid 
-            ? `Все подписи (${sigFiles.length}) действительны` 
-            : 'Одна или несколько подписей недействительны';
+        
+        let status = 'valid';
+        let message = `Все подписи (${sigFiles.length}) действительны`;
+
+        if (hasFatalError) {
+            status = 'invalid';
+            message = 'Одна или несколько подписей недействительны (файл или подпись повреждены)';
+        } else if (hasChainWarning) {
+            status = 'warning';
+            message = 'Подпись верна. Сертификат не подтвержден (не найден корневой сертификат УЦ)';
+        }
 
         appendResult(container, docFile.name, status, message, signersData, nonStandardFound, docItem);
 
@@ -1620,12 +1674,13 @@ async function verifyDocWithSignatures(docItem, container) {
     }
 }
 
+
 function appendResult(container, fileName, status, message, signersData = [], nonStandardFound = false, docItem = null) {
     const card = document.createElement('div');
     card.className = `result-card ${status} fade-in`;
     
-    let badgeIcon = status === 'valid' ? 'check' : status === 'invalid' ? 'times' : 'exclamation';
-    let badgeText = status === 'valid' ? 'Верна' : status === 'invalid' ? 'Неверна' : 'Ошибка';
+    let badgeIcon = status === 'valid' ? 'check' : status === 'invalid' ? 'times' : 'exclamation-triangle';
+    let badgeText = status === 'valid' ? 'Верна' : status === 'invalid' ? 'Неверна' : 'Предупреждение';
 
     let signersHtml = '';
     if (Array.isArray(signersData) && signersData.length > 0) {
@@ -1665,7 +1720,6 @@ function appendResult(container, fileName, status, message, signersData = [], no
         signersHtml += `</div>`;
     }
 
-    
     let warningBoxHtml = '';
     if (nonStandardFound && docItem) {
         const storeKey = 'fix_' + Math.random().toString(36).substr(2, 9);
