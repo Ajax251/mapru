@@ -9561,6 +9561,10 @@ map.events.add('dblclick', function (e) {
         <div class="custom-context-menu-item" id="theme-import-item">
             <i class="fas fa-file-upload"></i>Архив КПТ
         </div>
+        
+        <div class="custom-context-menu-item" id="load-overlapping-kpt-menu-item">
+    <i class="fas fa-layer-group" style="color: #10b981;"></i> Загрузить все КПТ под объектом 
+</div>
     </div>
 </div>
 
@@ -9926,6 +9930,32 @@ if (event.target.id === 'open-3d-clipped-menu-item') {
     }
 }
       
+      
+      if (event.target.id === 'load-overlapping-kpt-menu-item' || event.target.closest('#load-overlapping-kpt-menu-item')) {
+    contextMenu.style.display = 'none';
+    const lat = parseFloat(contextMenu.dataset.lat);
+    const lon = parseFloat(contextMenu.dataset.lon);
+
+    let targetPoly = selectedLine || findPolygonAtPoint(lat, lon);
+
+    if (!targetPoly) {
+        const candidatePolygons = polygons.filter(obj => obj instanceof ymaps.Polygon);
+        if (candidatePolygons.length === 1) {
+            targetPoly = candidatePolygons[0];
+        } else if (candidatePolygons.length > 1) {
+            showPolygonSelectionModal(candidatePolygons, (selectedObj) => {
+                if (selectedObj) loadQuartersOverlappingPolygon(selectedObj);
+            }, "Выберите объект для загрузки КПТ");
+            return;
+        }
+    }
+
+    if (targetPoly) {
+        loadQuartersOverlappingPolygon(targetPoly);
+    } else {
+        showNotification('Нарисуйте или выберите полигон на карте', 'warning');
+    }
+}
 
 if (event.target.id === 'quick-report-menu-item') {
             const lat = parseFloat(contextMenu.dataset.lat);
@@ -16906,6 +16936,183 @@ async function handleBatchLoad(selectedNumbers) {
 }
 
 
+
+async function loadQuartersOverlappingPolygon(targetObject) {
+    if (!targetObject) {
+        showNotification('Выберите полигон на карте', 'warning');
+        return;
+    }
+
+    showLoader('Поиск пересекаемых КПТ в БД Supabase...');
+
+    try {
+        let yandexRings = [];
+        if (targetObject instanceof ymaps.Polygon) {
+            yandexRings = targetObject.geometry.getCoordinates();
+        } else if (Array.isArray(targetObject)) {
+            yandexRings = targetObject;
+        } else {
+            throw new Error('Некорректный тип полигона.');
+        }
+
+        if (!yandexRings || yandexRings.length === 0) {
+            throw new Error('У полигона отсутствуют координаты.');
+        }
+
+        const outerRing = yandexRings[0];
+        let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+        const epsg3857Coords = [];
+
+        outerRing.forEach(coord => {
+            const [trueLat, trueLon] = getTrueWgs84Coords(coord[0], coord[1]);
+            const p = proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
+            epsg3857Coords.push(p);
+
+            minX = Math.min(minX, p[0]);
+            maxX = Math.max(maxX, p[0]);
+            minY = Math.min(minY, p[1]);
+            maxY = Math.max(maxY, p[1]);
+        });
+
+        if (epsg3857Coords.length > 0 && 
+           (epsg3857Coords[0][0] !== epsg3857Coords[epsg3857Coords.length - 1][0] || 
+            epsg3857Coords[0][1] !== epsg3857Coords[epsg3857Coords.length - 1][1])) {
+            epsg3857Coords.push(epsg3857Coords[0]);
+        }
+
+        const searchGeoJson = {
+            type: "Polygon",
+            coordinates: [epsg3857Coords]
+        };
+
+        let foundQuarterNumbers = [];
+
+        try {
+            const sqlQuery = `
+                SELECT quarter_number 
+                FROM cadastral_quarters 
+                WHERE ST_Intersects(
+                    geometry, 
+                    ST_SetSRID(ST_GeomFromGeoJSON('${JSON.stringify(searchGeoJson)}'), 3857)
+                );
+            `;
+
+            const { data, error } = await supabaseClient.rpc('execute_sql', { query: sqlQuery });
+
+            if (!error && Array.isArray(data)) {
+                foundQuarterNumbers = data.map(item => item.quarter_number).filter(Boolean);
+            } else {
+                console.warn('Ошибка SQL-запроса ST_Intersects, переходим на клиентский фолбэк:', error);
+            }
+        } catch (sqlErr) {
+            console.warn('Исключение при SQL запросе:', sqlErr);
+        }
+
+        if (foundQuarterNumbers.length === 0) {
+            const { data: allQuarters, error } = await supabaseClient
+                .from('cadastral_quarters')
+                .select('quarter_number, geometry');
+
+            if (!error && allQuarters) {
+                const searchTurfPoly = turf.polygon([epsg3857Coords]);
+
+                allQuarters.forEach(q => {
+                    if (q.geometry && q.geometry.coordinates) {
+                        try {
+                            const qTurfPoly = q.geometry.type === 'MultiPolygon' 
+                                ? turf.multiPolygon(q.geometry.coordinates)
+                                : turf.polygon(q.geometry.coordinates);
+
+                            if (turf.booleanIntersects(searchTurfPoly, qTurfPoly)) {
+                                foundQuarterNumbers.push(q.quarter_number);
+                            }
+                        } catch (e) {}
+                    }
+                });
+            }
+        }
+
+        if (foundQuarterNumbers.length === 0) {
+            showNotification('Пересекающиеся КПТ не найдены в базе Supabase.', 'warning');
+            hideLoader();
+            return;
+        }
+
+        showNotification(`Найдено пересекаемых КПТ: ${foundQuarterNumbers.length}. Загрузка с Mapruapp...`, 'info', 'cloud-download-alt', 4000);
+
+        let allLoadedFeatures = [];
+        let loadedQuartersCount = 0;
+        let missingQuarters = [];
+
+        for (let i = 0; i < foundQuarterNumbers.length; i++) {
+            const qNum = foundQuarterNumbers[i];
+            const filename = qNum.replace(/:/g, '_') + '.nspd';
+
+            showLoader(`Загрузка КПТ (${i + 1}/${foundQuarterNumbers.length}): ${qNum}...`);
+
+            const zipBlob = await fetchZipFromLocalServer('nspd', filename);
+
+            if (zipBlob) {
+                try {
+                    const { features } = await loadAndParseZipBlob(zipBlob);
+                    if (features && features.length > 0) {
+                        allLoadedFeatures.push(...features);
+                        loadedQuartersCount++;
+                    }
+                } catch (err) {
+                    console.error(`Ошибка чтения архива ${filename}:`, err);
+                    missingQuarters.push(qNum);
+                }
+            } else {
+                missingQuarters.push(qNum);
+            }
+        }
+
+        if (missingQuarters.length > 0) {
+            for (let i = 0; i < missingQuarters.length; i++) {
+                const qNum = missingQuarters[i];
+                showLoader(`Загрузка КПТ через NSPD (${i + 1}/${missingQuarters.length}): ${qNum}...`);
+                try {
+                    const { parcelFeatures } = await getAllParcelsInQuarter(null, null, true, qNum, false);
+                    if (parcelFeatures && parcelFeatures.length > 0) {
+                        allLoadedFeatures.push(...parcelFeatures);
+                        loadedQuartersCount++;
+                    }
+                } catch (nspdErr) {
+                    console.error(`Ошибка загрузки КПТ ${qNum} с NSPD:`, nspdErr);
+                }
+            }
+        }
+
+        if (allLoadedFeatures.length === 0) {
+            showNotification('Не удалось загрузить данные ни для одного из найденных КПТ.', 'error');
+            hideLoader();
+            return;
+        }
+
+        const uniqueFeaturesMap = new Map();
+        allLoadedFeatures.forEach(f => {
+            const cn = f.properties?.descr || f.properties?.options?.cad_num;
+            if (cn && !uniqueFeaturesMap.has(cn)) {
+                uniqueFeaturesMap.set(cn, f);
+            }
+        });
+
+        const uniqueFeaturesList = Array.from(uniqueFeaturesMap.values());
+
+        parcelFeaturesData = uniqueFeaturesList;
+        await processAndDrawParcels(uniqueFeaturesList, 'quarter');
+        populateSidebarWithParcels(uniqueFeaturesList, `Сводный (${loadedQuartersCount} КПТ)`);
+
+        showNotification(`Успешно загружено КПТ: ${loadedQuartersCount} из ${foundQuarterNumbers.length}. Загружено ЗУ: ${uniqueFeaturesList.length}`, 'success', 'check-circle', 5000);
+
+    } catch (error) {
+        console.error('Ошибка в loadQuartersOverlappingPolygon:', error);
+        showNotification(`Ошибка загрузки: ${error.message}`, 'error');
+    } finally {
+        hideLoader();
+    }
+}
 
 
 async function queryOKSInfo(latitude, longitude) {
@@ -26237,59 +26444,65 @@ async function getQuarterCadastre(lat, lon) {
     showLoader("Определение квартала...");
     
     try {
-        let quarterNumber = null;
-
-        const { x: pointX, y: pointY } = toEPSG3857(lat, lon);
-        const quarterInfoFromSupabase = await findQuarterByPointSupabase(pointX, pointY);
-
-        if (quarterInfoFromSupabase && quarterInfoFromSupabase.found_quarter_number) {
-            quarterNumber = quarterInfoFromSupabase.found_quarter_number;
+      
+        async function tryGetQuarterNumber(latitude, longitude) {
+            const cadastralData = await queryCadastralInfo(latitude, longitude);
+            if (!cadastralData || !cadastralData.features || cadastralData.features.length === 0) {
+                return null;
+            }
+            
+            const feature = cadastralData.features[0];
+            const cadastralNumber = feature.properties?.descr;
+            if (!cadastralNumber || cadastralNumber.split(':').length < 3) { 
+                return null;
+            }
+            return cadastralNumber.split(':').slice(0, 3).join(':');
         }
 
+       
+        let quarterNumber = await tryGetQuarterNumber(lat, lon);
+        let attempts = 0;
+        const maxAttempts = 3;
+        const squareWidthMeters = 50;
+
+     
         if (!quarterNumber) {
-            async function tryGetQuarterNumber(latitude, longitude) {
-                const cadastralData = await queryCadastralInfo(latitude, longitude);
-                if (!cadastralData || !cadastralData.features || cadastralData.features.length === 0) {
-                    return null;
-                }
-                
-                const feature = cadastralData.features[0];
-                const cadastralNumber = feature.properties?.descr;
-                if (!cadastralNumber || cadastralNumber.split(':').length < 3) { 
-                    return null;
-                }
-                return cadastralNumber.split(':').slice(0, 3).join(':');
-            }
+            const earthRadius = 6378137; 
+            const latRadians = lat * Math.PI / 180;
+            const squareWidthLat = squareWidthMeters / earthRadius * (180 / Math.PI);
+            const squareWidthLon = squareWidthMeters / (earthRadius * Math.cos(latRadians)) * (180 / Math.PI);
 
-            quarterNumber = await tryGetQuarterNumber(lat, lon);
+            while (!quarterNumber && attempts < maxAttempts) {
+                attempts++;
+                const offsetLat = (Math.random() - 0.5) * squareWidthLat;
+                const offsetLon = (Math.random() - 0.5) * squareWidthLon;
 
-            if (!quarterNumber) {
-                let attempts = 0;
-                const maxAttempts = 3;
-                const squareWidthMeters = 50;
-                const earthRadius = 6378137; 
-                const latRadians = lat * Math.PI / 180;
-                const squareWidthLat = squareWidthMeters / earthRadius * (180 / Math.PI);
-                const squareWidthLon = squareWidthMeters / (earthRadius * Math.cos(latRadians)) * (180 / Math.PI);
-
-                while (!quarterNumber && attempts < maxAttempts) {
-                    attempts++;
-                    const offsetLat = (Math.random() - 0.5) * squareWidthLat;
-                    const offsetLon = (Math.random() - 0.5) * squareWidthLon;
-
-                    quarterNumber = await tryGetQuarterNumber(lat + offsetLat, lon + offsetLon);
-                    if (!quarterNumber && attempts < maxAttempts) {
-                        await new Promise(resolve => setTimeout(resolve, 300));
-                    }
+                quarterNumber = await tryGetQuarterNumber(lat + offsetLat, lon + offsetLon);
+                if (!quarterNumber && attempts < maxAttempts) {
+                    await new Promise(resolve => setTimeout(resolve, 300));
                 }
             }
         }
 
+   
+        if (!quarterNumber) {
+            console.log('[getQuarterCadastre] Участок не найден. Запрос квартала по координатам через Supabase...');
+            const { x: pointX, y: pointY } = toEPSG3857(lat, lon);
+            const quarterInfoFromSupabase = await findQuarterByPointSupabase(pointX, pointY);
+
+            if (quarterInfoFromSupabase && quarterInfoFromSupabase.found_quarter_number) {
+                quarterNumber = quarterInfoFromSupabase.found_quarter_number;
+                console.log(`[getQuarterCadastre] Квартал успешно определен через Supabase: ${quarterNumber}`);
+            }
+        }
+
+       
         if (!quarterNumber) {
             showNotification('Не удалось определить кадастровый квартал в этой точке', 'error', 'exclamation-circle');
             return;
         }
 
+ 
         showLoader(`Загрузка границ квартала ${quarterNumber}...`);
         await drawCadastralQuarter(quarterNumber);
 

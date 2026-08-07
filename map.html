@@ -26234,172 +26234,76 @@ async function findParcelInArchive(targetCadastralNumber) {
 
 
 async function getQuarterCadastre(lat, lon) {
+    showLoader("Определение квартала...");
+    
     try {
-        
-        async function tryGetQuarterData(latitude, longitude) {
+      
+        async function tryGetQuarterNumber(latitude, longitude) {
             const cadastralData = await queryCadastralInfo(latitude, longitude);
             if (!cadastralData || !cadastralData.features || cadastralData.features.length === 0) {
                 return null;
             }
             
             const feature = cadastralData.features[0];
-            const cadastralNumber = feature.properties.descr;
+            const cadastralNumber = feature.properties?.descr;
             if (!cadastralNumber || cadastralNumber.split(':').length < 3) { 
-                 return null;
-            }
-            const quarterNumber = cadastralNumber.split(':').slice(0, 3).join(':');
-            
-            const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=2&query=${quarterNumber}`;
-           const response = await fetchNspd(url);
-            if (!response.ok) return null; 
-            const quarterData = await response.json();
-            
-            if (!quarterData || !quarterData.data || !quarterData.data.features || quarterData.data.features.length === 0) {
                 return null;
             }
-            
-            return quarterData.data.features[0];
+            return cadastralNumber.split(':').slice(0, 3).join(':');
         }
 
-        
-        let quarterFeature = await tryGetQuarterData(lat, lon);
-        let found = !!quarterFeature;
+       
+        let quarterNumber = await tryGetQuarterNumber(lat, lon);
         let attempts = 0;
         const maxAttempts = 3;
-        const stepMeters = 10; 
-        const squareWidthMeters = 50; 
-        const timeoutMs = 500;
+        const squareWidthMeters = 50;
 
-        
-        if (!found) {
+     
+        if (!quarterNumber) {
             const earthRadius = 6378137; 
             const latRadians = lat * Math.PI / 180;
-            
-            
             const squareWidthLat = squareWidthMeters / earthRadius * (180 / Math.PI);
             const squareWidthLon = squareWidthMeters / (earthRadius * Math.cos(latRadians)) * (180 / Math.PI);
 
-            while (!found && attempts < maxAttempts) {
+            while (!quarterNumber && attempts < maxAttempts) {
                 attempts++;
-                
                 const offsetLat = (Math.random() - 0.5) * squareWidthLat;
                 const offsetLon = (Math.random() - 0.5) * squareWidthLon;
-                const newLat = lat + offsetLat;
-                const newLon = lon + offsetLon;
 
-                console.log(`Поиск квартала ${attempts}: lat=${newLat.toFixed(6)}, lon=${newLon.toFixed(6)}`);
-                
-                quarterFeature = await tryGetQuarterData(newLat, newLon);
-                found = !!quarterFeature;
-
-                if (!found && attempts < maxAttempts) {
-                    await new Promise(resolve => setTimeout(resolve, timeoutMs));
+                quarterNumber = await tryGetQuarterNumber(lat + offsetLat, lon + offsetLon);
+                if (!quarterNumber && attempts < maxAttempts) {
+                    await new Promise(resolve => setTimeout(resolve, 300));
                 }
             }
         }
 
-        
-        if (!found) {
-           showNotification('Данные не найдены, выберите для клика место с полигоном', 'error', 'exclamation-circle');
+   
+        if (!quarterNumber) {
+            console.log('[getQuarterCadastre] Участок не найден. Запрос квартала по координатам через Supabase...');
+            const { x: pointX, y: pointY } = toEPSG3857(lat, lon);
+            const quarterInfoFromSupabase = await findQuarterByPointSupabase(pointX, pointY);
+
+            if (quarterInfoFromSupabase && quarterInfoFromSupabase.found_quarter_number) {
+                quarterNumber = quarterInfoFromSupabase.found_quarter_number;
+                console.log(`[getQuarterCadastre] Квартал успешно определен через Supabase: ${quarterNumber}`);
+            }
+        }
+
+       
+        if (!quarterNumber) {
+            showNotification('Не удалось определить кадастровый квартал в этой точке', 'error', 'exclamation-circle');
             return;
         }
 
-        
-        if (quarterFeature.geometry && quarterFeature.geometry.coordinates) {
-            const coordinates = quarterFeature.geometry.coordinates[0].map(coord => {
-                const point = proj4('EPSG:3857', 'EPSG:4326', coord);
-                return [point[1], point[0]]; 
-            });
+ 
+        showLoader(`Загрузка границ квартала ${quarterNumber}...`);
+        await drawCadastralQuarter(quarterNumber);
 
-            const offsetCoordinates = coordinates.map(coord => [
-                coord[0] - mapOffsetY * 0.000008983,
-                coord[1] - mapOffsetX * 0.000008983
-            ]);
-
-            const polygon = new ymaps.Polygon([offsetCoordinates], {}, {
-                strokeColor: '#FF0000',
-                strokeWidth: polygonStyle.width,
-                strokeOpacity: 0.8,
-                fillColor: '#00000000',
-                hintEnabled: false,
-                hasBalloon: false,
-                interactivityModel: 'default#transparent'
-            });
-
-            map.geoObjects.add(polygon);
-            polygons.push(polygon);
-
-            const bounds = polygon.geometry.getBounds();
-            const centerGeo = [
-                (bounds[0][0] + bounds[1][0]) / 2,
-                (bounds[0][1] + bounds[1][1]) / 2
-            ];
-
-            getAddressByCoords(centerGeo).then(address => {
-                document.getElementById('city-name-display').innerHTML = address;
-            });
-
-            const center3857 = proj4("EPSG:4326", "EPSG:3857", [centerGeo[1], centerGeo[0]]);
-
-            lastPolygonCenter = {
-                geo: {
-                    lat: centerGeo[0],
-                    lon: centerGeo[1]
-                },
-                epsg3857: {
-                    x: center3857[0],
-                    y: center3857[1]
-                },
-                native: {
-                    x: quarterFeature.geometry.coordinates[0][0][0],
-                    y: quarterFeature.geometry.coordinates[0][0][1]
-                }
-            };
-
-            
-            if (quarterFeature.properties && quarterFeature.properties.descr) {
-                currentQuarterNumber = quarterFeature.properties.descr;
-                console.log(`Current quarter updated by getQuarterCadastre: ${currentQuarterNumber}`);
-            }
-            
-
-            const quarterText = new ymaps.Placemark([
-                centerGeo[0] - mapOffsetY * 0.000008983,
-                centerGeo[1] - mapOffsetX * 0.000008983
-            ], {
-                iconContent: quarterFeature.properties.descr
-            }, {
-                preset: 'islands#redStretchyIcon'
-            });
-
-            map.geoObjects.add(quarterText);
-            polygons.push(quarterText);
-
-            let combinedBoundsInternal = null; 
-            polygons.forEach(obj => {
-                const objBounds = obj.geometry.getBounds();
-                if (!combinedBoundsInternal) {
-                    combinedBoundsInternal = objBounds;
-                } else {
-                    combinedBoundsInternal[0][0] = Math.min(combinedBoundsInternal[0][0], objBounds[0][0]);
-                    combinedBoundsInternal[0][1] = Math.min(combinedBoundsInternal[0][1], objBounds[0][1]);
-                    combinedBoundsInternal[1][0] = Math.max(combinedBoundsInternal[1][0], objBounds[1][0]);
-                    combinedBoundsInternal[1][1] = Math.max(combinedBoundsInternal[1][1], objBounds[1][1]);
-                }
-            });
-
-            if (combinedBoundsInternal) {
-                map.setBounds(combinedBoundsInternal, {
-                    checkZoomRange: true,
-                    duration: 200
-                });
-            }
-
-            showNotification(`Квартал ${quarterFeature.properties.descr}`, 'success', 'check-circle');
-        }
     } catch (error) {
         console.error('Ошибка при получении квартала:', error);
         showNotification('Ошибка подключения, попробуйте позже', 'error', 'exclamation-circle');
+    } finally {
+        hideLoader();
     }
 }
 
