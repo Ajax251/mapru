@@ -16937,9 +16937,14 @@ async function handleBatchLoad(selectedNumbers) {
 
 
 
+
 async function loadQuartersOverlappingPolygon(targetObject) {
     if (!targetObject) {
         showNotification('Выберите полигон на карте', 'warning');
+        return;
+    }
+
+    if (typeof isAreaLimitExceeded === 'function' && isAreaLimitExceeded(targetObject)) {
         return;
     }
 
@@ -16955,7 +16960,7 @@ async function loadQuartersOverlappingPolygon(targetObject) {
             throw new Error('Некорректный тип полигона.');
         }
 
-        if (!yandexRings || yandexRings.length === 0) {
+        if (!yandexRings || !yandexRings[0] || yandexRings[0].length === 0) {
             throw new Error('У полигона отсутствуют координаты.');
         }
 
@@ -16985,22 +16990,19 @@ async function loadQuartersOverlappingPolygon(targetObject) {
             coordinates: [epsg3857Coords]
         };
 
-        let foundQuarterNumbers = [];
+        const foundQuartersMap = new Map();
 
         try {
-            const sqlQuery = `
-                SELECT quarter_number 
-                FROM cadastral_quarters 
-                WHERE ST_Intersects(
-                    geometry, 
-                    ST_SetSRID(ST_GeomFromGeoJSON('${JSON.stringify(searchGeoJson)}'), 3857)
-                );
-            `;
+            const sqlQuery = `SELECT quarter_number, ST_AsGeoJSON(geometry)::json as geometry FROM cadastral_quarters WHERE ST_Intersects(geometry, ST_SetSRID(ST_GeomFromGeoJSON('${JSON.stringify(searchGeoJson)}'), 3857))`;
 
             const { data, error } = await supabaseClient.rpc('execute_sql', { query: sqlQuery });
 
             if (!error && Array.isArray(data)) {
-                foundQuarterNumbers = data.map(item => item.quarter_number).filter(Boolean);
+                data.forEach(item => {
+                    if (item.quarter_number) {
+                        foundQuartersMap.set(item.quarter_number, item.geometry);
+                    }
+                });
             } else {
                 console.warn('Ошибка SQL-запроса ST_Intersects, переходим на клиентский фолбэк:', error);
             }
@@ -17008,7 +17010,7 @@ async function loadQuartersOverlappingPolygon(targetObject) {
             console.warn('Исключение при SQL запросе:', sqlErr);
         }
 
-        if (foundQuarterNumbers.length === 0) {
+        if (foundQuartersMap.size === 0) {
             const { data: allQuarters, error } = await supabaseClient
                 .from('cadastral_quarters')
                 .select('quarter_number, geometry');
@@ -17024,7 +17026,7 @@ async function loadQuartersOverlappingPolygon(targetObject) {
                                 : turf.polygon(q.geometry.coordinates);
 
                             if (turf.booleanIntersects(searchTurfPoly, qTurfPoly)) {
-                                foundQuarterNumbers.push(q.quarter_number);
+                                foundQuartersMap.set(q.quarter_number, q.geometry);
                             }
                         } catch (e) {}
                     }
@@ -17032,13 +17034,154 @@ async function loadQuartersOverlappingPolygon(targetObject) {
             }
         }
 
-        if (foundQuarterNumbers.length === 0) {
+        if (foundQuartersMap.size === 0) {
             showNotification('Пересекающиеся КПТ не найдены в базе Supabase.', 'warning');
             hideLoader();
             return;
         }
 
-        showNotification(`Найдено пересекаемых КПТ: ${foundQuarterNumbers.length}. Загрузка с Mapruapp...`, 'info', 'cloud-download-alt', 4000);
+        const finalQuartersMap = await analyzeCoverageAndFillMissing(targetObject, foundQuartersMap);
+        const foundQuarterNumbers = Array.from(finalQuartersMap.keys());
+
+        hideLoader();
+
+        const loadMode = await new Promise((resolve) => {
+            const modal = document.createElement('div');
+            modal.style.cssText = `
+                display: block !important;
+                position: fixed;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                width: 420px;
+                max-width: 92vw;
+                z-index: 20000;
+                background: linear-gradient(135deg, #ffffff, #f0f4f8);
+                border: 1px solid #cbd5e1;
+                box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.25);
+                border-radius: 16px;
+                padding: 25px;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            `;
+
+            modal.innerHTML = `
+                <div style="display: flex; flex-direction: column; align-items: center; gap: 15px; text-align: center;">
+                    <h3 style="margin: 0; font-size: 1.25rem; color: #1e3a8a; font-weight: 600;">Найдено КПТ: ${foundQuarterNumbers.length}</h3>
+                    <p style="margin: 0; font-size: 0.9rem; color: #475569;">Выберите режим загрузки объектов:</p>
+
+                    <div style="display: flex; flex-direction: column; gap: 10px; width: 100%; margin-top: 5px;">
+                        <button id="opt-borders-only" style="
+                            width: 100%; padding: 12px; border: none; border-radius: 8px;
+                            background: linear-gradient(135deg, #3b82f6, #1d4ed8); color: white;
+                            font-size: 0.9rem; font-weight: 600; cursor: pointer;
+                            box-shadow: 0 2px 4px rgba(0,0,0,0.1); transition: all 0.2s;
+                        "><i class="fas fa-border-style"></i> Только границы квартала</button>
+
+                        <button id="opt-borders-colored" style="
+                            width: 100%; padding: 12px; border: none; border-radius: 8px;
+                            background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: white;
+                            font-size: 0.9rem; font-weight: 600; cursor: pointer;
+                            box-shadow: 0 2px 4px rgba(0,0,0,0.1); transition: all 0.2s;
+                        "><i class="fas fa-palette"></i> Только границы квартала (цвет)</button>
+
+                        <button id="opt-borders-and-parcels" style="
+                            width: 100%; padding: 12px; border: none; border-radius: 8px;
+                            background: linear-gradient(135deg, #10b981, #047857); color: white;
+                            font-size: 0.9rem; font-weight: 600; cursor: pointer;
+                            box-shadow: 0 2px 4px rgba(0,0,0,0.1); transition: all 0.2s;
+                        "><i class="fas fa-layer-group"></i> Границы квартала и ЗУ</button>
+
+                        <button id="opt-copy-cadastral" style="
+                            width: 100%; padding: 10px; border: 1px solid #3b82f6; border-radius: 8px;
+                            background: #eff6ff; color: #1d4ed8; font-size: 0.88rem;
+                            font-weight: 600; cursor: pointer; margin-top: 3px;
+                        "><i class="fas fa-copy"></i> Скопировать кадастровые номера</button>
+
+                        <button id="opt-cancel" style="
+                            width: 100%; padding: 10px; border: 1px solid #cbd5e1; border-radius: 8px;
+                            background: #ffffff; color: #64748b; font-size: 0.88rem;
+                            font-weight: 600; cursor: pointer; margin-top: 2px;
+                        ">Отмена</button>
+                    </div>
+                </div>
+            `;
+
+            document.body.appendChild(modal);
+
+            const close = (val) => {
+                if (modal.parentNode) modal.parentNode.removeChild(modal);
+                resolve(val);
+            };
+
+            modal.querySelector('#opt-borders-only').onclick = () => close('borders_only');
+            modal.querySelector('#opt-borders-colored').onclick = () => close('borders_colored');
+            modal.querySelector('#opt-borders-and-parcels').onclick = () => close('borders_and_parcels');
+
+            modal.querySelector('#opt-copy-cadastral').onclick = () => {
+                const textToCopy = foundQuarterNumbers.join('\n');
+                navigator.clipboard.writeText(textToCopy).then(() => {
+                    showNotification(`Скопировано ${foundQuarterNumbers.length} номеров кварталов`, 'success', 'check-circle');
+                }).catch(() => {
+                    showNotification('Ошибка копирования', 'error');
+                });
+            };
+
+            modal.querySelector('#opt-cancel').onclick = () => close(null);
+
+            modal.onclick = (e) => {
+                if (e.target === modal) close(null);
+            };
+        });
+
+        if (!loadMode) {
+            return;
+        }
+
+        showLoader('Отрисовка КПТ...');
+
+        if (loadMode === 'borders_only') {
+            for (let i = 0; i < foundQuarterNumbers.length; i++) {
+                const qNum = foundQuarterNumbers[i];
+                const qGeom = finalQuartersMap.get(qNum);
+                
+                if (qGeom) {
+                    drawQuarterFromGeoJson(qNum, qGeom, '#FF0000');
+                } else {
+                    await drawCadastralQuarter(qNum, '#FF0000');
+                }
+            }
+            showNotification(`Отрисованы границы ${foundQuarterNumbers.length} КПТ`, 'success', 'check-circle');
+            return;
+        }
+
+        if (loadMode === 'borders_colored') {
+            for (let i = 0; i < foundQuarterNumbers.length; i++) {
+                const qNum = foundQuarterNumbers[i];
+                const qGeom = finalQuartersMap.get(qNum);
+                const hue = Math.floor((i * (360 / foundQuarterNumbers.length) + Math.random() * 20) % 360);
+                const randomColor = hslToHex(hue, 85, 50);
+
+                if (qGeom) {
+                    drawQuarterFromGeoJson(qNum, qGeom, randomColor);
+                } else {
+                    await drawCadastralQuarter(qNum, randomColor);
+                }
+            }
+            showNotification(`Отрисованы цветные границы ${foundQuarterNumbers.length} КПТ`, 'success', 'check-circle');
+            return;
+        }
+
+        showNotification(`Загрузка КПТ и ЗУ (${foundQuarterNumbers.length} шт.)...`, 'info', 'cloud-download-alt', 4000);
+
+        for (let i = 0; i < foundQuarterNumbers.length; i++) {
+            const qNum = foundQuarterNumbers[i];
+            const qGeom = finalQuartersMap.get(qNum);
+            if (qGeom) {
+                drawQuarterFromGeoJson(qNum, qGeom, '#FF0000');
+            } else {
+                drawCadastralQuarter(qNum, '#FF0000');
+            }
+        }
 
         let allLoadedFeatures = [];
         let loadedQuartersCount = 0;
@@ -17071,21 +17214,21 @@ async function loadQuartersOverlappingPolygon(targetObject) {
         if (missingQuarters.length > 0) {
             for (let i = 0; i < missingQuarters.length; i++) {
                 const qNum = missingQuarters[i];
-                showLoader(`Загрузка КПТ через NSPD (${i + 1}/${missingQuarters.length}): ${qNum}...`);
+                showLoader(`Загрузка КПТ онлайн (${i + 1}/${missingQuarters.length}): ${qNum}...`);
                 try {
-                    const { parcelFeatures } = await getAllParcelsInQuarter(null, null, true, qNum, false);
+                    const { parcelFeatures } = await getAllParcelsInQuarter(null, null, true, qNum, true);
                     if (parcelFeatures && parcelFeatures.length > 0) {
                         allLoadedFeatures.push(...parcelFeatures);
                         loadedQuartersCount++;
                     }
                 } catch (nspdErr) {
-                    console.error(`Ошибка загрузки КПТ ${qNum} с NSPD:`, nspdErr);
+                    console.error(`Ошибка загрузки КПТ ${qNum} онлайн:`, nspdErr);
                 }
             }
         }
 
         if (allLoadedFeatures.length === 0) {
-            showNotification('Не удалось загрузить данные ни для одного из найденных КПТ.', 'error');
+            showNotification('Границы кварталов загружены, но файлы ЗУ отсутствуют.', 'warning');
             hideLoader();
             return;
         }
@@ -17114,6 +17257,83 @@ async function loadQuartersOverlappingPolygon(targetObject) {
     }
 }
 
+
+function drawQuarterFromGeoJson(quarterNumber, geometry, customColor = null) {
+    if (!geometry || !geometry.coordinates) return null;
+
+    try {
+        const geometryType = geometry.type;
+        const polygonsCoords = (geometryType === 'Polygon') ? [geometry.coordinates] : geometry.coordinates;
+        const yandexPolygonsCoords = [];
+
+        polygonsCoords.forEach(singlePolygonRings => {
+            const allProcessedRings = singlePolygonRings.map(ring => {
+                if (!Array.isArray(ring) || ring.length < 3) return null;
+                const coords = ring.map(coord => {
+                    const p = (Math.abs(coord[0]) > 200 || Math.abs(coord[1]) > 200) 
+                        ? proj4('EPSG:3857', 'EPSG:4326', coord) 
+                        : coord;
+                    return [p[1], p[0]];
+                });
+                return coords.map(c => [
+                    c[0] - mapOffsetY * 0.000008983,
+                    c[1] - mapOffsetX * 0.000008983
+                ]);
+            }).filter(r => r !== null);
+
+            if (allProcessedRings.length > 0) {
+                yandexPolygonsCoords.push(...allProcessedRings);
+            }
+        });
+
+        if (yandexPolygonsCoords.length === 0) return null;
+
+        const strokeColor = customColor || '#FF0000';
+        const fillColor = customColor ? `${customColor}33` : '#00000000';
+
+        const polygon = new ymaps.Polygon(yandexPolygonsCoords, {
+            cadastralNumber: quarterNumber,
+            isQuarterBoundary: true
+        }, {
+            strokeColor: strokeColor,
+            strokeWidth: polygonStyle.width || 2,
+            strokeOpacity: 0.9,
+            fillColor: fillColor,
+            fillRule: 'evenodd',
+            hintEnabled: false,
+            hasBalloon: false,
+            interactivityModel: 'default#transparent'
+        });
+
+        map.geoObjects.add(polygon);
+        polygons.push(polygon);
+
+        const bounds = polygon.geometry.getBounds();
+        if (bounds) {
+            const centerGeo = [
+                (bounds[0][0] + bounds[1][0]) / 2,
+                (bounds[0][1] + bounds[1][1]) / 2
+            ];
+
+            const quarterText = new ymaps.Placemark([
+                centerGeo[0] - mapOffsetY * 0.000008983,
+                centerGeo[1] - mapOffsetX * 0.000008983
+            ], {
+                iconContent: quarterNumber
+            }, {
+                preset: 'islands#redStretchyIcon'
+            });
+
+            map.geoObjects.add(quarterText);
+            polygons.push(quarterText);
+        }
+
+        return polygon;
+    } catch (e) {
+        console.error(`Ошибка быстрого рисования квартала ${quarterNumber}:`, e);
+        return null;
+    }
+}
 
 async function queryOKSInfo(latitude, longitude) {
     const centerPoint = toEPSG3857(latitude, longitude);
@@ -21553,16 +21773,269 @@ function isCadastralQuarter(text) {
     return pattern.test(text.trim());
 }
 
-
-async function drawCadastralQuarter(quarterNumber) {
+async function analyzeCoverageAndFillMissing(targetObject, foundQuartersMap) {
     try {
-        const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=2&query=${quarterNumber}`;
-       const response = await fetchNspd(url);
+        let yandexRings = targetObject instanceof ymaps.Polygon 
+            ? targetObject.geometry.getCoordinates() 
+            : targetObject;
+
+        if (!yandexRings || !yandexRings[0] || yandexRings[0].length < 3) return foundQuartersMap;
+
+        const wgsCoords = yandexRings[0].map(coord => {
+            const [trueLat, trueLon] = getTrueWgs84Coords(coord[0], coord[1]);
+            return [trueLon, trueLat];
+        });
+
+        if (wgsCoords[0][0] !== wgsCoords[wgsCoords.length - 1][0] || wgsCoords[0][1] !== wgsCoords[wgsCoords.length - 1][1]) {
+            wgsCoords.push(wgsCoords[0]);
+        }
+
+        const targetTurfPoly = turf.polygon([wgsCoords]);
+        const targetArea = turf.area(targetTurfPoly);
+
+        if (targetArea <= 0) return foundQuartersMap;
+
+        const loadedTurfPolys = [];
+        foundQuartersMap.forEach((geom) => {
+            if (geom && geom.coordinates) {
+                try {
+                    const convertRingToWgs = (ring) => ring.map(c => proj4('EPSG:3857', 'EPSG:4326', c));
+                    if (geom.type === 'Polygon') {
+                        loadedTurfPolys.push(turf.polygon(geom.coordinates.map(convertRingToWgs)));
+                    } else if (geom.type === 'MultiPolygon') {
+                        geom.coordinates.forEach(poly => {
+                            loadedTurfPolys.push(turf.polygon(poly.map(convertRingToWgs)));
+                        });
+                    }
+                } catch(e) {}
+            }
+        });
+
+        if (loadedTurfPolys.length === 0) return foundQuartersMap;
+
+        let combinedQuarters = loadedTurfPolys[0];
+        for (let i = 1; i < loadedTurfPolys.length; i++) {
+            try {
+                combinedQuarters = turf.union(turf.featureCollection([combinedQuarters, loadedTurfPolys[i]]));
+            } catch(e) {}
+        }
+
+        let diff = null;
+        try {
+            diff = turf.difference(turf.featureCollection([targetTurfPoly, combinedQuarters]));
+        } catch(e) {}
+
+        if (!diff || !diff.geometry) {
+            showNotification('Полигон полностью покрыт найденными КПТ (100%)', 'success', 'check-circle');
+            return foundQuartersMap;
+        }
+
+        const uncollectedFrags = diff.geometry.type === 'Polygon' ? [diff.geometry.coordinates] 
+            : (diff.geometry.type === 'MultiPolygon' ? diff.geometry.coordinates : []);
+
+        const significantFrags = [];
+        let uncoveredAreaSum = 0;
+
+        uncollectedFrags.forEach(ringCoords => {
+            try {
+                const fragPoly = turf.polygon(ringCoords);
+                const fragArea = turf.area(fragPoly);
+                if (fragArea > 1.0 && (fragArea / targetArea) > 0.0005) {
+                    significantFrags.push(fragPoly);
+                    uncoveredAreaSum += fragArea;
+                }
+            } catch(e) {}
+        });
+
+        if (significantFrags.length === 0) {
+            showNotification('Полигон полностью покрыт имеющимися КПТ (зазоры < 1 м² проигнорированы)', 'success', 'check-circle');
+            return foundQuartersMap;
+        }
+
+        const coveragePercent = Math.max(0, Math.min(99, Math.round(((targetArea - uncoveredAreaSum) / targetArea) * 100)));
+        showNotification(`Покрытие из БД Supabase: ${coveragePercent}%. Поиск отсутствующих КПТ (${significantFrags.length} зоны)...`, 'warning', 'search', 5000);
+
+        let nspdRequestCount = 0;
+        let userAborted = false;
+
+        for (let i = 0; i < significantFrags.length; i++) {
+            if (userAborted) break;
+
+            if (nspdRequestCount > 0 && nspdRequestCount % 3 === 0) {
+                hideLoader();
+                const remainingCount = significantFrags.length - i;
+
+                const shouldContinue = await new Promise((resolve) => {
+                    const modal = document.createElement('div');
+                    modal.style.cssText = `
+                        display: block !important;
+                        position: fixed;
+                        top: 50%;
+                        left: 50%;
+                        transform: translate(-50%, -50%);
+                        width: 380px;
+                        max-width: 90vw;
+                        z-index: 20000;
+                        background: linear-gradient(135deg, #ffffff, #f0f4f8);
+                        border: 1px solid #cbd5e1;
+                        box-shadow: 0 10px 25px -5px rgba(0, 0, 0, 0.25);
+                        border-radius: 16px;
+                        padding: 25px;
+                        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                        text-align: center;
+                    `;
+
+                    modal.innerHTML = `
+                        <div style="display: flex; flex-direction: column; align-items: center; gap: 15px;">
+                            <div style="width: 50px; height: 50px; border-radius: 50%; background: #fef3c7; color: #d97706; display: flex; align-items: center; justify-content: center; font-size: 1.4rem;">
+                                <i class="fas fa-pause-circle"></i>
+                            </div>
+                            <h3 style="margin: 0; font-size: 1.15rem; color: #1e3a8a; font-weight: 600;">Лимит запросов (3/3)</h3>
+                            <p style="margin: 0; font-size: 0.88rem; color: #475569; line-height: 1.4;">
+                                Выполнено 3 запроса к онлайн-базе. Осталось неисследованных зон: <b>${remainingCount}</b>.<br>Продолжить поиск?
+                            </p>
+                            <div style="display: flex; gap: 10px; width: 100%; margin-top: 5px;">
+                                <button id="btn-continue-nspd" style="
+                                    flex: 1; padding: 11px; border: none; border-radius: 8px;
+                                    background: linear-gradient(135deg, #10b981, #047857); color: white;
+                                    font-size: 0.9rem; font-weight: 600; cursor: pointer;
+                                    box-shadow: 0 2px 4px rgba(0,0,0,0.1);
+                                "><i class="fas fa-play"></i> Продолжить</button>
+                                <button id="btn-stop-nspd" style="
+                                    flex: 1; padding: 11px; border: 1px solid #cbd5e1; border-radius: 8px;
+                                    background: #ffffff; color: #64748b; font-size: 0.9rem;
+                                    font-weight: 600; cursor: pointer;
+                                ">Завершить</button>
+                            </div>
+                        </div>
+                    `;
+
+                    document.body.appendChild(modal);
+
+                    const close = (val) => {
+                        if (modal.parentNode) modal.parentNode.removeChild(modal);
+                        resolve(val);
+                    };
+
+                    modal.querySelector('#btn-continue-nspd').onclick = () => close(true);
+                    modal.querySelector('#btn-stop-nspd').onclick = () => close(false);
+                    modal.onclick = (e) => { if (e.target === modal) close(false); };
+                });
+
+                if (!shouldContinue) {
+                    userAborted = true;
+                    break;
+                }
+            }
+
+            const frag = significantFrags[i];
+            const ptOnFeature = turf.pointOnFeature(frag);
+            const [lon, lat] = ptOnFeature.geometry.coordinates;
+
+            showLoader(`Запрос ЕГРН для зоны ${i + 1}/${significantFrags.length}...`);
+
+            const mapLat = lat - mapOffsetY * 0.000008983;
+            const mapLon = lon - mapOffsetX * 0.000008983;
+
+            nspdRequestCount++;
+            const cadastralInfo = await queryCadastralInfo(mapLat, mapLon);
+
+            if (cadastralInfo && cadastralInfo.features && cadastralInfo.features.length > 0) {
+                const cn = cadastralInfo.features[0].properties?.descr;
+                if (cn && cn.includes(':')) {
+                    const qNum = cn.split(':').slice(0, 3).join(':');
+                    if (qNum && !foundQuartersMap.has(qNum)) {
+                        foundQuartersMap.set(qNum, null);
+                        showNotification(`Найден отсутствующий КПТ: ${qNum}`, 'info');
+
+                        const qFeature = await fetchNSPDQuarterGeometry(qNum);
+                        if (qFeature && qFeature.geometry) {
+                            foundQuartersMap.set(qNum, qFeature.geometry);
+                            await saveQuarterGeometryToSupabase(qNum, qFeature.geometry);
+                        }
+                    }
+                }
+            }
+
+            await new Promise(r => setTimeout(r, 1000));
+        }
+
+        const finalLoadedTurfPolys = [];
+        foundQuartersMap.forEach((geom) => {
+            if (geom && geom.coordinates) {
+                try {
+                    const convertRingToWgs = (ring) => ring.map(c => proj4('EPSG:3857', 'EPSG:4326', c));
+                    if (geom.type === 'Polygon') {
+                        finalLoadedTurfPolys.push(turf.polygon(geom.coordinates.map(convertRingToWgs)));
+                    } else if (geom.type === 'MultiPolygon') {
+                        geom.coordinates.forEach(poly => {
+                            finalLoadedTurfPolys.push(turf.polygon(poly.map(convertRingToWgs)));
+                        });
+                    }
+                } catch(e) {}
+            }
+        });
+
+        if (finalLoadedTurfPolys.length > 0) {
+            let finalCombined = finalLoadedTurfPolys[0];
+            for (let i = 1; i < finalLoadedTurfPolys.length; i++) {
+                try {
+                    finalCombined = turf.union(turf.featureCollection([finalCombined, finalLoadedTurfPolys[i]]));
+                } catch(e) {}
+            }
+
+            let finalDiff = null;
+            try {
+                finalDiff = turf.difference(turf.featureCollection([targetTurfPoly, finalCombined]));
+            } catch(e) {}
+
+            if (finalDiff && finalDiff.geometry) {
+                const finalFrags = finalDiff.geometry.type === 'Polygon' ? [finalDiff.geometry.coordinates] 
+                    : (finalDiff.geometry.type === 'MultiPolygon' ? finalDiff.geometry.coordinates : []);
+                
+                let finalUncoveredArea = 0;
+                finalFrags.forEach(ringCoords => {
+                    try {
+                        const fragArea = turf.area(turf.polygon(ringCoords));
+                        if (fragArea > 1.0) finalUncoveredArea += fragArea;
+                    } catch(e) {}
+                });
+
+                if (finalUncoveredArea > 1.0) {
+                    const percentLeft = Math.round((finalUncoveredArea / targetArea) * 100);
+                    showNotification(`Внимание: Не удалось найти все кварталы для полного покрытия! Непокрыто ~${Math.round(finalUncoveredArea).toLocaleString('ru-RU')} м² (${percentLeft}%).`, 'warning', 'exclamation-triangle', 8000);
+                }
+            }
+        }
+
+        return foundQuartersMap;
+
+    } catch (err) {
+        console.error("Ошибка при анализе покрытия:", err);
+        return foundQuartersMap;
+    }
+}
+
+
+async function fetchNSPDQuarterGeometry(qn) {
+    const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=2&query=${encodeURIComponent(qn)}`;
+    try {
+        const response = await fetchNspd(url);
+        const data = await response.json();
+        if (data?.data?.features?.length > 0) return data.data.features[0];
+    } catch (error) {}
+    return null;
+}
+
+
+async function drawCadastralQuarter(quarterNumber, customColor = null) {
+    try {
+        const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=2&query=${encodeURIComponent(quarterNumber)}`;
+        const response = await fetchNspd(url);
         const quarterData = await response.json();
 
         if (!quarterData || !quarterData.data || !quarterData.data.features || quarterData.data.features.length === 0) {
-            showNotification('Данные о квартале не найдены', 'error', 'exclamation-circle');
-            return;
+            return null;
         }
 
         const quarterFeature = quarterData.data.features[0];
@@ -21578,11 +22051,17 @@ async function drawCadastralQuarter(quarterNumber) {
                 coord[1] - mapOffsetX * 0.000008983
             ]);
 
-            const polygon = new ymaps.Polygon([offsetCoordinates], {}, {
-                strokeColor: '#FF0000', 
-                strokeWidth: polygonStyle.width,
-                strokeOpacity: 0.8,
-                fillColor: '#00000000',
+            const strokeColor = customColor || '#FF0000';
+            const fillColor = customColor ? `${customColor}33` : '#00000000'; // 20% прозрачность = 33 hex
+
+            const polygon = new ymaps.Polygon([offsetCoordinates], {
+                cadastralNumber: quarterNumber,
+                isQuarterBoundary: true
+            }, {
+                strokeColor: strokeColor, 
+                strokeWidth: polygonStyle.width || 2,
+                strokeOpacity: 0.9,
+                fillColor: fillColor,
                 hintEnabled: false,
                 hasBalloon: false,
                 interactivityModel: 'default#transparent'
@@ -21597,27 +22076,6 @@ async function drawCadastralQuarter(quarterNumber) {
                 (bounds[0][1] + bounds[1][1]) / 2
             ];
 
-            getAddressByCoords(centerGeo).then(address => {
-                document.getElementById('city-name-display').innerHTML = address;
-            });
-
-            const center3857 = proj4("EPSG:4326", "EPSG:3857", [centerGeo[1], centerGeo[0]]);
-
-            lastPolygonCenter = {
-                geo: {
-                    lat: centerGeo[0],
-                    lon: centerGeo[1]
-                },
-                epsg3857: {
-                    x: center3857[0],
-                    y: center3857[1]
-                },
-                native: {
-                    x: quarterFeature.geometry.coordinates[0][0][0],
-                    y: quarterFeature.geometry.coordinates[0][0][1]
-                }
-            };
-
             const quarterText = new ymaps.Placemark([
                 centerGeo[0] - mapOffsetY * 0.000008983,
                 centerGeo[1] - mapOffsetX * 0.000008983
@@ -21630,32 +22088,12 @@ async function drawCadastralQuarter(quarterNumber) {
             map.geoObjects.add(quarterText);
             polygons.push(quarterText);
 
-            let combinedBounds = null;
-            polygons.forEach(obj => {
-                const objBounds = obj.geometry.getBounds();
-                if (!combinedBounds) {
-                    combinedBounds = objBounds;
-                } else {
-                    combinedBounds[0][0] = Math.min(combinedBounds[0][0], objBounds[0][0]);
-                    combinedBounds[0][1] = Math.min(combinedBounds[0][1], objBounds[0][1]);
-                    combinedBounds[1][0] = Math.max(combinedBounds[1][0], objBounds[1][0]);
-                    combinedBounds[1][1] = Math.max(combinedBounds[1][1], objBounds[1][1]);
-                }
-            });
-
-            if (combinedBounds) {
-                map.setBounds(combinedBounds, {
-                    checkZoomRange: true,
-                    duration: 200
-                });
-            }
-
-            showNotification(`Квартал ${quarterFeature.properties.descr}`, 'success', 'check-circle');
+            return polygon;
         }
     } catch (error) {
         console.error('Ошибка при отрисовке квартала:', error);
-        showNotification('Ошибка подключения, попробуйте позже', 'error', 'exclamation-circle');
     }
+    return null;
 }
 
                      const searchIcon = document.getElementById('search-icon');
