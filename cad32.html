@@ -783,8 +783,6 @@ let selectionBeforeDblClick = null;
 let showScaleBar = true; 
 let drawPrintScaleBar = true; 
 let showVertices = true; 
-let rmbStart = null;
-let rmbMoved = false;
 
 const GRAB_POINT_RADIUS_SCREEN = 8;
 const ADD_POINT_THRESHOLD_SCREEN = 8;
@@ -2865,10 +2863,7 @@ canvas.addEventListener('mousemove', e => {
     }
   }
 
-if (isPanning) {
-    if (rmbStart && Math.hypot(e.clientX - rmbStart.x, e.clientY - rmbStart.y) > 3) {
-      rmbMoved = true;
-    }
+  if (isPanning) {
     ox += (e.clientX - panStart.x) * dpr;
     oy += (e.clientY - panStart.y) * dpr;
     panStart = { x: e.clientX, y: e.clientY };
@@ -2877,14 +2872,9 @@ if (isPanning) {
 });
 
 canvas.addEventListener('mousedown', e => {
-  
-  if (e.button === 1 || (e.button === 0 && e.shiftKey) || (e.button === 0 && tool === 'pan') || (e.button === 2 && tool === 'select')) {
+  if (e.button === 1 || (e.button === 0 && e.shiftKey) || (e.button === 0 && tool === 'pan')) {
     isPanning = true;
     panStart = { x: e.clientX, y: e.clientY };
-    if (e.button === 2) {
-      rmbStart = { x: e.clientX, y: e.clientY };
-      rmbMoved = false;
-    }
     if (tool === 'pan') canvas.style.cursor = 'grabbing';
     e.preventDefault();
 
@@ -3008,8 +2998,7 @@ canvas.addEventListener('mousedown', e => {
 });
 
 window.addEventListener('mouseup', e => {
-  isPanning = false;
-  rmbStart = null;
+  isPanning=false;
   
   if (isMovingPoint) {
     isMovingPoint = false;
@@ -3102,13 +3091,6 @@ canvas.addEventListener('dblclick', (e) => {
 canvas.addEventListener('contextmenu', e => {
   e.preventDefault();
   
-  
-  if (rmbMoved) {
-    rmbMoved = false;
-    return;
-  }
-  rmbMoved = false;
-  
   if (tool === 'edit-geom' && hoveredVertexInfo) {
     const eTarget = entities.find(el => el.id === hoveredVertexInfo.entityId);
     if (eTarget && eTarget.pts && eTarget.pts.length > 2) {
@@ -3178,7 +3160,7 @@ $('contextMenu').addEventListener('click', e => {
 window.addEventListener('keydown', e => {
   if (e.target === $('cmdInput') || e.target.tagName === 'INPUT' || e.target.tagName === 'SELECT' || e.target.tagName === 'TEXTAREA') return;
 
-  
+  // Сдвиг чертежа стрелками клавиатуры
   const panStep = 40 * dpr;
   if (e.key === 'ArrowLeft') {
     e.preventDefault();
@@ -5219,12 +5201,7 @@ async function importFilesWithOptions(files, opts) {
 
 function getCADCoordinates() {
   let contours = [];
-  
-  const targetEntities = (selection.size > 0) 
-    ? entities.filter(e => selection.has(e.id)) 
-    : entities;
-
-  for (const e of targetEntities) {
+  for (const e of entities) {
     if (e._helper) continue;
     const lay = layers[e.layer];
     if (lay && !lay.visible) continue;
@@ -5253,55 +5230,6 @@ function getCADCoordinates() {
   return contours.join('\n\n');
 }
 
-function exportToHtmlApp(targetHtmlName) {
-  const coords = getCADCoordinates();
-  if (!coords.trim()) {
-    log('Нет координат для копирования', 'err');
-    return;
-  }
-  navigator.clipboard.writeText(coords).then(() => {
-    const msg = selection.size > 0 
-      ? `Координаты выбранных объектов (${selection.size} шт.) скопированы в буфер обмена` 
-      : 'Координаты скопированы в буфер обмена в формате X tab Y';
-    log(msg, 'ok');
-    window.open(targetHtmlName, '_blank');
-  }).catch(err => {
-    log('Ошибка буфера обмена: ' + err.message, 'err');
-  });
-}
-
-
-function clipSegmentToBox(x1, y1, x2, y2, minX, maxX, minY, maxY) {
-  let t0 = 0, t1 = 1;
-  const dx = x2 - x1;
-  const dy = y2 - y1;
-
-  const p = [-dx, dx, -dy, dy];
-  const q = [x1 - minX, maxX - x1, y1 - minY, maxY - y1];
-
-  for (let i = 0; i < 4; i++) {
-    if (p[i] === 0) {
-      if (q[i] < 0) return null;
-    } else {
-      const r = q[i] / p[i];
-      if (p[i] < 0) {
-        if (r > t1) return null;
-        if (r > t0) t0 = r;
-      } else {
-        if (r < t0) return null;
-        if (r < t1) t1 = r;
-      }
-    }
-  }
-
-  return {
-    x1: x1 + t0 * dx,
-    y1: y1 + t0 * dy,
-    x2: x1 + t1 * dx,
-    y2: y1 + t1 * dy
-  };
-}
-
 function getVisibleCoordinates() {
   const W = canvas.width, H = canvas.height;
   const [w0x, w0y] = s2w(0, 0);
@@ -5310,92 +5238,68 @@ function getVisibleCoordinates() {
   const maxX = Math.max(w0x, wWx);
   const minY = Math.min(w0y, wWy);
   const maxY = Math.max(w0y, wWy);
-
   let contours = [];
-
   for (const e of entities) {
     if (e._helper) continue;
     const lay = layers[e.layer];
     if (lay && !lay.visible) continue;
-
-    if (e.type === 'POINT') {
-      if (e.x >= minX && e.x <= maxX && e.y >= minY && e.y <= maxY) {
-        contours.push(formatAutoSwappedCoords(e.x, e.y));
+    let pts = [];
+    if (e.type === 'LINE') {
+      if ((e.x1 >= minX && e.x1 <= maxX && e.y1 >= minY && e.y1 <= maxY) ||
+          (e.x2 >= minX && e.x2 <= maxX && e.y2 >= minY && e.y2 <= maxY)) {
+        pts.push(formatAutoSwappedCoords(e.x1, e.y1));
+        pts.push(formatAutoSwappedCoords(e.x2, e.y2));
       }
     } else if (e.type === 'CIRCLE' || e.type === 'ARC' || e.type === 'ELLIPSE') {
       if (e.cx >= minX && e.cx <= maxX && e.cy >= minY && e.cy <= maxY) {
-        contours.push(formatAutoSwappedCoords(e.cx, e.cy));
+        pts.push(formatAutoSwappedCoords(e.cx, e.cy));
       }
-    } else if (e.type === 'LINE') {
-      const clipped = clipSegmentToBox(e.x1, e.y1, e.x2, e.y2, minX, maxX, minY, maxY);
-      if (clipped) {
-        const p1 = formatAutoSwappedCoords(clipped.x1, clipped.y1);
-        const p2 = formatAutoSwappedCoords(clipped.x2, clipped.y2);
-        contours.push(`${p1}\n${p2}`);
+    } else if (e.type === 'POINT') {
+      if (e.x >= minX && e.x <= maxX && e.y >= minY && e.y <= maxY) {
+        pts.push(formatAutoSwappedCoords(e.x, e.y));
       }
-    } else if (e.type === 'LWPOLYLINE' && e.pts && e.pts.length > 0) {
-      
-      const segments = [];
-      for (let i = 0; i < e.pts.length - 1; i++) {
-        segments.push({ p1: e.pts[i], p2: e.pts[i + 1] });
-      }
-      if (e.closed && e.pts.length > 2) {
-        segments.push({ p1: e.pts[e.pts.length - 1], p2: e.pts[0] });
-      }
-
-      let currentSubPoly = [];
-
-      for (const seg of segments) {
-        const clipped = clipSegmentToBox(seg.p1.x, seg.p1.y, seg.p2.x, seg.p2.y, minX, maxX, minY, maxY);
-        if (clipped) {
-          const startPt = { x: clipped.x1, y: clipped.y1 };
-          const endPt = { x: clipped.x2, y: clipped.y2 };
-
-          if (currentSubPoly.length > 0) {
-            const last = currentSubPoly[currentSubPoly.length - 1];
-            
-            if (Math.hypot(last.x - startPt.x, last.y - startPt.y) < 1e-5) {
-              currentSubPoly.push(endPt);
-            } else {
-              
-              contours.push(currentSubPoly.map(p => formatAutoSwappedCoords(p.x, p.y)).join('\n'));
-              currentSubPoly = [startPt, endPt];
-            }
-          } else {
-            currentSubPoly = [startPt, endPt];
-          }
-        } else {
-          if (currentSubPoly.length > 0) {
-            contours.push(currentSubPoly.map(p => formatAutoSwappedCoords(p.x, p.y)).join('\n'));
-            currentSubPoly = [];
-          }
+    } else if (e.type === 'LWPOLYLINE') {
+      const anyVisible = e.pts.some(p => p.x >= minX && p.x <= maxX && p.y >= minY && p.y <= maxY);
+      if (anyVisible) {
+        e.pts.forEach(p => pts.push(formatAutoSwappedCoords(p.x, p.y)));
+        if (e.closed && e.pts.length > 0) {
+          pts.push(formatAutoSwappedCoords(e.pts[0].x, e.pts[0].y));
         }
       }
-
-      if (currentSubPoly.length > 0) {
-        contours.push(currentSubPoly.map(p => formatAutoSwappedCoords(p.x, p.y)).join('\n'));
-      }
+    }
+    if (pts.length > 0) {
+      contours.push(pts.join('\n'));
     }
   }
-
   return contours.join('\n\n');
 }
 
-      
+        function exportToHtmlApp(targetHtmlName) {
+          const coords = getCADCoordinates();
+          if (!coords.trim()) {
+            log('Нет координат для копирования', 'err');
+            return;
+          }
+          navigator.clipboard.writeText(coords).then(() => {
+            log('Координаты скопированы в буфер обмена в формате X tab Y', 'ok');
+            window.open(targetHtmlName, '_blank');
+          }).catch(err => {
+            log('Ошибка буфера обмена: ' + err.message, 'err');
+          });
+        }
 
-  function exportVisibleToClipboard() {
-  const coords = getVisibleCoordinates();
-  if (!coords.trim()) {
-    log('В видимой области нет координат объектов', 'err');
-    return;
-  }
-  navigator.clipboard.writeText(coords).then(() => {
-    log('Координаты видимой области скопированы в буфер обмена', 'ok');
-    window.open('sh.html', '_blank');
-  }).catch(err => {
-    log('Ошибка буфера обмена: ' + err.message, 'err');
-  });
-}
+        function exportVisibleToClipboard() {
+          const coords = getVisibleCoordinates();
+          if (!coords.trim()) {
+            log('В видимой области нет координат объектов', 'err');
+            return;
+          }
+          navigator.clipboard.writeText(coords).then(() => {
+            log('Координаты видимой области скопированы в буфер обмена в формате X tab Y', 'ok');
+          }).catch(err => {
+            log('Ошибка буфера обмена: ' + err.message, 'err');
+          });
+        }
         
         function copyToClipboard() {
   if (!selection.size) {
