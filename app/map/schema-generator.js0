@@ -1,6 +1,25 @@
-console.log("%c[Schema Generator] Загружена версия 2.33", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+
+console.log("%c[Schema Generator] Загружена версия 2.359", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
+// Вспомогательная функция конвертации любых цветовых строк в #HEX для элементов <input type="color">
+function toHexColor(col) {
+    if (!col) return '#333333';
+    col = String(col).trim();
+    if (col.startsWith('#')) {
+        return col.length === 4 ? '#' + col[1] + col[1] + col[2] + col[2] + col[3] + col[3] : col.substring(0, 7);
+    }
+    if (col.startsWith('rgb')) {
+        var nums = col.replace(/[^0-9,]/g, '').split(',');
+        if (nums.length >= 3) {
+            var r = parseInt(nums[0], 10).toString(16).padStart(2, '0');
+            var g = parseInt(nums[1], 10).toString(16).padStart(2, '0');
+            var b = parseInt(nums[2], 10).toString(16).padStart(2, '0');
+            return '#' + r + g + b;
+        }
+    }
+    return '#333333';
+}
 
 function startSchemaWorkflow(lat, lon, targetPolygon) {
     if (!targetPolygon) return;
@@ -126,14 +145,10 @@ function generateLegendPointImage(color) {
     return canvas.toDataURL('image/png');
 }
 
-
-// Функция получения полного условного номера для таблиц и текстовых блоков
 function getFormattedZuName(quarter, zuName) {
     if (!zuName) return '';
-    let clean = zuName.trim().replace(/^:+/, ''); // Удаляем двоеточия в начале
+    let clean = zuName.trim().replace(/^:+/, '');
     if (!clean) return '';
-    
-    // Если уже содержит квартал или является полным кадастровым номером
     if ((quarter && clean.includes(quarter)) || (clean.match(/:/g) || []).length >= 2) {
         return clean;
     }
@@ -143,13 +158,10 @@ function getFormattedZuName(quarter, zuName) {
     return clean;
 }
 
-// Функция получения текста метки на карте (например: ":ЗУ1" или "01:01:000000:1:ЗУ1")
 function getFormattedZuLabelText(quarter, zuName) {
     if (!zuName) return '';
-    let clean = zuName.trim().replace(/^:+/, ''); // Удаляем двоеточия в начале
+    let clean = zuName.trim().replace(/^:+/, '');
     if (!clean) return '';
-    
-    // Если уже полный кадастровый номер
     if ((quarter && clean.includes(quarter)) || (clean.match(/:/g) || []).length >= 2) {
         return clean;
     }
@@ -169,22 +181,65 @@ function generatePartsSchemaImage(targetPolygon, config) {
     const coords = targetPolygon.geometry.getCoordinates()[0];
     if (!coords || coords.length < 3) return canvas.toDataURL('image/png');
 
-    let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
-    coords.forEach(c => {
-        minLat = Math.min(minLat, c[0]); maxLat = Math.max(maxLat, c[0]);
-        minLon = Math.min(minLon, c[1]); maxLon = Math.max(maxLon, c[1]);
+    // Настройка МСК и смещений
+    const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
+    const destSystem = (typeof COORDINATE_SYSTEMS !== 'undefined') ? COORDINATE_SYSTEMS.find(s => s.value === destSc) : null;
+    let mskOffsetX = 0, mskOffsetY = 0;
+
+    if (localStorage.getItem('autoLoadMskOffset') !== 'false' && destSystem) {
+        mskOffsetX = destSystem.offsetX || 0; 
+        mskOffsetY = destSystem.offsetY || 0;
+    } else {
+        mskOffsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
+        mskOffsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
+    }
+
+    const isMskAvailable = destSystem && destSystem.def && typeof proj4 !== 'undefined';
+    if (isMskAvailable) {
+        proj4.defs(destSc, destSystem.def);
+    }
+
+    // Вычисляем точные координаты МСК для точек контура
+    const mskPoints = coords.map(c => {
+        if (isMskAvailable) {
+            const trueLat = c[0] + ((typeof mapOffsetY !== 'undefined' ? mapOffsetY : -1) * 0.000008983);
+            const trueLon = c[1] + ((typeof mapOffsetX !== 'undefined' ? mapOffsetX : -4.5) * 0.000008983);
+            const p = proj4("EPSG:4326", destSc, [trueLon, trueLat]);
+            return {
+                x: p[1] + mskOffsetX, // X в МСК (Север)
+                y: p[0] + mskOffsetY  // Y в МСК (Восток)
+            };
+        }
+        return null;
     });
 
-    const centerLat = (minLat + maxLat) / 2;
-    const latScale = 111132.95 - 559.82 * Math.cos(2 * centerLat * Math.PI / 180);
-    const lonScale = 111412.84 * Math.cos(centerLat * Math.PI / 180);
+    let localPoints;
+    if (isMskAvailable && mskPoints.every(p => p && !isNaN(p.x) && !isNaN(p.y))) {
+        // Локальные точки в метрах МСК для правильного отображения пропорций и прямого расчета длин
+        localPoints = mskPoints.map(p => ({
+            x: p.y, // Внешняя Y координата (Восток) -> ось X канваса
+            y: p.x, // Внешняя X координата (Север) -> ось Y канваса
+            mskX: p.x,
+            mskY: p.y
+        }));
+    } else {
+        // Резервный расчет, если МСК не определена
+        let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+        coords.forEach(c => {
+            minLat = Math.min(minLat, c[0]); maxLat = Math.max(maxLat, c[0]);
+            minLon = Math.min(minLon, c[1]); maxLon = Math.max(maxLon, c[1]);
+        });
 
-    const localPoints = coords.map(c => {
-        return {
+        const centerLat = (minLat + maxLat) / 2;
+        const latScale = 111132.95 - 559.82 * Math.cos(2 * centerLat * Math.PI / 180);
+        const lonScale = 111412.84 * Math.cos(centerLat * Math.PI / 180);
+
+        localPoints = coords.map(c => ({
             x: (c[1] - minLon) * lonScale,
-            y: (c[0] - minLat) * latScale
-        };
-    });
+            y: (c[0] - minLat) * latScale,
+            rawCoord: c
+        }));
+    }
 
     let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
     localPoints.forEach(p => {
@@ -241,11 +296,9 @@ function generatePartsSchemaImage(targetPolygon, config) {
     const isClosed = Math.abs(drawPoints[0].x - drawPoints[drawPoints.length-1].x) < 1e-3 && Math.abs(drawPoints[0].y - drawPoints[drawPoints.length-1].y) < 1e-3;
     const drawLimit = isClosed ? drawPoints.length - 1 : drawPoints.length;
 
-    // Отрисовка характерных точек и их названий
     drawPoints.forEach((p, idx) => {
         if (idx >= drawLimit) return;
         
-        // Рисуем кружок точки
         ctx.beginPath();
         ctx.arc(p.x, p.y, 4, 0, 2 * Math.PI);
         ctx.fillStyle = '#ffffff';
@@ -254,7 +307,6 @@ function generatePartsSchemaImage(targetPolygon, config) {
         ctx.lineWidth = 1.5;
         ctx.stroke();
 
-        // Добавляем текст названия точки (н1, н2...)
         ctx.save();
         ctx.font = 'bold 12px Arial';
         ctx.fillStyle = config.pointColor || '#ff3b30';
@@ -264,7 +316,6 @@ function generatePartsSchemaImage(targetPolygon, config) {
         ctx.textBaseline = 'bottom';
         
         const labelText = `н${idx + 1}`;
-        // Белая обводка текста для читаемости поверх линий
         ctx.strokeText(labelText, p.x + 8, p.y - 4);
         ctx.fillText(labelText, p.x + 8, p.y - 4);
         ctx.restore();
@@ -283,7 +334,16 @@ function generatePartsSchemaImage(targetPolygon, config) {
 
         const lp1 = localPoints[i];
         const lp2 = localPoints[i+1];
-        const distance = Math.sqrt((lp1.x - lp2.x)**2 + (lp1.y - lp2.y)**2);
+
+        // Точный расчет геодезического расстояния в МСК
+        let distance;
+        if (lp1.mskX !== undefined && lp2.mskX !== undefined) {
+            distance = Math.hypot(lp2.mskX - lp1.mskX, lp2.mskY - lp1.mskY);
+        } else if (typeof getDistanceMsk === 'function' && lp1.rawCoord && lp2.rawCoord) {
+            distance = getDistanceMsk(lp1.rawCoord, lp2.rawCoord);
+        } else {
+            distance = Math.hypot(lp2.x - lp1.x, lp2.y - lp1.y);
+        }
 
         let angle = Math.atan2(p2.y - p1.y, p2.x - p1.x);
         if (angle > Math.PI / 2 || angle < -Math.PI / 2) {
@@ -301,8 +361,6 @@ function generatePartsSchemaImage(targetPolygon, config) {
         ctx.fillText(labelText, 0, -4);
         ctx.restore();
     }
-
-  
 
     return {
         image: canvas.toDataURL('image/png'),
@@ -383,7 +441,7 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
                         <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
                             <div style="display: flex; flex-direction: column; gap: 3px;">
                                 <label style="color: #555;">Цвет контура:</label>
-                                <input type="color" id="sch_lineColor" value="${sLineColor}" style="width: 100%; height: 26px; border-radius: 4px; border:none; cursor:pointer;">
+                                <input type="color" id="sch_lineColor" value="${toHexColor(sLineColor)}" style="width: 100%; height: 26px; border-radius: 4px; border:none; cursor:pointer;">
                             </div>
                             <div style="display: flex; flex-direction: column; gap: 3px;">
                                 <label style="color: #555;">Толщина: <span id="sch_lineWidth_val">${sLineWidth}</span>px</label>
@@ -391,7 +449,7 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
                             </div>
                             <div style="display: flex; flex-direction: column; gap: 3px;">
                                 <label style="color: #555;">Цвет заливки:</label>
-                                <input type="color" id="sch_fillColor" value="${sFillColor}" style="width: 100%; height: 26px; border-radius: 4px; border:none; cursor:pointer;">
+                                <input type="color" id="sch_fillColor" value="${toHexColor(sFillColor)}" style="width: 100%; height: 26px; border-radius: 4px; border:none; cursor:pointer;">
                             </div>
                             <div style="display: flex; flex-direction: column; gap: 3px;">
                                 <label style="color: #555;">Заливка: <span id="sch_fillOpacity_val">${sFillOpacity}</span>%</label>
@@ -406,7 +464,7 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
                             <label style="cursor:pointer; display:flex; align-items:center; gap:6px; font-weight: bold;">
                                 <input type="checkbox" id="sch_showPoints" ${sShowPoints ? 'checked' : ''}> Точки (н1, н2...)
                             </label>
-                            <input type="color" id="sch_pointColor" value="${sPointColor}" style="width: 35px; height: 22px; border:none; cursor:pointer;">
+                            <input type="color" id="sch_pointColor" value="${toHexColor(sPointColor)}" style="width: 35px; height: 22px; border:none; cursor:pointer;">
                         </div>
                         <div style="display: grid; grid-template-columns: 1.2fr 1fr; gap: 8px; align-items: center; margin-bottom: 6px;">
                             <label style="color: #555;">Размер шрифта (px):</label>
@@ -520,14 +578,14 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
                         <div style="background: #fff; border: 1px dashed #cbd5e1; padding: 8px; border-radius: 6px; display: flex; flex-direction: column; gap: 6px;">
                             <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px;">
                                 <span>Цвет контура ПЗЗ:</span>
-                                <input type="color" id="sch_pzzLineColor" value="${sPzzLineColor}" style="width: 35px; height: 22px; border: none; cursor: pointer; border-radius: 4px;">
+                                <input type="color" id="sch_pzzLineColor" value="${toHexColor(sPzzLineColor)}" style="width: 35px; height: 22px; border: none; cursor: pointer; border-radius: 4px;">
                             </div>
                             <label style="cursor: pointer; display: flex; align-items: center; gap: 4px; margin-bottom: 2px;">
                                 <input type="checkbox" id="sch_pzzShowPoints" ${sPzzShowPoints ? 'checked' : ''}> Точки на ПЗЗ
                             </label>
                             <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px; border-top: 1px solid #eee; padding-top: 4px;">
                                 <span>Цвет контура спутника:</span>
-                                <input type="color" id="sch_satLineColor" value="${sSatLineColor}" style="width: 35px; height: 22px; border: none; cursor: pointer; border-radius: 4px;">
+                                <input type="color" id="sch_satLineColor" value="${toHexColor(sSatLineColor)}" style="width: 35px; height: 22px; border: none; cursor: pointer; border-radius: 4px;">
                             </div>
                             <label style="cursor: pointer; display: flex; align-items: center; gap: 4px;">
                                 <input type="checkbox" id="sch_satShowPoints" ${sSatShowPoints ? 'checked' : ''}> Точки на спутнике
@@ -632,7 +690,6 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
 
     modal.querySelector('#sch_lineWidth').addEventListener('input', e => modal.querySelector('#sch_lineWidth_val').textContent = e.target.value);
     modal.querySelector('#sch_fillOpacity').addEventListener('input', e => modal.querySelector('#sch_fillOpacity_val').textContent = e.target.value);
-    
 
     modal.querySelector('#sch_export_json_btn').onclick = () => {
         const config = {
@@ -695,18 +752,18 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
         reader.onload = (event) => {
             try {
                 const config = JSON.parse(event.target.result);
-                if (config.lineColor) modal.querySelector('#sch_lineColor').value = config.lineColor;
+                if (config.lineColor) modal.querySelector('#sch_lineColor').value = toHexColor(config.lineColor);
                 if (config.lineWidth) {
                     modal.querySelector('#sch_lineWidth').value = config.lineWidth;
                     modal.querySelector('#sch_lineWidth_val').textContent = config.lineWidth;
                 }
-                if (config.fillColor) modal.querySelector('#sch_fillColor').value = config.fillColor;
+                if (config.fillColor) modal.querySelector('#sch_fillColor').value = toHexColor(config.fillColor);
                 if (config.fillOpacity !== undefined) {
                     modal.querySelector('#sch_fillOpacity').value = config.fillOpacity;
                     modal.querySelector('#sch_fillOpacity_val').textContent = config.fillOpacity;
                 }
                 if (config.showPoints !== undefined) modal.querySelector('#sch_showPoints').checked = config.showPoints;
-            if (config.pointColor) modal.querySelector('#sch_pointColor').value = config.pointColor;
+                if (config.pointColor) modal.querySelector('#sch_pointColor').value = toHexColor(config.pointColor);
                 if (config.pointFontSize !== undefined) {
                     modal.querySelector('#sch_pointFontSize').value = config.pointFontSize;
                 }
@@ -739,16 +796,16 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
                 }
                 if (config.pzzOffset !== undefined) modal.querySelector('#sch_pzzOffset').value = config.pzzOffset;
                 if (config.satOffset !== undefined) modal.querySelector('#sch_satOffset').value = config.satOffset;
-                if (config.pzzLineColor) modal.querySelector('#sch_pzzLineColor').value = config.pzzLineColor;
+                if (config.pzzLineColor) modal.querySelector('#sch_pzzLineColor').value = toHexColor(config.pzzLineColor);
                 if (config.pzzShowPoints !== undefined) modal.querySelector('#sch_pzzShowPoints').checked = config.pzzShowPoints;
-                if (config.satLineColor) modal.querySelector('#sch_satLineColor').value = config.satLineColor;
+                if (config.satLineColor) modal.querySelector('#sch_satLineColor').value = toHexColor(config.satLineColor);
                 if (config.satShowPoints !== undefined) modal.querySelector('#sch_satShowPoints').checked = config.satShowPoints;
                 if (config.loadZouit !== undefined) modal.querySelector('#sch_loadZouit').checked = config.loadZouit;
                 if (config.zouitNearby !== undefined) modal.querySelector('#sch_zouitNearby').checked = config.zouitNearby;
                 if (config.loadNearby !== undefined) modal.querySelector('#sch_loadNearby').checked = config.loadNearby;
                 if (config.nearbyRadius !== undefined) modal.querySelector('#sch_nearbyRadius').value = config.nearbyRadius;
 
-         showNotification("Настройки успешно загружены из JSON", "success");
+                showNotification("Настройки успешно загружены из JSON", "success");
             } catch (err) {
                 console.error("Ошибка импорта JSON:", err);
                 showNotification("Ошибка чтения JSON файла", "error");
@@ -1395,7 +1452,6 @@ function calculateLabelsData(centerGeo, config) {
         labelsData.push({ text: config.terrZone, type: 'terrZone', pctX: pct.x, pctY: pct.y, pctX_inside: pct.x, pctY_inside: pct.y });
     }
     if (config.zuName) {
-        // Использование безопасного формирования текста метки без двойных двоеточий
         const labelText = getFormattedZuLabelText(config.quarter, config.zuName);
         const pctInside = getRelativePct(centerGeo);
         const pctCallout = getRelativePct([centerGeo[0] + latDelta * 0.12, centerGeo[1] - lonDelta * 0.14]);
@@ -1413,8 +1469,6 @@ function calculateLabelsData(centerGeo, config) {
     return labelsData;
 }
 
-
-// Функция загрузки данных окружения (ЗОУИТ, соседние участки, ОКС)
 async function loadEnvironmentData(centerGeo, polygon, config) {
     const trueLat = centerGeo[0] + (mapOffsetY * 0.000008983);
     const trueLon = centerGeo[1] + (mapOffsetX * 0.000008983);
@@ -1468,11 +1522,10 @@ async function loadEnvironmentData(centerGeo, polygon, config) {
     }
 }
 
-// Функция генерации интерактивных выносок
 function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRgba) {
     return labelsData.map(l => {
         if (pageType === 'satellite' && l.type === 'terrZone') return '';
-        if (pageType === 'parts' && l.type !== 'zuName') return ''; // На чертеже частей отображаем только метку ЗУ
+        if (pageType === 'parts' && l.type !== 'zuName') return '';
 
         let text = l.text;
         let showLabel = true;
@@ -1505,6 +1558,8 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
 
         let finalFontColor = isNoBg ? defaultLineColor : '#333333';
         let hasCalloutClass = ''; 
+        let fontWeight = 'normal';
+        let fontStyle = 'normal';
 
         const styleKey = `sch_style_${pageType}_${l.type}`;
         const savedStyleStr = localStorage.getItem(styleKey);
@@ -1518,9 +1573,11 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
         }
 
         if (savedStyle) {
-            fontSize = savedStyle.fontSize;
-            finalFontColor = savedStyle.color;
-            isNoBg = savedStyle.noBg;
+            if (savedStyle.fontSize) fontSize = savedStyle.fontSize;
+            if (savedStyle.color) finalFontColor = savedStyle.color;
+            if (savedStyle.noBg !== undefined) isNoBg = savedStyle.noBg;
+            if (savedStyle.fontWeight) fontWeight = savedStyle.fontWeight;
+            if (savedStyle.fontStyle) fontStyle = savedStyle.fontStyle;
         }
 
         let pctX = l.pctX;
@@ -1539,6 +1596,7 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
         }
 
         const w = Math.ceil((text.length * (fontSize * 0.54)) + 16);
+        const hexColor = toHexColor(finalFontColor);
 
         return `
             <div class="interactive-label ${isNoBg ? 'no-bg' : ''} ${hasCalloutClass}" 
@@ -1547,12 +1605,15 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
                  data-anchor-x="${pageType === 'parts' ? 50 : l.pctX_inside}" 
                  data-anchor-y="${pageType === 'parts' ? 50 : l.pctY_inside}" 
                  data-default-color="${defaultLineColor}">
-                <span contenteditable="true" class="label-text" title="Двойной клик — изменить текст, зажать — перетащить" style="font-size: ${fontSize}px; background: ${calloutBgRgba}; border: 1.5px solid ${config.lineColor || '#ff3b30'}; color: ${finalFontColor}; white-space: nowrap !important; display: inline-block !important; width: ${w}px !important; text-align: center;">${text}</span>
+                <span contenteditable="true" class="label-text" title="Двойной клик — изменить текст, зажать — перетащить" style="font-size: ${fontSize}px; font-weight: ${fontWeight}; font-style: ${fontStyle}; background: ${calloutBgRgba}; border: 1.5px solid ${config.lineColor || '#ff3b30'}; color: ${finalFontColor}; white-space: nowrap !important; display: inline-block !important; width: ${w}px !important; text-align: center;">${text}</span>
                 <div class="label-controls">
                     <button class="ctrl-btn size-up" data-tooltip="Увеличить шрифт">+</button>
                     <button class="ctrl-btn size-down" data-tooltip="Уменьшить шрифт">-</button>
-                    <input type="color" class="color-picker" data-tooltip="Цвет шрифта" value="${finalFontColor}">
+                    <button class="ctrl-btn toggle-bold ${fontWeight === 'bold' ? 'active' : ''}" data-tooltip="Жирный"><i class="fas fa-bold"></i></button>
+                    <button class="ctrl-btn toggle-italic ${fontStyle === 'italic' ? 'active' : ''}" data-tooltip="Курсив"><i class="fas fa-italic"></i></button>
+                    <input type="color" class="color-picker" data-tooltip="Цвет шрифта" value="${hexColor}">
                     <button class="ctrl-btn toggle-bg" data-tooltip="Фон/Граница"><i class="fas ${isNoBg ? 'fa-eye' : 'fa-eye-slash'}"></i></button>
+                    <button class="ctrl-btn copy-lbl" data-tooltip="Копировать"><i class="fas fa-copy"></i></button>
                     <button class="ctrl-btn toggle-callout" data-tooltip="Вкл/Выкл выноску"><i class="fas fa-slash"></i></button>
                     <button class="ctrl-btn delete-lbl" data-tooltip="Удалить метку">&times;</button>
                 </div>
@@ -1560,8 +1621,6 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
         `;
     }).join('');
 }
-
-
 
 function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage, coordsTable, areaStr, terrZoneName, imgLegendPoly, imgLegendPoint, labelsData, config, partsGridStep = 5, partsHeight = 76.7) {
     function getFormattedZuName(quarter, zuName) {
@@ -1804,6 +1863,13 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             background: #fff;
             border-radius: 3px;
         }
+        
+        .ctrl-btn.active {
+            background: #2563eb !important;
+            color: #ffffff !important;
+            border-color: #1d4ed8 !important;
+        }
+        
         .ctrl-btn:hover {
             background: #eee;
         }
@@ -1874,6 +1940,8 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             }
             .btn-panel { display: none !important; }
             .label-controls { display: none !important; }
+            .img-ctrls, .resize-handle { display: none !important; }
+            .pasted-img-wrapper img { border: none !important; }
             .interactive-label .label-text {
                 border-color: ${config.lineColor || '#ff3b30'} !important;
                 -webkit-print-color-adjust: exact !important;
@@ -1889,12 +1957,16 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
 </head>
 <body>
 
-    <div class="btn-panel">
-        <button class="btn-ui" onclick="window.print()"><i class="fas fa-print"></i> Печать в PDF</button>
-        <button class="btn-ui btn-html" onclick="saveAsHtml()"><i class="fas fa-file-code"></i> Сохранить HTML</button>
-        <button class="btn-ui btn-save" id="btnExportWord"><i class="fas fa-file-word"></i> Скачать DOCX</button>
-        <button class="btn-ui" id="btnSaveStyles" style="background: #10b981; margin-top: 10px;" title="Сохранить текущее оформление меток в файл"><i class="fas fa-save"></i> Сохранить стили</button>
+<div class="btn-panel">
+
+        <button class="btn-ui" onclick="window.print()" style="background: #f70000;"><i class="fas fa-print"></i> Печать в PDF</button>
+        <button class="btn-ui btn-html" onclick="saveAsHtml()" style="background: #6366f1;"><i class="fas fa-file-code"></i> Сохранить HTML</button>
+        <button class="btn-ui btn-save" id="btnExportWord" style="background: #10b981;"><i class="fas fa-file-word"></i> Скачать DOCX</button>
+        <button class="btn-ui" id="btnSaveStyles" style="background: #06b6d4; margin-top: 10px;" title="Сохранить текущее оформление меток в файл"><i class="fas fa-save"></i> Сохранить стили</button>
         <button class="btn-ui" id="btnLoadStyles" style="background: #3b82f6;" title="Загрузить оформление меток из файла"><i class="fas fa-file-import"></i> Загрузить стили</button>
+        <button class="btn-ui" id="btnPasteImage" style="background: #8b5cf6;" title="Вставить изображение из буфера обмена на текущий лист"><i class="fas fa-paste"></i> Вставить изображение</button>
+        <button class="btn-ui" id="btnExportSchemaCoords" style="background: #ec4899;" title="Скопировать координаты и открыть Схему"><i class="fas fa-map-marked-alt"></i> Схема</button>
+        <button class="btn-ui" id="btnAddCustomText" style="background: #f97316;" title="Добавить текстовую надпись на текущий лист"><i class="fas fa-font"></i> Добавить текст</button>
         <input type="file" id="fileLoadStyles" accept=".json" style="display: none;">
     </div>
 
@@ -1986,6 +2058,24 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
     ) : ""}
 
     <script>
+      function toHexColor(col) {
+    if (!col) return '#333333';
+    col = String(col).trim();
+    if (col.startsWith('#')) {
+        return col.length === 4 ? '#' + col[1] + col[1] + col[2] + col[2] + col[3] + col[3] : col.substring(0, 7);
+    }
+    if (col.startsWith('rgb')) {
+        var nums = col.replace(/[^0-9,]/g, '').split(',');
+        if (nums.length >= 3) {
+            var r = parseInt(nums[0], 10).toString(16).padStart(2, '0');
+            var g = parseInt(nums[1], 10).toString(16).padStart(2, '0');
+            var b = parseInt(nums[2], 10).toString(16).padStart(2, '0');
+            return '#' + r + g + b;
+        }
+    }
+    return '#333333';
+}
+
         const al1 = document.getElementById('authLine1');
         const al2 = document.getElementById('authLine2');
         const al3 = document.getElementById('authLine3');
@@ -1993,11 +2083,11 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
         const an = document.getElementById('authNo');
         
         const saveLines = () => {
-            localStorage.setItem('sch_al1', al1.value);
-            localStorage.setItem('sch_al2', al2.value);
-            localStorage.setItem('sch_al3', al3.value);
-            localStorage.setItem('sch_ad', ad.value);
-            localStorage.setItem('sch_an', an.value);
+            localStorage.setItem('sch_al1', al1 ? al1.value : '');
+            localStorage.setItem('sch_al2', al2 ? al2.value : '');
+            localStorage.setItem('sch_al3', al3 ? al3.value : '');
+            localStorage.setItem('sch_ad', ad ? ad.value : '');
+            localStorage.setItem('sch_an', an ? an.value : '');
         };
 
         if(al1) al1.addEventListener('input', saveLines);
@@ -2022,40 +2112,114 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             saveAs(blob, "Схема_расположения.html");
         }
 
-        function saveAllStylesToJSON() {
-            const stylesConfig = {};
-            document.querySelectorAll('.interactive-label').forEach(label => {
-                const frame = label.closest('.map-frame');
-                if (!frame) return;
-                
-                const pageType = frame.dataset.pageType;
-                const labelType = label.dataset.type;
-                const span = label.querySelector('.label-text');
-                
-                const styleObj = {
-                    fontSize: parseInt(window.getComputedStyle(span).fontSize, 10),
-                    color: span.style.color || label.dataset.defaultColor,
-                    noBg: label.classList.contains('no-bg')
-                };
-                
-                if (!stylesConfig[pageType]) stylesConfig[pageType] = {};
-                stylesConfig[pageType][labelType] = styleObj;
-            });
-            
-            for (const pageType in stylesConfig) {
-                for (const labelType in stylesConfig[pageType]) {
-                    localStorage.setItem('sch_style_' + pageType + '_' + labelType, JSON.stringify(stylesConfig[pageType][labelType]));
-                }
-            }
+      function createLabelDomElement(item) {
+            const label = document.createElement('div');
+            label.className = 'interactive-label ' + (item.noBg ? 'no-bg ' : '') + (item.hasCallout ? 'has-callout ' : '');
+            label.style.left = item.left || '50%';
+            label.style.top = item.top || '50%';
+            label.dataset.type = item.type || 'customText';
+            label.dataset.anchorX = item.anchorX !== undefined ? item.anchorX : '50';
+            label.dataset.anchorY = item.anchorY !== undefined ? item.anchorY : '50';
+            label.dataset.defaultColor = item.defaultColor || '#ff3b30';
 
-            const jsonString = JSON.stringify(stylesConfig, null, 2);
+            const fontSize = item.fontSize || 24;
+            const text = item.text || '';
+            const w = Math.ceil((text.length * (fontSize * 0.54)) + 16);
+            const fontColor = item.color || item.defaultColor || '#ff3b30';
+            const hexColor = toHexColor(fontColor);
+            const fontWeight = item.fontWeight || 'normal';
+            const fontStyle = item.fontStyle || 'normal';
+
+            label.innerHTML = '<span contenteditable="true" class="label-text" title="Двойной клик — изменить текст, зажать — перетащить" style="font-size: ' + fontSize + 'px; font-weight: ' + fontWeight + '; font-style: ' + fontStyle + '; background: rgba(255, 255, 255, 0.95); border: 1.5px solid ' + (item.defaultColor || '#ff3b30') + '; color: ' + fontColor + '; white-space: nowrap !important; display: inline-block !important; width: ' + w + 'px !important; text-align: center;">' + text + '</span>' +
+                '<div class="label-controls">' +
+                    '<button class="ctrl-btn size-up" data-tooltip="Увеличить шрифт">+</button>' +
+                    '<button class="ctrl-btn size-down" data-tooltip="Уменьшить шрифт">-</button>' +
+                    '<button class="ctrl-btn toggle-bold ' + (fontWeight === 'bold' ? 'active' : '') + '" data-tooltip="Жирный"><i class="fas fa-bold"></i></button>' +
+                    '<button class="ctrl-btn toggle-italic ' + (fontStyle === 'italic' ? 'active' : '') + '" data-tooltip="Курсив"><i class="fas fa-italic"></i></button>' +
+                    '<input type="color" class="color-picker" data-tooltip="Цвет шрифта" value="' + hexColor + '">' +
+                    '<button class="ctrl-btn toggle-bg" data-tooltip="Фон/Граница"><i class="fas ' + (item.noBg ? 'fa-eye' : 'fa-eye-slash') + '"></i></button>' +
+                    '<button class="ctrl-btn copy-lbl" data-tooltip="Копировать"><i class="fas fa-copy"></i></button>' +
+                    '<button class="ctrl-btn toggle-callout" data-tooltip="Вкл/Выкл выноску"><i class="fas fa-slash"></i></button>' +
+                    '<button class="ctrl-btn delete-lbl" data-tooltip="Удалить метку">&times;</button>' +
+                '</div>';
+
+            return label;
+        }
+
+        function saveAllStylesToJSON() {
+            const pages = Array.from(document.querySelectorAll('.page'));
+            const labelsData = [];
+
+            pages.forEach((page, pageIndex) => {
+                const labels = page.querySelectorAll('.interactive-label');
+                labels.forEach(label => {
+                    const span = label.querySelector('.label-text');
+                    if (!span) return;
+
+                    const frame = label.closest('.map-frame');
+                    const containerType = frame ? 'map-frame' : 'page';
+
+                    labelsData.push({
+                        pageIndex: pageIndex,
+                        containerType: containerType,
+                        type: label.dataset.type || 'customText',
+                        text: span.textContent || '',
+                        left: label.style.left,
+                        top: label.style.top,
+                        anchorX: label.dataset.anchorX || '50',
+                        anchorY: label.dataset.anchorY || '50',
+                        defaultColor: label.dataset.defaultColor || '#ff3b30',
+                        fontSize: parseInt(window.getComputedStyle(span).fontSize, 10),
+                        color: span.style.color || label.dataset.defaultColor,
+                        noBg: label.classList.contains('no-bg'),
+                        hasCallout: label.classList.contains('has-callout'),
+                        fontWeight: span.style.fontWeight || 'normal',
+                        fontStyle: span.style.fontStyle || 'normal'
+                    });
+                });
+            });
+
+            const exportData = {
+                version: 2,
+                labels: labelsData
+            };
+
+            const jsonString = JSON.stringify(exportData, null, 2);
             const blob = new Blob([jsonString], {type: "application/json;charset=utf-8"});
-            saveAs(blob, "стили_меток_схемы.json");
+            saveAs(blob, "стили_и_метки_схемы.json");
         }
 
         function loadAllStylesFromJSON(jsonText) {
             try {
-                const stylesConfig = JSON.parse(jsonText);
+                const parsed = JSON.parse(jsonText);
+
+                // Если файл содержит новый формат (с сохранением всех меток и их текстов)
+                if (parsed && Array.isArray(parsed.labels)) {
+                    document.querySelectorAll('.interactive-label').forEach(lbl => lbl.remove());
+
+                    const pages = Array.from(document.querySelectorAll('.page'));
+
+                    parsed.labels.forEach(item => {
+                        const page = pages[item.pageIndex] || pages[0];
+                        if (!page) return;
+
+                        let targetContainer = page;
+                        if (item.containerType === 'map-frame') {
+                            targetContainer = page.querySelector('.map-frame') || page;
+                        }
+
+                        const labelEl = createLabelDomElement(item);
+                        targetContainer.appendChild(labelEl);
+                        initInteractiveLabel(labelEl);
+                    });
+
+                    updateAllCallouts();
+                    alert("Все метки и их параметры успешно загружены!");
+                    return;
+                }
+
+                // Старый формат (обратная совместимость)
+                const stylesConfig = parsed;
                 for (const pageType in stylesConfig) {
                     for (const labelType in stylesConfig[pageType]) {
                         const styleObj = stylesConfig[pageType][labelType];
@@ -2064,11 +2228,21 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                         const labelEl = document.querySelector('.map-frame[data-page-type="' + pageType + '"] .interactive-label[data-type="' + labelType + '"]');
                         if (labelEl) {
                             const span = labelEl.querySelector('.label-text');
-                            span.style.fontSize = styleObj.fontSize + 'px';
-                            span.style.color = styleObj.color;
+                            if (span) {
+                                span.style.fontSize = styleObj.fontSize + 'px';
+                                span.style.color = styleObj.color;
+                                span.style.fontWeight = styleObj.fontWeight || 'normal';
+                                span.style.fontStyle = styleObj.fontStyle || 'normal';
+                            }
+
+                            const btnBold = labelEl.querySelector('.toggle-bold');
+                            if (btnBold) btnBold.classList.toggle('active', styleObj.fontWeight === 'bold');
+
+                            const btnItalic = labelEl.querySelector('.toggle-italic');
+                            if (btnItalic) btnItalic.classList.toggle('active', styleObj.fontStyle === 'italic');
                             
                             const cp = labelEl.querySelector('.color-picker');
-                            if (cp) cp.value = styleObj.color;
+                            if (cp) cp.value = toHexColor(styleObj.color);
 
                             if (styleObj.noBg) {
                                 labelEl.classList.add('no-bg');
@@ -2092,19 +2266,133 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             }
         }
 
-        document.getElementById('btnSaveStyles').onclick = saveAllStylesToJSON;
+        const btnSaveStyles = document.getElementById('btnSaveStyles');
+        if (btnSaveStyles) btnSaveStyles.onclick = saveAllStylesToJSON;
         
         const fileLoader = document.getElementById('fileLoadStyles');
-        document.getElementById('btnLoadStyles').onclick = () => fileLoader.click();
-        fileLoader.onchange = (e) => {
-            const file = e.target.files[0];
-            if (!file) return;
-            const reader = new FileReader();
-            reader.onload = (ev) => loadAllStylesFromJSON(ev.target.result);
-            reader.readAsText(file);
-        };
+        const btnLoadStyles = document.getElementById('btnLoadStyles');
+        if (btnLoadStyles && fileLoader) {
+            btnLoadStyles.onclick = () => fileLoader.click();
+            fileLoader.onchange = (e) => {
+                const file = e.target.files[0];
+                if (!file) return;
+                const reader = new FileReader();
+                reader.onload = (ev) => loadAllStylesFromJSON(ev.target.result);
+                reader.readAsText(file);
+            };
+        }
+
+     // --- ВСТАВКА ИЗОБРАЖЕНИЯ ИЗ БУФЕРА ОБМЕНА ---
+        function getCurrentPage() {
+            const pages = document.querySelectorAll('.page');
+            if (!pages.length) return document.body;
+            let currentPage = pages[0];
+            let minDiff = Infinity;
+            pages.forEach(page => {
+                const rect = page.getBoundingClientRect();
+                const diff = Math.abs(rect.top);
+                if (diff < minDiff) {
+                    minDiff = diff;
+                    currentPage = page;
+                }
+            });
+            return currentPage;
+        }
+
+        function insertPastedImageToCurrentPage(imgDataUrl) {
+            const page = getCurrentPage();
+            const wrapper = document.createElement('div');
+            wrapper.className = 'pasted-img-wrapper';
+            wrapper.style.cssText = 'position: absolute; top: 150px; left: 150px; width: 200px; z-index: 500; cursor: move; user-select: none; touch-action: none;';
+
+            wrapper.innerHTML = '<img src="' + imgDataUrl + '" style="width: 100%; height: auto; display: block; pointer-events: none; border: 1px dashed rgba(0,0,0,0.2);">' +
+                '<div class="img-ctrls" style="position: absolute; top: -26px; right: 0; display: flex; gap: 2px; background: rgba(255,255,255,0.95); padding: 2px; border-radius: 4px; border: 1px solid #ccc; opacity: 0; transition: opacity 0.2s;">' +
+                    '<button class="ctrl-btn del-img" title="Удалить" style="width:20px;height:20px;line-height:1;border:none;background:#ef4444;color:#fff;border-radius:3px;cursor:pointer;">&times;</button>' +
+                '</div>' +
+                '<div class="resize-handle" title="Потяните для изменения размера (пропорции сохраняются)" style="position: absolute; right: -6px; bottom: -6px; width: 12px; height: 12px; background: #3b82f6; border: 2px solid #fff; border-radius: 50%; cursor: nwse-resize;"></div>';
+
+            page.appendChild(wrapper);
+
+            wrapper.addEventListener('mouseenter', () => wrapper.querySelector('.img-ctrls').style.opacity = '1');
+            wrapper.addEventListener('mouseleave', () => wrapper.querySelector('.img-ctrls').style.opacity = '0');
+
+            wrapper.querySelector('.del-img').onclick = (e) => {
+                e.stopPropagation();
+                wrapper.remove();
+            };
+
+            let isDragging = false, startX = 0, startY = 0, startLeft = 0, startTop = 0;
+            wrapper.addEventListener('mousedown', (e) => {
+                if (e.target.classList.contains('resize-handle') || e.target.closest('.img-ctrls')) return;
+                isDragging = true;
+                startX = e.clientX;
+                startY = e.clientY;
+                const rect = wrapper.getBoundingClientRect();
+                const pageRect = page.getBoundingClientRect();
+                startLeft = rect.left - pageRect.left;
+                startTop = rect.top - pageRect.top;
+                e.preventDefault();
+            });
+
+            let isResizing = false, resizeStartX = 0, resizeStartWidth = 0;
+            const resizeHandle = wrapper.querySelector('.resize-handle');
+            resizeHandle.addEventListener('mousedown', (e) => {
+                e.stopPropagation();
+                e.preventDefault();
+                isResizing = true;
+                resizeStartX = e.clientX;
+                resizeStartWidth = wrapper.offsetWidth;
+            });
+
+            document.addEventListener('mousemove', (e) => {
+                if (isDragging) {
+                    const dx = e.clientX - startX;
+                    const dy = e.clientY - startY;
+                    wrapper.style.left = (startLeft + dx) + 'px';
+                    wrapper.style.top = (startTop + dy) + 'px';
+                } else if (isResizing) {
+                    const dx = e.clientX - resizeStartX;
+                    const newW = Math.max(40, resizeStartWidth + dx);
+                    wrapper.style.width = newW + 'px';
+                }
+            });
+
+            document.addEventListener('mouseup', () => {
+                isDragging = false;
+                isResizing = false;
+            });
+        }
+
+        const btnPasteImage = document.getElementById('btnPasteImage');
+        if (btnPasteImage) {
+            btnPasteImage.onclick = async function() {
+                try {
+                    const clipboardItems = await navigator.clipboard.read();
+                    let imageBlob = null;
+                    for (const item of clipboardItems) {
+                        const imageType = item.types.find(type => type.startsWith('image/'));
+                        if (imageType) {
+                            imageBlob = await item.getType(imageType);
+                            break;
+                        }
+                    }
+                    if (!imageBlob) {
+                        alert("В буфере обмена не найдено изображение.");
+                        return;
+                    }
+                    const reader = new FileReader();
+                    reader.onload = function(e) {
+                        insertPastedImageToCurrentPage(e.target.result);
+                    };
+                    reader.readAsDataURL(imageBlob);
+                } catch (err) {
+                    alert("Не удалось прочитать изображение из буфера обмена. Проверьте разрешения браузера.");
+                }
+            };
+        }
 
         function updatePageCallouts(frame) {
+            if (!frame) return;
             const svg = frame.querySelector('.callout-svg');
             if (!svg) return;
             
@@ -2134,7 +2422,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                     const endY_pct = anchorY_pct + (labelY_pct - anchorY_pct) * ratio;
 
                     const span = label.querySelector('.label-text');
-                    const spanColor = span.style.color ? span.style.color.trim().toLowerCase() : '';
+                    const spanColor = span && span.style.color ? span.style.color.trim().toLowerCase() : '';
                     
                     let lineColor = label.dataset.defaultColor || '#ff3b30';
                     
@@ -2143,10 +2431,10 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                     }
                     
                     const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-                    line.setAttribute('x1', \`\${anchorX_pct}%\`);
-                    line.setAttribute('y1', \`\${anchorY_pct}%\`);
-                    line.setAttribute('x2', \`\${endX_pct}%\`);
-                    line.setAttribute('y2', \`\${endY_pct}%\`);
+                 line.setAttribute('x1', anchorX_pct + '%');
+line.setAttribute('y1', anchorY_pct + '%');
+line.setAttribute('x2', endX_pct + '%');
+line.setAttribute('y2', endY_pct + '%');
                     line.setAttribute('stroke', lineColor);
                     line.setAttribute('stroke-width', '2');
                     
@@ -2165,7 +2453,8 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
             });
         }
 
-        document.querySelectorAll('.interactive-label').forEach(label => {
+        function initInteractiveLabel(label) {
+            if (!label) return;
             let isDragging = false;
             let startX, startY;
             let startLeft, startTop;
@@ -2177,7 +2466,7 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
 
             const saveLabelStyleTemplate = () => {
                 const frame = label.closest('.map-frame');
-                if (!frame) return;
+                if (!frame || !span) return;
                 
                 const pageType = frame.dataset.pageType;
                 const labelType = label.dataset.type;
@@ -2189,7 +2478,9 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 const template = {
                     fontSize: fontSize,
                     color: color,
-                    noBg: noBg
+                    noBg: noBg,
+                    fontWeight: span.style.fontWeight || 'normal',
+                    fontStyle: span.style.fontStyle || 'normal'
                 };
                 
                 localStorage.setItem('sch_style_' + pageType + '_' + labelType, JSON.stringify(template));
@@ -2202,11 +2493,11 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
 
             const hideControlsWithDelay = () => {
                 clearTimeout(hideTimeout);
-                if (document.activeElement === span) {
+                if (span && document.activeElement === span) {
                     return;
                 }
                 hideTimeout = setTimeout(() => {
-                    if (document.activeElement !== span) {
+                    if (span && document.activeElement !== span) {
                         label.classList.remove('show-controls');
                     }
                 }, 4000); 
@@ -2214,27 +2505,35 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
 
             label.addEventListener('mouseenter', showControls);
             label.addEventListener('mouseleave', hideControlsWithDelay);
-            controls.addEventListener('mouseenter', showControls);
-            controls.addEventListener('mouseleave', hideControlsWithDelay);
+            if (controls) {
+                controls.addEventListener('mouseenter', showControls);
+                controls.addEventListener('mouseleave', hideControlsWithDelay);
+            }
 
-            span.addEventListener('focus', showControls);
-            span.addEventListener('blur', hideControlsWithDelay);
+            if (span) {
+                span.addEventListener('focus', showControls);
+                span.addEventListener('blur', hideControlsWithDelay);
+                span.addEventListener('dblclick', (e) => {
+                    e.stopPropagation();
+                    span.focus();
+                });
+            }
 
             label.addEventListener('mousedown', (e) => {
-                if (e.target.closest('.ctrl-btn') || e.target.closest('.color-picker') || (e.target === span && document.activeElement === span)) return;
+                if (e.target.closest('.ctrl-btn') || e.target.closest('.color-picker') || (span && e.target === span && document.activeElement === span)) return;
                 
                 isDragging = true;
                 startX = e.clientX;
                 startY = e.clientY;
                 
-                startLeft = parseFloat(label.style.left);
-                startTop = parseFloat(label.style.top);
+                startLeft = parseFloat(label.style.left) || 0;
+                startTop = parseFloat(label.style.top) || 0;
                 
                 e.preventDefault();
             });
 
             document.addEventListener('mousemove', (e) => {
-                if (!isDragging) return;
+                if (!isDragging || !label.parentElement) return;
                 const parentRect = label.parentElement.getBoundingClientRect();
                 
                 const dx = ((e.clientX - startX) / parentRect.width) * 100;
@@ -2250,40 +2549,63 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 isDragging = false;
             });
 
-            span.addEventListener('dblclick', (e) => {
-                e.stopPropagation();
-                span.focus();
-            });
+            const btnUp = label.querySelector('.size-up');
+            if (btnUp && span) {
+                btnUp.onclick = (ev) => {
+                    ev.stopPropagation();
+                    const currentSize = parseInt(window.getComputedStyle(span).fontSize, 10);
+                    const newSize = currentSize + 2;
+                    span.style.fontSize = newSize + 'px';
+                    
+                    const textLength = span.textContent.length;
+                    const newWidth = Math.ceil((textLength * (newSize * 0.54)) + 16);
+                    span.style.width = newWidth + 'px';
+                    
+                    updatePageCallouts(label.parentElement);
+                    saveLabelStyleTemplate(); 
+                };
+            }
 
-            label.querySelector('.size-up').onclick = (ev) => {
-                ev.stopPropagation();
-                const currentSize = parseInt(window.getComputedStyle(span).fontSize);
-                const newSize = currentSize + 2;
-                span.style.fontSize = newSize + 'px';
-                
-                const textLength = span.textContent.length;
-                const newWidth = Math.ceil((textLength * (newSize * 0.54)) + 16);
-                span.style.width = newWidth + 'px';
-                
-                updatePageCallouts(label.parentElement);
-                saveLabelStyleTemplate(); 
-            };
+            const btnDown = label.querySelector('.size-down');
+            if (btnDown && span) {
+                btnDown.onclick = (ev) => {
+                    ev.stopPropagation();
+                    const currentSize = parseInt(window.getComputedStyle(span).fontSize, 10);
+                    const newSize = Math.max(10, currentSize - 2);
+                    span.style.fontSize = newSize + 'px';
+                    
+                    const textLength = span.textContent.length;
+                    const newWidth = Math.ceil((textLength * (newSize * 0.54)) + 16);
+                    span.style.width = newWidth + 'px';
+                    
+                    updatePageCallouts(label.parentElement);
+                    saveLabelStyleTemplate(); 
+                };
+            }
 
-            label.querySelector('.size-down').onclick = (ev) => {
-                ev.stopPropagation();
-                const currentSize = parseInt(window.getComputedStyle(span).fontSize);
-                const newSize = Math.max(10, currentSize - 2);
-                span.style.fontSize = newSize + 'px';
-                
-                const textLength = span.textContent.length;
-                const newWidth = Math.ceil((textLength * (newSize * 0.54)) + 16);
-                span.style.width = newWidth + 'px';
-                
-                updatePageCallouts(label.parentElement);
-                saveLabelStyleTemplate(); 
-            };
+            const btnBold = label.querySelector('.toggle-bold');
+            if (btnBold && span) {
+                btnBold.onclick = (ev) => {
+                    ev.stopPropagation();
+                    const isBold = span.style.fontWeight === 'bold';
+                    span.style.fontWeight = isBold ? 'normal' : 'bold';
+                    btnBold.classList.toggle('active', !isBold);
+                    saveLabelStyleTemplate();
+                };
+            }
 
-            if (colorPicker) {
+            const btnItalic = label.querySelector('.toggle-italic');
+            if (btnItalic && span) {
+                btnItalic.onclick = (ev) => {
+                    ev.stopPropagation();
+                    const isItalic = span.style.fontStyle === 'italic';
+                    span.style.fontStyle = isItalic ? 'normal' : 'italic';
+                    btnItalic.classList.toggle('active', !isItalic);
+                    saveLabelStyleTemplate();
+                };
+            }
+
+            if (colorPicker && span) {
                 colorPicker.addEventListener('input', (ev) => {
                     span.style.color = ev.target.value;
                     updatePageCallouts(label.parentElement);
@@ -2296,390 +2618,527 @@ function openSchemaDocumentWindow(mapImage, pzzImage, satelliteImage, partsImage
                 });
             }
 
-            label.querySelector('.toggle-bg').onclick = (ev) => {
-                ev.stopPropagation();
-                label.classList.toggle('no-bg');
-                const icon = label.querySelector('.toggle-bg i');
-                if (label.classList.contains('no-bg')) {
-                    icon.className = 'fas fa-eye';
-                } else {
-                    icon.className = 'fas fa-eye-slash';
-                }
-                saveLabelStyleTemplate(); 
-            };
+            const btnToggleBg = label.querySelector('.toggle-bg');
+            if (btnToggleBg) {
+                btnToggleBg.onclick = (ev) => {
+                    ev.stopPropagation();
+                    label.classList.toggle('no-bg');
+                    const icon = label.querySelector('.toggle-bg i');
+                    if (icon) {
+                        if (label.classList.contains('no-bg')) {
+                            icon.className = 'fas fa-eye';
+                        } else {
+                            icon.className = 'fas fa-eye-slash';
+                        }
+                    }
+                    saveLabelStyleTemplate(); 
+                };
+            }
 
-            label.querySelector('.toggle-callout').onclick = (ev) => {
-                ev.stopPropagation();
-                label.classList.toggle('has-callout');
-                updatePageCallouts(label.parentElement);
-            };
+            const btnCopy = label.querySelector('.copy-lbl');
+            if (btnCopy) {
+                btnCopy.onclick = (ev) => {
+                    ev.stopPropagation();
+                    const parent = label.parentElement;
+                    if (!parent) return;
+                    const cloned = label.cloneNode(true);
+                    
+                    const curLeft = parseFloat(label.style.left) || 50;
+                    const curTop = parseFloat(label.style.top) || 50;
+                    cloned.style.left = (curLeft + 3) + '%';
+                    cloned.style.top = (curTop + 3) + '%';
+                    
+                    parent.appendChild(cloned);
+                    initInteractiveLabel(cloned);
+                    updatePageCallouts(parent);
+                };
+            }
 
-            label.querySelector('.delete-lbl').onclick = (ev) => {
-                ev.stopPropagation();
-                label.remove();
-                updatePageCallouts(label.parentElement);
-            };
-        });
+            const btnToggleCallout = label.querySelector('.toggle-callout');
+            if (btnToggleCallout) {
+                btnToggleCallout.onclick = (ev) => {
+                    ev.stopPropagation();
+                    label.classList.toggle('has-callout');
+                    updatePageCallouts(label.parentElement);
+                };
+            }
+
+            const btnDelete = label.querySelector('.delete-lbl');
+            if (btnDelete) {
+                btnDelete.onclick = (ev) => {
+                    ev.stopPropagation();
+                    const parent = label.parentElement;
+                    label.remove();
+                    if (parent) updatePageCallouts(parent);
+                };
+            }
+        }
+
+        document.querySelectorAll('.interactive-label').forEach(initInteractiveLabel);
 
         updateAllCallouts();
 
         window.addEventListener('resize', updateAllCallouts);
 
-        document.getElementById('btnExportWord').onclick = async function() {
-            async function captureFrame(frameEl) {
-                if (!frameEl) return null;
-                const controls = frameEl.querySelectorAll('.label-controls');
-                controls.forEach(c => c.style.setProperty('display', 'none', 'important'));
-                
-                const canvas = await html2canvas(frameEl, {
-                    useCORS: true,
-                    allowTaint: true,
-                    scale: 2,
-                    logging: false
-                });
-                
-                controls.forEach(c => c.style.removeProperty('display'));
-                return canvas.toDataURL('image/png');
-            }
+        const btnExportWord = document.getElementById('btnExportWord');
+        if (btnExportWord) {
+            btnExportWord.onclick = async function() {
+                async function captureFrame(frameEl) {
+                    if (!frameEl) return null;
+                    const controls = frameEl.querySelectorAll('.label-controls');
+                    controls.forEach(c => c.style.setProperty('display', 'none', 'important'));
+                    
+                    const canvas = await html2canvas(frameEl, {
+                        useCORS: true,
+                        allowTaint: true,
+                        scale: 2,
+                        logging: false
+                    });
+                    
+                    controls.forEach(c => c.style.removeProperty('display'));
+                    return canvas.toDataURL('image/png');
+                }
 
-            var mapImgData = await captureFrame(document.querySelector('.map-frame[data-page-type="cp"]')) || "${mapImage}";
-            var mapDims = await getImageDimensions(mapImgData);
-            var mapHeight = Math.round(500 * (mapDims.h / mapDims.w));
+                var mapImgData = await captureFrame(document.querySelector('.map-frame[data-page-type="cp"]')) || "${mapImage}";
+                var mapDims = await getImageDimensions(mapImgData);
+                var mapHeight = Math.round(500 * (mapDims.h / mapDims.w));
 
-            var pzzImgData = "";
-            var pzzHeight = 320;
-            const pzzFrame = document.querySelector('.map-frame[data-page-type="pzz"]');
-            if (pzzFrame) {
-                pzzImgData = await captureFrame(pzzFrame);
-                if (pzzImgData) {
+                var pzzImgData = "";
+                var pzzHeight = 320;
+                const pzzFrame = document.querySelector('.map-frame[data-page-type="pzz"]');
+                if (pzzFrame) {
+                    pzzImgData = await captureFrame(pzzFrame);
+                    if (pzzImgData) {
+                        var pzzDims = await getImageDimensions(pzzImgData);
+                        pzzHeight = Math.round(500 * (pzzDims.h / pzzDims.w));
+                    }
+                } else if ("${pzzImage || ''}") {
+                    pzzImgData = "${pzzImage || ''}";
                     var pzzDims = await getImageDimensions(pzzImgData);
                     pzzHeight = Math.round(500 * (pzzDims.h / pzzDims.w));
                 }
-            } else if ("${pzzImage || ''}") {
-                pzzImgData = "${pzzImage || ''}";
-                var pzzDims = await getImageDimensions(pzzImgData);
-                pzzHeight = Math.round(500 * (pzzDims.h / pzzDims.w));
-            }
 
-            var satImgData = "";
-            var satHeight = 320;
-            const satFrame = document.querySelector('.map-frame[data-page-type="satellite"]');
-            if (satFrame) {
-                satImgData = await captureFrame(satFrame);
-                if (satImgData) {
+                var satImgData = "";
+                var satHeight = 320;
+                const satFrame = document.querySelector('.map-frame[data-page-type="satellite"]');
+                if (satFrame) {
+                    satImgData = await captureFrame(satFrame);
+                    if (satImgData) {
+                        var satDims = await getImageDimensions(satImgData);
+                        satHeight = Math.round(500 * (satDims.h / satDims.w));
+                    }
+                } else if ("${satelliteImage || ''}") {
+                    satImgData = "${satelliteImage || ''}";
                     var satDims = await getImageDimensions(satImgData);
                     satHeight = Math.round(500 * (satDims.h / satDims.w));
                 }
-            } else if ("${satelliteImage || ''}") {
-                satImgData = "${satelliteImage || ''}";
-                var satDims = await getImageDimensions(satImgData);
-                satHeight = Math.round(500 * (satDims.h / satDims.w));
-            }
 
-            var partsImgData = "";
-            var partsHeight = 420;
-            const partsFrame = document.querySelector('.map-frame[data-page-type="parts"]');
-            if (partsFrame) {
-                partsImgData = await captureFrame(partsFrame);
-                if (partsImgData) {
+                var partsImgData = "";
+                var partsHeight = 420;
+                const partsFrame = document.querySelector('.map-frame[data-page-type="parts"]');
+                if (partsFrame) {
+                    partsImgData = await captureFrame(partsFrame);
+                    if (partsImgData) {
+                        var partsDims = await getImageDimensions(partsImgData);
+                        partsHeight = Math.round(500 * (partsDims.h / partsDims.w));
+                    }
+                } else if ("${partsImage || ''}") {
+                    partsImgData = "${partsImage || ''}";
                     var partsDims = await getImageDimensions(partsImgData);
                     partsHeight = Math.round(500 * (partsDims.h / partsDims.w));
                 }
-            } else if ("${partsImage || ''}") {
-                partsImgData = "${partsImage || ''}";
-                var partsDims = await getImageDimensions(partsImgData);
-                partsHeight = Math.round(500 * (partsDims.h / partsDims.w));
-            }
 
-            const coords = ${JSON.stringify(coordsTable)};
-            const sqImgData = "${imgLegendPoly}";
-            const circImgData = "${imgLegendPoint}";
+                const coords = ${JSON.stringify(coordsTable)};
+                const sqImgData = "${imgLegendPoly}";
+                const circImgData = "${imgLegendPoint}";
 
-            const adVal = document.getElementById('authDate').value.trim();
-            const anVal = document.getElementById('authNo').value.trim();
+                const adVal = document.getElementById('authDate') ? document.getElementById('authDate').value.trim() : '';
+                const anVal = document.getElementById('authNo') ? document.getElementById('authNo').value.trim() : '';
 
-            const pHeader = (text) => new docx.Paragraph({
-                alignment: docx.AlignmentType.CENTER,
-                spacing: { before: 80, after: 80 },
-                children: [new docx.TextRun({ text: text, bold: true, size: 22 })]
-            });
+                const pHeader = (text) => new docx.Paragraph({
+                    alignment: docx.AlignmentType.CENTER,
+                    spacing: { before: 80, after: 80 },
+                    children: [new docx.TextRun({ text: text, bold: true, size: 22 })]
+                });
 
-            const pCell = (text, isCenter = false, isBold = false) => new docx.Paragraph({
-                alignment: isCenter ? docx.AlignmentType.CENTER : docx.AlignmentType.LEFT,
-                spacing: { before: 80, after: 80 },
-                children: [new docx.TextRun({ text: text, bold: isBold, size: 22 })]
-            });
+                const pCell = (text, isCenter = false, isBold = false) => new docx.Paragraph({
+                    alignment: isCenter ? docx.AlignmentType.CENTER : docx.AlignmentType.LEFT,
+                    spacing: { before: 80, after: 80 },
+                    children: [new docx.TextRun({ text: text, bold: isBold, size: 22 })]
+                });
 
-            const formatLine = (val) => val.trim().length > 0 ? val : "__________________________________________________";
+                const formatLine = (val) => (val && val.trim().length > 0) ? val : "__________________________________________________";
 
-            const pApprRight = (text, isBold = false, isUnderlined = false) => new docx.Paragraph({
-                alignment: docx.AlignmentType.RIGHT,
-                spacing: { after: 40 },
-                children: [new docx.TextRun({ text: text, bold: isBold, size: 22, underline: isUnderlined ? { type: "single" } : undefined })]
-            });
+                const pApprRight = (text, isBold = false, isUnderlined = false) => new docx.Paragraph({
+                    alignment: docx.AlignmentType.RIGHT,
+                    spacing: { after: 40 },
+                    children: [new docx.TextRun({ text: text, bold: isBold, size: 22, underline: isUnderlined ? { type: "single" } : undefined })]
+                });
 
-            const pApprNote = (text) => new docx.Paragraph({
-                alignment: docx.AlignmentType.RIGHT,
-                spacing: { after: 80 },
-                children: [new docx.TextRun({ text: text, size: 16, color: "555555", italic: true })]
-            });
+                const pApprNote = (text) => new docx.Paragraph({
+                    alignment: docx.AlignmentType.RIGHT,
+                    spacing: { after: 80 },
+                    children: [new docx.TextRun({ text: text, size: 16, color: "555555", italic: true })]
+                });
 
-            const pApprDateNo = () => new docx.Paragraph({
-                alignment: docx.AlignmentType.RIGHT,
-                spacing: { after: 120 },
-                children: [
-                    new docx.TextRun({ text: "от ", size: 22 }),
-                    new docx.TextRun({ text: adVal ? adVal : "__________________", size: 22, underline: adVal ? { type: "single" } : undefined }),
-                    new docx.TextRun({ text: " № ", size: 22 }),
-                    new docx.TextRun({ text: anVal ? anVal : "_________", size: 22, underline: anVal ? { type: "single" } : undefined })
-                ]
-            });
+                const pApprDateNo = () => new docx.Paragraph({
+                    alignment: docx.AlignmentType.RIGHT,
+                    spacing: { after: 120 },
+                    children: [
+                        new docx.TextRun({ text: "от ", size: 22 }),
+                        new docx.TextRun({ text: adVal ? adVal : "__________________", size: 22, underline: adVal ? { type: "single" } : undefined }),
+                        new docx.TextRun({ text: " № ", size: 22 }),
+                        new docx.TextRun({ text: anVal ? anVal : "_________", size: 22, underline: anVal ? { type: "single" } : undefined })
+                    ]
+                });
 
-            const approvalTable = new docx.Table({
-                alignment: docx.AlignmentType.RIGHT,
-                width: { size: 100, type: docx.WidthType.PERCENTAGE },
-                borders: {
-                    top: { style: docx.BorderStyle.NONE, size: 0, color: "auto" },
-                    bottom: { style: docx.BorderStyle.NONE, size: 0, color: "auto" },
-                    left: { style: docx.BorderStyle.NONE, size: 0, color: "auto" },
-                    right: { style: docx.BorderStyle.NONE, size: 0, color: "auto" },
-                    insideHorizontal: { style: docx.BorderStyle.NONE, size: 0, color: "auto" },
-                    insideVertical: { style: docx.BorderStyle.NONE, size: 0, color: "auto" }
-                },
-                rows: [
+                const approvalTable = new docx.Table({
+                    alignment: docx.AlignmentType.RIGHT,
+                    width: { size: 100, type: docx.WidthType.PERCENTAGE },
+                    borders: {
+                        top: { style: docx.BorderStyle.NONE, size: 0, color: "auto" },
+                        bottom: { style: docx.BorderStyle.NONE, size: 0, color: "auto" },
+                        left: { style: docx.BorderStyle.NONE, size: 0, color: "auto" },
+                        right: { style: docx.BorderStyle.NONE, size: 0, color: "auto" },
+                        insideHorizontal: { style: docx.BorderStyle.NONE, size: 0, color: "auto" },
+                        insideVertical: { style: docx.BorderStyle.NONE, size: 0, color: "auto" }
+                    },
+                    rows: [
+                        new docx.TableRow({
+                            children: [
+                                new docx.TableCell({ children: [], width: { size: 50, type: docx.WidthType.PERCENTAGE } }),
+                                new docx.TableCell({
+                                    width: { size: 50, type: docx.WidthType.PERCENTAGE },
+                                    children: [
+                                        pApprRight("Утверждена", true),
+                                        pApprRight(formatLine(al1 ? al1.value : ''), false, true),
+                                        pApprRight(formatLine(al2 ? al2.value : ''), false, true),
+                                        pApprRight(formatLine(al3 ? al3.value : ''), false, true),
+                                        pApprNote("(наименование документа об утверждении, включая наименование органов гос. власти или органов местного самоуправления)"),
+                                        pApprDateNo()
+                                    ]
+                                })
+                            ]
+                        })
+                    ]
+                });
+                
+                const docRows = [
                     new docx.TableRow({
                         children: [
-                            new docx.TableCell({ children: [], width: { size: 50, type: docx.WidthType.PERCENTAGE } }),
                             new docx.TableCell({
-                                width: { size: 50, type: docx.WidthType.PERCENTAGE },
                                 children: [
-                                    pApprRight("Утверждена", true),
-                                    pApprRight(formatLine(al1.value), false, true),
-                                    pApprRight(formatLine(al2.value), false, true),
-                                    pApprRight(formatLine(al3.value), false, true),
-                                    pApprNote("(наименование документа об утверждении, включая наименование органов гос. власти или органов местного самоуправления)"),
-                                    pApprDateNo()
-                                ]
+                                    new docx.Paragraph({
+                                        spacing: { before: 80, after: 80 },
+                                        children: [
+                                            new docx.TextRun({ text: "Условный номер земельного участка: ", bold: true, size: 22 }),
+                                            new docx.TextRun({ text: "${fullZuName}", size: 22 })
+                                        ]
+                                    })
+                                ],
+                                columnSpan: 3
                             })
+                        ]
+                    }),
+                    new docx.TableRow({
+                        children: [
+                            new docx.TableCell({
+                                children: [
+                                    new docx.Paragraph({
+                                        spacing: { before: 80, after: 80 },
+                                        children: [
+                                            new docx.TextRun({ text: "Площадь земельного участка: ", bold: true, size: 22 }),
+                                            new docx.TextRun({ text: "${areaStr} кв.м", size: 22 })
+                                        ]
+                                    })
+                                ],
+                                columnSpan: 3
+                            })
+                        ]
+                    }),
+                    new docx.TableRow({
+                        children: [
+                            new docx.TableCell({
+                                children: [
+                                    new docx.Paragraph({
+                                        spacing: { before: 80, after: 80 },
+                                        children: [
+                                            new docx.TextRun({ text: "Территориальная зона: ", bold: true, size: 22 }),
+                                            new docx.TextRun({ text: "${config.terrZone || 'Не установлена'}", size: 22 })
+                                        ]
+                                    })
+                                ],
+                                columnSpan: 3
+                            })
+                        ]
+                    }),
+                    new docx.TableRow({
+                        children: [
+                            new docx.TableCell({
+                                children: [
+                                    new docx.Paragraph({
+                                        spacing: { before: 80, after: 80 },
+                                        children: [
+                                            new docx.TextRun({ text: "Вид разрешенного использования: ", bold: true, size: 22 }),
+                                            new docx.TextRun({ text: "${config.vri || 'Не установлен'}", size: 22 })
+                                        ]
+                                    })
+                                ],
+                                columnSpan: 3
+                            })
+                        ]
+                    }),
+                    new docx.TableRow({
+                        children: [
+                            new docx.TableCell({
+                                shading: { fill: "E6F2FF" },
+                                children: [pHeader("Обозначение характерных точек границ")],
+                                rowSpan: 2,
+                                verticalAlign: docx.VerticalAlign.CENTER,
+                                width: { size: 40, type: docx.WidthType.PERCENTAGE }
+                            }),
+                            new docx.TableCell({
+                                shading: { fill: "E6F2FF" },
+                                children: [pHeader("Координаты в местной системе координат, м")],
+                                columnSpan: 2
+                            }),
+                        ]
+                    }),
+                    new docx.TableRow({
+                        children: [
+                            new docx.TableCell({
+                                shading: { fill: "E6F2FF" },
+                                children: [pHeader("X")]
+                            }),
+                            new docx.TableCell({
+                                shading: { fill: "E6F2FF" },
+                                children: [pHeader("Y")]
+                            }),
                         ]
                     })
-                ]
-            });
-            
-            const docRows = [
-                new docx.TableRow({
-                    children: [
-                        new docx.TableCell({
-                            children: [
-                                new docx.Paragraph({
-                                    spacing: { before: 80, after: 80 },
-                                    children: [
-                                        new docx.TextRun({ text: "Условный номер земельного участка: ", bold: true, size: 22 }),
-                                        new docx.TextRun({ text: "${fullZuName}", size: 22 })
-                                    ]
-                                })
-                            ],
-                            columnSpan: 3
-                        })
-                    ]
-                }),
-                new docx.TableRow({
-                    children: [
-                        new docx.TableCell({
-                            children: [
-                                new docx.Paragraph({
-                                    spacing: { before: 80, after: 80 },
-                                    children: [
-                                        new docx.TextRun({ text: "Площадь земельного участка: ", bold: true, size: 22 }),
-                                        new docx.TextRun({ text: "${areaStr} кв.м", size: 22 })
-                                    ]
-                                })
-                            ],
-                            columnSpan: 3
-                        })
-                    ]
-                }),
-                new docx.TableRow({
-                    children: [
-                        new docx.TableCell({
-                            children: [
-                                new docx.Paragraph({
-                                    spacing: { before: 80, after: 80 },
-                                    children: [
-                                        new docx.TextRun({ text: "Территориальная зона: ", bold: true, size: 22 }),
-                                        new docx.TextRun({ text: "${config.terrZone || 'Не установлена'}", size: 22 })
-                                    ]
-                                })
-                            ],
-                            columnSpan: 3
-                        })
-                    ]
-                }),
-                new docx.TableRow({
-                    children: [
-                        new docx.TableCell({
-                            children: [
-                                new docx.Paragraph({
-                                    spacing: { before: 80, after: 80 },
-                                    children: [
-                                        new docx.TextRun({ text: "Вид разрешенного использования: ", bold: true, size: 22 }),
-                                        new docx.TextRun({ text: "${config.vri || 'Не установлен'}", size: 22 })
-                                    ]
-                                })
-                            ],
-                            columnSpan: 3
-                        })
-                    ]
-                }),
-                new docx.TableRow({
-                    children: [
-                        new docx.TableCell({
-                            shading: { fill: "E6F2FF" },
-                            children: [pHeader("Обозначение характерных точек границ")],
-                            rowSpan: 2,
-                            verticalAlign: docx.VerticalAlign.CENTER,
-                            width: { size: 40, type: docx.WidthType.PERCENTAGE }
-                        }),
-                        new docx.TableCell({
-                            shading: { fill: "E6F2FF" },
-                            children: [pHeader("Координаты в местной системе координат, м")],
-                            columnSpan: 2
-                        }),
-                    ]
-                }),
-                new docx.TableRow({
-                    children: [
-                        new docx.TableCell({
-                            shading: { fill: "E6F2FF" },
-                            children: [pHeader("X")]
-                        }),
-                        new docx.TableCell({
-                            shading: { fill: "E6F2FF" },
-                            children: [pHeader("Y")]
-                        }),
-                    ]
-                })
-            ];
+                ];
 
-            coords.forEach(c => {
-                docRows.push(new docx.TableRow({
-                    children: [
-                        new docx.TableCell({ children: [pCell(c.point, true)] }),
-                        new docx.TableCell({ children: [pCell(c.x, true)], width: { size: 30, type: docx.WidthType.PERCENTAGE } }),
-                        new docx.TableCell({ children: [pCell(c.y, true)], width: { size: 30, type: docx.WidthType.PERCENTAGE } }),
-                    ]
-                }));
-            });
-
-            const sections = [{
-                properties: { page: { size: { width: docx.convertMillimetersToTwip(210), height: docx.convertMillimetersToTwip(297) }, margin: { top: 1134, right: 850, bottom: 1134, left: 1700 } } },
-                children: [
-                    approvalTable,
-                    new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { before: 400, after: 200 }, children: [
-                        new docx.TextRun({ text: "СХЕМА РАСПОЛОЖЕНИЯ ЗЕМЕЛЬНОГО УЧАСТКА ИЛИ ЗЕМЕЛЬНЫХ УЧАСТКОВ НА КАДАСТРОВОМ ПЛАНЕ ТЕРРИТОРИИ", size: 28, bold: true })
-                    ]}),
-                    new docx.Table({
-                        width: { size: 100, type: docx.WidthType.PERCENTAGE },
-                        borders: {
-                            top: { style: docx.BorderStyle.SINGLE, size: 8, color: "000000" },
-                            bottom: { style: docx.BorderStyle.SINGLE, size: 8, color: "000000" },
-                            left: { style: docx.BorderStyle.SINGLE, size: 8, color: "000000" },
-                            right: { style: docx.BorderStyle.SINGLE, size: 8, color: "000000" },
-                            insideHorizontal: { style: docx.BorderStyle.SINGLE, size: 8, color: "000000" },
-                            insideVertical: { style: docx.BorderStyle.SINGLE, size: 8, color: "000000" }
-                        },
-                        rows: docRows
-                    }),
-                    new docx.Paragraph({
-                        alignment: docx.AlignmentType.CENTER,
-                        spacing: { before: 200, after: 100 },
+                coords.forEach(c => {
+                    docRows.push(new docx.TableRow({
                         children: [
-                            new docx.ImageRun({
-                                data: mapImgData.split(',')[1],
-                                transformation: { width: 500, height: mapHeight }
-                            })
+                            new docx.TableCell({ children: [pCell(c.point, true)] }),
+                            new docx.TableCell({ children: [pCell(c.x, true)], width: { size: 30, type: docx.WidthType.PERCENTAGE } }),
+                            new docx.TableCell({ children: [pCell(c.y, true)], width: { size: 30, type: docx.WidthType.PERCENTAGE } }),
                         ]
-                    }),
-                    new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
-                        new docx.TextRun({ text: document.getElementById('scaleText').value, size: 22, bold: true })
-                    ]}),
-                    new docx.Paragraph({ spacing: { after: 100 }, children: [new docx.TextRun({ text: "Условные обозначения:", size: 22, bold: true })] }),
-                    new docx.Paragraph({ spacing: { after: 50 }, children: [
-                        new docx.ImageRun({ data: sqImgData.split(',')[1], transformation: { width: 18, height: 18 } }),
-                        new docx.TextRun({ text: "  - образуемый земельный участок", size: 20 })
-                    ]}),
-                    new docx.Paragraph({ spacing: { after: 50 }, children: [
-                        new docx.ImageRun({ data: circImgData.split(',')[1], transformation: { width: 24, height: 18 } }),
-                        new docx.TextRun({ text: "  - обозначение характерной точки границы образуемого земельного участка", size: 20 })
-                    ]})
-                ]
-            }];
-
-            if (${(config.includePzz || config.includeSat) ? "true" : "false"}) {
-                const s2Children = [];
-                if (${config.includePzz ? "true" : "false"}) {
-                    s2Children.push(new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { before: 100, after: 100 }, children: [
-                        new docx.TextRun({ text: "СХЕМА РАСПОЛОЖЕНИЯ ОБРАЗУЕМОГО ЗЕМЕЛЬНОГО УЧАСТКА НА КАРТЕ ГРАДОСТРОИТЕЛЬНОГО ЗОНИРОВАНИЯ", size: 24, bold: true })
-                    ]}));
-                    if (pzzImgData) {
-                        s2Children.push(new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
-                            new docx.ImageRun({ data: pzzImgData.split(',')[1], transformation: { width: 500, height: pzzHeight } })
-                        ]}));
-                    } else {
-                        s2Children.push(new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
-                            new docx.TextRun({ text: "[Растр ПЗЗ не найден]", size: 20, italic: true })
-                        ]}));
-                    }
-                }
-                if (${config.includeSat ? "true" : "false"}) {
-                    s2Children.push(new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { before: 100, after: 100 }, children: [
-                        new docx.TextRun({ text: "СХЕМА РАСПОЛОЖЕНИЯ ОБРАЗУЕМОГО ЗЕМЕЛЬНОГО УЧАСТКА НА СПУТНИКОВОЙ КАРТЕ", size: 24, bold: true })
-                    ]}));
-                    s2Children.push(new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [
-                        new docx.ImageRun({ data: satImgData.split(',')[1], transformation: { width: 500, height: satHeight } })
-                    ]}));
-                }
-                sections.push({
-                    properties: { page: { size: { width: docx.convertMillimetersToTwip(210), height: docx.convertMillimetersToTwip(297) }, margin: { top: 1134, right: 850, bottom: 1134, left: 1700 } } },
-                    children: s2Children
+                    }));
                 });
-            }
 
-            if (${config.includeParts ? "true" : "false"}) {
-                sections.push({
+                const sections = [{
                     properties: { page: { size: { width: docx.convertMillimetersToTwip(210), height: docx.convertMillimetersToTwip(297) }, margin: { top: 1134, right: 850, bottom: 1134, left: 1700 } } },
                     children: [
-                        new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
-                            new docx.TextRun({ text: "СХЕМА ЧАСТЕЙ ОБРАЗУЕМОГО ЗЕМЕЛЬНОГО УЧАСТКА", size: 26, bold: true })
+                        approvalTable,
+                        new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { before: 400, after: 200 }, children: [
+                            new docx.TextRun({ text: "СХЕМА РАСПОЛОЖЕНИЯ ЗЕМЕЛЬНОГО УЧАСТКА ИЛИ ЗЕМЕЛЬНЫХ УЧАСТКОВ НА КАДАСТРОВОМ ПЛАНЕ ТЕРРИТОРИИ", size: 28, bold: true })
                         ]}),
+                        new docx.Table({
+                            width: { size: 100, type: docx.WidthType.PERCENTAGE },
+                            borders: {
+                                top: { style: docx.BorderStyle.SINGLE, size: 8, color: "000000" },
+                                bottom: { style: docx.BorderStyle.SINGLE, size: 8, color: "000000" },
+                                left: { style: docx.BorderStyle.SINGLE, size: 8, color: "000000" },
+                                right: { style: docx.BorderStyle.SINGLE, size: 8, color: "000000" },
+                                insideHorizontal: { style: docx.BorderStyle.SINGLE, size: 8, color: "000000" },
+                                insideVertical: { style: docx.BorderStyle.SINGLE, size: 8, color: "000000" }
+                            },
+                            rows: docRows
+                        }),
+                        new docx.Paragraph({
+                            alignment: docx.AlignmentType.CENTER,
+                            spacing: { before: 200, after: 100 },
+                            children: [
+                                new docx.ImageRun({
+                                    data: mapImgData.split(',')[1],
+                                    transformation: { width: 500, height: mapHeight }
+                                })
+                            ]
+                        }),
                         new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
-                            new docx.ImageRun({ data: partsImgData.split(',')[1], transformation: { width: 500, height: partsHeight } })
+                            new docx.TextRun({ text: document.getElementById('scaleText') ? document.getElementById('scaleText').value : '', size: 22, bold: true })
                         ]}),
-                        new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [
-                            new docx.TextRun({ text: "Сетка: ${partsGridStep} м   |   Высота: ${partsHeight} м", size: 20, bold: true })
+                        new docx.Paragraph({ spacing: { after: 100 }, children: [new docx.TextRun({ text: "Условные обозначения:", size: 22, bold: true })] }),
+                        new docx.Paragraph({ spacing: { after: 50 }, children: [
+                            new docx.ImageRun({ data: sqImgData.split(',')[1], transformation: { width: 18, height: 18 } }),
+                            new docx.TextRun({ text: "  - образуемый земельный участок", size: 20 })
+                        ]}),
+                        new docx.Paragraph({ spacing: { after: 50 }, children: [
+                            new docx.ImageRun({ data: circImgData.split(',')[1], transformation: { width: 24, height: 18 } }),
+                            new docx.TextRun({ text: "  - обозначение характерной точки границы образуемого земельного участка", size: 20 })
                         ]})
                     ]
-                });
-            }
+                }];
 
-            const doc = new docx.Document({
-                styles: {
-                    default: {
-                        document: {
-                            run: {
-                                font: "Times New Roman",
-                                size: 22,
-                                color: "000000"
-                            }
+                if (${(config.includePzz || config.includeSat) ? "true" : "false"}) {
+                    const s2Children = [];
+                    if (${config.includePzz ? "true" : "false"}) {
+                        s2Children.push(new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { before: 100, after: 100 }, children: [
+                            new docx.TextRun({ text: "СХЕМА РАСПОЛОЖЕНИЯ ОБРАЗУЕМОГО ЗЕМЕЛЬНОГО УЧАСТКА НА КАРТЕ ГРАДОСТРОИТЕЛЬНОГО ЗОНИРОВАНИЯ", size: 24, bold: true })
+                        ]}));
+                        if (pzzImgData) {
+                            s2Children.push(new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
+                                new docx.ImageRun({ data: pzzImgData.split(',')[1], transformation: { width: 500, height: pzzHeight } })
+                            ]}));
+                        } else {
+                            s2Children.push(new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
+                                new docx.TextRun({ text: "[Растр ПЗЗ не найден]", size: 20, italic: true })
+                            ]}));
                         }
                     }
-                },
-                sections: sections
-            });
-            docx.Packer.toBlob(doc).then(blob => {
-                saveAs(blob, "Схема_расположения.docx");
-            }).catch(e => alert("Ошибка создания DOCX: " + e));
-        };
+                    if (${config.includeSat ? "true" : "false"}) {
+                        s2Children.push(new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { before: 100, after: 100 }, children: [
+                            new docx.TextRun({ text: "СХЕМА РАСПОЛОЖЕНИЯ ОБРАЗУЕМОГО ЗЕМЕЛЬНОГО УЧАСТКА НА СПУТНИКОВОЙ КАРТЕ", size: 24, bold: true })
+                        ]}));
+                        s2Children.push(new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [
+                            new docx.ImageRun({ data: satImgData.split(',')[1], transformation: { width: 500, height: satHeight } })
+                        ]}));
+                    }
+                    sections.push({
+                        properties: { page: { size: { width: docx.convertMillimetersToTwip(210), height: docx.convertMillimetersToTwip(297) }, margin: { top: 1134, right: 850, bottom: 1134, left: 1700 } } },
+                        children: s2Children
+                    });
+                }
+
+                if (${config.includeParts ? "true" : "false"}) {
+                    sections.push({
+                        properties: { page: { size: { width: docx.convertMillimetersToTwip(210), height: docx.convertMillimetersToTwip(297) }, margin: { top: 1134, right: 850, bottom: 1134, left: 1700 } } },
+                        children: [
+                            new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
+                                new docx.TextRun({ text: "СХЕМА ЧАСТЕЙ ОБРАЗУЕМОГО ЗЕМЕЛЬНОГО УЧАСТКА", size: 26, bold: true })
+                            ]}),
+                            new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
+                                new docx.ImageRun({ data: partsImgData.split(',')[1], transformation: { width: 500, height: partsHeight } })
+                            ]}),
+                            new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, children: [
+                                new docx.TextRun({ text: "Сетка: ${partsGridStep} м   |   Высота: ${partsHeight} м", size: 20, bold: true })
+                            ]})
+                        ]
+                    });
+                }
+
+                const doc = new docx.Document({
+                    styles: {
+                        default: {
+                            document: {
+                                run: {
+                                    font: "Times New Roman",
+                                    size: 22,
+                                    color: "000000"
+                                }
+                            }
+                        }
+                    },
+                    sections: sections
+                });
+                docx.Packer.toBlob(doc).then(blob => {
+                    saveAs(blob, "Схема_расположения.docx");
+                }).catch(e => alert("Ошибка создания DOCX: " + e));
+            };
+        }
+        
+        
+// --- ДОБАВЛЕНИЕ ПРОИЗВОЛЬНОЙ ТЕКСТОВОЙ НАДПИСИ ---
+        function createCustomTextLabel(textText) {
+            const page = getCurrentPage();
+            const targetContainer = page; // Привязываем напрямую к странице (.page)
+
+            const label = document.createElement('div');
+            label.className = 'interactive-label no-bg';
+            label.style.left = '50%';
+            label.style.top = '20%';
+            label.dataset.type = 'customText';
+            label.dataset.anchorX = '50';
+            label.dataset.anchorY = '20';
+            label.dataset.defaultColor = '#ff3b30';
+
+            const fontSize = 24;
+            const w = Math.ceil((textText.length * (fontSize * 0.54)) + 16);
+
+            label.innerHTML = '<span contenteditable="true" class="label-text" title="Двойной клик — изменить текст, зажать — перетащить" style="font-size: ' + fontSize + 'px; font-weight: bold; font-style: normal; background: rgba(255, 255, 255, 0.95); border: 1.5px solid #ff3b30; color: #ff3b30; white-space: nowrap !important; display: inline-block !important; width: ' + w + 'px !important; text-align: center;">' + textText + '</span>' +
+                '<div class="label-controls">' +
+                    '<button class="ctrl-btn size-up" data-tooltip="Увеличить шрифт">+</button>' +
+                    '<button class="ctrl-btn size-down" data-tooltip="Уменьшить шрифт">-</button>' +
+                    '<button class="ctrl-btn toggle-bold active" data-tooltip="Жирный"><i class="fas fa-bold"></i></button>' +
+                    '<button class="ctrl-btn toggle-italic" data-tooltip="Курсив"><i class="fas fa-italic"></i></button>' +
+                    '<input type="color" class="color-picker" data-tooltip="Цвет шрифта" value="#ff3b30">' +
+                    '<button class="ctrl-btn toggle-bg" data-tooltip="Фон/Граница"><i class="fas fa-eye"></i></button>' +
+                    '<button class="ctrl-btn copy-lbl" data-tooltip="Копировать"><i class="fas fa-copy"></i></button>' +
+                    '<button class="ctrl-btn toggle-callout" data-tooltip="Вкл/Выкл выноску"><i class="fas fa-slash"></i></button>' +
+                    '<button class="ctrl-btn delete-lbl" data-tooltip="Удалить метку">&times;</button>' +
+                '</div>';
+
+            targetContainer.appendChild(label);
+            initInteractiveLabel(label);
+            updatePageCallouts(targetContainer);
+        }
+        
+        
+    const btnExportSchemaCoords = document.getElementById('btnExportSchemaCoords');
+        if (btnExportSchemaCoords) {
+            btnExportSchemaCoords.onclick = function() {
+                const trs = Array.from(document.querySelectorAll('table tr'));
+                const pointRows = trs.filter(tr => tr.querySelectorAll('td').length === 3);
+
+                let blocks = [];
+                let currentBlock = [];
+                let startPt = null, startX = null, startY = null;
+
+                pointRows.forEach(tr => {
+                    const tds = tr.querySelectorAll('td');
+                    const pt = tds[0].innerText.trim();
+                    const x = tds[1].innerText.trim();
+                    const y = tds[2].innerText.trim();
+
+                    if (!x || !y) return;
+
+                    if (currentBlock.length === 0) {
+                        startPt = pt;
+                        startX = x;
+                        startY = y;
+                        currentBlock.push(x + '\\t' + y);
+                    } else {
+                        currentBlock.push(x + '\\t' + y);
+                        if ((pt === startPt || (x === startX && y === startY)) && currentBlock.length > 1) {
+                            blocks.push(currentBlock.join('\\n'));
+                            currentBlock = [];
+                            startPt = null; startX = null; startY = null;
+                        }
+                    }
+                });
+
+                if (currentBlock.length > 0) {
+                    blocks.push(currentBlock.join('\\n'));
+                }
+
+                const textToCopy = blocks.join('\\n\\n');
+
+                if (navigator.clipboard && navigator.clipboard.writeText) {
+                    navigator.clipboard.writeText(textToCopy);
+                } else {
+                    const textarea = document.createElement('textarea');
+                    textarea.value = textToCopy;
+                    document.body.appendChild(textarea);
+                    textarea.select();
+                    document.execCommand('copy');
+                    textarea.remove();
+                }
+
+                window.open('vsemap.ru/sh.html', '_blank');
+            };
+        }
+
+        const btnAddCustomText = document.getElementById('btnAddCustomText');
+        if (btnAddCustomText) {
+            btnAddCustomText.onclick = function() {
+                const textInput = prompt("Введите текст надписи:", "Схема объекта");
+                if (textInput !== null && textInput.trim() !== '') {
+                    createCustomTextLabel(textInput.trim());
+                }
+            };
+        }
     </script>
 </body>
 </html>`;
@@ -2801,6 +3260,9 @@ function addSchemaGrid(config) {
     return tempObjects;
 }
 
+
+
+
 async function executeMskConversion() {
     const sourceText = document.getElementById('msk-coords-input').value.trim();
     const sourceSc = document.getElementById('msk-select').value;
@@ -2810,7 +3272,7 @@ async function executeMskConversion() {
     const offsetX = parseFloat(offsetXRaw) || 0;
     const offsetY = parseFloat(offsetYRaw) || 0;
 
-    console.log(`[executeMskConversion] Смещения для конвертации: X=${offsetX}, Y=${offsetY} (исходные: "${document.getElementById('mskOffsetX').value}", "${document.getElementById('mskOffsetY').value}")`);
+    console.log(`[executeMskConversion] Смещения для конвертации: X=${offsetX}, Y=${offsetY}`);
     
     if (!sourceText) {
         showNotification('Введите координаты для конвертации', 'warning');
