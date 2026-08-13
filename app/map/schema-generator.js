@@ -3488,7 +3488,7 @@ function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
 
     modal.innerHTML = `
         <div style="background: #ffffff; padding: 20px; width: 95%; max-width: 820px; box-sizing: border-box; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); font-family: Arial, sans-serif; font-size: 12px;">
-            <h3 style="margin: 0 0 15px 0; text-align: center; color: #1e3a8a; font-size: 16px; font-weight: bold;">Настройки Чертежей СРЗУ (Без точек и таблиц)</h3>
+            <h3 style="margin: 0 0 15px 0; text-align: center; color: #1e3a8a; font-size: 16px; font-weight: bold;">Настройки Чертежей СРЗУ</h3>
             
             <div style="display: grid; grid-template-columns: 1fr 1fr 1.1fr; gap: 15px; margin-bottom: 12px;">
                 <div style="display: flex; flex-direction: column; gap: 12px;">
