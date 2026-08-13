@@ -3457,7 +3457,8 @@ function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
     const sFillOpacity = localStorage.getItem('srzu_fillOpacity') || '0';
     const sScaleText = localStorage.getItem('srzu_scaleText') || '';
 
-    const sSkipLoad = window.__schemaDataLoaded;
+    // ПО УМОЛЧАНИЮ Галочка "Не загружать повторно" установлена (true)
+    const sSkipLoad = localStorage.getItem('srzu_skipLoad') !== 'false';
     const sLoadZouit = localStorage.getItem('srzu_loadZouit') !== 'false';
     const sZouitNearby = localStorage.getItem('srzu_zouitNearby') === 'true';
     const sLoadNearby = localStorage.getItem('srzu_loadNearby') !== 'false';
@@ -3667,19 +3668,29 @@ function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
                 </div>
             </div>
 
-            <!-- БЛОК ОКРУЖЕНИЕ -->
-            <div style="background: #f8fafc; border: 1px solid #cbd5e1; padding: 8px; border-radius: 8px; margin-bottom: 12px; display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 5px; font-size: 11px;">
-                <label style="cursor: pointer; display: flex; align-items: center; gap: 4px; font-weight: bold; color: #1e3a8a;">
-                    <input type="checkbox" id="srzu_skipLoad" ${sSkipLoad ? 'checked' : ''}> Не загружать повторно
-                </label>
-                <div id="srzu_load_options" style="display: ${sSkipLoad ? 'none' : 'flex'}; gap: 8px; align-items: center;">
-                    <label style="cursor: pointer;"><input type="checkbox" id="srzu_loadZouit" ${sLoadZouit ? 'checked' : ''}> ЗОУИТ</label>
-                    <label style="cursor: pointer;"><input type="checkbox" id="srzu_zouitNearby" ${sZouitNearby ? 'checked' : ''}> Буфер 10м</label>
-                    <label style="cursor: pointer;"><input type="checkbox" id="srzu_loadNearby" ${sLoadNearby ? 'checked' : ''}> Соседние ЗУ</label>
-                    <div style="display: flex; align-items: center; gap: 2px;">
-                        <label>R:</label>
-                        <input type="number" id="srzu_nearbyRadius" value="${sNearbyRadius}" style="width: 40px; padding: 2px; border: 1px solid #ccc; border-radius: 4px; text-align: center;">
+            <!-- БЛОК ОКРУЖЕНИЕ И ЭКСПОРТ/ИМПОРТ JSON -->
+            <div style="display: grid; grid-template-columns: 1.5fr 1fr; gap: 15px; border-top: 1px solid #e2e8f0; padding-top: 12px; margin-bottom: 12px;">
+                <div style="background: #f8fafc; border: 1px solid #cbd5e1; padding: 8px; border-radius: 8px; display: flex; flex-direction: column; gap: 6px; justify-content: center; min-height: 48px;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 5px; font-size: 11px;">
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 4px; font-weight: bold; color: #1e3a8a;">
+                            <input type="checkbox" id="srzu_skipLoad" ${sSkipLoad ? 'checked' : ''}> Не загружать повторно
+                        </label>
+                        <div id="srzu_load_options" style="display: ${sSkipLoad ? 'none' : 'flex'}; gap: 8px; align-items: center;">
+                            <label style="cursor: pointer;"><input type="checkbox" id="srzu_loadZouit" ${sLoadZouit ? 'checked' : ''}> ЗОУИТ</label>
+                            <label style="cursor: pointer;"><input type="checkbox" id="srzu_zouitNearby" ${sZouitNearby ? 'checked' : ''}> Буфер 10м</label>
+                            <label style="cursor: pointer;"><input type="checkbox" id="srzu_loadNearby" ${sLoadNearby ? 'checked' : ''}> Соседние ЗУ</label>
+                            <div style="display: flex; align-items: center; gap: 2px;">
+                                <label>R:</label>
+                                <input type="number" id="srzu_nearbyRadius" value="${sNearbyRadius}" style="width: 40px; padding: 2px; border: 1px solid #ccc; border-radius: 4px; text-align: center;">
+                            </div>
+                        </div>
                     </div>
+                </div>
+                
+                <div style="display: flex; gap: 8px; align-items: center; justify-content: center;">
+                    <button id="srzu_export_json_btn" class="btn-ui" style="flex: 1; padding: 6px; font-size: 11px; background: #475569; cursor: pointer; color: white; border: none; border-radius: 6px; height: 32px; display: flex; align-items: center; justify-content: center; gap: 4px;"><i class="fas fa-file-export"></i> Экспорт JSON</button>
+                    <button id="srzu_import_json_btn" class="btn-ui" style="flex: 1; padding: 6px; font-size: 11px; background: #475569; cursor: pointer; color: white; border: none; border-radius: 6px; height: 32px; display: flex; align-items: center; justify-content: center; gap: 4px;"><i class="fas fa-file-import"></i> Импорт JSON</button>
+                    <input type="file" id="srzu_import_file_input" accept=".json" style="display: none;">
                 </div>
             </div>
 
@@ -3715,6 +3726,122 @@ function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
 
     modal.querySelector('#srzu_lineWidth').addEventListener('input', e => modal.querySelector('#srzu_lineWidth_val').textContent = e.target.value);
     modal.querySelector('#srzu_fillOpacity').addEventListener('input', e => modal.querySelector('#srzu_fillOpacity_val').textContent = e.target.value);
+
+    // Обработчик Экспорта настроек СРЗУ в JSON
+    modal.querySelector('#srzu_export_json_btn').onclick = () => {
+        const config = {
+            lineColor: modal.querySelector('#srzu_lineColor').value,
+            lineWidth: parseInt(modal.querySelector('#srzu_lineWidth').value, 10),
+            fillColor: modal.querySelector('#srzu_fillColor').value,
+            fillOpacity: parseInt(modal.querySelector('#srzu_fillOpacity').value, 10),
+            
+            cptShowZu: modal.querySelector('#srzu_cptShowZu').checked,
+            cptShowZouit: modal.querySelector('#srzu_cptShowZouit').checked,
+            cptZuNameMode: modal.querySelector('#srzu_cptZuNameMode').value,
+            pzzShowZu: modal.querySelector('#srzu_pzzShowZu').checked,
+            pzzShowZouit: modal.querySelector('#srzu_pzzShowZouit').checked,
+            pzzZuNameMode: modal.querySelector('#srzu_pzzZuNameMode').value,
+            satShowZu: modal.querySelector('#srzu_satShowZu').checked,
+            satShowZouit: modal.querySelector('#srzu_satShowZouit').checked,
+            satZuNameMode: modal.querySelector('#srzu_satZuNameMode').value,
+
+            quarter: modal.querySelector('#srzu_quarter').value.trim(),
+            settlement: modal.querySelector('#srzu_settlement').value.trim(),
+            municipality: modal.querySelector('#srzu_municipality').value.trim(),
+            terrZone: modal.querySelector('#srzu_terrZone').value.trim(),
+            vri: modal.querySelector('#srzu_vri').value.trim(),
+            zuName: modal.querySelector('#srzu_zuName').value.trim(),
+            scaleText: modal.querySelector('#srzu_scaleText').value.trim(),
+            includePzz: modal.querySelector('#srzu_includePzz').checked,
+            includeSat: modal.querySelector('#srzu_includeSat').checked,
+            zoomMode: zoomModeSelect.value,
+            pzzOffset: parseInt(modal.querySelector('#srzu_pzzOffset').value, 10),
+            satOffset: parseInt(modal.querySelector('#srzu_satOffset').value, 10),
+            pzzLineColor: modal.querySelector('#srzu_pzzLineColor').value,
+            satLineColor: modal.querySelector('#srzu_satLineColor').value,
+
+            skipLoad: modal.querySelector('#srzu_skipLoad').checked,
+            loadZouit: modal.querySelector('#srzu_loadZouit').checked,
+            zouitNearby: modal.querySelector('#srzu_zouitNearby').checked,
+            loadNearby: modal.querySelector('#srzu_loadNearby').checked,
+            nearbyRadius: parseInt(modal.querySelector('#srzu_nearbyRadius').value, 10)
+        };
+        const jsonString = JSON.stringify(config, null, 2);
+        const blob = new Blob([jsonString], {type: "application/json;charset=utf-8"});
+        saveAs(blob, "настройки_чертежей_срзу.json");
+    };
+
+    // Обработчик Импорта настроек СРЗУ из JSON
+    const fileInput = modal.querySelector('#srzu_import_file_input');
+    modal.querySelector('#srzu_import_json_btn').onclick = () => {
+        fileInput.click();
+    };
+
+    fileInput.onchange = (e) => {
+        const file = e.target.files[0];
+        if (!file) return;
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            try {
+                const config = JSON.parse(event.target.result);
+                if (config.lineColor) modal.querySelector('#srzu_lineColor').value = toHexColor(config.lineColor);
+                if (config.lineWidth) {
+                    modal.querySelector('#srzu_lineWidth').value = config.lineWidth;
+                    modal.querySelector('#srzu_lineWidth_val').textContent = config.lineWidth;
+                }
+                if (config.fillColor) modal.querySelector('#srzu_fillColor').value = toHexColor(config.fillColor);
+                if (config.fillOpacity !== undefined) {
+                    modal.querySelector('#srzu_fillOpacity').value = config.fillOpacity;
+                    modal.querySelector('#srzu_fillOpacity_val').textContent = config.fillOpacity;
+                }
+
+                if (config.cptShowZu !== undefined) modal.querySelector('#srzu_cptShowZu').checked = config.cptShowZu;
+                if (config.cptShowZouit !== undefined) modal.querySelector('#srzu_cptShowZouit').checked = config.cptShowZouit;
+                if (config.cptZuNameMode !== undefined) modal.querySelector('#srzu_cptZuNameMode').value = config.cptZuNameMode;
+                if (config.pzzShowZu !== undefined) modal.querySelector('#srzu_pzzShowZu').checked = config.pzzShowZu;
+                if (config.pzzShowZouit !== undefined) modal.querySelector('#srzu_pzzShowZouit').checked = config.pzzShowZouit;
+                if (config.pzzZuNameMode !== undefined) modal.querySelector('#srzu_pzzZuNameMode').value = config.pzzZuNameMode;
+                if (config.satShowZu !== undefined) modal.querySelector('#srzu_satShowZu').checked = config.satShowZu;
+                if (config.satShowZouit !== undefined) modal.querySelector('#srzu_satShowZouit').checked = config.satShowZouit;
+                if (config.satZuNameMode !== undefined) modal.querySelector('#srzu_satZuNameMode').value = config.satZuNameMode;
+
+                if (config.quarter !== undefined) modal.querySelector('#srzu_quarter').value = config.quarter;
+                if (config.settlement !== undefined) modal.querySelector('#srzu_settlement').value = config.settlement;
+                if (config.municipality !== undefined) modal.querySelector('#srzu_municipality').value = config.municipality;
+                if (config.terrZone !== undefined) modal.querySelector('#srzu_terrZone').value = config.terrZone;
+                if (config.vri !== undefined) modal.querySelector('#srzu_vri').value = config.vri;
+                if (config.zuName !== undefined) modal.querySelector('#srzu_zuName').value = config.zuName;
+                if (config.scaleText !== undefined) modal.querySelector('#srzu_scaleText').value = config.scaleText;
+                if (config.includePzz !== undefined) modal.querySelector('#srzu_includePzz').checked = config.includePzz;
+                if (config.includeSat !== undefined) modal.querySelector('#srzu_includeSat').checked = config.includeSat;
+                if (config.zoomMode) {
+                    zoomModeSelect.value = config.zoomMode;
+                    toggleOffsets();
+                }
+                if (config.pzzOffset !== undefined) modal.querySelector('#srzu_pzzOffset').value = config.pzzOffset;
+                if (config.satOffset !== undefined) modal.querySelector('#srzu_satOffset').value = config.satOffset;
+                if (config.pzzLineColor) modal.querySelector('#srzu_pzzLineColor').value = toHexColor(config.pzzLineColor);
+                if (config.satLineColor) modal.querySelector('#srzu_satLineColor').value = toHexColor(config.satLineColor);
+
+                if (config.skipLoad !== undefined) {
+                    modal.querySelector('#srzu_skipLoad').checked = config.skipLoad;
+                    toggleDataOptions();
+                }
+                if (config.loadZouit !== undefined) modal.querySelector('#srzu_loadZouit').checked = config.loadZouit;
+                if (config.zouitNearby !== undefined) modal.querySelector('#srzu_zouitNearby').checked = config.zouitNearby;
+                if (config.loadNearby !== undefined) modal.querySelector('#srzu_loadNearby').checked = config.loadNearby;
+                if (config.nearbyRadius !== undefined) modal.querySelector('#srzu_nearbyRadius').value = config.nearbyRadius;
+
+                showNotification("Настройки СРЗУ успешно загружены из JSON", "success");
+            } catch (err) {
+                console.error("Ошибка импорта JSON:", err);
+                showNotification("Ошибка чтения JSON файла", "error");
+            } finally {
+                fileInput.value = '';
+            }
+        };
+        reader.readAsText(file);
+    };
 
     const closeModal = () => document.body.removeChild(modal);
     modal.querySelector('#srzu_cancel_btn').onclick = closeModal;
@@ -3764,6 +3891,7 @@ function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
         localStorage.setItem('srzu_fillColor', config.fillColor);
         localStorage.setItem('srzu_fillOpacity', config.fillOpacity * 100);
 
+        localStorage.setItem('srzu_skipLoad', config.skipLoad ? 'true' : 'false');
         localStorage.setItem('srzu_loadZouit', config.loadZouit);
         localStorage.setItem('srzu_zouitNearby', config.zouitNearby ? 'true' : 'false');
         localStorage.setItem('srzu_loadNearby', config.loadNearby);
