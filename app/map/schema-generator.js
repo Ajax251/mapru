@@ -1,5 +1,5 @@
 
-console.log("%c[Schema Generator] Загружена версия 2.37", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.36", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 // Вспомогательная функция конвертации любых цветовых строк в #HEX для элементов <input type="color">
@@ -3725,6 +3725,244 @@ function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
     };
 }
 
+async function executeSrzuGeneration(lat, lon, targetPolygon, config) {
+    showLoader('Подготовка Чертёжа КПТ (1/3)...');
+
+    const originalMode = localStorage.getItem('mapMode') || 'map';
+    const originalCenter = map.getCenter();
+    const originalZoom = map.getZoom();
+    const originalRasterVisible = rasterOverlay ? rasterOverlay.options.get('visible') : false;
+
+    const origStrokeColor = targetPolygon.options.get('strokeColor');
+    const origStrokeWidth = targetPolygon.options.get('strokeWidth');
+    const origFillColor = targetPolygon.options.get('fillColor');
+
+    const originalVisibilities = new Map();
+    const saveOriginalVisibilities = () => {
+        originalVisibilities.clear();
+        polygons.forEach(p => {
+            if (p.options) {
+                originalVisibilities.set(p, p.options.get('visible'));
+            }
+        });
+        parcelPlacemarks.forEach(pm => {
+            if (pm.options) {
+                originalVisibilities.set(pm, pm.options.get('visible'));
+            }
+        });
+    };
+
+    const restoreOriginalVisibilities = () => {
+        originalVisibilities.forEach((vis, p) => {
+            if (p.options) {
+                p.options.set('visible', vis);
+            }
+        });
+    };
+
+    const setLayerVisibilityForPage = (pageConfig) => {
+        polygons.forEach(p => {
+            if (p === targetPolygon) {
+                p.options.set('visible', true);
+                return;
+            }
+
+            const categoryName = (p.properties.get('featureData')?.properties?.categoryName || '').toLowerCase();
+            const categoryId = p.properties.get('featureData')?.properties?.category;
+
+            const isZouit = p.properties.get('isZouit') || 
+                            categoryId === 36940 ||
+                            categoryName.includes('зоуит') ||
+                            categoryName.includes('ограничен');
+
+            const isZu = p.properties.get('isParcelInQuarter') || 
+                         p.properties.get('isFoundInArea') || 
+                         !!p.properties.get('cadastralNumber') ||
+                         categoryName.includes('участ') ||
+                         categoryId === 36275;
+
+            if (p instanceof ymaps.Polygon) {
+                if (isZu) {
+                    p.options.set('visible', pageConfig.showZu);
+                } else if (isZouit) {
+                    p.options.set('visible', pageConfig.showZouit);
+                }
+            } else if (p instanceof ymaps.Placemark) {
+                if (p.properties.get('isSchemaPoint')) {
+                    p.options.set('visible', false); // На СРЗУ точки всегда скрыты
+                } else if (isZu) {
+                    p.options.set('visible', pageConfig.showZu);
+                } else if (isZouit) {
+                    p.options.set('visible', pageConfig.showZouit);
+                }
+            }
+        });
+
+        parcelPlacemarks.forEach(pm => {
+            pm.options.set('visible', pageConfig.showZu && map.getZoom() > 14);
+        });
+    };
+
+    try {
+        saveOriginalVisibilities();
+
+        // Скрываем все временные маркеры точек n1, n2 если они были
+        polygons.forEach(p => {
+            if (p instanceof ymaps.Placemark && p.properties.get('isSchemaPoint')) {
+                p.options.set('visible', false);
+            }
+        });
+
+        const fillHex = Math.round(config.fillOpacity * 255).toString(16).padStart(2, '0');
+        targetPolygon.options.set({
+            strokeColor: config.lineColor,
+            strokeWidth: config.lineWidth,
+            fillColor: config.fillOpacity > 0 ? `${config.fillColor}${fillHex}` : '#00000000',
+            zIndex: 1000
+        });
+
+        const boundsGeo = targetPolygon.geometry.getBounds();
+        const centerGeo = [(boundsGeo[0][0] + boundsGeo[1][0]) / 2, (boundsGeo[0][1] + boundsGeo[1][1]) / 2];
+
+        await new Promise(r => setTimeout(r, 400));
+
+        showLoader('Создание снимка Чертёжа КПТ...');
+        map.setCenter(centerGeo); 
+        setLayerVisibilityForPage({ showZu: config.cptShowZu, showZouit: config.cptShowZouit });
+        
+        const bounds = map.getBounds();
+        const latDelta = bounds[1][0] - bounds[0][0];
+        const lonDelta = bounds[1][1] - bounds[0][1];
+
+        const labelsData = calculateLabelsData(centerGeo, config);
+
+        let tempCalloutLine = null;
+        if (config.cptZuNameMode === 'callout' && config.zuName) {
+            const labelPoint = [centerGeo[0] + latDelta * 0.12, centerGeo[1] - lonDelta * 0.14];
+            tempCalloutLine = new ymaps.Polyline([labelPoint, centerGeo], {}, {
+                strokeColor: config.lineColor || '#ff3b30',
+                strokeWidth: 2.5,
+                zIndex: 1205,
+                interactivityModel: 'default#transparent'
+            });
+            map.geoObjects.add(tempCalloutLine);
+        }
+        
+        await new Promise(r => setTimeout(r, 500));
+        const mapImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement);
+        
+        if (tempCalloutLine) map.geoObjects.remove(tempCalloutLine);
+
+        let pzzImageBase64 = null;
+        let rasterLoadedSuccessfully = false;
+
+        if (config.includePzz) {
+            showLoader('Подготовка ПЗЗ растра...');
+            rasterLoadedSuccessfully = await silentLoadRasterForSchema(config.quarter);
+            if (rasterLoadedSuccessfully && rasterOverlay) {
+                rasterOverlay.options.set('visible', true);
+                
+                let pzzZoom = originalZoom;
+                if (config.zoomMode === 'individual') {
+                    pzzZoom = originalZoom + config.pzzOffset;
+                }
+                map.setZoom(pzzZoom);
+                map.setCenter(centerGeo); 
+
+                setLayerVisibilityForPage({ showZu: config.pzzShowZu, showZouit: config.pzzShowZouit });
+
+                targetPolygon.options.set({
+                    strokeColor: config.pzzLineColor,
+                    fillColor: '#00000000'
+                });
+
+                if (config.pzzZuNameMode === 'callout' && config.zuName) {
+                    const labelPoint = [centerGeo[0] + latDelta * 0.12, centerGeo[1] - lonDelta * 0.14];
+                    tempCalloutLine = new ymaps.Polyline([labelPoint, centerGeo], {}, {
+                        strokeColor: config.lineColor || '#ff3b30',
+                        strokeWidth: 2.5,
+                        zIndex: 1205,
+                        interactivityModel: 'default#transparent'
+                    });
+                    map.geoObjects.add(tempCalloutLine);
+                }
+
+                await new Promise(r => setTimeout(r, 2000));
+                pzzImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement);
+                
+                if (tempCalloutLine) map.geoObjects.remove(tempCalloutLine);
+                rasterOverlay.options.set('visible', false);
+            }
+        }
+
+        let satelliteImageBase64 = null;
+
+        if (config.includeSat) {
+            showLoader('Переключение на спутник...');
+            setMapMode('google-hyb');
+
+            let satZoom = originalZoom;
+            if (config.zoomMode === 'individual') {
+                satZoom = originalZoom + config.satOffset;
+            }
+            map.setZoom(satZoom);
+            map.setCenter(centerGeo); 
+
+            setLayerVisibilityForPage({ showZu: config.satShowZu, showZouit: config.satShowZouit });
+
+            targetPolygon.options.set({
+                strokeColor: config.satLineColor,
+                fillColor: '#00000000'
+            });
+
+            if (config.satZuNameMode === 'callout' && config.zuName) {
+                const labelPoint = [centerGeo[0] + latDelta * 0.12, centerGeo[1] - lonDelta * 0.14];
+                tempCalloutLine = new ymaps.Polyline([labelPoint, centerGeo], {}, {
+                    strokeColor: config.calloutLineColor || '#ff3b30',
+                    strokeWidth: 2.5,
+                    zIndex: 1205,
+                    interactivityModel: 'default#transparent'
+                });
+                map.geoObjects.add(tempCalloutLine);
+            }
+
+            await new Promise(r => setTimeout(r, 3500));
+            satelliteImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement);
+
+            if (tempCalloutLine) map.geoObjects.remove(tempCalloutLine);
+        }
+
+        showLoader('Сброс подложек...');
+        setMapMode(originalMode);
+        map.setCenter(originalCenter, originalZoom);
+        if (rasterOverlay) {
+            rasterOverlay.options.set('visible', originalRasterVisible);
+        }
+
+        targetPolygon.options.set({
+            strokeColor: origStrokeColor,
+            strokeWidth: origStrokeWidth,
+            fillColor: origFillColor
+        });
+
+        restoreOriginalVisibilities();
+
+        const imgLegendPoly = generateLegendPolygonImage(config.lineColor, config.fillColor, config.fillOpacity);
+
+        openSrzuDocumentWindow(
+            mapImageBase64, pzzImageBase64, satelliteImageBase64,
+            imgLegendPoly, labelsData, config
+        );
+        showNotification('Чертёж СРЗУ успешно сформирован', 'success');
+
+    } catch (error) {
+        showNotification(`Ошибка генерации: ${error.message}`, 'error');
+        console.error(error);
+    } finally {
+        hideLoader();
+    }
+}
+
 function openSrzuDocumentWindow(mapImage, pzzImage, satelliteImage, imgLegendPoly, labelsData, config) {
     const fullZuName = getFormattedZuName(config.quarter, config.zuName);
     const calloutBgRgba = 'rgba(255, 255, 255, 0.95)';
@@ -4370,451 +4608,6 @@ function openSrzuDocumentWindow(mapImage, pzzImage, satelliteImage, imgLegendPol
                         ]}),
                         new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { before: 100, after: 100 }, children: [
                             new docx.ImageRun({ data: mapImgData.toDataURL('image/png').split(',')[1], transformation: { width: 500, height: 600 } })
-                        ]}),
-                        new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
-                            new docx.TextRun({ text: document.getElementById('scaleText') ? document.getElementById('scaleText').value : '', size: 22, bold: true })
-                        ]}),
-                        new docx.Paragraph({ spacing: { after: 100 }, children: [new docx.TextRun({ text: "Условные обозначения:", size: 22, bold: true })] }),
-                        new docx.Paragraph({ spacing: { after: 50 }, children: [
-                            new docx.ImageRun({ data: sqImgData.split(',')[1], transformation: { width: 18, height: 18 } }),
-                            new docx.TextRun({ text: "  - образуемый земельный участок", size: 20 })
-                        ]})
-                    ]
-                }];
-
-                const doc = new docx.Document({ sections: sections });
-                docx.Packer.toBlob(doc).then(blob => saveAs(blob, "Чертёж_СРЗУ.docx")).catch(e => alert("Ошибка создания DOCX: " + e));
-            };
-        }
-    </script>
-</body>
-</html>`;
-
-    const win = window.open('', '_blank');
-    win.document.write(htmlContent);
-    win.document.close();
-}
-
-function openSrzuDocumentWindow(mapImage, pzzImage, satelliteImage, imgLegendPoly, labelsData, config) {
-    const fullZuName = getFormattedZuName(config.quarter, config.zuName);
-    const calloutBgRgba = 'rgba(255, 255, 255, 0.95)';
-
-    const cptLabelsHtml = generateInteractiveLabelsHtml(labelsData, 'cp', config, calloutBgRgba);
-    const pzzLabelsHtml = config.includePzz ? generateInteractiveLabelsHtml(labelsData, 'pzz', config, calloutBgRgba) : '';
-    const satLabelsHtml = config.includeSat ? generateInteractiveLabelsHtml(labelsData, 'satellite', config, calloutBgRgba) : '';
-
-    const htmlContent = `<!DOCTYPE html>
-<html lang="ru">
-<head>
-    <meta charset="UTF-8">
-    <title>СРЗУ - Чертёж</title>
-    <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/font-awesome/6.4.0/css/all.min.css">
-    <script src="https://unpkg.com/docx@7.8.2/build/index.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/FileSaver.js/2.0.5/FileSaver.min.js"></script>
-    <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-    <style>
-        body { font-family: "Times New Roman", Times, serif; font-size: 10.5pt; background: #e9ecef; margin: 0; padding: 20px; }
-        .page { 
-            background: white; 
-            width: 210mm; 
-            min-height: 297mm; 
-            padding: 10mm 15mm; 
-            margin: 0 auto 20px auto; 
-            box-shadow: 0 0 10px rgba(0,0,0,0.1); 
-            box-sizing: border-box; 
-            position: relative;
-        }
-        .page::after { content: ""; display: table; clear: both; }
-        
-        .scale-input { border: none; background: transparent; font-family: inherit; font-size: 10.5pt; font-weight: bold; text-align: center; outline: none; width: 100%; margin-top: 6px; }
-        .title { clear: both; text-align: center; font-weight: bold; font-size: 12pt; margin-top: 10px; margin-bottom: 15px; text-transform: uppercase; line-height: 1.3; }
-        
-        .map-frame { 
-            width: 100%; 
-            max-height: 220mm; 
-            border: 1.5px solid #000; 
-            box-sizing: border-box; 
-            background: #ffffff;
-            position: relative; 
-            overflow: hidden;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-        }
-        .map-frame img { 
-            width: 100%; 
-            max-height: 220mm; 
-            object-fit: contain; 
-            display: block; 
-            pointer-events: none; 
-        }
-
-        .btn-panel { position: fixed; top: 20px; left: 20px; display: flex; flex-direction: column; gap: 8px; z-index: 9999; }
-        .btn-ui { padding: 9px 14px; background: #3b82f6; color: white; border: none; border-radius: 6px; font-weight: bold; font-size: 9.5pt; cursor: pointer; transition: 0.2s; text-align: center; box-shadow: 0 4px 6px rgba(0,0,0,0.1); }
-        .btn-ui:hover { background: #2563eb; transform: translateY(-1px); }
-
-        .interactive-label {
-            position: absolute;
-            transform: translate(-50%, -50%);
-            cursor: move;
-            user-select: none;
-            z-index: 10;
-            display: inline-block;
-            font-family: "Times New Roman", Times, serif;
-            -webkit-print-color-adjust: exact !important;
-            print-color-adjust: exact !important;
-        }
-        .interactive-label .label-text {
-            display: inline-block;
-            padding: 3px 8px;
-            border-radius: 4px;
-            box-shadow: 0 2px 6px rgba(0,0,0,0.15);
-            white-space: nowrap;
-            outline: none;
-            -webkit-print-color-adjust: exact !important;
-            print-color-adjust: exact !important;
-        }
-        
-        .interactive-label.no-bg .label-text {
-            background: transparent !important;
-            border-color: transparent !important;
-            box-shadow: none !important;
-        }
-        
-        .interactive-label .label-controls {
-            position: absolute;
-            left: 100%;
-            top: 0;
-            margin-left: 5px;
-            display: flex;
-            flex-direction: column;
-            gap: 2px;
-            opacity: 0;
-            transition: opacity 0.15s ease;
-            pointer-events: none;
-            background: rgba(255,255,255,0.95);
-            border: 1px solid #ccc;
-            border-radius: 4px;
-            padding: 2px;
-        }
-
-        .interactive-label:hover .label-controls,
-        .interactive-label:focus-within .label-controls,
-        .interactive-label.show-controls .label-controls {
-            opacity: 1 !important;
-            pointer-events: auto !important;
-        }
-        .ctrl-btn {
-            width: 20px;
-            height: 20px;
-            font-size: 10px;
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            border: 1px solid #ccc;
-            background: #fff;
-            border-radius: 3px;
-        }
-        
-        .ctrl-btn.active { background: #2563eb !important; color: #ffffff !important; }
-        .color-picker { width: 20px; height: 20px; padding: 0; border: 1px solid #ccc; border-radius: 3px; cursor: pointer; background: none; }
-
-        @media print {
-            @page { size: A4 portrait; margin: 0; }
-            body { background: white; padding: 0; margin: 0; }
-            .page { 
-                box-shadow: none; margin: 0; padding: 10mm 15mm; width: 210mm; height: 297mm; max-height: 297mm;
-                page-break-after: always; break-after: page; page-break-inside: avoid; break-inside: avoid; box-sizing: border-box; overflow: hidden;
-            }
-            .btn-panel, .label-controls, .img-ctrls, .resize-handle { display: none !important; }
-        }
-    </style>
-</head>
-<body>
-
-    <div class="btn-panel">
-        <button class="btn-ui" onclick="window.print()" style="background: #f70000;"><i class="fas fa-print"></i> Печать в PDF</button>
-        <button class="btn-ui" onclick="saveAsHtml()" style="background: #6366f1;"><i class="fas fa-file-code"></i> Сохранить HTML</button>
-        <button class="btn-ui" id="btnExportWord" style="background: #10b981;"><i class="fas fa-file-word"></i> Скачать DOCX</button>
-        <button class="btn-ui" id="btnExportActivePng" style="background: #0288d1;"><i class="fas fa-file-image"></i> Скачать чертёж PNG</button>
-        <button class="btn-ui" id="btnExportActiveJpg" style="background: #d97706;"><i class="fas fa-file-image"></i> Скачать чертёж JPG</button>
-        <button class="btn-ui" id="btnPasteImage" style="background: #8b5cf6;"><i class="fas fa-paste"></i> Вставить картинку</button>
-        <button class="btn-ui" id="btnAddCustomText" style="background: #f97316;"><i class="fas fa-font"></i> Добавить текст</button>
-    </div>
-
-    <div class="page">
-        <div class="title">
-            Схема расположения земельного участка или земельных участков на кадастровом плане территории (${fullZuName})
-        </div>
-
-        <div class="map-frame" data-page-type="cp">
-            <img src="${mapImage}" alt="">
-            <svg class="callout-svg" style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;"></svg>
-            ${cptLabelsHtml}
-        </div>
-        <div style="text-align: center;"><input type="text" id="scaleText" class="scale-input" value="${config.scaleText}"></div>
-
-        <div style="margin-top: 15px; font-size: 9.5pt;">
-            <b contenteditable="true">Условные обозначения:</b>
-            <div style="display: flex; align-items: center; margin-top: 6px;">
-                <img src="${imgLegendPoly}" style="margin-right: 10px; height: 15px;"> <span contenteditable="true">- образуемый земельный участок</span>
-            </div>
-        </div>
-    </div>
-
-    ${(config.includePzz || config.includeSat) ? (
-        "<div class='page'>" +
-        (config.includePzz ? (
-            "<div class='title' style='font-size: 11.5pt; margin-bottom: 8px;'>" +
-                "Схема расположения образуемого земельного участка на карте градостроительного зонирования " + (config.municipality || '') +
-            "</div>" +
-            "<div class='map-frame' data-page-type='pzz' style='margin-bottom: 20px;'>" +
-                (pzzImage ? ("<img src='" + pzzImage + "' alt=''><svg class='callout-svg' style='position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;'></svg>" + pzzLabelsHtml) : ("<div style='padding: 40px; text-align: center; color: #777; font-style: italic; border: 1px dashed #999; width:100%; box-sizing:border-box;'>Растр ПЗЗ (.rst) не найден.</div>")) +
-            "</div>"
-        ) : "") +
-        (config.includeSat ? (
-            "<div class='title' style='font-size: 11.5pt; margin-bottom: 8px; " + (config.includePzz ? "margin-top: 15px;" : "") + "'>" +
-                "Схема расположения образуемого земельного участка на спутниковой карте" +
-            "</div>" +
-            "<div class='map-frame' data-page-type='satellite'>" +
-                "<img src='" + satelliteImage + "' alt=''>" +
-                "<svg class='callout-svg' style='position: absolute; top: 0; left: 0; width: 100%; height: 100%; pointer-events: none; z-index: 5;'></svg>" +
-                satLabelsHtml +
-            "</div>"
-        ) : "") +
-        "</div>"
-    ) : ""}
-
-    <script>
-        function toHexColor(col) {
-            if (!col) return '#333333';
-            col = String(col).trim();
-            if (col.startsWith('#')) return col.length === 4 ? '#' + col[1] + col[1] + col[2] + col[2] + col[3] + col[3] : col.substring(0, 7);
-            if (col.startsWith('rgb')) {
-                var nums = col.replace(/[^0-9,]/g, '').split(',');
-                if (nums.length >= 3) {
-                    return '#' + parseInt(nums[0], 10).toString(16).padStart(2, '0') + parseInt(nums[1], 10).toString(16).padStart(2, '0') + parseInt(nums[2], 10).toString(16).padStart(2, '0');
-                }
-            }
-            return '#333333';
-        }
-
-        function saveAsHtml() {
-            var html = "<!DOCTYPE html><html>" + document.documentElement.innerHTML + "</html>";
-            var blob = new Blob([html], {type: "text/html;charset=utf-8"});
-            saveAs(blob, "Чертёж_СРЗУ.html");
-        }
-
-        async function exportFrameAsImage(format) {
-            const pages = Array.from(document.querySelectorAll('.page'));
-            let targetFrame = document.querySelector('.map-frame');
-            
-            // Находим наиболлее видимый чертеж на экране
-            let minDiff = Infinity;
-            document.querySelectorAll('.map-frame').forEach(frame => {
-                const rect = frame.getBoundingClientRect();
-                const diff = Math.abs(rect.top);
-                if (diff < minDiff) {
-                    minDiff = diff;
-                    targetFrame = frame;
-                }
-            });
-
-            if (!targetFrame) return;
-
-            const controls = targetFrame.querySelectorAll('.label-controls');
-            controls.forEach(c => c.style.setProperty('display', 'none', 'important'));
-
-            const canvas = await html2canvas(targetFrame, {
-                useCORS: true,
-                allowTaint: true,
-                scale: 2,
-                logging: false
-            });
-
-            controls.forEach(c => c.style.removeProperty('display'));
-
-            const mime = format === 'jpg' ? 'image/jpeg' : 'image/png';
-            const ext = format === 'jpg' ? 'jpg' : 'png';
-            const frameType = targetFrame.dataset.pageType || 'чертеж';
-
-            canvas.toBlob(blob => {
-                saveAs(blob, \`Чертёж_\${frameType}_\${'${fullZuName}'.replace(/[:\/]/g, '_')}.\${ext}\`);
-            }, mime, 0.95);
-        }
-
-        document.getElementById('btnExportActivePng').onclick = () => exportFrameAsImage('png');
-        document.getElementById('btnExportActiveJpg').onclick = () => exportFrameAsImage('jpg');
-
-        function updatePageCallouts(frame) {
-            if (!frame) return;
-            const svg = frame.querySelector('.callout-svg');
-            if (!svg) return;
-            svg.innerHTML = '';
-            const frameRect = frame.getBoundingClientRect();
-            
-            frame.querySelectorAll('.interactive-label.has-callout').forEach(label => {
-                const anchorX_pct = parseFloat(label.dataset.anchorX);
-                const anchorY_pct = parseFloat(label.dataset.anchorY);
-                if (isNaN(anchorX_pct) || isNaN(anchorY_pct)) return;
-                
-                const labelRect = label.getBoundingClientRect();
-                const labelX_pct = ((labelRect.left + labelRect.width / 2 - frameRect.left) / frameRect.width) * 100;
-                const labelY_pct = ((labelRect.top + labelRect.height / 2 - frameRect.top) / frameRect.height) * 100;
-                
-                const dx_px = (labelX_pct - anchorX_pct) * (frameRect.width / 100);
-                const dy_px = (labelY_pct - anchorY_pct) * (frameRect.height / 100);
-                const dist_px = Math.sqrt(dx_px * dx_px + dy_px * dy_px);
-
-                const angle = Math.abs(Math.atan2(dy_px, dx_px));
-                const isHorizontal = angle < Math.PI / 4 || angle > 3 * Math.PI / 4;
-                const gap = isHorizontal ? (labelRect.width / 2 + 1) : (labelRect.height / 2 + 1);
-                if (dist_px > gap) {
-                    const ratio = (dist_px - gap) / dist_px;
-                    const endX_pct = anchorX_pct + (labelX_pct - anchorX_pct) * ratio;
-                    const endY_pct = anchorY_pct + (labelY_pct - anchorY_pct) * ratio;
-
-                    const span = label.querySelector('.label-text');
-                    const spanColor = span && span.style.color ? span.style.color.trim().toLowerCase() : '';
-                    let lineColor = label.dataset.defaultColor || '#ff3b30';
-                    if (spanColor && spanColor !== '#333333' && spanColor !== 'rgb(51, 51, 51)') {
-                        lineColor = spanColor;
-                    }
-                    
-                    const line = document.createElementNS('http://www.w3.org/2000/svg', 'line');
-                    line.setAttribute('x1', anchorX_pct + '%');
-                    line.setAttribute('y1', anchorY_pct + '%');
-                    line.setAttribute('x2', endX_pct + '%');
-                    line.setAttribute('y2', endY_pct + '%');
-                    line.setAttribute('stroke', lineColor);
-                    line.setAttribute('stroke-width', '2');
-                    svg.appendChild(line);
-                }
-            });
-        }
-
-        function updateAllCallouts() {
-            document.querySelectorAll('.map-frame').forEach(frame => updatePageCallouts(frame));
-        }
-
-        function initInteractiveLabel(label) {
-            if (!label) return;
-            let isDragging = false, startX, startY, startLeft, startTop, hideTimeout;
-            const span = label.querySelector('.label-text');
-            const controls = label.querySelector('.label-controls');
-
-            const showControls = () => { clearTimeout(hideTimeout); label.classList.add('show-controls'); };
-            const hideControlsWithDelay = () => {
-                clearTimeout(hideTimeout);
-                if (span && document.activeElement === span) return;
-                hideTimeout = setTimeout(() => {
-                    if (span && document.activeElement !== span) label.classList.remove('show-controls');
-                }, 4000); 
-            };
-
-            label.addEventListener('mouseenter', showControls);
-            label.addEventListener('mouseleave', hideControlsWithDelay);
-
-            label.addEventListener('mousedown', (e) => {
-                if (e.target.closest('.ctrl-btn') || e.target.closest('.color-picker') || (span && e.target === span && document.activeElement === span)) return;
-                isDragging = true;
-                startX = e.clientX; startY = e.clientY;
-                startLeft = parseFloat(label.style.left) || 0;
-                startTop = parseFloat(label.style.top) || 0;
-                e.preventDefault();
-            });
-
-            document.addEventListener('mousemove', (e) => {
-                if (!isDragging || !label.parentElement) return;
-                const parentRect = label.parentElement.getBoundingClientRect();
-                const dx = ((e.clientX - startX) / parentRect.width) * 100;
-                const dy = ((e.clientY - startY) / parentRect.height) * 100;
-                label.style.left = (startLeft + dx) + '%';
-                label.style.top = (startTop + dy) + '%';
-                updatePageCallouts(label.parentElement);
-            });
-
-            document.addEventListener('mouseup', () => { isDragging = false; });
-
-            const btnUp = label.querySelector('.size-up');
-            if (btnUp && span) {
-                btnUp.onclick = (ev) => {
-                    ev.stopPropagation();
-                    const newSize = parseInt(window.getComputedStyle(span).fontSize, 10) + 2;
-                    span.style.fontSize = newSize + 'px';
-                    span.style.width = Math.ceil((span.textContent.length * (newSize * 0.54)) + 16) + 'px';
-                    updatePageCallouts(label.parentElement);
-                };
-            }
-
-            const btnDown = label.querySelector('.size-down');
-            if (btnDown && span) {
-                btnDown.onclick = (ev) => {
-                    ev.stopPropagation();
-                    const newSize = Math.max(10, parseInt(window.getComputedStyle(span).fontSize, 10) - 2);
-                    span.style.fontSize = newSize + 'px';
-                    span.style.width = Math.ceil((span.textContent.length * (newSize * 0.54)) + 16) + 'px';
-                    updatePageCallouts(label.parentElement);
-                };
-            }
-
-            const btnToggleBg = label.querySelector('.toggle-bg');
-            if (btnToggleBg) {
-                btnToggleBg.onclick = (ev) => {
-                    ev.stopPropagation();
-                    label.classList.toggle('no-bg');
-                };
-            }
-
-            const btnToggleCallout = label.querySelector('.toggle-callout');
-            if (btnToggleCallout) {
-                btnToggleCallout.onclick = (ev) => {
-                    ev.stopPropagation();
-                    label.classList.toggle('has-callout');
-                    updatePageCallouts(label.parentElement);
-                };
-            }
-
-            const btnDelete = label.querySelector('.delete-lbl');
-            if (btnDelete) {
-                btnDelete.onclick = (ev) => {
-                    ev.stopPropagation();
-                    const parent = label.parentElement;
-                    label.remove();
-                    if (parent) updatePageCallouts(parent);
-                };
-            }
-        }
-
-        document.querySelectorAll('.interactive-label').forEach(initInteractiveLabel);
-        updateAllCallouts();
-        window.addEventListener('resize', updateAllCallouts);
-
-        // DOCX Экспорт для СРЗУ без таблиц
-        const btnExportWord = document.getElementById('btnExportWord');
-        if (btnExportWord) {
-            btnExportWord.onclick = async function() {
-                async function captureFrame(frameEl) {
-                    if (!frameEl) return null;
-                    const controls = frameEl.querySelectorAll('.label-controls');
-                    controls.forEach(c => c.style.setProperty('display', 'none', 'important'));
-                    const canvas = await html2canvas(frameEl, { useCORS: true, allowTaint: true, scale: 2, logging: false });
-                    controls.forEach(c => c.style.removeProperty('display'));
-                    return canvas.toDataURL('image/png');
-                }
-
-                var mapImgData = await captureFrame(document.querySelector('.map-frame[data-page-type="cp"]')) || "${mapImage}";
-                var sqImgData = "${imgLegendPoly}";
-
-                const sections = [{
-                    properties: { page: { size: { width: docx.convertMillimetersToTwip(210), height: docx.convertMillimetersToTwip(297) }, margin: { top: 1134, right: 850, bottom: 1134, left: 1700 } } },
-                    children: [
-                        new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { before: 200, after: 200 }, children: [
-                            new docx.TextRun({ text: "СХЕМА РАСПОЛОЖЕНИЯ ЗЕМЕЛЬНОГО УЧАСТКА НА КАДАСТРОВОМ ПЛАНЕ ТЕРРИТОРИИ", size: 26, bold: true })
-                        ]}),
-                        new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { before: 100, after: 100 }, children: [
-                            new docx.ImageRun({ data: mapImgData.split(',')[1], transformation: { width: 500, height: 600 } })
                         ]}),
                         new docx.Paragraph({ alignment: docx.AlignmentType.CENTER, spacing: { after: 200 }, children: [
                             new docx.TextRun({ text: document.getElementById('scaleText') ? document.getElementById('scaleText').value : '', size: 22, bold: true })
