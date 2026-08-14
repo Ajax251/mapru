@@ -1,5 +1,5 @@
 
-console.log("%c[Schema Generator] Загружена версия 2.471", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.47", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 
@@ -100,31 +100,31 @@ async function takeMapScreenshotForSchema(quarter, settlement, scaleFactor = 2) 
     });
 
     try {
-     const canvas = await html2canvas(mapElement, {
-    useCORS: true,
-    allowTaint: false, // Отключаем загрязнение холста
-    logging: false,
-    scale: scaleFactor,
-    width: mapElement.clientWidth,
-    height: mapElement.clientHeight,
-    scrollX: 0,
-    scrollY: 0,
-    ignoreElements: (element) => {
-        if (element.tagName === 'IMG' && element.src) {
-            if (element.src.includes('clck') || element.src.includes('counter') || element.src.includes('promo') || element.src.includes('statface')) {
-                return true;
+        const canvas = await html2canvas(mapElement, {
+            useCORS: true,
+            allowTaint: true, // ВОССТАНОВЛЕНО: позволяет захватывать тайлы карты
+            logging: false,
+            scale: scaleFactor,
+            width: mapElement.clientWidth,
+            height: mapElement.clientHeight,
+            scrollX: 0,
+            scrollY: 0,
+            ignoreElements: (element) => {
+                if (element.tagName === 'IMG' && element.src) {
+                    if (element.src.includes('clck') || element.src.includes('counter') || element.src.includes('promo') || element.src.includes('statface')) {
+                        return true;
+                    }
+                }
+                if (typeof element.className === 'string') {
+                    return element.className.includes('-copyright') || 
+                           element.className.includes('-gototech') || 
+                           element.className.includes('-gotoymaps') ||
+                           element.className.includes('-promo') ||
+                           element.className.includes('-balloon');
+                }
+                return false;
             }
-        }
-        if (typeof element.className === 'string') {
-            return element.className.includes('-copyright') || 
-                   element.className.includes('-gototech') || 
-                   element.className.includes('-gotoymaps') ||
-                   element.className.includes('-promo') ||
-                   element.className.includes('-balloon');
-        }
-        return false;
-    }
-});
+        });
 
         return canvas.toDataURL('image/png');
     } catch (err) {
@@ -2861,7 +2861,7 @@ line.setAttribute('y2', endY_pct + '%');
                     
                     const canvas = await html2canvas(frameEl, {
                         useCORS: true,
-                        allowTaint: false
+                        allowTaint: true, // ИСПРАВЛЕНО c false на true
                         scale: 2,
                         logging: false
                     });
@@ -4679,7 +4679,7 @@ async function getCapturedFrameCanvas(frameEl) {
             controls.forEach(c => c.style.setProperty('display', 'none', 'important'));
             const canvas = await html2canvas(frameEl, { 
                 useCORS: true, 
-             allowTaint: false
+                allowTaint: true, // ИСПРАВЛЕНО с false на true
                 scale: 2, 
                 logging: false 
             });
