@@ -1,5 +1,5 @@
 
-console.log("%c[Schema Generator] Загружена версия 2.44", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.43", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 
@@ -3277,13 +3277,17 @@ line.setAttribute('y2', endY_pct + '%');
 </body>
 </html>`;
 
-     const win = window.open('', '_blank');
+   const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const win = window.open(url, '_blank');
     if (!win) {
-        alert('Всплывающее окно заблокировано браузером! Разрешите открытие всплывающих окон для этого сайта в настройках браузера.');
-        return;
+        const a = document.createElement('a');
+        a.href = url;
+        a.target = '_blank';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
     }
-    win.document.write(htmlContent);
-    win.document.close();
 }
 
 function addSchemaGrid(config) {
@@ -5082,11 +5086,15 @@ function openSrzuDocumentWindow(mapImage, pzzImage, satelliteImage, imgLegendPol
 </body>
 </html>`;
 
-   const win = window.open('', '_blank');
+ const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const win = window.open(url, '_blank');
     if (!win) {
-        alert('Всплывающее окно заблокировано браузером! Разрешите открытие всплывающих окон для этого сайта в настройках браузера.');
-        return;
+        const a = document.createElement('a');
+        a.href = url;
+        a.target = '_blank';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
     }
-    win.document.write(htmlContent);
-    win.document.close();
 }
