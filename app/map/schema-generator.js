@@ -1,5 +1,5 @@
 
-console.log("%c[Schema Generator] Загружена версия 2.46", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.47", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 
@@ -82,8 +82,8 @@ async function takeMapScreenshotForSchema(quarter, settlement, scaleFactor = 2) 
     mapElement.style.setProperty('box-shadow', 'none', 'important');
     mapElement.style.setProperty('border-radius', '0', 'important');
 
-    // Временно скрываем служебные панели и копирайты Яндекса, блокирующие захват карты
-    const panesToHide = ['controls', 'copyrights', 'outerOverlays'];
+    // Скрываем только контролы и копирайты (НЕ скрываем outerOverlays, чтобы не потерять слои)
+    const panesToHide = ['controls', 'copyrights'];
     const hiddenPanes = [];
     panesToHide.forEach(paneName => {
         try {
@@ -102,7 +102,7 @@ async function takeMapScreenshotForSchema(quarter, settlement, scaleFactor = 2) 
     try {
         const canvas = await html2canvas(mapElement, {
             useCORS: true,
-            allowTaint: false,
+            allowTaint: true, // ВОССТАНОВЛЕНО: позволяет захватывать тайлы карты
             logging: false,
             scale: scaleFactor,
             width: mapElement.clientWidth,
@@ -131,13 +131,12 @@ async function takeMapScreenshotForSchema(quarter, settlement, scaleFactor = 2) 
         console.error("[Screenshot Error]", err);
         const fallbackCanvas = await html2canvas(mapElement, {
             useCORS: true,
-            allowTaint: false,
+            allowTaint: true,
             logging: false,
             scale: 1
         });
         return fallbackCanvas.toDataURL('image/png');
     } finally {
-        // Восстанавливаем служебные панели карты
         hiddenPanes.forEach(el => {
             el.style.display = el.style.oldDisplay || '';
             delete el.style.oldDisplay;
@@ -2855,17 +2854,17 @@ line.setAttribute('y2', endY_pct + '%');
         const btnExportWord = document.getElementById('btnExportWord');
         if (btnExportWord) {
             btnExportWord.onclick = async function() {
-                async function captureFrame(frameEl) {
+            async function captureFrame(frameEl) {
                     if (!frameEl) return null;
                     const controls = frameEl.querySelectorAll('.label-controls');
                     controls.forEach(c => c.style.setProperty('display', 'none', 'important'));
                     
-       const canvas = await html2canvas(frameEl, {
-    useCORS: true,
-    allowTaint: false,
-    scale: 2,
-    logging: false
-});
+                    const canvas = await html2canvas(frameEl, {
+                        useCORS: true,
+                        allowTaint: true, // ИСПРАВЛЕНО c false на true
+                        scale: 2,
+                        logging: false
+                    });
                     
                     controls.forEach(c => c.style.removeProperty('display'));
                     return canvas.toDataURL('image/png');
@@ -4673,17 +4672,17 @@ function openSrzuDocumentWindow(mapImage, pzzImage, satelliteImage, imgLegendPol
             var blob = new Blob([html], {type: "text/html;charset=utf-8"});
             saveAs(blob, "Чертёж_СРЗУ.html");
         }
-
-        async function getCapturedFrameCanvas(frameEl) {
+        
+async function getCapturedFrameCanvas(frameEl) {
             if (!frameEl) return null;
             const controls = frameEl.querySelectorAll('.label-controls');
             controls.forEach(c => c.style.setProperty('display', 'none', 'important'));
-   const canvas = await html2canvas(frameEl, {
-    useCORS: true,
-    allowTaint: false,
-    scale: 2,
-    logging: false
-});
+            const canvas = await html2canvas(frameEl, { 
+                useCORS: true, 
+                allowTaint: true, // ИСПРАВЛЕНО с false на true
+                scale: 2, 
+                logging: false 
+            });
             controls.forEach(c => c.style.removeProperty('display'));
             return canvas;
         }
