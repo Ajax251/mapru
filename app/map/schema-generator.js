@@ -1,5 +1,5 @@
 
-console.log("%c[Schema Generator] Загружена версия 2.45", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.46", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 
@@ -82,10 +82,27 @@ async function takeMapScreenshotForSchema(quarter, settlement, scaleFactor = 2) 
     mapElement.style.setProperty('box-shadow', 'none', 'important');
     mapElement.style.setProperty('border-radius', '0', 'important');
 
+    // Временно скрываем служебные панели и копирайты Яндекса, блокирующие захват карты
+    const panesToHide = ['controls', 'copyrights', 'outerOverlays'];
+    const hiddenPanes = [];
+    panesToHide.forEach(paneName => {
+        try {
+            const pane = map.panes.get(paneName);
+            if (pane) {
+                const el = pane.getElement();
+                if (el && el.style.display !== 'none') {
+                    el.style.oldDisplay = el.style.display;
+                    el.style.display = 'none';
+                    hiddenPanes.push(el);
+                }
+            }
+        } catch (e) {}
+    });
+
     try {
         const canvas = await html2canvas(mapElement, {
             useCORS: true,
-            allowTaint: false, // Отключаем taint, чтобы toDataURL не блокировался
+            allowTaint: false,
             logging: false,
             scale: scaleFactor,
             width: mapElement.clientWidth,
@@ -93,9 +110,8 @@ async function takeMapScreenshotForSchema(quarter, settlement, scaleFactor = 2) 
             scrollX: 0,
             scrollY: 0,
             ignoreElements: (element) => {
-                // Игнорируем рекламу, промо-ссылки, счетчики кликов и копирайты
                 if (element.tagName === 'IMG' && element.src) {
-                    if (element.src.includes('clck') || element.src.includes('counter') || element.src.includes('promo')) {
+                    if (element.src.includes('clck') || element.src.includes('counter') || element.src.includes('promo') || element.src.includes('statface')) {
                         return true;
                     }
                 }
@@ -113,7 +129,6 @@ async function takeMapScreenshotForSchema(quarter, settlement, scaleFactor = 2) 
         return canvas.toDataURL('image/png');
     } catch (err) {
         console.error("[Screenshot Error]", err);
-        // Резервная попытка в базовом масштабе без внешних элементов
         const fallbackCanvas = await html2canvas(mapElement, {
             useCORS: true,
             allowTaint: false,
@@ -122,6 +137,11 @@ async function takeMapScreenshotForSchema(quarter, settlement, scaleFactor = 2) 
         });
         return fallbackCanvas.toDataURL('image/png');
     } finally {
+        // Восстанавливаем служебные панели карты
+        hiddenPanes.forEach(el => {
+            el.style.display = el.style.oldDisplay || '';
+            delete el.style.oldDisplay;
+        });
         mapElement.style.removeProperty('border');
         mapElement.style.removeProperty('box-shadow');
         mapElement.style.removeProperty('border-radius');
@@ -1149,8 +1169,6 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
             window.__schemaDataLoaded = true;
         }
 
-        await new Promise(r => setTimeout(r, 600));
-
         showLoader('Создание снимка карты КПТ...');
         map.setCenter(centerGeo); 
         setLayerVisibilityForPage({ showZu: config.cptShowZu, showZouit: config.cptShowZouit });
@@ -1173,7 +1191,8 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
             map.geoObjects.add(tempCalloutLine);
         }
         
-        await new Promise(r => setTimeout(r, 500));
+        // Задержка для полной подгрузки тайлов КПТ
+        await new Promise(r => setTimeout(r, 1200));
         const mapImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement);
         
         if (tempCalloutLine) map.geoObjects.remove(tempCalloutLine);
@@ -1222,6 +1241,7 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
                     map.geoObjects.add(tempCalloutLine);
                 }
 
+                // Задержка для растра ПЗЗ
                 await new Promise(r => setTimeout(r, 2000));
                 pzzImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement);
                 
@@ -1285,7 +1305,8 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
                 map.geoObjects.add(tempCalloutLine);
             }
 
-            await new Promise(r => setTimeout(r, 3500));
+            // Задержка для подгрузки тайлов спутника Google
+            await new Promise(r => setTimeout(r, 3000));
             satelliteImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement);
 
             if (tempCalloutLine) map.geoObjects.remove(tempCalloutLine);
@@ -1653,16 +1674,35 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
         const isNoBgDefault = (pageType === 'cp');
         let isNoBg = isNoBgDefault;
 
-        let defaultLineColor = '#ff3b30';
+        // Раздельные цвета по типам объектов
+        let defaultLabelColor = '#333333';
         if (pageType === 'satellite') {
-            defaultLineColor = '#ffffff';
-        } else if (config.lineColor) {
-            defaultLineColor = config.lineColor;
+            defaultLabelColor = (l.type === 'zuName') ? '#fde047' : '#ffffff';
+        } else {
+            switch(l.type) {
+                case 'zuName':
+                    defaultLabelColor = config.lineColor || '#ff3b30';
+                    break;
+                case 'quarter':
+                    defaultLabelColor = '#1e40af'; // Синий для квартала
+                    break;
+                case 'terrZone':
+                    defaultLabelColor = '#7c3aed'; // Фиолетовый для терр. зоны
+                    break;
+                case 'settlement':
+                    defaultLabelColor = '#0f172a'; // Темный для нас. пункта
+                    break;
+                case 'municipality':
+                    defaultLabelColor = '#334155'; // Темно-серый для поселения
+                    break;
+                default:
+                    defaultLabelColor = '#ff3b30';
+            }
         }
 
-        let finalFontColor = isNoBg ? defaultLineColor : '#333333';
+        let finalFontColor = defaultLabelColor;
         let hasCalloutClass = ''; 
-        let fontWeight = 'normal';
+        let fontWeight = (l.type === 'zuName' || l.type === 'quarter') ? 'bold' : 'normal';
         let fontStyle = 'normal';
 
         const styleKey = `sch_style_${pageType}_${l.type}`;
@@ -1671,9 +1711,7 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
         if (savedStyleStr) {
             try {
                 savedStyle = JSON.parse(savedStyleStr);
-            } catch(e) { 
-                console.error(e); 
-            }
+            } catch(e) {}
         }
 
         if (savedStyle) {
@@ -1708,8 +1746,8 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
                  data-type="${l.type}" 
                  data-anchor-x="${pageType === 'parts' ? 50 : l.pctX_inside}" 
                  data-anchor-y="${pageType === 'parts' ? 50 : l.pctY_inside}" 
-                 data-default-color="${defaultLineColor}">
-                <span contenteditable="true" class="label-text" title="Двойной клик — изменить текст, зажать — перетащить" style="font-size: ${fontSize}px; font-weight: ${fontWeight}; font-style: ${fontStyle}; background: ${calloutBgRgba}; border: 1.5px solid ${config.lineColor || '#ff3b30'}; color: ${finalFontColor}; white-space: nowrap !important; display: inline-block !important; width: ${w}px !important; text-align: center;">${text}</span>
+                 data-default-color="${defaultLabelColor}">
+                <span contenteditable="true" class="label-text" title="Двойной клик — изменить текст, зажать — перетащить" style="font-size: ${fontSize}px; font-weight: ${fontWeight}; font-style: ${fontStyle}; background: ${calloutBgRgba}; border: 1.5px solid ${defaultLabelColor}; color: ${finalFontColor}; white-space: nowrap !important; display: inline-block !important; width: ${w}px !important; text-align: center;">${text}</span>
                 <div class="label-controls">
                     <button class="ctrl-btn size-up" data-tooltip="Увеличить шрифт">+</button>
                     <button class="ctrl-btn size-down" data-tooltip="Уменьшить шрифт">-</button>
@@ -4163,9 +4201,6 @@ async function executeSrzuGeneration(lat, lon, targetPolygon, config) {
             window.__schemaDataLoaded = true;
         }
 
-        await new Promise(r => setTimeout(r, 400));
-
-        // Выбираем масштаб снимка в зависимости от ориентации (2.5 для Альбомного, 2 для Книжного)
         const screenshotScale = config.orientation === 'landscape' ? 2.5 : 2;
 
         showLoader('Создание снимка Чертёжа КПТ...');
@@ -4190,7 +4225,8 @@ async function executeSrzuGeneration(lat, lon, targetPolygon, config) {
             map.geoObjects.add(tempCalloutLine);
         }
         
-        await new Promise(r => setTimeout(r, 500));
+        // Задержка для полной подгрузки тайлов КПТ
+        await new Promise(r => setTimeout(r, 1200));
         const mapImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement, screenshotScale);
         
         if (tempCalloutLine) map.geoObjects.remove(tempCalloutLine);
@@ -4229,6 +4265,7 @@ async function executeSrzuGeneration(lat, lon, targetPolygon, config) {
                     map.geoObjects.add(tempCalloutLine);
                 }
 
+                // Задержка для растра ПЗЗ
                 await new Promise(r => setTimeout(r, 2000));
                 pzzImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement, screenshotScale);
                 
@@ -4268,7 +4305,8 @@ async function executeSrzuGeneration(lat, lon, targetPolygon, config) {
                 map.geoObjects.add(tempCalloutLine);
             }
 
-            await new Promise(r => setTimeout(r, 3500));
+            // Задержка для подгрузки тайлов спутника Google
+            await new Promise(r => setTimeout(r, 3000));
             satelliteImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement, screenshotScale);
 
             if (tempCalloutLine) map.geoObjects.remove(tempCalloutLine);
