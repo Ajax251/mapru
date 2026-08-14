@@ -3277,7 +3277,11 @@ line.setAttribute('y2', endY_pct + '%');
 </body>
 </html>`;
 
-    const win = window.open('', '_blank');
+     const win = window.open('', '_blank');
+    if (!win) {
+        alert('Всплывающее окно заблокировано браузером! Разрешите открытие всплывающих окон для этого сайта в настройках браузера.');
+        return;
+    }
     win.document.write(htmlContent);
     win.document.close();
 }
@@ -5078,7 +5082,11 @@ function openSrzuDocumentWindow(mapImage, pzzImage, satelliteImage, imgLegendPol
 </body>
 </html>`;
 
-    const win = window.open('', '_blank');
+   const win = window.open('', '_blank');
+    if (!win) {
+        alert('Всплывающее окно заблокировано браузером! Разрешите открытие всплывающих окон для этого сайта в настройках браузера.');
+        return;
+    }
     win.document.write(htmlContent);
     win.document.close();
 }
