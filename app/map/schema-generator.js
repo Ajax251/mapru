@@ -1,5 +1,5 @@
 
-console.log("%c[Schema Generator] Загружена версия 2.39", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.47", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 
@@ -82,30 +82,69 @@ async function takeMapScreenshotForSchema(quarter, settlement, scaleFactor = 2) 
     mapElement.style.setProperty('box-shadow', 'none', 'important');
     mapElement.style.setProperty('border-radius', '0', 'important');
 
-    const canvas = await html2canvas(mapElement, {
-        useCORS: true,
-        allowTaint: true,
-        logging: false,
-        scale: scaleFactor, // Увеличенный масштаб рендеринга для высокого качества
-        width: mapElement.clientWidth,
-        height: mapElement.clientHeight,
-        scrollX: 0,
-        scrollY: 0,
-        ignoreElements: (element) => {
-            if (typeof element.className === 'string') {
-                return element.className.includes('-copyright') || 
-                       element.className.includes('-gototech') || 
-                       element.className.includes('-gotoymaps');
+    // Скрываем только контролы и копирайты (НЕ скрываем outerOverlays, чтобы не потерять слои)
+    const panesToHide = ['controls', 'copyrights'];
+    const hiddenPanes = [];
+    panesToHide.forEach(paneName => {
+        try {
+            const pane = map.panes.get(paneName);
+            if (pane) {
+                const el = pane.getElement();
+                if (el && el.style.display !== 'none') {
+                    el.style.oldDisplay = el.style.display;
+                    el.style.display = 'none';
+                    hiddenPanes.push(el);
+                }
             }
-            return false;
-        }
+        } catch (e) {}
     });
 
-    mapElement.style.removeProperty('border');
-    mapElement.style.removeProperty('box-shadow');
-    mapElement.style.removeProperty('border-radius');
+    try {
+        const canvas = await html2canvas(mapElement, {
+            useCORS: true,
+            allowTaint: true, // ВОССТАНОВЛЕНО: позволяет захватывать тайлы карты
+            logging: false,
+            scale: scaleFactor,
+            width: mapElement.clientWidth,
+            height: mapElement.clientHeight,
+            scrollX: 0,
+            scrollY: 0,
+            ignoreElements: (element) => {
+                if (element.tagName === 'IMG' && element.src) {
+                    if (element.src.includes('clck') || element.src.includes('counter') || element.src.includes('promo') || element.src.includes('statface')) {
+                        return true;
+                    }
+                }
+                if (typeof element.className === 'string') {
+                    return element.className.includes('-copyright') || 
+                           element.className.includes('-gototech') || 
+                           element.className.includes('-gotoymaps') ||
+                           element.className.includes('-promo') ||
+                           element.className.includes('-balloon');
+                }
+                return false;
+            }
+        });
 
-    return canvas.toDataURL('image/png'); 
+        return canvas.toDataURL('image/png');
+    } catch (err) {
+        console.error("[Screenshot Error]", err);
+        const fallbackCanvas = await html2canvas(mapElement, {
+            useCORS: true,
+            allowTaint: true,
+            logging: false,
+            scale: 1
+        });
+        return fallbackCanvas.toDataURL('image/png');
+    } finally {
+        hiddenPanes.forEach(el => {
+            el.style.display = el.style.oldDisplay || '';
+            delete el.style.oldDisplay;
+        });
+        mapElement.style.removeProperty('border');
+        mapElement.style.removeProperty('box-shadow');
+        mapElement.style.removeProperty('border-radius');
+    }
 }
 
 function generateLegendPolygonImage(strokeColor, fillColor, opacity) {
@@ -370,19 +409,101 @@ function generatePartsSchemaImage(targetPolygon, config) {
     };
 }
 
+function makeModalDraggable(dialogBox, headerEl) {
+    if (!dialogBox || !headerEl) return;
+    headerEl.style.cursor = 'grab';
+    headerEl.style.userSelect = 'none';
+
+    let isDragging = false;
+    let startX = 0, startY = 0;
+    let currentX = 0, currentY = 0;
+
+    headerEl.addEventListener('mousedown', (e) => {
+        isDragging = true;
+        headerEl.style.cursor = 'grabbing';
+        startX = e.clientX - currentX;
+        startY = e.clientY - currentY;
+        e.preventDefault();
+    });
+
+    const onMouseMove = (e) => {
+        if (!isDragging) return;
+        currentX = e.clientX - startX;
+        currentY = e.clientY - startY;
+        dialogBox.style.transform = `translate(${currentX}px, ${currentY}px)`;
+    };
+
+    const onMouseUp = () => {
+        if (isDragging) {
+            isDragging = false;
+            headerEl.style.cursor = 'grab';
+        }
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+}
+
+function makeFloatingWindowDraggable(windowEl, headerEl) {
+    if (!windowEl || !headerEl) return;
+    headerEl.style.cursor = 'grab';
+    headerEl.style.userSelect = 'none';
+
+    let isDragging = false;
+    let startX = 0, startY = 0;
+
+    headerEl.addEventListener('mousedown', (e) => {
+        isDragging = true;
+        headerEl.style.cursor = 'grabbing';
+
+        const rect = windowEl.getBoundingClientRect();
+        windowEl.style.transform = 'none';
+        windowEl.style.left = rect.left + 'px';
+        windowEl.style.top = rect.top + 'px';
+
+        startX = e.clientX - rect.left;
+        startY = e.clientY - rect.top;
+        e.preventDefault();
+    });
+
+    const onMouseMove = (e) => {
+        if (!isDragging) return;
+        windowEl.style.left = (e.clientX - startX) + 'px';
+        windowEl.style.top = (e.clientY - startY) + 'px';
+    };
+
+    const onMouseUp = () => {
+        if (isDragging) {
+            isDragging = false;
+            headerEl.style.cursor = 'grab';
+        }
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+}
+
 function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
+    const existing = document.getElementById('sch_settings_window');
+    if (existing) existing.remove();
+
     const modal = document.createElement('div');
+    modal.id = 'sch_settings_window';
     modal.style.position = 'fixed';
-    modal.style.top = '0';
-    modal.style.left = '0';
-    modal.style.width = '100%';
-    modal.style.height = '100%';
-    modal.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
-    modal.style.backdropFilter = 'blur(4px)';
-    modal.style.display = 'flex';
-    modal.style.alignItems = 'center';
-    modal.style.justifyContent = 'center';
+    modal.style.top = '50%';
+    modal.style.left = '50%';
+    modal.style.transform = 'translate(-50%, -50%)';
     modal.style.zIndex = '15000';
+    modal.style.background = '#ffffff';
+    modal.style.padding = '20px';
+    modal.style.width = '95%';
+    modal.style.maxWidth = '980px';
+    modal.style.boxSizing = 'border-box';
+    modal.style.borderRadius = '12px';
+    modal.style.boxShadow = '0 10px 35px rgba(0,0,0,0.3)';
+    modal.style.border = '1px solid #cbd5e1';
+    modal.style.fontFamily = 'Arial, sans-serif';
+    modal.style.fontSize = '12px';
 
     const sLineColor = localStorage.getItem('sch_lineColor') || '#FF0000';
     const sLineWidth = localStorage.getItem('sch_lineWidth') || '3';
@@ -432,241 +553,242 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
     const sSatShowPoints = localStorage.getItem('sch_satShowPoints') !== 'false';
 
     modal.innerHTML = `
-        <div style="background: #ffffff; padding: 20px; width: 95%; max-width: 980px; box-sizing: border-box; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); font-family: Arial, sans-serif; font-size: 12px;">
-            <h3 style="margin: 0 0 15px 0; text-align: center; color: #1e3a8a; font-size: 16px; font-weight: bold;">Настройки Схемы СРЗУ</h3>
-            
-            <div style="display: grid; grid-template-columns: 1fr 1fr 1.1fr; gap: 15px; margin-bottom: 12px;">
-                <div style="display: flex; flex-direction: column; gap: 12px;">
-                    <div>
-                        <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Стили контура</h4>
-                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-                            <div style="display: flex; flex-direction: column; gap: 3px;">
-                                <label style="color: #555;">Цвет контура:</label>
-                                <input type="color" id="sch_lineColor" value="${toHexColor(sLineColor)}" style="width: 100%; height: 26px; border-radius: 4px; border:none; cursor:pointer;">
-                            </div>
-                            <div style="display: flex; flex-direction: column; gap: 3px;">
-                                <label style="color: #555;">Толщина: <span id="sch_lineWidth_val">${sLineWidth}</span>px</label>
-                                <input type="range" id="sch_lineWidth" min="1" max="10" value="${sLineWidth}" style="width: 100%;">
-                            </div>
-                            <div style="display: flex; flex-direction: column; gap: 3px;">
-                                <label style="color: #555;">Цвет заливки:</label>
-                                <input type="color" id="sch_fillColor" value="${toHexColor(sFillColor)}" style="width: 100%; height: 26px; border-radius: 4px; border:none; cursor:pointer;">
-                            </div>
-                            <div style="display: flex; flex-direction: column; gap: 3px;">
-                                <label style="color: #555;">Заливка: <span id="sch_fillOpacity_val">${sFillOpacity}</span>%</label>
-                                <input type="range" id="sch_fillOpacity" min="0" max="100" value="${sFillOpacity}" style="width: 100%;">
-                            </div>
+        <h3 id="sch_modal_header" style="margin: 0 0 15px 0; text-align: center; color: #1e3a8a; font-size: 16px; font-weight: bold; cursor: grab; user-select: none;">Настройки Схемы СРЗУ</h3>
+        
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1.1fr; gap: 15px; margin-bottom: 12px;">
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+                <div>
+                    <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Стили контура</h4>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                        <div style="display: flex; flex-direction: column; gap: 3px;">
+                            <label style="color: #555;">Цвет контура:</label>
+                            <input type="color" id="sch_lineColor" value="${toHexColor(sLineColor)}" style="width: 100%; height: 26px; border-radius: 4px; border:none; cursor:pointer;">
                         </div>
-                    </div>
-
-                    <div>
-                        <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Характерные точки</h4>
-                        <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
-                            <label style="cursor:pointer; display:flex; align-items:center; gap:6px; font-weight: bold;">
-                                <input type="checkbox" id="sch_showPoints" ${sShowPoints ? 'checked' : ''}> Точки (н1, н2...)
-                            </label>
-                            <input type="color" id="sch_pointColor" value="${toHexColor(sPointColor)}" style="width: 35px; height: 22px; border:none; cursor:pointer;">
+                        <div style="display: flex; flex-direction: column; gap: 3px;">
+                            <label style="color: #555;">Толщина: <span id="sch_lineWidth_val">${sLineWidth}</span>px</label>
+                            <input type="range" id="sch_lineWidth" min="1" max="10" value="${sLineWidth}" style="width: 100%;">
                         </div>
-                        <div style="display: grid; grid-template-columns: 1.2fr 1fr; gap: 8px; align-items: center; margin-bottom: 6px;">
-                            <label style="color: #555;">Размер шрифта (px):</label>
-                            <input type="number" id="sch_pointFontSize" min="8" max="72" value="${sPointFontSize}" style="width: 100%; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                        <div style="display: flex; flex-direction: column; gap: 3px;">
+                            <label style="color: #555;">Цвет заливки:</label>
+                            <input type="color" id="sch_fillColor" value="${toHexColor(sFillColor)}" style="width: 100%; height: 26px; border-radius: 4px; border:none; cursor:pointer;">
                         </div>
-                        <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; color: #333;">
-                            <input type="checkbox" id="sch_autoSort" ${localStorage.getItem('sch_autoSort') !== 'false' ? 'checked' : ''}> Автоустановка (СЗ -> по часовой)
-                        </label>
-                    </div>
-
-                    <div>
-                        <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Масштабирование карт</h4>
-                        <div style="display: flex; flex-direction: column; gap: 6px; background: #f8fafc; padding: 8px; border-radius: 6px; border: 1px solid #e2e8f0;">
-                            <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px;">
-                                <label style="color: #475569;">Режим:</label>
-                                <select id="sch_zoomMode" style="padding: 2px 4px; border-radius: 4px; border: 1px solid #ccc;">
-                                    <option value="constant" ${sZoomMode === 'constant' ? 'selected' : ''}>Постоянный</option>
-                                    <option value="individual" ${sZoomMode === 'individual' ? 'selected' : ''}>Индивидуальный</option>
-                                </select>
-                            </div>
-                            <div id="sch_offsets_container" style="display: flex; flex-direction: column; gap: 4px;">
-                                <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px;">
-                                    <label style="color: #475569;">Смещение ПЗЗ:</label>
-                                    <select id="sch_pzzOffset" style="padding: 2px 4px; border-radius: 4px; border: 1px solid #ccc;">
-                                        <option value="-3" ${sPzzOffset === -3 ? 'selected' : ''}>-3 (отдалить)</option>
-                                        <option value="-2" ${sPzzOffset === -2 ? 'selected' : ''}>-2 (отдалить)</option>
-                                        <option value="-1" ${sPzzOffset === -1 ? 'selected' : ''}>-1 (отдалить)</option>
-                                        <option value="0" ${sPzzOffset === 0 ? 'selected' : ''}>0 (без изм.)</option>
-                                        <option value="1" ${sPzzOffset === 1 ? 'selected' : ''}>+1 (приблизить)</option>
-                                        <option value="2" ${sPzzOffset === 2 ? 'selected' : ''}>+2 (приблизить)</option>
-                                        <option value="3" ${sPzzOffset === 3 ? 'selected' : ''}>+3 (приблизить)</option>
-                                    </select>
-                                </div>
-                                <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px;">
-                                    <label style="color: #475569;">Смещение спутника:</label>
-                                    <select id="sch_satOffset" style="padding: 2px 4px; border-radius: 4px; border: 1px solid #ccc;">
-                                        <option value="-3" ${sSatOffset === -3 ? 'selected' : ''}>-3 (отдалить)</option>
-                                        <option value="-2" ${sSatOffset === -2 ? 'selected' : ''}>-2 (отдалить)</option>
-                                        <option value="-1" ${sSatOffset === -1 ? 'selected' : ''}>-1 (отдалить)</option>
-                                        <option value="0" ${sSatOffset === 0 ? 'selected' : ''}>0 (без изм.)</option>
-                                        <option value="1" ${sSatOffset === 1 ? 'selected' : ''}>+1 (приблизить)</option>
-                                        <option value="2" ${sSatOffset === 2 ? 'selected' : ''}>+2 (приблизить)</option>
-                                        <option value="3" ${sSatOffset === 3 ? 'selected' : ''}>+3 (приблизить)</option>
-                                    </select>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-                </div>
-
-                <div style="display: flex; flex-direction: column; gap: 12px;">
-                    <div>
-                        <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Настройки по листам</h4>
-                        <div style="background: #f8fafc; border: 1px solid #e2e8f0; padding: 8px; border-radius: 6px; display: flex; flex-direction: column; gap: 8px;">
-                            <div>
-                                <strong>Лист КПТ:</strong>
-                                <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px;">
-                                    <div style="display: flex; gap: 8px;">
-                                        <label style="cursor:pointer;"><input type="checkbox" id="sch_cptShowZu" ${sCptShowZu ? 'checked' : ''}> ЗУ</label>
-                                        <label style="cursor:pointer;"><input type="checkbox" id="sch_cptShowZouit" ${sCptShowZouit ? 'checked' : ''}> ЗОУИТ</label>
-                                    </div>
-                                    <select id="sch_cptZuNameMode" style="padding: 1px 2px; border-radius: 4px; border: 1px solid #ccc; font-size: 11px;">
-                                        <option value="off" ${sCptZuNameMode === 'off' ? 'selected' : ''}>Название: Выкл</option>
-                                        <option value="inside" ${sCptZuNameMode === 'inside' ? 'selected' : ''}>Название: Внутри</option>
-                                        <option value="callout" ${sCptZuNameMode === 'callout' ? 'selected' : ''}>Название: Выноска</option>
-                                    </select>
-                                </div>
-                            </div>
-                            <div style="border-top: 1px solid #eee; padding-top: 5px;">
-                                <strong>Лист ПЗЗ:</strong>
-                                <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px;">
-                                    <div style="display: flex; gap: 8px;">
-                                        <label style="cursor:pointer;"><input type="checkbox" id="sch_pzzShowZu" ${sPzzShowZu ? 'checked' : ''}> ЗУ</label>
-                                        <label style="cursor:pointer;"><input type="checkbox" id="sch_pzzShowZouit" ${sPzzShowZouit ? 'checked' : ''}> ЗОУИТ</label>
-                                    </div>
-                                    <select id="sch_pzzZuNameMode" style="padding: 1px 2px; border-radius: 4px; border: 1px solid #ccc; font-size: 11px;">
-                                        <option value="off" ${sPzzZuNameMode === 'off' ? 'selected' : ''}>Название: Выкл</option>
-                                        <option value="inside" ${sPzzZuNameMode === 'inside' ? 'selected' : ''}>Название: Внутри</option>
-                                        <option value="callout" ${sPzzZuNameMode === 'callout' ? 'selected' : ''}>Название: Выноска</option>
-                                    </select>
-                                </div>
-                            </div>
-                            <div style="border-top: 1px solid #eee; padding-top: 5px;">
-                                <strong>Лист Спутник:</strong>
-                                <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px;">
-                                    <div style="display: flex; gap: 8px;">
-                                        <label style="cursor:pointer;"><input type="checkbox" id="sch_satShowZu" ${sSatShowZu ? 'checked' : ''}> ЗУ</label>
-                                        <label style="cursor:pointer;"><input type="checkbox" id="sch_satShowZouit" ${sSatShowZouit ? 'checked' : ''}> ЗОУИТ</label>
-                                    </div>
-                                    <select id="sch_satZuNameMode" style="padding: 1px 2px; border-radius: 4px; border: 1px solid #ccc; font-size: 11px;">
-                                        <option value="off" ${sSatZuNameMode === 'off' ? 'selected' : ''}>Название: Выкл</option>
-                                        <option value="inside" ${sSatZuNameMode === 'inside' ? 'selected' : ''}>Название: Внутри</option>
-                                        <option value="callout" ${sSatZuNameMode === 'callout' ? 'selected' : ''}>Название: Выноска</option>
-                                    </select>
-                                </div>
-                            </div>
-                        </div>
-                    </div>
-
-                    <div>
-                        <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Включаемые страницы</h4>
-                        <div style="background: #f8fafc; border: 1px solid #e2e8f0; padding: 8px; border-radius: 6px; display: flex; flex-direction: column; gap: 5px;">
-                            <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;"><input type="checkbox" id="sch_includePzz" ${sIncludePzz ? 'checked' : ''}> Схема ПЗЗ (.rst)</label>
-                            <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;"><input type="checkbox" id="sch_includeSat" ${sIncludeSat ? 'checked' : ''}> Схема на спутнике</label>
-                            <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;"><input type="checkbox" id="sch_includeParts" ${sIncludeParts ? 'checked' : ''}> Чертеж размеров сторон</label>
-                        </div>
-                    </div>
-
-                    <div>
-                        <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Оформление ПЗЗ и Спутника</h4>
-                        <div style="background: #fff; border: 1px dashed #cbd5e1; padding: 8px; border-radius: 6px; display: flex; flex-direction: column; gap: 6px;">
-                            <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px;">
-                                <span>Цвет контура ПЗЗ:</span>
-                                <input type="color" id="sch_pzzLineColor" value="${toHexColor(sPzzLineColor)}" style="width: 35px; height: 22px; border: none; cursor: pointer; border-radius: 4px;">
-                            </div>
-                            <label style="cursor: pointer; display: flex; align-items: center; gap: 4px; margin-bottom: 2px;">
-                                <input type="checkbox" id="sch_pzzShowPoints" ${sPzzShowPoints ? 'checked' : ''}> Точки на ПЗЗ
-                            </label>
-                            <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px; border-top: 1px solid #eee; padding-top: 4px;">
-                                <span>Цвет контура спутника:</span>
-                                <input type="color" id="sch_satLineColor" value="${toHexColor(sSatLineColor)}" style="width: 35px; height: 22px; border: none; cursor: pointer; border-radius: 4px;">
-                            </div>
-                            <label style="cursor: pointer; display: flex; align-items: center; gap: 4px;">
-                                <input type="checkbox" id="sch_satShowPoints" ${sSatShowPoints ? 'checked' : ''}> Точки на спутнике
-                            </label>
+                        <div style="display: flex; flex-direction: column; gap: 3px;">
+                            <label style="color: #555;">Заливка: <span id="sch_fillOpacity_val">${sFillOpacity}</span>%</label>
+                            <input type="range" id="sch_fillOpacity" min="0" max="100" value="${sFillOpacity}" style="width: 100%;">
                         </div>
                     </div>
                 </div>
 
                 <div>
-                    <h4 style="margin: 0 0 10px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Атрибуты и страницы</h4>
-                    <div style="display: flex; flex-direction: column; gap: 6px; background: #f8fafc; padding: 10px; border-radius: 8px; border: 1px solid #e2e8f0; height: calc(100% - 25px); box-sizing: border-box; justify-content: space-between;">
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                            <label style="color:#555; width: 95px; flex-shrink: 0;">Док. утв.:</label>
-                            <input type="text" id="sch_approvalDoc" value="${sApprovalDoc}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-                        </div>
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                            <label style="color:#555; width: 95px; flex-shrink: 0;">Поселение:</label>
-                            <input type="text" id="sch_municipality" value="${sMunicipality}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-                        </div>
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                            <label style="color:#555; width: 95px; flex-shrink: 0;">Нас. пункт:</label>
-                            <input type="text" id="sch_settlement" value="${sSettlement}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-                        </div>
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                            <label style="color:#555; width: 95px; flex-shrink: 0;">Квартал:</label>
-                            <input type="text" id="sch_quarter" value="${sQuarter}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-                        </div>
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                            <label style="color:#555; width: 95px; flex-shrink: 0;">Номер ЗУ:</label>
-                            <input type="text" id="sch_zuName" value="${sZuName}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-                        </div>
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                            <label style="color:#555; width: 95px; flex-shrink: 0;">Терр. зона:</label>
-                            <input type="text" id="sch_terrZone" value="${sTerrZone}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-                        </div>
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                            <label style="color:#555; width: 95px; flex-shrink: 0;">Вид разр. исп.:</label>
-                            <input type="text" id="sch_vri" value="${sVri}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-                        </div>
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                            <label style="color:#555; width: 95px; flex-shrink: 0;">Масштаб под.:</label>
-                            <input type="text" id="sch_scaleText" value="${sScaleText}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-                        </div>
-                    </div>
-                </div>
-            </div>
-
-            <div style="display: grid; grid-template-columns: 1.5fr 1fr; gap: 15px; border-top: 1px solid #e2e8f0; padding-top: 12px; margin-bottom: 12px;">
-                <div style="background: #f8fafc; border: 1px solid #cbd5e1; padding: 8px; border-radius: 8px; display: flex; flex-direction: column; gap: 6px; justify-content: center; min-height: 48px;">
-                    <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 5px; font-size: 11px;">
-                        <label style="cursor: pointer; display: flex; align-items: center; gap: 4px; font-weight: bold; color: #1e3a8a;">
-                            <input type="checkbox" id="sch_skipLoad" ${sSkipLoad ? 'checked' : ''}> Не загружать повторно
+                    <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Характерные точки</h4>
+                    <div style="display: flex; justify-content: space-between; align-items: center; margin-bottom: 6px;">
+                        <label style="cursor:pointer; display:flex; align-items:center; gap:6px; font-weight: bold;">
+                            <input type="checkbox" id="sch_showPoints" ${sShowPoints ? 'checked' : ''}> Точки (н1, н2...)
                         </label>
-                        <div id="sch_load_options" style="display: ${sSkipLoad ? 'none' : 'flex'}; gap: 8px; align-items: center;">
-                            <label style="cursor: pointer;"><input type="checkbox" id="sch_loadZouit" ${sLoadZouit ? 'checked' : ''}> ЗОУИТ</label>
-                            <label style="cursor: pointer;"><input type="checkbox" id="sch_zouitNearby" ${sZouitNearby ? 'checked' : ''}> Буфер 10м</label>
-                            <label style="cursor: pointer;"><input type="checkbox" id="sch_loadNearby" ${sLoadNearby ? 'checked' : ''}> Соседние ЗУ</label>
-                            <div style="display: flex; align-items: center; gap: 2px;">
-                                <label>R:</label>
-                                <input type="number" id="sch_nearbyRadius" value="${sNearbyRadius}" style="width: 40px; padding: 2px; border: 1px solid #ccc; border-radius: 4px; text-align: center;">
+                        <input type="color" id="sch_pointColor" value="${toHexColor(sPointColor)}" style="width: 35px; height: 22px; border:none; cursor:pointer;">
+                    </div>
+                    <div style="display: grid; grid-template-columns: 1.2fr 1fr; gap: 8px; align-items: center; margin-bottom: 6px;">
+                        <label style="color: #555;">Размер шрифта (px):</label>
+                        <input type="number" id="sch_pointFontSize" min="8" max="72" value="${sPointFontSize}" style="width: 100%; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                    <label style="cursor: pointer; display: flex; align-items: center; gap: 6px; color: #333;">
+                        <input type="checkbox" id="sch_autoSort" ${localStorage.getItem('sch_autoSort') !== 'false' ? 'checked' : ''}> Автоустановка (СЗ -> по часовой)
+                    </label>
+                </div>
+
+                <div>
+                    <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Масштабирование карт</h4>
+                    <div style="display: flex; flex-direction: column; gap: 6px; background: #f8fafc; padding: 8px; border-radius: 6px; border: 1px solid #e2e8f0;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px;">
+                            <label style="color: #475569;">Режим:</label>
+                            <select id="sch_zoomMode" style="padding: 2px 4px; border-radius: 4px; border: 1px solid #ccc;">
+                                <option value="constant" ${sZoomMode === 'constant' ? 'selected' : ''}>Постоянный</option>
+                                <option value="individual" ${sZoomMode === 'individual' ? 'selected' : ''}>Индивидуальный</option>
+                            </select>
+                        </div>
+                        <div id="sch_offsets_container" style="display: flex; flex-direction: column; gap: 4px;">
+                            <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px;">
+                                <label style="color: #475569;">Смещение ПЗЗ:</label>
+                                <select id="sch_pzzOffset" style="padding: 2px 4px; border-radius: 4px; border: 1px solid #ccc;">
+                                    <option value="-3" ${sPzzOffset === -3 ? 'selected' : ''}>-3 (отдалить)</option>
+                                    <option value="-2" ${sPzzOffset === -2 ? 'selected' : ''}>-2 (отдалить)</option>
+                                    <option value="-1" ${sPzzOffset === -1 ? 'selected' : ''}>-1 (отдалить)</option>
+                                    <option value="0" ${sPzzOffset === 0 ? 'selected' : ''}>0 (без изм.)</option>
+                                    <option value="1" ${sPzzOffset === 1 ? 'selected' : ''}>+1 (приблизить)</option>
+                                    <option value="2" ${sPzzOffset === 2 ? 'selected' : ''}>+2 (приблизить)</option>
+                                    <option value="3" ${sPzzOffset === 3 ? 'selected' : ''}>+3 (приблизить)</option>
+                                </select>
+                            </div>
+                            <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px;">
+                                <label style="color: #475569;">Смещение спутника:</label>
+                                <select id="sch_satOffset" style="padding: 2px 4px; border-radius: 4px; border: 1px solid #ccc;">
+                                    <option value="-3" ${sSatOffset === -3 ? 'selected' : ''}>-3 (отдалить)</option>
+                                    <option value="-2" ${sSatOffset === -2 ? 'selected' : ''}>-2 (отдалить)</option>
+                                    <option value="-1" ${sSatOffset === -1 ? 'selected' : ''}>-1 (отдалить)</option>
+                                    <option value="0" ${sSatOffset === 0 ? 'selected' : ''}>0 (без изм.)</option>
+                                    <option value="1" ${sSatOffset === 1 ? 'selected' : ''}>+1 (приблизить)</option>
+                                    <option value="2" ${sSatOffset === 2 ? 'selected' : ''}>+2 (приблизить)</option>
+                                    <option value="3" ${sSatOffset === 3 ? 'selected' : ''}>+3 (приблизить)</option>
+                                </select>
                             </div>
                         </div>
                     </div>
                 </div>
-                
-                <div style="display: flex; gap: 8px; align-items: center; justify-content: center;">
-                    <button id="sch_export_json_btn" class="btn-ui" style="flex: 1; padding: 6px; font-size: 11px; background: #475569; cursor: pointer; color: white; border: none; border-radius: 6px; height: 32px; display: flex; align-items: center; justify-content: center; gap: 4px;"><i class="fas fa-file-export"></i> Экспорт JSON</button>
-                    <button id="sch_import_json_btn" class="btn-ui" style="flex: 1; padding: 6px; font-size: 11px; background: #475569; cursor: pointer; color: white; border: none; border-radius: 6px; height: 32px; display: flex; align-items: center; justify-content: center; gap: 4px;"><i class="fas fa-file-import"></i> Импорт JSON</button>
-                    <input type="file" id="sch_import_file_input" accept=".json" style="display: none;">
+            </div>
+
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+                <div>
+                    <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Настройки по листам</h4>
+                    <div style="background: #f8fafc; border: 1px solid #e2e8f0; padding: 8px; border-radius: 6px; display: flex; flex-direction: column; gap: 8px;">
+                        <div>
+                            <strong>Лист КПТ:</strong>
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px;">
+                                <div style="display: flex; gap: 8px;">
+                                    <label style="cursor:pointer;"><input type="checkbox" id="sch_cptShowZu" ${sCptShowZu ? 'checked' : ''}> ЗУ</label>
+                                    <label style="cursor:pointer;"><input type="checkbox" id="sch_cptShowZouit" ${sCptShowZouit ? 'checked' : ''}> ЗОУИТ</label>
+                                </div>
+                                <select id="sch_cptZuNameMode" style="padding: 1px 2px; border-radius: 4px; border: 1px solid #ccc; font-size: 11px;">
+                                    <option value="off" ${sCptZuNameMode === 'off' ? 'selected' : ''}>Название: Выкл</option>
+                                    <option value="inside" ${sCptZuNameMode === 'inside' ? 'selected' : ''}>Название: Внутри</option>
+                                    <option value="callout" ${sCptZuNameMode === 'callout' ? 'selected' : ''}>Название: Выноска</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div style="border-top: 1px solid #eee; padding-top: 5px;">
+                            <strong>Лист ПЗЗ:</strong>
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px;">
+                                <div style="display: flex; gap: 8px;">
+                                    <label style="cursor:pointer;"><input type="checkbox" id="sch_pzzShowZu" ${sPzzShowZu ? 'checked' : ''}> ЗУ</label>
+                                    <label style="cursor:pointer;"><input type="checkbox" id="sch_pzzShowZouit" ${sPzzShowZouit ? 'checked' : ''}> ЗОУИТ</label>
+                                </div>
+                                <select id="sch_pzzZuNameMode" style="padding: 1px 2px; border-radius: 4px; border: 1px solid #ccc; font-size: 11px;">
+                                    <option value="off" ${sPzzZuNameMode === 'off' ? 'selected' : ''}>Название: Выкл</option>
+                                    <option value="inside" ${sPzzZuNameMode === 'inside' ? 'selected' : ''}>Название: Внутри</option>
+                                    <option value="callout" ${sPzzZuNameMode === 'callout' ? 'selected' : ''}>Название: Выноска</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div style="border-top: 1px solid #eee; padding-top: 5px;">
+                            <strong>Лист Спутник:</strong>
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px;">
+                                <div style="display: flex; gap: 8px;">
+                                    <label style="cursor:pointer;"><input type="checkbox" id="sch_satShowZu" ${sSatShowZu ? 'checked' : ''}> ЗУ</label>
+                                    <label style="cursor:pointer;"><input type="checkbox" id="sch_satShowZouit" ${sSatShowZouit ? 'checked' : ''}> ЗОУИТ</label>
+                                </div>
+                                <select id="sch_satZuNameMode" style="padding: 1px 2px; border-radius: 4px; border: 1px solid #ccc; font-size: 11px;">
+                                    <option value="off" ${sSatZuNameMode === 'off' ? 'selected' : ''}>Название: Выкл</option>
+                                    <option value="inside" ${sSatZuNameMode === 'inside' ? 'selected' : ''}>Название: Внутри</option>
+                                    <option value="callout" ${sSatZuNameMode === 'callout' ? 'selected' : ''}>Название: Выноска</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+
+                <div>
+                    <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Включаемые страницы</h4>
+                    <div style="background: #f8fafc; border: 1px solid #e2e8f0; padding: 8px; border-radius: 6px; display: flex; flex-direction: column; gap: 5px;">
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;"><input type="checkbox" id="sch_includePzz" ${sIncludePzz ? 'checked' : ''}> Схема ПЗЗ (.rst)</label>
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;"><input type="checkbox" id="sch_includeSat" ${sIncludeSat ? 'checked' : ''}> Схема на спутнике</label>
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;"><input type="checkbox" id="sch_includeParts" ${sIncludeParts ? 'checked' : ''}> Чертеж размеров сторон</label>
+                    </div>
+                </div>
+
+                <div>
+                    <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Оформление ПЗЗ и Спутника</h4>
+                    <div style="background: #fff; border: 1px dashed #cbd5e1; padding: 8px; border-radius: 6px; display: flex; flex-direction: column; gap: 6px;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px;">
+                            <span>Цвет контура ПЗЗ:</span>
+                            <input type="color" id="sch_pzzLineColor" value="${toHexColor(sPzzLineColor)}" style="width: 35px; height: 22px; border: none; cursor: pointer; border-radius: 4px;">
+                        </div>
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 4px; margin-bottom: 2px;">
+                            <input type="checkbox" id="sch_pzzShowPoints" ${sPzzShowPoints ? 'checked' : ''}> Точки на ПЗЗ
+                        </label>
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px; border-top: 1px solid #eee; padding-top: 4px;">
+                            <span>Цвет контура спутника:</span>
+                            <input type="color" id="sch_satLineColor" value="${toHexColor(sSatLineColor)}" style="width: 35px; height: 22px; border: none; cursor: pointer; border-radius: 4px;">
+                        </div>
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 4px;">
+                            <input type="checkbox" id="sch_satShowPoints" ${sSatShowPoints ? 'checked' : ''}> Точки на спутнике
+                        </label>
+                    </div>
                 </div>
             </div>
 
-            <div class="buttons" style="display: flex; gap: 10px;">
-                <button id="sch_apply_btn" class="apply-btn" style="flex: 1; padding: 10px; font-weight: bold; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer;"><i class="fas fa-check"></i> Сформировать схему</button>
-                <button id="sch_cancel_btn" class="cancel-btn" style="flex: 1; padding: 10px; font-weight: bold; background: #e2e8f0; color: #475569; border: none; border-radius: 6px; cursor: pointer;"><i class="fas fa-times"></i> Отмена</button>
+            <div>
+                <h4 style="margin: 0 0 10px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Атрибуты и страницы</h4>
+                <div style="display: flex; flex-direction: column; gap: 6px; background: #f8fafc; padding: 10px; border-radius: 8px; border: 1px solid #e2e8f0; height: calc(100% - 25px); box-sizing: border-box; justify-content: space-between;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                        <label style="color:#555; width: 95px; flex-shrink: 0;">Док. утв.:</label>
+                        <input type="text" id="sch_approvalDoc" value="${sApprovalDoc}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                        <label style="color:#555; width: 95px; flex-shrink: 0;">Поселение:</label>
+                        <input type="text" id="sch_municipality" value="${sMunicipality}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                        <label style="color:#555; width: 95px; flex-shrink: 0;">Нас. пункт:</label>
+                        <input type="text" id="sch_settlement" value="${sSettlement}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                        <label style="color:#555; width: 95px; flex-shrink: 0;">Квартал:</label>
+                        <input type="text" id="sch_quarter" value="${sQuarter}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                        <label style="color:#555; width: 95px; flex-shrink: 0;">Номер ЗУ:</label>
+                        <input type="text" id="sch_zuName" value="${sZuName}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                        <label style="color:#555; width: 95px; flex-shrink: 0;">Терр. зона:</label>
+                        <input type="text" id="sch_terrZone" value="${sTerrZone}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                        <label style="color:#555; width: 95px; flex-shrink: 0;">Вид разр. исп.:</label>
+                        <input type="text" id="sch_vri" value="${sVri}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                        <label style="color:#555; width: 95px; flex-shrink: 0;">Масштаб под.:</label>
+                        <input type="text" id="sch_scaleText" value="${sScaleText}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                </div>
             </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1.5fr 1fr; gap: 15px; border-top: 1px solid #e2e8f0; padding-top: 12px; margin-bottom: 12px;">
+            <div style="background: #f8fafc; border: 1px solid #cbd5e1; padding: 8px; border-radius: 8px; display: flex; flex-direction: column; gap: 6px; justify-content: center; min-height: 48px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 5px; font-size: 11px;">
+                    <label style="cursor: pointer; display: flex; align-items: center; gap: 4px; font-weight: bold; color: #1e3a8a;">
+                        <input type="checkbox" id="sch_skipLoad" ${sSkipLoad ? 'checked' : ''}> Не загружать повторно
+                    </label>
+                    <div id="sch_load_options" style="display: ${sSkipLoad ? 'none' : 'flex'}; gap: 8px; align-items: center;">
+                        <label style="cursor: pointer;"><input type="checkbox" id="sch_loadZouit" ${sLoadZouit ? 'checked' : ''}> ЗОУИТ</label>
+                        <label style="cursor: pointer;"><input type="checkbox" id="sch_zouitNearby" ${sZouitNearby ? 'checked' : ''}> Буфер 10м</label>
+                        <label style="cursor: pointer;"><input type="checkbox" id="sch_loadNearby" ${sLoadNearby ? 'checked' : ''}> Соседние ЗУ</label>
+                        <div style="display: flex; align-items: center; gap: 2px;">
+                            <label>R:</label>
+                            <input type="number" id="sch_nearbyRadius" value="${sNearbyRadius}" style="width: 40px; padding: 2px; border: 1px solid #ccc; border-radius: 4px; text-align: center;">
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div style="display: flex; gap: 8px; align-items: center; justify-content: center;">
+                <button id="sch_export_json_btn" class="btn-ui" style="flex: 1; padding: 6px; font-size: 11px; background: #475569; cursor: pointer; color: white; border: none; border-radius: 6px; height: 32px; display: flex; align-items: center; justify-content: center; gap: 4px;"><i class="fas fa-file-export"></i> Экспорт JSON</button>
+                <button id="sch_import_json_btn" class="btn-ui" style="flex: 1; padding: 6px; font-size: 11px; background: #475569; cursor: pointer; color: white; border: none; border-radius: 6px; height: 32px; display: flex; align-items: center; justify-content: center; gap: 4px;"><i class="fas fa-file-import"></i> Импорт JSON</button>
+                <input type="file" id="sch_import_file_input" accept=".json" style="display: none;">
+            </div>
+        </div>
+
+        <div class="buttons" style="display: flex; gap: 10px;">
+            <button id="sch_apply_btn" class="apply-btn" style="flex: 1; padding: 10px; font-weight: bold; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer;"><i class="fas fa-check"></i> Сформировать схему</button>
+            <button id="sch_cancel_btn" class="cancel-btn" style="flex: 1; padding: 10px; font-weight: bold; background: #e2e8f0; color: #475569; border: none; border-radius: 6px; cursor: pointer;"><i class="fas fa-times"></i> Отмена</button>
         </div>
     `;
 
     document.body.appendChild(modal);
+
+    const headerEl = modal.querySelector('#sch_modal_header');
+    makeFloatingWindowDraggable(modal, headerEl);
 
     const zoomModeSelect = modal.querySelector('#sch_zoomMode');
     const offsetsDiv = modal.querySelector('#sch_offsets_container');
@@ -817,7 +939,7 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
         reader.readAsText(file);
     };
 
-    const closeModal = () => document.body.removeChild(modal);
+    const closeModal = () => modal.remove();
     modal.querySelector('#sch_cancel_btn').onclick = closeModal;
 
     modal.querySelector('#sch_apply_btn').onclick = () => {
@@ -1046,8 +1168,6 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
             window.__schemaDataLoaded = true;
         }
 
-        await new Promise(r => setTimeout(r, 600));
-
         showLoader('Создание снимка карты КПТ...');
         map.setCenter(centerGeo); 
         setLayerVisibilityForPage({ showZu: config.cptShowZu, showZouit: config.cptShowZouit });
@@ -1070,7 +1190,8 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
             map.geoObjects.add(tempCalloutLine);
         }
         
-        await new Promise(r => setTimeout(r, 500));
+        // Задержка для полной подгрузки тайлов КПТ
+        await new Promise(r => setTimeout(r, 1200));
         const mapImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement);
         
         if (tempCalloutLine) map.geoObjects.remove(tempCalloutLine);
@@ -1119,6 +1240,7 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
                     map.geoObjects.add(tempCalloutLine);
                 }
 
+                // Задержка для растра ПЗЗ
                 await new Promise(r => setTimeout(r, 2000));
                 pzzImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement);
                 
@@ -1182,7 +1304,8 @@ async function executeSchemaGeneration(lat, lon, targetPolygon, config) {
                 map.geoObjects.add(tempCalloutLine);
             }
 
-            await new Promise(r => setTimeout(r, 3500));
+            // Задержка для подгрузки тайлов спутника Google
+            await new Promise(r => setTimeout(r, 3000));
             satelliteImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement);
 
             if (tempCalloutLine) map.geoObjects.remove(tempCalloutLine);
@@ -1550,16 +1673,35 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
         const isNoBgDefault = (pageType === 'cp');
         let isNoBg = isNoBgDefault;
 
-        let defaultLineColor = '#ff3b30';
+        // Раздельные цвета по типам объектов
+        let defaultLabelColor = '#333333';
         if (pageType === 'satellite') {
-            defaultLineColor = '#ffffff';
-        } else if (config.lineColor) {
-            defaultLineColor = config.lineColor;
+            defaultLabelColor = (l.type === 'zuName') ? '#fde047' : '#ffffff';
+        } else {
+            switch(l.type) {
+                case 'zuName':
+                    defaultLabelColor = config.lineColor || '#ff3b30';
+                    break;
+                case 'quarter':
+                    defaultLabelColor = '#1e40af'; // Синий для квартала
+                    break;
+                case 'terrZone':
+                    defaultLabelColor = '#7c3aed'; // Фиолетовый для терр. зоны
+                    break;
+                case 'settlement':
+                    defaultLabelColor = '#0f172a'; // Темный для нас. пункта
+                    break;
+                case 'municipality':
+                    defaultLabelColor = '#334155'; // Темно-серый для поселения
+                    break;
+                default:
+                    defaultLabelColor = '#ff3b30';
+            }
         }
 
-        let finalFontColor = isNoBg ? defaultLineColor : '#333333';
+        let finalFontColor = defaultLabelColor;
         let hasCalloutClass = ''; 
-        let fontWeight = 'normal';
+        let fontWeight = (l.type === 'zuName' || l.type === 'quarter') ? 'bold' : 'normal';
         let fontStyle = 'normal';
 
         const styleKey = `sch_style_${pageType}_${l.type}`;
@@ -1568,9 +1710,7 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
         if (savedStyleStr) {
             try {
                 savedStyle = JSON.parse(savedStyleStr);
-            } catch(e) { 
-                console.error(e); 
-            }
+            } catch(e) {}
         }
 
         if (savedStyle) {
@@ -1605,8 +1745,8 @@ function generateInteractiveLabelsHtml(labelsData, pageType, config, calloutBgRg
                  data-type="${l.type}" 
                  data-anchor-x="${pageType === 'parts' ? 50 : l.pctX_inside}" 
                  data-anchor-y="${pageType === 'parts' ? 50 : l.pctY_inside}" 
-                 data-default-color="${defaultLineColor}">
-                <span contenteditable="true" class="label-text" title="Двойной клик — изменить текст, зажать — перетащить" style="font-size: ${fontSize}px; font-weight: ${fontWeight}; font-style: ${fontStyle}; background: ${calloutBgRgba}; border: 1.5px solid ${config.lineColor || '#ff3b30'}; color: ${finalFontColor}; white-space: nowrap !important; display: inline-block !important; width: ${w}px !important; text-align: center;">${text}</span>
+                 data-default-color="${defaultLabelColor}">
+                <span contenteditable="true" class="label-text" title="Двойной клик — изменить текст, зажать — перетащить" style="font-size: ${fontSize}px; font-weight: ${fontWeight}; font-style: ${fontStyle}; background: ${calloutBgRgba}; border: 1.5px solid ${defaultLabelColor}; color: ${finalFontColor}; white-space: nowrap !important; display: inline-block !important; width: ${w}px !important; text-align: center;">${text}</span>
                 <div class="label-controls">
                     <button class="ctrl-btn size-up" data-tooltip="Увеличить шрифт">+</button>
                     <button class="ctrl-btn size-down" data-tooltip="Уменьшить шрифт">-</button>
@@ -2714,14 +2854,14 @@ line.setAttribute('y2', endY_pct + '%');
         const btnExportWord = document.getElementById('btnExportWord');
         if (btnExportWord) {
             btnExportWord.onclick = async function() {
-                async function captureFrame(frameEl) {
+            async function captureFrame(frameEl) {
                     if (!frameEl) return null;
                     const controls = frameEl.querySelectorAll('.label-controls');
                     controls.forEach(c => c.style.setProperty('display', 'none', 'important'));
                     
                     const canvas = await html2canvas(frameEl, {
                         useCORS: true,
-                        allowTaint: true,
+                        allowTaint: true, // ИСПРАВЛЕНО c false на true
                         scale: 2,
                         logging: false
                     });
@@ -3174,9 +3314,17 @@ line.setAttribute('y2', endY_pct + '%');
 </body>
 </html>`;
 
-    const win = window.open('', '_blank');
-    win.document.write(htmlContent);
-    win.document.close();
+   const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const win = window.open(url, '_blank');
+    if (!win) {
+        const a = document.createElement('a');
+        a.href = url;
+        a.target = '_blank';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    }
 }
 
 function addSchemaGrid(config) {
@@ -3439,18 +3587,26 @@ function startSrzuWorkflow(lat, lon, targetPolygon) {
 }
 
 function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
+    const existing = document.getElementById('srzu_settings_window');
+    if (existing) existing.remove();
+
     const modal = document.createElement('div');
+    modal.id = 'srzu_settings_window';
     modal.style.position = 'fixed';
-    modal.style.top = '0';
-    modal.style.left = '0';
-    modal.style.width = '100%';
-    modal.style.height = '100%';
-    modal.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
-    modal.style.backdropFilter = 'blur(4px)';
-    modal.style.display = 'flex';
-    modal.style.alignItems = 'center';
-    modal.style.justifyContent = 'center';
+    modal.style.top = '50%';
+    modal.style.left = '50%';
+    modal.style.transform = 'translate(-50%, -50%)';
     modal.style.zIndex = '15000';
+    modal.style.background = '#ffffff';
+    modal.style.padding = '20px';
+    modal.style.width = '95%';
+    modal.style.maxWidth = '820px';
+    modal.style.boxSizing = 'border-box';
+    modal.style.borderRadius = '12px';
+    modal.style.boxShadow = '0 10px 35px rgba(0,0,0,0.3)';
+    modal.style.border = '1px solid #cbd5e1';
+    modal.style.fontFamily = 'Arial, sans-serif';
+    modal.style.fontSize = '12px';
 
     const sLineColor = localStorage.getItem('srzu_lineColor') || '#FF0000';
     const sLineWidth = localStorage.getItem('srzu_lineWidth') || '3';
@@ -3458,10 +3614,7 @@ function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
     const sFillOpacity = localStorage.getItem('srzu_fillOpacity') || '0';
     const sScaleText = localStorage.getItem('srzu_scaleText') || '';
 
-    // ОПЦИЯ ОРИЕНТАЦИИ СТРАНИЦЫ
     const sOrientation = localStorage.getItem('srzu_orientation') || 'portrait';
-
-    // ПО УМОЛЧАНИЮ Галочка "Не загружать повторно" включена (true)
     const sSkipLoad = localStorage.getItem('srzu_skipLoad') !== 'false';
     const sLoadZouit = localStorage.getItem('srzu_loadZouit') !== 'false';
     const sZouitNearby = localStorage.getItem('srzu_zouitNearby') === 'true';
@@ -3498,221 +3651,221 @@ function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
     const sSatLineColor = localStorage.getItem('srzu_satLineColor') || '#FFFFFF';
 
     modal.innerHTML = `
-        <div style="background: #ffffff; padding: 20px; width: 95%; max-width: 820px; box-sizing: border-box; border-radius: 12px; box-shadow: 0 10px 30px rgba(0,0,0,0.3); font-family: Arial, sans-serif; font-size: 12px;">
-            <h3 style="margin: 0 0 15px 0; text-align: center; color: #1e3a8a; font-size: 16px; font-weight: bold;">Настройки Чертежей СРЗУ</h3>
-            
-            <div style="display: grid; grid-template-columns: 1fr 1fr 1.1fr; gap: 15px; margin-bottom: 12px;">
-                <div style="display: flex; flex-direction: column; gap: 12px;">
-                    <div>
-                        <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Стили контура</h4>
-                        <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
-                            <div style="display: flex; flex-direction: column; gap: 3px;">
-                                <label style="color: #555;">Цвет контура:</label>
-                                <input type="color" id="srzu_lineColor" value="${toHexColor(sLineColor)}" style="width: 100%; height: 26px; border-radius: 4px; border:none; cursor:pointer;">
-                            </div>
-                            <div style="display: flex; flex-direction: column; gap: 3px;">
-                                <label style="color: #555;">Толщина: <span id="srzu_lineWidth_val">${sLineWidth}</span>px</label>
-                                <input type="range" id="srzu_lineWidth" min="1" max="10" value="${sLineWidth}" style="width: 100%;">
-                            </div>
-                            <div style="display: flex; flex-direction: column; gap: 3px;">
-                                <label style="color: #555;">Цвет заливки:</label>
-                                <input type="color" id="srzu_fillColor" value="${toHexColor(sFillColor)}" style="width: 100%; height: 26px; border-radius: 4px; border:none; cursor:pointer;">
-                            </div>
-                            <div style="display: flex; flex-direction: column; gap: 3px;">
-                                <label style="color: #555;">Заливка: <span id="srzu_fillOpacity_val">${sFillOpacity}</span>%</label>
-                                <input type="range" id="srzu_fillOpacity" min="0" max="100" value="${sFillOpacity}" style="width: 100%;">
-                            </div>
+        <h3 id="srzu_modal_header" style="margin: 0 0 15px 0; text-align: center; color: #1e3a8a; font-size: 16px; font-weight: bold; cursor: grab; user-select: none;">Настройки Чертежей СРЗУ</h3>
+        
+        <div style="display: grid; grid-template-columns: 1fr 1fr 1.1fr; gap: 15px; margin-bottom: 12px;">
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+                <div>
+                    <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Стили контура</h4>
+                    <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 8px;">
+                        <div style="display: flex; flex-direction: column; gap: 3px;">
+                            <label style="color: #555;">Цвет контура:</label>
+                            <input type="color" id="srzu_lineColor" value="${toHexColor(sLineColor)}" style="width: 100%; height: 26px; border-radius: 4px; border:none; cursor:pointer;">
                         </div>
-                    </div>
-
-                    <div>
-                        <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Масштабирование карт</h4>
-                        <div style="display: flex; flex-direction: column; gap: 6px; background: #f8fafc; padding: 8px; border-radius: 6px; border: 1px solid #e2e8f0;">
-                            <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px;">
-                                <label style="color: #475569;">Режим:</label>
-                                <select id="srzu_zoomMode" style="padding: 2px 4px; border-radius: 4px; border: 1px solid #ccc;">
-                                    <option value="constant" ${sZoomMode === 'constant' ? 'selected' : ''}>Постоянный</option>
-                                    <option value="individual" ${sZoomMode === 'individual' ? 'selected' : ''}>Индивидуальный</option>
-                                </select>
-                            </div>
-                            <div id="srzu_offsets_container" style="display: flex; flex-direction: column; gap: 4px;">
-                                <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px;">
-                                    <label style="color: #475569;">Смещение ПЗЗ:</label>
-                                    <select id="srzu_pzzOffset" style="padding: 2px 4px; border-radius: 4px; border: 1px solid #ccc;">
-                                        <option value="-3" ${sPzzOffset === -3 ? 'selected' : ''}>-3 (отдалить)</option>
-                                        <option value="-2" ${sPzzOffset === -2 ? 'selected' : ''}>-2 (отдалить)</option>
-                                        <option value="-1" ${sPzzOffset === -1 ? 'selected' : ''}>-1 (отдалить)</option>
-                                        <option value="0" ${sPzzOffset === 0 ? 'selected' : ''}>0 (без изм.)</option>
-                                        <option value="1" ${sPzzOffset === 1 ? 'selected' : ''}>+1 (приблизить)</option>
-                                        <option value="2" ${sPzzOffset === 2 ? 'selected' : ''}>+2 (приблизить)</option>
-                                        <option value="3" ${sPzzOffset === 3 ? 'selected' : ''}>+3 (приблизить)</option>
-                                    </select>
-                                </div>
-                                <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px;">
-                                    <label style="color: #475569;">Смещение спутника:</label>
-                                    <select id="srzu_satOffset" style="padding: 2px 4px; border-radius: 4px; border: 1px solid #ccc;">
-                                        <option value="-3" ${sSatOffset === -3 ? 'selected' : ''}>-3 (отдалить)</option>
-                                        <option value="-2" ${sSatOffset === -2 ? 'selected' : ''}>-2 (отдалить)</option>
-                                        <option value="-1" ${sSatOffset === -1 ? 'selected' : ''}>-1 (отдалить)</option>
-                                        <option value="0" ${sSatOffset === 0 ? 'selected' : ''}>0 (без изм.)</option>
-                                        <option value="1" ${sSatOffset === 1 ? 'selected' : ''}>+1 (приблизить)</option>
-                                        <option value="2" ${sSatOffset === 2 ? 'selected' : ''}>+2 (приблизить)</option>
-                                        <option value="3" ${sSatOffset === 3 ? 'selected' : ''}>+3 (приблизить)</option>
-                                    </select>
-                                </div>
-                            </div>
+                        <div style="display: flex; flex-direction: column; gap: 3px;">
+                            <label style="color: #555;">Толщина: <span id="srzu_lineWidth_val">${sLineWidth}</span>px</label>
+                            <input type="range" id="srzu_lineWidth" min="1" max="10" value="${sLineWidth}" style="width: 100%;">
+                        </div>
+                        <div style="display: flex; flex-direction: column; gap: 3px;">
+                            <label style="color: #555;">Цвет заливки:</label>
+                            <input type="color" id="srzu_fillColor" value="${toHexColor(sFillColor)}" style="width: 100%; height: 26px; border-radius: 4px; border:none; cursor:pointer;">
+                        </div>
+                        <div style="display: flex; flex-direction: column; gap: 3px;">
+                            <label style="color: #555;">Заливка: <span id="srzu_fillOpacity_val">${sFillOpacity}</span>%</label>
+                            <input type="range" id="srzu_fillOpacity" min="0" max="100" value="${sFillOpacity}" style="width: 100%;">
                         </div>
                     </div>
                 </div>
 
-                <div style="display: flex; flex-direction: column; gap: 12px;">
-                    <div>
-                        <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Настройки по листам</h4>
-                        <div style="background: #f8fafc; border: 1px solid #e2e8f0; padding: 8px; border-radius: 6px; display: flex; flex-direction: column; gap: 8px;">
-                            <div>
-                                <strong>Лист КПТ:</strong>
-                                <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px;">
-                                    <div style="display: flex; gap: 8px;">
-                                        <label style="cursor:pointer;"><input type="checkbox" id="srzu_cptShowZu" ${sCptShowZu ? 'checked' : ''}> ЗУ</label>
-                                        <label style="cursor:pointer;"><input type="checkbox" id="srzu_cptShowZouit" ${sCptShowZouit ? 'checked' : ''}> ЗОУИТ</label>
-                                    </div>
-                                    <select id="srzu_cptZuNameMode" style="padding: 1px 2px; border-radius: 4px; border: 1px solid #ccc; font-size: 11px;">
-                                        <option value="off" ${sCptZuNameMode === 'off' ? 'selected' : ''}>Название: Выкл</option>
-                                        <option value="inside" ${sCptZuNameMode === 'inside' ? 'selected' : ''}>Название: Внутри</option>
-                                        <option value="callout" ${sCptZuNameMode === 'callout' ? 'selected' : ''}>Название: Выноска</option>
-                                    </select>
-                                </div>
-                            </div>
-                            <div style="border-top: 1px solid #eee; padding-top: 5px;">
-                                <strong>Лист ПЗЗ:</strong>
-                                <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px;">
-                                    <div style="display: flex; gap: 8px;">
-                                        <label style="cursor:pointer;"><input type="checkbox" id="srzu_pzzShowZu" ${sPzzShowZu ? 'checked' : ''}> ЗУ</label>
-                                        <label style="cursor:pointer;"><input type="checkbox" id="srzu_pzzShowZouit" ${sPzzShowZouit ? 'checked' : ''}> ЗОУИТ</label>
-                                    </div>
-                                    <select id="srzu_pzzZuNameMode" style="padding: 1px 2px; border-radius: 4px; border: 1px solid #ccc; font-size: 11px;">
-                                        <option value="off" ${sPzzZuNameMode === 'off' ? 'selected' : ''}>Название: Выкл</option>
-                                        <option value="inside" ${sPzzZuNameMode === 'inside' ? 'selected' : ''}>Название: Внутри</option>
-                                        <option value="callout" ${sPzzZuNameMode === 'callout' ? 'selected' : ''}>Название: Выноска</option>
-                                    </select>
-                                </div>
-                            </div>
-                            <div style="border-top: 1px solid #eee; padding-top: 5px;">
-                                <strong>Лист Спутник:</strong>
-                                <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px;">
-                                    <div style="display: flex; gap: 8px;">
-                                        <label style="cursor:pointer;"><input type="checkbox" id="srzu_satShowZu" ${sSatShowZu ? 'checked' : ''}> ЗУ</label>
-                                        <label style="cursor:pointer;"><input type="checkbox" id="srzu_satShowZouit" ${sSatShowZouit ? 'checked' : ''}> ЗОУИТ</label>
-                                    </div>
-                                    <select id="srzu_satZuNameMode" style="padding: 1px 2px; border-radius: 4px; border: 1px solid #ccc; font-size: 11px;">
-                                        <option value="off" ${sSatZuNameMode === 'off' ? 'selected' : ''}>Название: Выкл</option>
-                                        <option value="inside" ${sSatZuNameMode === 'inside' ? 'selected' : ''}>Название: Внутри</option>
-                                        <option value="callout" ${sSatZuNameMode === 'callout' ? 'selected' : ''}>Название: Выноска</option>
-                                    </select>
-                                </div>
-                            </div>
+                <div>
+                    <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Масштабирование карт</h4>
+                    <div style="display: flex; flex-direction: column; gap: 6px; background: #f8fafc; padding: 8px; border-radius: 6px; border: 1px solid #e2e8f0;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px;">
+                            <label style="color: #475569;">Режим:</label>
+                            <select id="srzu_zoomMode" style="padding: 2px 4px; border-radius: 4px; border: 1px solid #ccc;">
+                                <option value="constant" ${sZoomMode === 'constant' ? 'selected' : ''}>Постоянный</option>
+                                <option value="individual" ${sZoomMode === 'individual' ? 'selected' : ''}>Индивидуальный</option>
+                            </select>
                         </div>
-                    </div>
-
-                    <div>
-                        <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Включаемые чертежи</h4>
-                        <div style="background: #f8fafc; border: 1px solid #e2e8f0; padding: 8px; border-radius: 6px; display: flex; flex-direction: column; gap: 5px;">
-                            <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;"><input type="checkbox" id="srzu_includePzz" ${sIncludePzz ? 'checked' : ''}> Чертеж ПЗЗ (.rst)</label>
-                            <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;"><input type="checkbox" id="srzu_includeSat" ${sIncludeSat ? 'checked' : ''}> Чертеж на спутнике</label>
-                        </div>
-                    </div>
-
-                    <div>
-                        <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Оформление ПЗЗ и Спутника</h4>
-                        <div style="background: #fff; border: 1px dashed #cbd5e1; padding: 8px; border-radius: 6px; display: flex; flex-direction: column; gap: 6px;">
+                        <div id="srzu_offsets_container" style="display: flex; flex-direction: column; gap: 4px;">
                             <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px;">
-                                <span>Цвет контура ПЗЗ:</span>
-                                <input type="color" id="srzu_pzzLineColor" value="${toHexColor(sPzzLineColor)}" style="width: 35px; height: 22px; border: none; cursor: pointer; border-radius: 4px;">
+                                <label style="color: #475569;">Смещение ПЗЗ:</label>
+                                <select id="srzu_pzzOffset" style="padding: 2px 4px; border-radius: 4px; border: 1px solid #ccc;">
+                                    <option value="-3" ${sPzzOffset === -3 ? 'selected' : ''}>-3 (отдалить)</option>
+                                    <option value="-2" ${sPzzOffset === -2 ? 'selected' : ''}>-2 (отдалить)</option>
+                                    <option value="-1" ${sPzzOffset === -1 ? 'selected' : ''}>-1 (отдалить)</option>
+                                    <option value="0" ${sPzzOffset === 0 ? 'selected' : ''}>0 (без изм.)</option>
+                                    <option value="1" ${sPzzOffset === 1 ? 'selected' : ''}>+1 (приблизить)</option>
+                                    <option value="2" ${sPzzOffset === 2 ? 'selected' : ''}>+2 (приблизить)</option>
+                                    <option value="3" ${sPzzOffset === 3 ? 'selected' : ''}>+3 (приблизить)</option>
+                                </select>
                             </div>
-                            <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px; border-top: 1px solid #eee; padding-top: 4px;">
-                                <span>Цвет контура спутника:</span>
-                                <input type="color" id="srzu_satLineColor" value="${toHexColor(sSatLineColor)}" style="width: 35px; height: 22px; border: none; cursor: pointer; border-radius: 4px;">
+                            <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px;">
+                                <label style="color: #475569;">Смещение спутника:</label>
+                                <select id="srzu_satOffset" style="padding: 2px 4px; border-radius: 4px; border: 1px solid #ccc;">
+                                    <option value="-3" ${sSatOffset === -3 ? 'selected' : ''}>-3 (отдалить)</option>
+                                    <option value="-2" ${sSatOffset === -2 ? 'selected' : ''}>-2 (отдалить)</option>
+                                    <option value="-1" ${sSatOffset === -1 ? 'selected' : ''}>-1 (отдалить)</option>
+                                    <option value="0" ${sSatOffset === 0 ? 'selected' : ''}>0 (без изм.)</option>
+                                    <option value="1" ${sSatOffset === 1 ? 'selected' : ''}>+1 (приблизить)</option>
+                                    <option value="2" ${sSatOffset === 2 ? 'selected' : ''}>+2 (приблизить)</option>
+                                    <option value="3" ${sSatOffset === 3 ? 'selected' : ''}>+3 (приблизить)</option>
+                                </select>
+                            </div>
+                        </div>
+                    </div>
+                </div>
+            </div>
+
+            <div style="display: flex; flex-direction: column; gap: 12px;">
+                <div>
+                    <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Настройки по листам</h4>
+                    <div style="background: #f8fafc; border: 1px solid #e2e8f0; padding: 8px; border-radius: 6px; display: flex; flex-direction: column; gap: 8px;">
+                        <div>
+                            <strong>Лист КПТ:</strong>
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px;">
+                                <div style="display: flex; gap: 8px;">
+                                    <label style="cursor:pointer;"><input type="checkbox" id="srzu_cptShowZu" ${sCptShowZu ? 'checked' : ''}> ЗУ</label>
+                                    <label style="cursor:pointer;"><input type="checkbox" id="srzu_cptShowZouit" ${sCptShowZouit ? 'checked' : ''}> ЗОУИТ</label>
+                                </div>
+                                <select id="srzu_cptZuNameMode" style="padding: 1px 2px; border-radius: 4px; border: 1px solid #ccc; font-size: 11px;">
+                                    <option value="off" ${sCptZuNameMode === 'off' ? 'selected' : ''}>Название: Выкл</option>
+                                    <option value="inside" ${sCptZuNameMode === 'inside' ? 'selected' : ''}>Название: Внутри</option>
+                                    <option value="callout" ${sCptZuNameMode === 'callout' ? 'selected' : ''}>Название: Выноска</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div style="border-top: 1px solid #eee; padding-top: 5px;">
+                            <strong>Лист ПЗЗ:</strong>
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px;">
+                                <div style="display: flex; gap: 8px;">
+                                    <label style="cursor:pointer;"><input type="checkbox" id="srzu_pzzShowZu" ${sPzzShowZu ? 'checked' : ''}> ЗУ</label>
+                                    <label style="cursor:pointer;"><input type="checkbox" id="srzu_pzzShowZouit" ${sPzzShowZouit ? 'checked' : ''}> ЗОУИТ</label>
+                                </div>
+                                <select id="srzu_pzzZuNameMode" style="padding: 1px 2px; border-radius: 4px; border: 1px solid #ccc; font-size: 11px;">
+                                    <option value="off" ${sPzzZuNameMode === 'off' ? 'selected' : ''}>Название: Выкл</option>
+                                    <option value="inside" ${sPzzZuNameMode === 'inside' ? 'selected' : ''}>Название: Внутри</option>
+                                    <option value="callout" ${sPzzZuNameMode === 'callout' ? 'selected' : ''}>Название: Выноска</option>
+                                </select>
+                            </div>
+                        </div>
+                        <div style="border-top: 1px solid #eee; padding-top: 5px;">
+                            <strong>Лист Спутник:</strong>
+                            <div style="display: flex; align-items: center; justify-content: space-between; margin-top: 3px;">
+                                <div style="display: flex; gap: 8px;">
+                                    <label style="cursor:pointer;"><input type="checkbox" id="srzu_satShowZu" ${sSatShowZu ? 'checked' : ''}> ЗУ</label>
+                                    <label style="cursor:pointer;"><input type="checkbox" id="srzu_satShowZouit" ${sSatShowZouit ? 'checked' : ''}> ЗОУИТ</label>
+                                </div>
+                                <select id="srzu_satZuNameMode" style="padding: 1px 2px; border-radius: 4px; border: 1px solid #ccc; font-size: 11px;">
+                                    <option value="off" ${sSatZuNameMode === 'off' ? 'selected' : ''}>Название: Выкл</option>
+                                    <option value="inside" ${sSatZuNameMode === 'inside' ? 'selected' : ''}>Название: Внутри</option>
+                                    <option value="callout" ${sSatZuNameMode === 'callout' ? 'selected' : ''}>Название: Выноска</option>
+                                </select>
                             </div>
                         </div>
                     </div>
                 </div>
 
                 <div>
-                    <h4 style="margin: 0 0 10px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Атрибуты территории</h4>
-                    <div style="display: flex; flex-direction: column; gap: 6px; background: #f8fafc; padding: 10px; border-radius: 8px; border: 1px solid #e2e8f0; height: calc(100% - 25px); box-sizing: border-box; justify-content: space-between;">
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                            <label style="color:#555; width: 95px; flex-shrink: 0;">Ориентация:</label>
-                            <select id="srzu_orientation" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-                                <option value="portrait" ${sOrientation === 'portrait' ? 'selected' : ''}>Книжная (А4)</option>
-                                <option value="landscape" ${sOrientation === 'landscape' ? 'selected' : ''}>Альбомная (А4)</option>
-                            </select>
+                    <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Включаемые чертежи</h4>
+                    <div style="background: #f8fafc; border: 1px solid #e2e8f0; padding: 8px; border-radius: 6px; display: flex; flex-direction: column; gap: 5px;">
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;"><input type="checkbox" id="srzu_includePzz" ${sIncludePzz ? 'checked' : ''}> Чертеж ПЗЗ (.rst)</label>
+                        <label style="cursor: pointer; display: flex; align-items: center; gap: 6px;"><input type="checkbox" id="srzu_includeSat" ${sIncludeSat ? 'checked' : ''}> Чертеж на спутнике</label>
+                    </div>
+                </div>
+
+                <div>
+                    <h4 style="margin: 0 0 8px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Оформление ПЗЗ и Спутника</h4>
+                    <div style="background: #fff; border: 1px dashed #cbd5e1; padding: 8px; border-radius: 6px; display: flex; flex-direction: column; gap: 6px;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px;">
+                            <span>Цвет контура ПЗЗ:</span>
+                            <input type="color" id="srzu_pzzLineColor" value="${toHexColor(sPzzLineColor)}" style="width: 35px; height: 22px; border: none; cursor: pointer; border-radius: 4px;">
                         </div>
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                            <label style="color:#555; width: 95px; flex-shrink: 0;">Поселение:</label>
-                            <input type="text" id="srzu_municipality" value="${sMunicipality}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-                        </div>
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                            <label style="color:#555; width: 95px; flex-shrink: 0;">Нас. пункт:</label>
-                            <input type="text" id="srzu_settlement" value="${sSettlement}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-                        </div>
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                            <label style="color:#555; width: 95px; flex-shrink: 0;">Квартал:</label>
-                            <input type="text" id="srzu_quarter" value="${sQuarter}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-                        </div>
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                            <label style="color:#555; width: 95px; flex-shrink: 0;">Номер ЗУ:</label>
-                            <input type="text" id="srzu_zuName" value="${sZuName}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-                        </div>
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                            <label style="color:#555; width: 95px; flex-shrink: 0;">Терр. зона:</label>
-                            <input type="text" id="srzu_terrZone" value="${sTerrZone}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-                        </div>
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                            <label style="color:#555; width: 95px; flex-shrink: 0;">Вид разр. исп.:</label>
-                            <input type="text" id="srzu_vri" value="${sVri}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
-                        </div>
-                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
-                            <label style="color:#555; width: 95px; flex-shrink: 0;">Масштаб под.:</label>
-                            <input type="text" id="srzu_scaleText" value="${sScaleText}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                        <div style="display: flex; align-items: center; justify-content: space-between; gap: 5px; border-top: 1px solid #eee; padding-top: 4px;">
+                            <span>Цвет контура спутника:</span>
+                            <input type="color" id="srzu_satLineColor" value="${toHexColor(sSatLineColor)}" style="width: 35px; height: 22px; border: none; cursor: pointer; border-radius: 4px;">
                         </div>
                     </div>
                 </div>
             </div>
 
-            <!-- БЛОК ОКРУЖЕНИЕ И ЭКСПОРТ/ИМПОРТ JSON -->
-            <div style="display: grid; grid-template-columns: 1.5fr 1fr; gap: 15px; border-top: 1px solid #e2e8f0; padding-top: 12px; margin-bottom: 12px;">
-                <div style="background: #f8fafc; border: 1px solid #cbd5e1; padding: 8px; border-radius: 8px; display: flex; flex-direction: column; gap: 6px; justify-content: center; min-height: 48px;">
-                    <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 5px; font-size: 11px;">
-                        <label style="cursor: pointer; display: flex; align-items: center; gap: 4px; font-weight: bold; color: #1e3a8a;">
-                            <input type="checkbox" id="srzu_skipLoad" ${sSkipLoad ? 'checked' : ''}> Не загружать повторно
-                        </label>
-                        <div id="srzu_load_options" style="display: ${sSkipLoad ? 'none' : 'flex'}; gap: 8px; align-items: center;">
-                            <label style="cursor: pointer;"><input type="checkbox" id="srzu_loadZouit" ${sLoadZouit ? 'checked' : ''}> ЗОУИТ</label>
-                            <label style="cursor: pointer;"><input type="checkbox" id="srzu_zouitNearby" ${sZouitNearby ? 'checked' : ''}> Буфер 10м</label>
-                            <label style="cursor: pointer;"><input type="checkbox" id="srzu_loadNearby" ${sLoadNearby ? 'checked' : ''}> Соседние ЗУ</label>
-                            <div style="display: flex; align-items: center; gap: 2px;">
-                                <label>R:</label>
-                                <input type="number" id="srzu_nearbyRadius" value="${sNearbyRadius}" style="width: 40px; padding: 2px; border: 1px solid #ccc; border-radius: 4px; text-align: center;">
-                            </div>
+            <div>
+                <h4 style="margin: 0 0 10px 0; color: #1e3a8a; border-bottom: 2px solid #e2e8f0; padding-bottom: 4px; font-size: 13px;">Атрибуты территории</h4>
+                <div style="display: flex; flex-direction: column; gap: 6px; background: #f8fafc; padding: 10px; border-radius: 8px; border: 1px solid #e2e8f0; height: calc(100% - 25px); box-sizing: border-box; justify-content: space-between;">
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                        <label style="color:#555; width: 95px; flex-shrink: 0;">Ориентация:</label>
+                        <select id="srzu_orientation" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                            <option value="portrait" ${sOrientation === 'portrait' ? 'selected' : ''}>Книжная (А4)</option>
+                            <option value="landscape" ${sOrientation === 'landscape' ? 'selected' : ''}>Альбомная (А4)</option>
+                        </select>
+                    </div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                        <label style="color:#555; width: 95px; flex-shrink: 0;">Поселение:</label>
+                        <input type="text" id="srzu_municipality" value="${sMunicipality}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                        <label style="color:#555; width: 95px; flex-shrink: 0;">Нас. пункт:</label>
+                        <input type="text" id="srzu_settlement" value="${sSettlement}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                        <label style="color:#555; width: 95px; flex-shrink: 0;">Квартал:</label>
+                        <input type="text" id="srzu_quarter" value="${sQuarter}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                        <label style="color:#555; width: 95px; flex-shrink: 0;">Номер ЗУ:</label>
+                        <input type="text" id="srzu_zuName" value="${sZuName}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                        <label style="color:#555; width: 95px; flex-shrink: 0;">Терр. зона:</label>
+                        <input type="text" id="srzu_terrZone" value="${sTerrZone}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                        <label style="color:#555; width: 95px; flex-shrink: 0;">Вид разр. исп.:</label>
+                        <input type="text" id="srzu_vri" value="${sVri}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                    <div style="display: flex; align-items: center; justify-content: space-between; gap: 8px; width: 100%;">
+                        <label style="color:#555; width: 95px; flex-shrink: 0;">Масштаб под.:</label>
+                        <input type="text" id="srzu_scaleText" value="${sScaleText}" style="flex:1; padding: 3px 6px; border: 1px solid #ccc; border-radius: 4px; box-sizing: border-box;">
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <div style="display: grid; grid-template-columns: 1.5fr 1fr; gap: 15px; border-top: 1px solid #e2e8f0; padding-top: 12px; margin-bottom: 12px;">
+            <div style="background: #f8fafc; border: 1px solid #cbd5e1; padding: 8px; border-radius: 8px; display: flex; flex-direction: column; gap: 6px; justify-content: center; min-height: 48px;">
+                <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 5px; font-size: 11px;">
+                    <label style="cursor: pointer; display: flex; align-items: center; gap: 4px; font-weight: bold; color: #1e3a8a;">
+                        <input type="checkbox" id="srzu_skipLoad" ${sSkipLoad ? 'checked' : ''}> Не загружать повторно
+                    </label>
+                    <div id="srzu_load_options" style="display: ${sSkipLoad ? 'none' : 'flex'}; gap: 8px; align-items: center;">
+                        <label style="cursor: pointer;"><input type="checkbox" id="srzu_loadZouit" ${sLoadZouit ? 'checked' : ''}> ЗОУИТ</label>
+                        <label style="cursor: pointer;"><input type="checkbox" id="srzu_zouitNearby" ${sZouitNearby ? 'checked' : ''}> Буфер 10м</label>
+                        <label style="cursor: pointer;"><input type="checkbox" id="srzu_loadNearby" ${sLoadNearby ? 'checked' : ''}> Соседние ЗУ</label>
+                        <div style="display: flex; align-items: center; gap: 2px;">
+                            <label>R:</label>
+                            <input type="number" id="srzu_nearbyRadius" value="${sNearbyRadius}" style="width: 40px; padding: 2px; border: 1px solid #ccc; border-radius: 4px; text-align: center;">
                         </div>
                     </div>
                 </div>
-                
-                <div style="display: flex; gap: 8px; align-items: center; justify-content: center;">
-                    <button id="srzu_export_json_btn" class="btn-ui" style="flex: 1; padding: 6px; font-size: 11px; background: #475569; cursor: pointer; color: white; border: none; border-radius: 6px; height: 32px; display: flex; align-items: center; justify-content: center; gap: 4px;"><i class="fas fa-file-export"></i> Экспорт JSON</button>
-                    <button id="srzu_import_json_btn" class="btn-ui" style="flex: 1; padding: 6px; font-size: 11px; background: #475569; cursor: pointer; color: white; border: none; border-radius: 6px; height: 32px; display: flex; align-items: center; justify-content: center; gap: 4px;"><i class="fas fa-file-import"></i> Импорт JSON</button>
-                    <input type="file" id="srzu_import_file_input" accept=".json" style="display: none;">
-                </div>
             </div>
+            
+            <div style="display: flex; gap: 8px; align-items: center; justify-content: center;">
+                <button id="srzu_export_json_btn" class="btn-ui" style="flex: 1; padding: 6px; font-size: 11px; background: #475569; cursor: pointer; color: white; border: none; border-radius: 6px; height: 32px; display: flex; align-items: center; justify-content: center; gap: 4px;"><i class="fas fa-file-export"></i> Экспорт JSON</button>
+                <button id="srzu_import_json_btn" class="btn-ui" style="flex: 1; padding: 6px; font-size: 11px; background: #475569; cursor: pointer; color: white; border: none; border-radius: 6px; height: 32px; display: flex; align-items: center; justify-content: center; gap: 4px;"><i class="fas fa-file-import"></i> Импорт JSON</button>
+                <input type="file" id="srzu_import_file_input" accept=".json" style="display: none;">
+            </div>
+        </div>
 
-            <div class="buttons" style="display: flex; gap: 10px; margin-top: 10px;">
-                <button id="srzu_apply_btn" class="apply-btn" style="flex: 1; padding: 10px; font-weight: bold; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer;"><i class="fas fa-check"></i> Сформировать Чертёж СРЗУ</button>
-                <button id="srzu_cancel_btn" class="cancel-btn" style="flex: 1; padding: 10px; font-weight: bold; background: #e2e8f0; color: #475569; border: none; border-radius: 6px; cursor: pointer;"><i class="fas fa-times"></i> Отмена</button>
-            </div>
+        <div class="buttons" style="display: flex; gap: 10px; margin-top: 10px;">
+            <button id="srzu_apply_btn" class="apply-btn" style="flex: 1; padding: 10px; font-weight: bold; background: #2563eb; color: white; border: none; border-radius: 6px; cursor: pointer;"><i class="fas fa-check"></i> Сформировать Чертёж СРЗУ</button>
+            <button id="srzu_cancel_btn" class="cancel-btn" style="flex: 1; padding: 10px; font-weight: bold; background: #e2e8f0; color: #475569; border: none; border-radius: 6px; cursor: pointer;"><i class="fas fa-times"></i> Отмена</button>
         </div>
     `;
 
     document.body.appendChild(modal);
+
+    const headerEl = modal.querySelector('#srzu_modal_header');
+    makeFloatingWindowDraggable(modal, headerEl);
 
     const zoomModeSelect = modal.querySelector('#srzu_zoomMode');
     const offsetsDiv = modal.querySelector('#srzu_offsets_container');
@@ -3738,7 +3891,6 @@ function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
     modal.querySelector('#srzu_lineWidth').addEventListener('input', e => modal.querySelector('#srzu_lineWidth_val').textContent = e.target.value);
     modal.querySelector('#srzu_fillOpacity').addEventListener('input', e => modal.querySelector('#srzu_fillOpacity_val').textContent = e.target.value);
 
-    // Экспорт настроек СРЗУ в JSON
     modal.querySelector('#srzu_export_json_btn').onclick = () => {
         const config = {
             lineColor: modal.querySelector('#srzu_lineColor').value,
@@ -3783,7 +3935,6 @@ function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
         saveAs(blob, "настройки_чертежей_срзу.json");
     };
 
-    // Импорт настроек СРЗУ из JSON
     const fileInput = modal.querySelector('#srzu_import_file_input');
     modal.querySelector('#srzu_import_json_btn').onclick = () => {
         fileInput.click();
@@ -3856,7 +4007,7 @@ function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
         reader.readAsText(file);
     };
 
-    const closeModal = () => document.body.removeChild(modal);
+    const closeModal = () => modal.remove();
     modal.querySelector('#srzu_cancel_btn').onclick = closeModal;
 
     modal.querySelector('#srzu_apply_btn').onclick = () => {
@@ -3865,7 +4016,7 @@ function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
             lineWidth: parseInt(modal.querySelector('#srzu_lineWidth').value, 10),
             fillColor: modal.querySelector('#srzu_fillColor').value,
             fillOpacity: parseInt(modal.querySelector('#srzu_fillOpacity').value, 10) / 100,
-            showPoints: false, // В СРЗУ точки ВСЕГДА отключены
+            showPoints: false,
 
             skipLoad: modal.querySelector('#srzu_skipLoad').checked,
             loadZouit: modal.querySelector('#srzu_loadZouit').checked,
@@ -4049,9 +4200,6 @@ async function executeSrzuGeneration(lat, lon, targetPolygon, config) {
             window.__schemaDataLoaded = true;
         }
 
-        await new Promise(r => setTimeout(r, 400));
-
-        // Выбираем масштаб снимка в зависимости от ориентации (2.5 для Альбомного, 2 для Книжного)
         const screenshotScale = config.orientation === 'landscape' ? 2.5 : 2;
 
         showLoader('Создание снимка Чертёжа КПТ...');
@@ -4076,7 +4224,8 @@ async function executeSrzuGeneration(lat, lon, targetPolygon, config) {
             map.geoObjects.add(tempCalloutLine);
         }
         
-        await new Promise(r => setTimeout(r, 500));
+        // Задержка для полной подгрузки тайлов КПТ
+        await new Promise(r => setTimeout(r, 1200));
         const mapImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement, screenshotScale);
         
         if (tempCalloutLine) map.geoObjects.remove(tempCalloutLine);
@@ -4115,6 +4264,7 @@ async function executeSrzuGeneration(lat, lon, targetPolygon, config) {
                     map.geoObjects.add(tempCalloutLine);
                 }
 
+                // Задержка для растра ПЗЗ
                 await new Promise(r => setTimeout(r, 2000));
                 pzzImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement, screenshotScale);
                 
@@ -4154,7 +4304,8 @@ async function executeSrzuGeneration(lat, lon, targetPolygon, config) {
                 map.geoObjects.add(tempCalloutLine);
             }
 
-            await new Promise(r => setTimeout(r, 3500));
+            // Задержка для подгрузки тайлов спутника Google
+            await new Promise(r => setTimeout(r, 3000));
             satelliteImageBase64 = await takeMapScreenshotForSchema(config.quarter, config.settlement, screenshotScale);
 
             if (tempCalloutLine) map.geoObjects.remove(tempCalloutLine);
@@ -4521,12 +4672,17 @@ function openSrzuDocumentWindow(mapImage, pzzImage, satelliteImage, imgLegendPol
             var blob = new Blob([html], {type: "text/html;charset=utf-8"});
             saveAs(blob, "Чертёж_СРЗУ.html");
         }
-
-        async function getCapturedFrameCanvas(frameEl) {
+        
+async function getCapturedFrameCanvas(frameEl) {
             if (!frameEl) return null;
             const controls = frameEl.querySelectorAll('.label-controls');
             controls.forEach(c => c.style.setProperty('display', 'none', 'important'));
-            const canvas = await html2canvas(frameEl, { useCORS: true, allowTaint: true, scale: 2, logging: false });
+            const canvas = await html2canvas(frameEl, { 
+                useCORS: true, 
+                allowTaint: true, // ИСПРАВЛЕНО с false на true
+                scale: 2, 
+                logging: false 
+            });
             controls.forEach(c => c.style.removeProperty('display'));
             return canvas;
         }
@@ -4967,7 +5123,15 @@ function openSrzuDocumentWindow(mapImage, pzzImage, satelliteImage, imgLegendPol
 </body>
 </html>`;
 
-    const win = window.open('', '_blank');
-    win.document.write(htmlContent);
-    win.document.close();
+ const blob = new Blob([htmlContent], { type: 'text/html;charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const win = window.open(url, '_blank');
+    if (!win) {
+        const a = document.createElement('a');
+        a.href = url;
+        a.target = '_blank';
+        document.body.appendChild(a);
+        a.click();
+        a.remove();
+    }
 }
