@@ -1,5 +1,5 @@
 
-console.log("%c[Schema Generator] Загружена версия 2.39", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
+console.log("%c[Schema Generator] Загружена версия 2.4", "color: #0078D4; font-weight: bold; font-size: 13px; background: #e6f0fa; padding: 4px 8px; border-radius: 4px;");
 window.__schemaDataLoaded = false;
 
 
@@ -370,6 +370,41 @@ function generatePartsSchemaImage(targetPolygon, config) {
     };
 }
 
+function makeModalDraggable(dialogBox, headerEl) {
+    if (!dialogBox || !headerEl) return;
+    headerEl.style.cursor = 'grab';
+    headerEl.style.userSelect = 'none';
+
+    let isDragging = false;
+    let startX = 0, startY = 0;
+    let currentX = 0, currentY = 0;
+
+    headerEl.addEventListener('mousedown', (e) => {
+        isDragging = true;
+        headerEl.style.cursor = 'grabbing';
+        startX = e.clientX - currentX;
+        startY = e.clientY - currentY;
+        e.preventDefault();
+    });
+
+    const onMouseMove = (e) => {
+        if (!isDragging) return;
+        currentX = e.clientX - startX;
+        currentY = e.clientY - startY;
+        dialogBox.style.transform = `translate(${currentX}px, ${currentY}px)`;
+    };
+
+    const onMouseUp = () => {
+        if (isDragging) {
+            isDragging = false;
+            headerEl.style.cursor = 'grab';
+        }
+    };
+
+    document.addEventListener('mousemove', onMouseMove);
+    document.addEventListener('mouseup', onMouseUp);
+}
+
 function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
     const modal = document.createElement('div');
     modal.style.position = 'fixed';
@@ -378,7 +413,6 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
     modal.style.width = '100%';
     modal.style.height = '100%';
     modal.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
-    modal.style.backdropFilter = 'blur(4px)';
     modal.style.display = 'flex';
     modal.style.alignItems = 'center';
     modal.style.justifyContent = 'center';
@@ -668,6 +702,11 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
 
     document.body.appendChild(modal);
 
+    // Подключение перетаскивания за заголовок h3
+    const dialogBox = modal.firstElementChild;
+    const headerEl = dialogBox.querySelector('h3');
+    makeModalDraggable(dialogBox, headerEl);
+
     const zoomModeSelect = modal.querySelector('#sch_zoomMode');
     const offsetsDiv = modal.querySelector('#sch_offsets_container');
     const toggleOffsets = () => {
@@ -911,6 +950,7 @@ function openSchemaSettingsModal(lat, lon, targetPolygon, detectedData) {
         executeSchemaGeneration(lat, lon, targetPolygon, config);
     };
 }
+
 
 async function silentLoadRasterForSchema(quarterNumber) {
     if (rasterOverlay) return true;
@@ -3446,7 +3486,6 @@ function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
     modal.style.width = '100%';
     modal.style.height = '100%';
     modal.style.backgroundColor = 'rgba(0, 0, 0, 0.5)';
-    modal.style.backdropFilter = 'blur(4px)';
     modal.style.display = 'flex';
     modal.style.alignItems = 'center';
     modal.style.justifyContent = 'center';
@@ -3458,10 +3497,7 @@ function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
     const sFillOpacity = localStorage.getItem('srzu_fillOpacity') || '0';
     const sScaleText = localStorage.getItem('srzu_scaleText') || '';
 
-    // ОПЦИЯ ОРИЕНТАЦИИ СТРАНИЦЫ
     const sOrientation = localStorage.getItem('srzu_orientation') || 'portrait';
-
-    // ПО УМОЛЧАНИЮ Галочка "Не загружать повторно" включена (true)
     const sSkipLoad = localStorage.getItem('srzu_skipLoad') !== 'false';
     const sLoadZouit = localStorage.getItem('srzu_loadZouit') !== 'false';
     const sZouitNearby = localStorage.getItem('srzu_zouitNearby') === 'true';
@@ -3679,7 +3715,6 @@ function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
                 </div>
             </div>
 
-            <!-- БЛОК ОКРУЖЕНИЕ И ЭКСПОРТ/ИМПОРТ JSON -->
             <div style="display: grid; grid-template-columns: 1.5fr 1fr; gap: 15px; border-top: 1px solid #e2e8f0; padding-top: 12px; margin-bottom: 12px;">
                 <div style="background: #f8fafc; border: 1px solid #cbd5e1; padding: 8px; border-radius: 8px; display: flex; flex-direction: column; gap: 6px; justify-content: center; min-height: 48px;">
                     <div style="display: flex; align-items: center; justify-content: space-between; flex-wrap: wrap; gap: 5px; font-size: 11px;">
@@ -3713,6 +3748,11 @@ function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
     `;
 
     document.body.appendChild(modal);
+
+    // Подключение перетаскивания за заголовок h3
+    const dialogBox = modal.firstElementChild;
+    const headerEl = dialogBox.querySelector('h3');
+    makeModalDraggable(dialogBox, headerEl);
 
     const zoomModeSelect = modal.querySelector('#srzu_zoomMode');
     const offsetsDiv = modal.querySelector('#srzu_offsets_container');
@@ -3865,7 +3905,7 @@ function openSrzuSettingsModal(lat, lon, targetPolygon, detectedData) {
             lineWidth: parseInt(modal.querySelector('#srzu_lineWidth').value, 10),
             fillColor: modal.querySelector('#srzu_fillColor').value,
             fillOpacity: parseInt(modal.querySelector('#srzu_fillOpacity').value, 10) / 100,
-            showPoints: false, // В СРЗУ точки ВСЕГДА отключены
+            showPoints: false,
 
             skipLoad: modal.querySelector('#srzu_skipLoad').checked,
             loadZouit: modal.querySelector('#srzu_loadZouit').checked,
