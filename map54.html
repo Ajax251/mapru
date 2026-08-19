@@ -4412,10 +4412,10 @@ body:has(#parcel-results-sidebar.collapsed:not(.hidden)) .google-sv-btn {
                 <input type="checkbox" id="toggleOpenGoogleEarth" onchange="updateGoogleEarthSetting()">
             </div>
          
-        <div class="style-setting">
-    <label for="toggleMobileProxy">Мобильный режим:</label>
-    <input type="checkbox" id="toggleMobileProxy" onchange="updateMobileProxySetting()">
-</div>
+           <div class="style-setting" style="display: none;">
+                <label for="toggleVercelProxy">Мобильный режим:</label>
+                <input type="checkbox" id="toggleVercelProxy" onchange="updateVercelProxySetting()">
+            </div>
             
             
             <div class="style-setting">
@@ -4783,7 +4783,8 @@ let selectedVriFromLegend = null;
         const ALTITUDE_CORRECTION_FACTOR = 3; 
         let selectedLine = null;
         
-let isMobileProxyMode = false; 
+        let useVercelProxyFeature = false; 
+       let useVercelProxy = false;
        let isVercelProxyBlocked = false;
        let lastVercelBlockTime = 0;
        let isGlobalFillActive = localStorage.getItem('isGlobalFillActive') === 'true'; 
@@ -4829,31 +4830,60 @@ window.isPanoramaOpen = false;
 
 async function fetchNspd(url, options = {}) {
     return new Promise((resolve, reject) => {
+     
         nspdRequestQueue = nspdRequestQueue.then(async () => {
             try {
+            
                 await new Promise(r => setTimeout(r, MIN_NSPD_INTERVAL));
 
-                // Если включен "Мобильный режим" — проксируем через mapruapp.ru
-                if (isMobileProxyMode) {
+               
+                if (GATEWAY_NODE_INDEX > 0 && GATEWAY_TARGET_PATTERNS.some(pattern => url.includes(pattern))) {
                     try {
                         const urlObject = new URL(url);
-                        const mapruProxyUrl = `https://mapruapp.ru/api/sync${urlObject.pathname}${urlObject.search}`;
+                        const proxyPrefix = `/p${GATEWAY_NODE_INDEX}`;
+                        const mapruProxyUrl = `https://mapruapp.ru/api/sync${proxyPrefix}${urlObject.pathname}${urlObject.search}`;
                         
                         const newOptions = { ...options };
                         const headers = new Headers(newOptions.headers || {});
                         headers.set('x-sync-host', 'https://nspd.gov.ru');
                         newOptions.headers = headers;
 
+                        console.log(`[Router] Redirected via gateway node: ${GATEWAY_NODE_INDEX}`);
                         const response = await fetch(mapruProxyUrl, newOptions);
                         resolve(response);
                         return;
                     } catch (proxyError) {
-                        console.error("[MobileProxy] Ошибка проксирования через mapruapp:", proxyError);
+                        console.error("[Router] Redirection failed, falling back to default route:", proxyError);
                     }
                 }
+               
 
-                // Стандартный прямой запрос к NSPD
-                const response = await fetch(url, options);
+                if (!useVercelProxyFeature) {
+                    const response = await fetch(url, options);
+                    resolve(response);
+                    return;
+                }
+
+                if (isVercelProxyBlocked) {
+                    resolve(new Response(JSON.stringify({ error: "Vercel proxy is blocked" }), {
+                        status: 403, headers: { 'Content-Type': 'application/json' }
+                    }));
+                    return;
+                }
+                
+                const urlObject = new URL(url);
+                const targetPath = `${urlObject.pathname}${urlObject.search}`;
+                const refererParam = encodeURIComponent('https://nspd.gov.ru/map');
+                const originParam = encodeURIComponent('https://nspd.gov.ru');
+                const proxyRequestUrl = `${vercelProxyUrl}?target=${encodeURIComponent(targetPath)}&referer=${refererParam}&origin=${originParam}`;
+               
+                const response = await fetch(proxyRequestUrl, { ...options }); 
+
+                if (!response.ok && response.status === 403) {
+                    isVercelProxyBlocked = true;
+                    const currentTime = Date.now();
+                    if (currentTime - lastVercelBlockTime > 30000) lastVercelBlockTime = currentTime;
+                }
                 resolve(response);
 
             } catch (error) {
@@ -5691,10 +5721,12 @@ function openStyleSettings() {
         toggleOpenGoogleEarthCheckbox.checked = openGoogleEarthAfterExport;
     }
   
-const toggleMobileProxyCheckbox = document.getElementById('toggleMobileProxy');
-if (toggleMobileProxyCheckbox) {
-    toggleMobileProxyCheckbox.checked = isMobileProxyMode;
-}
+    const toggleVercelProxyCheckbox = document.getElementById('toggleVercelProxy');
+    if (toggleVercelProxyCheckbox) {
+     
+        toggleVercelProxyCheckbox.checked = useVercelProxyFeature;
+    }
+  
     const toggleHeightLabelCheckbox = document.getElementById('toggleHeightLabel');
     if (toggleHeightLabelCheckbox) {
         toggleHeightLabelCheckbox.checked = isCameraHeightLabelVisible;
@@ -13096,16 +13128,14 @@ function findLinearIntersections(turfLines, targetFeatures) {
 }
 
 
-   function updateMobileProxySetting() {
-    const checkbox = document.getElementById('toggleMobileProxy');
-    if (checkbox) {
-        isMobileProxyMode = checkbox.checked;
-        showNotification(
-            isMobileProxyMode ? 'Мобильный режим (прокси mapruapp) включен' : 'Мобильный режим выключен',
-            'info'
-        );
-    }
-}
+    function updateVercelProxySetting() {
+            const checkbox = document.getElementById('toggleVercelProxy');
+            if (checkbox) {
+                useVercelProxyFeature = checkbox.checked;
+         
+             
+            }
+        }
 
 async function drawLinearObjectToCanvas(mainLines, otherObjects) {
     const canvasWidth = 800;
