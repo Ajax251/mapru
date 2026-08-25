@@ -1,8 +1,8 @@
-const CACHE_NAME = 'map-pwa-v1.0';
+const CACHE_NAME = 'map-pwa-v1.1';
 
 const ASSETS_TO_CACHE = [
     './',
-    './index.html',
+    './map.html',
     './msk.js',
     './sk.js',
     './webfonts/all.min.css',
@@ -76,7 +76,7 @@ self.addEventListener('fetch', (event) => {
                         return cachedResponse;
                     }
                     if (event.request.mode === 'navigate') {
-                        return caches.match('./') || caches.match('./index.html');
+                        return caches.match('./') || caches.match('./map.html');
                     }
                 });
             })
