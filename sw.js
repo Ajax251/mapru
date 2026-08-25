@@ -1,4 +1,4 @@
-const CACHE_NAME = 'map-pwa-v1.1';
+const CACHE_NAME = 'map-pwa-v1.3';
 
 const ASSETS_TO_CACHE = [
     './',
@@ -21,6 +21,9 @@ const ASSETS_TO_CACHE = [
     './app/map/schema-generator.js?v=2.0',
     './app/map/pzz-module.js',
     './img/map.png',
+    './img/icon.svg',
+    './img/icon-192.png',
+    './img/icon-512.png',
     './img/menu.png',
     './img/history.png',
     './img/find.png'
@@ -60,25 +63,23 @@ self.addEventListener('fetch', (event) => {
     }
 
     event.respondWith(
-        fetch(event.request)
-            .then((networkResponse) => {
-                if (networkResponse && networkResponse.status === 200 && event.request.method === 'GET') {
+        caches.match(event.request).then((cachedResponse) => {
+            const fetchPromise = fetch(event.request).then((networkResponse) => {
+                if (networkResponse && (networkResponse.status === 200 || networkResponse.type === 'opaque') && event.request.method === 'GET') {
                     const responseClone = networkResponse.clone();
                     caches.open(CACHE_NAME).then((cache) => {
                         cache.put(event.request, responseClone);
                     });
                 }
                 return networkResponse;
-            })
-            .catch(() => {
-                return caches.match(event.request).then((cachedResponse) => {
-                    if (cachedResponse) {
-                        return cachedResponse;
-                    }
-                    if (event.request.mode === 'navigate') {
-                        return caches.match('./') || caches.match('./map.html');
-                    }
-                });
-            })
+            }).catch(() => {
+                if (event.request.mode === 'navigate') {
+                    return caches.match('./map.html') || caches.match('map.html') || caches.match('./');
+                }
+                return cachedResponse;
+            });
+
+            return cachedResponse || fetchPromise;
+        })
     );
 });
