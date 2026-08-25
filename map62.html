@@ -14666,60 +14666,82 @@ document.addEventListener('DOMContentLoaded', () => {
 async function checkAndRenderViewportLocalQuarters() {
     if (!isLocalArchiveQuickViewActive || !map) return;
 
-    // 1. Получаем координаты центра экрана карты
-    const center = map.getCenter();
-    if (!center) return;
+    const bounds = map.getBounds();
+    if (!bounds) return;
 
-    const [centerMapLat, centerMapLon] = center;
+    const [minLat, minLon] = getTrueWgs84Coords(bounds[0][0], bounds[0][1]);
+    const [maxLat, maxLon] = getTrueWgs84Coords(bounds[1][0], bounds[1][1]);
+    const screenBbox = turf.bboxPolygon([minLon, minLat, maxLon, maxLat]);
 
     try {
-        // 2. Ищем локальный квартал строго в точке центра экрана
-        const q = await findQuarterInLocalIndex(centerMapLat, centerMapLon);
-        if (!q) return; // В центре экрана нет сохраненного квартала — ничего лишнего не грузим
+        const db = await openLocalDB();
+        const tx = db.transaction('quarters_index', 'readonly');
+        const allQuarters = await new Promise(r => {
+            const req = tx.objectStore('quarters_index').getAll();
+            req.onsuccess = () => r(req.result || []);
+            req.onerror = () => r([]);
+        });
 
-        const qNum = q.quarter_number;
-
-        // 3. Если квартал в центре экрана уже отрисован — пропускаем
-        if (activeRenderedQuartersObjects.has(qNum)) {
-            return;
-        }
-
-        // 4. Загружаем слои только для найденного квартала в центре
         const showZU = localStorage.getItem('laLayerZU') !== 'false';
         const showOKS = localStorage.getItem('laLayerOKS') !== 'false';
         const showSTR = localStorage.getItem('laLayerSTR') !== 'false';
 
-        const drawnForThisQuarter = [];
+        for (const q of allQuarters) {
+            if (!q.geojson_geom || !q.geojson_geom.coordinates) continue;
 
-        if (showZU) {
-            const zu = await loadFromLocalArchive(qNum, 'ZU');
-            if (zu && zu.data && zu.data.length > 0) {
-                const objs = await processAndDrawParcels(zu.data, 'quarter');
-                drawnForThisQuarter.push(...objs);
-            }
-        }
-        if (showOKS) {
-            const oks = await loadFromLocalArchive(qNum, 'OKS');
-            if (oks && oks.data && oks.data.length > 0) {
-                const start = polygons.length;
-                await processAndDrawBuildings(oks.data);
-                drawnForThisQuarter.push(...polygons.slice(start));
-            }
-        }
-        if (showSTR) {
-            const str = await loadFromLocalArchive(qNum, 'STR');
-            if (str && str.data && str.data.length > 0) {
-                const start = polygons.length;
-                await processAndDrawStructures(str.data);
-                drawnForThisQuarter.push(...polygons.slice(start));
-            }
-        }
+            try {
+                const geom = q.geojson_geom;
+                const isMulti = geom.type === 'MultiPolygon';
+                const convertCoord = (c) => (Math.abs(c[0]) > 200 || Math.abs(c[1]) > 200) ? proj4('EPSG:3857', 'EPSG:4326', c) : c;
+                
+                const wgsCoords = isMulti
+                    ? geom.coordinates.map(p => p.map(r => r.map(convertCoord)))
+                    : geom.coordinates.map(r => r.map(convertCoord));
 
-        if (drawnForThisQuarter.length > 0) {
-            activeRenderedQuartersObjects.set(qNum, drawnForThisQuarter);
+                const wgsPoly = isMulti ? turf.multiPolygon(wgsCoords) : turf.polygon(wgsCoords);
+
+                if (turf.booleanIntersects(screenBbox, wgsPoly)) {
+                    const qNum = q.quarter_number;
+
+                    // Если квартал уже отрисован — пропускаем
+                    if (activeRenderedQuartersObjects.has(qNum)) {
+                        continue;
+                    }
+
+                    const drawnForThisQuarter = [];
+
+                    if (showZU) {
+                        const zu = await loadFromLocalArchive(qNum, 'ZU');
+                        if (zu && zu.data && zu.data.length > 0) {
+                            const objs = await processAndDrawParcels(zu.data, 'quarter');
+                            drawnForThisQuarter.push(...objs);
+                        }
+                    }
+                    if (showOKS) {
+                        const oks = await loadFromLocalArchive(qNum, 'OKS');
+                        if (oks && oks.data && oks.data.length > 0) {
+                            const start = polygons.length;
+                            await processAndDrawBuildings(oks.data);
+                            drawnForThisQuarter.push(...polygons.slice(start));
+                        }
+                    }
+                    if (showSTR) {
+                        const str = await loadFromLocalArchive(qNum, 'STR');
+                        if (str && str.data && str.data.length > 0) {
+                            const start = polygons.length;
+                            await processAndDrawStructures(str.data);
+                            drawnForThisQuarter.push(...polygons.slice(start));
+                        }
+                    }
+
+                    if (drawnForThisQuarter.length > 0) {
+                        activeRenderedQuartersObjects.set(qNum, drawnForThisQuarter);
+                    }
+                }
+            } catch(polyErr) {}
         }
     } catch (e) {
-        console.warn('[Локальный архив] Ошибка автопросмотра по центру экрана:', e);
+        console.warn('[Локальный архив] Ошибка автопросмотра экрана:', e);
     }
 }
 
