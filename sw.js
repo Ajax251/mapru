@@ -1,8 +1,19 @@
 const CACHE_NAME = 'map-pwa-v1.3';
 
+const CACHE_NAME = 'map-pwa-v1.4';
+
 const ASSETS_TO_CACHE = [
     './',
     './map.html',
+    './sh.html',
+    './editor.html',
+    './egrn.html',
+    './fias.html',
+    './mk.html',
+    './mapmini.html',
+    './format.html',
+    './formatx.html',
+    './image.html',
     './msk.js',
     './sk.js',
     './webfonts/all.min.css',
@@ -21,7 +32,6 @@ const ASSETS_TO_CACHE = [
     './app/map/schema-generator.js?v=2.0',
     './app/map/pzz-module.js',
     './img/map.png',
-    './img/icon.svg',
     './img/icon-192.png',
     './img/icon-512.png',
     './img/menu.png',
