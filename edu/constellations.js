@@ -143,7 +143,8 @@ const CONSTELLATIONS = {
             { name: "Сулафат", bayer: "γ", ra: 18.982, dec: 32.690, mag: 3.24 },
             { name: "Лиры δ¹", bayer: "δ¹", ra: 18.908, dec: 36.899, mag: 5.58 },
             { name: "Лиры δ²", bayer: "δ²", ra: 18.915, dec: 36.899, mag: 4.22 },
-            { name: "Лиры ζ", bayer: "ζ", ra: 18.746, dec: 37.605, mag: 4.34 }
+            { name: "Лиры ζ", bayer: "ζ", ra: 18.746, dec: 37.605, mag: 4.34 },
+{ name: "Туманность Кольцо (M57)", ra: 18.89, dec: 33.03, mag: 8.8, bayer: "M57", isNebula: true }
         ],
         lines: [
             ["Вега", "Лиры ζ"],
@@ -344,7 +345,9 @@ const CONSTELLATIONS = {
             { name: "Тельца γ", bayer: "γ", ra: 4.330, dec: 15.628, mag: 3.65 },
             { name: "Тельца δ¹", bayer: "δ¹", ra: 4.382, dec: 17.543, mag: 3.77 },
             { name: "Тельца ε", bayer: "ε", ra: 4.477, dec: 19.181, mag: 3.53 },
-            { name: "Тельца λ", bayer: "λ", ra: 4.011, dec: 12.490, mag: 3.47 }
+            { name: "Тельца λ", bayer: "λ", ra: 4.011, dec: 12.490, mag: 3.47 },
+{ name: "Плеяды (M45)", ra: 3.79, dec: 24.10, mag: 1.6, bayer: "M45", isNebula: true },
+{ name: "Крабовидная туманность (M1)", ra: 5.58, dec: 22.01, mag: 8.4, bayer: "M1", isNebula: true }
         ],
         lines: [
             ["Эльнат", "Тельца ζ"],
@@ -610,6 +613,7 @@ const CONSTELLATIONS = {
             { name: "Альнилам", bayer: "ε", ra: 5.603, dec: -1.202, mag: 1.69 },
             { name: "Альнитак", bayer: "ζ", ra: 5.679, dec: -1.943, mag: 1.74 },
             { name: "Саиф", bayer: "κ", ra: 5.796, dec: -9.670, mag: 2.07 },
+{ name: "Туманность Ориона (M42)", ra: 5.59, dec: -5.39, mag: 4.0, bayer: "M42", isNebula: true },
             { name: "Меисса", bayer: "λ", ra: 5.585, dec: 9.934, mag: 3.39 }
         ],
         lines: [
