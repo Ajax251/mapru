@@ -3697,15 +3697,18 @@ function updateSky() {
             if (star.mag < minMagnitude) minMagnitude = star.mag;
             if (star.mag > maxMagnitude) maxMagnitude = star.mag;
 
-            const col = star.mag < 1 ? '#ffffee' : star.mag < 2 ? '#ffffff' : '#ddeeff';
-          const sprite = createStarSprite(col, star.mag);
+           // Внутри cData.stars.forEach((star, idx) => { ... })
+const col = star.mag < 1 ? '#ffffee' : star.mag < 2 ? '#ffffff' : '#ddeeff';
+
+// Если это туманность (M31), используем спец-спрайт
+const sprite = star.isNebula ? createNebulaSprite() : createStarSprite(col, star.mag);
 sprite.position.copy(pos);
 const initialOpacity = star.mag <= settings.maxMagnitude && settings.stars ? 1.0 : 0.0;
 sprite.material.opacity = initialOpacity;
 sprite.visible = initialOpacity > 0;
 
 sprite.userData = { 
-    type: 'star', 
+    type: star.isNebula ? 'nebula' : 'star', 
     name: star.name, 
     magnitude: star.mag, 
     ra: star.ra, 
@@ -3715,8 +3718,8 @@ sprite.userData = {
     constellation: cName, 
     bayer: star.bayer,
     timesCalculated: false,
-    baseScale: sprite.scale.clone(), 
-    targetOpacity: initialOpacity   
+    baseScale: sprite.scale.clone(),
+    targetOpacity: initialOpacity
 };
 groups.stars.add(sprite);
 interactiveObjects.push(sprite);
@@ -4531,6 +4534,68 @@ function calculateObjectTimes(ra, dec) {
 
 
 
+function createNebulaSprite() {
+    const canvas = document.createElement('canvas');
+    canvas.width = 256;
+    canvas.height = 256;
+    const ctx = canvas.getContext('2d');
+    const cx = 128, cy = 128;
+
+    ctx.save();
+    ctx.translate(cx, cy);
+    ctx.rotate(-Math.PI / 4.5); // Наклон галактики (~40 градусов)
+
+    // Внешнее диффузное свечение (рукава / гало)
+    ctx.scale(2.2, 0.9);
+    const gradOuter = ctx.createRadialGradient(0, 0, 5, 0, 0, 110);
+    gradOuter.addColorStop(0, 'rgba(210, 230, 255, 0.6)');
+    gradOuter.addColorStop(0.25, 'rgba(130, 170, 255, 0.35)');
+    gradOuter.addColorStop(0.55, 'rgba(160, 110, 230, 0.15)');
+    gradOuter.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = gradOuter;
+    ctx.beginPath();
+    ctx.arc(0, 0, 110, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Яркий диск
+    const gradInner = ctx.createRadialGradient(0, 0, 2, 0, 0, 45);
+    gradInner.addColorStop(0, 'rgba(255, 255, 230, 0.95)');
+    gradInner.addColorStop(0.3, 'rgba(255, 220, 160, 0.7)');
+    gradInner.addColorStop(0.7, 'rgba(140, 190, 255, 0.25)');
+    gradInner.addColorStop(1, 'rgba(0, 0, 0, 0)');
+    ctx.fillStyle = gradInner;
+    ctx.beginPath();
+    ctx.arc(0, 0, 45, 0, Math.PI * 2);
+    ctx.fill();
+
+    // Ядро галактики
+    ctx.scale(0.6, 1.0);
+    const gradCore = ctx.createRadialGradient(0, 0, 0, 0, 0, 16);
+    gradCore.addColorStop(0, '#ffffff');
+    gradCore.addColorStop(0.4, 'rgba(255, 240, 200, 0.9)');
+    gradCore.addColorStop(1, 'rgba(255, 180, 80, 0)');
+    ctx.fillStyle = gradCore;
+    ctx.beginPath();
+    ctx.arc(0, 0, 16, 0, Math.PI * 2);
+    ctx.fill();
+
+    ctx.restore();
+
+    const texture = new THREE.CanvasTexture(canvas);
+    const material = new THREE.SpriteMaterial({
+        map: texture,
+        transparent: true,
+        blending: THREE.AdditiveBlending,
+        depthTest: true,
+        depthWrite: false
+    });
+
+    const sprite = new THREE.Sprite(material);
+    sprite.scale.set(4.0, 4.0, 1); // Размер туманности на небесной сфере
+    return sprite;
+}
+
+
 function calculateBodyTimes(bodyName) {
     const observer = new Astronomy.Observer(observerLat, observerLon, 0);
     const now = new Date();
@@ -4540,36 +4605,52 @@ function calculateBodyTimes(bodyName) {
     const riseEvent = Astronomy.SearchRiseSet(bodyName, observer, +1, startOfDay, 1);
     const setEvent = Astronomy.SearchRiseSet(bodyName, observer, -1, startOfDay, 1);
     
-    
-    const transitEvent = Astronomy.SearchHourAngle(bodyName, observer, 0, startOfDay);
-    const nadirEvent = Astronomy.SearchHourAngle(bodyName, observer, 12, startOfDay);
-
-    const rise = riseEvent ? riseEvent.date : null;
-    const set = setEvent ? setEvent.date : null;
-    let transitTime = transitEvent ? transitEvent.date : null;
-    let nadirTime = nadirEvent ? nadirEvent.date : null;
-
+    let transitTime = null;
+    let nadirTime = null;
     let maxAltitude = -90;
-    
-    if (transitTime) {
-        const eq = Astronomy.Equator(bodyName, transitTime, observer, false, true);
-        const hor = Astronomy.Horizon(transitTime, observer, eq.ra, eq.dec, 'normal');
-        maxAltitude = hor.altitude;
-    } else {
-        const eq = Astronomy.Equator(bodyName, now, observer, false, true);
-        const hor = Astronomy.Horizon(now, observer, eq.ra, eq.dec, 'normal');
-        maxAltitude = hor.altitude;
+
+    // 1. Попытка через SearchHourAngle (0ч = Зенит/Кульминация, 12ч = Надир)
+    try {
+        const trEvent = Astronomy.SearchHourAngle(bodyName, observer, 0, startOfDay);
+        if (trEvent && trEvent.time) {
+            transitTime = trEvent.time.date;
+            if (trEvent.hor) maxAltitude = trEvent.hor.altitude;
+        }
+    } catch (e) {}
+
+    try {
+        const ndEvent = Astronomy.SearchHourAngle(bodyName, observer, 12, startOfDay);
+        if (ndEvent && ndEvent.time) {
+            nadirTime = ndEvent.time.date;
+        }
+    } catch (e) {}
+
+    // 2. Универсальный резервный расчет (шаг 5 мин по суткам), если SearchHourAngle вернул null
+    if (!transitTime || !nadirTime) {
+        let maxAlt = -90, minAlt = 90;
+        for (let m = 0; m <= 24 * 60; m += 5) {
+            const t = new Date(startOfDay.getTime() + m * 60000);
+            try {
+                const eq = Astronomy.Equator(bodyName, t, observer, false, true);
+                const hor = Astronomy.Horizon(t, observer, eq.ra, eq.dec, 'normal');
+                if (hor.altitude > maxAlt) {
+                    maxAlt = hor.altitude;
+                    if (!transitTime) transitTime = t;
+                }
+                if (hor.altitude < minAlt) {
+                    minAlt = hor.altitude;
+                    if (!nadirTime) nadirTime = t;
+                }
+            } catch (e) {}
+        }
+        if (maxAltitude === -90) maxAltitude = maxAlt;
     }
 
-    return { 
-        rise: rise, 
-        set: set, 
-        maxAltitude: maxAltitude, 
-        transitTime: transitTime,
-        nadirTime: nadirTime
-    };
-}
+    const rise = riseEvent ? (riseEvent.date || (riseEvent.time ? riseEvent.time.date : null)) : null;
+    const set = setEvent ? (setEvent.date || (setEvent.time ? setEvent.time.date : null)) : null;
 
+    return { rise, set, maxAltitude, transitTime, nadirTime };
+}
 
 function formatTime(date) {
     if (!date) return '—';
@@ -4580,10 +4661,10 @@ function showTooltip(x, y, data) {
     const tooltip = document.getElementById('tooltip');
     let icon = '⭐', typeText = 'Звезда', extraInfo = '';
 
-    
+    // Ленивое вычисление времён при первом наведении
     if (!data.timesCalculated && data.type !== 'iss') {
         let times = null;
-        if (data.type === 'star' && data.ra !== undefined && data.dec !== undefined) {
+        if ((data.type === 'star' || data.type === 'nebula') && data.ra !== undefined && data.dec !== undefined) {
             times = calculateObjectTimes(data.ra, data.dec);
         } else if (data.type === 'planet') {
             const enName = PLANET_NAMES_EN[data.name] || data.name;
@@ -4606,6 +4687,7 @@ function showTooltip(x, y, data) {
 
     if (data.type === 'star') {
         icon = data.magnitude < 1 ? '🌟' : '⭐';
+        typeText = 'Звезда';
         extraInfo = `
             <div class="tooltip-row"><span class="tooltip-label">Зв. величина:</span><span class="tooltip-value">${data.magnitude.toFixed(2)}m</span></div>
             <div class="tooltip-row"><span class="tooltip-label">Азимут:</span><span class="tooltip-value">${data.azimuth?.toFixed(1) || '—'}°</span></div>
@@ -4619,9 +4701,28 @@ function showTooltip(x, y, data) {
             <div class="tooltip-row"><span class="tooltip-label">Dec:</span><span class="tooltip-value">${data.dec?.toFixed(2) || '—'}°</span></div>`;
         if (data.constellation) extraInfo += `<div class="tooltip-constellation">Созвездие: ${data.constellation}</div>`;
         extraInfo += `<div class="tooltip-hint">🖱️ Двойной клик — подробнее</div>`;
+
+    } else if (data.type === 'nebula') {
+        icon = '🌀';
+        typeText = 'Спиральная галактика (M31)';
+        extraInfo = `
+            <div class="tooltip-row"><span class="tooltip-label">Зв. величина:</span><span class="tooltip-value">${data.magnitude.toFixed(2)}m</span></div>
+            <div class="tooltip-row"><span class="tooltip-label">Расстояние:</span><span class="tooltip-value">~2.5 млн св. лет</span></div>
+            <div class="tooltip-row"><span class="tooltip-label">Азимут:</span><span class="tooltip-value">${data.azimuth?.toFixed(1) || '—'}°</span></div>
+            <div class="tooltip-row"><span class="tooltip-label">Высота:</span><span class="tooltip-value">${data.altitude?.toFixed(1) || '—'}°</span></div>
+            <div class="tooltip-row"><span class="tooltip-label">Макс. высота:</span><span class="tooltip-value">${data.maxAltitude?.toFixed(1) || '—'}°</span></div>
+            <div class="tooltip-row"><span class="tooltip-label">Восход:</span><span class="tooltip-value">${formatTime(data.riseTime)}</span></div>
+            <div class="tooltip-row"><span class="tooltip-label">Закат:</span><span class="tooltip-value">${formatTime(data.setTime)}</span></div>
+            <div class="tooltip-row"><span class="tooltip-label">Зенит:</span><span class="tooltip-value">${formatTime(data.transitTime)}</span></div>
+            <div class="tooltip-row"><span class="tooltip-label">Надир:</span><span class="tooltip-value">${formatTime(data.nadirTime)}</span></div>
+            <div class="tooltip-row"><span class="tooltip-label">RA:</span><span class="tooltip-value">${data.ra?.toFixed(2) || '—'}h</span></div>
+            <div class="tooltip-row"><span class="tooltip-label">Dec:</span><span class="tooltip-value">${data.dec?.toFixed(2) || '—'}°</span></div>`;
+        if (data.constellation) extraInfo += `<div class="tooltip-constellation">Созвездие: ${data.constellation}</div>`;
+        extraInfo += `<div class="tooltip-hint">🖱️ Двойной клик — подробнее</div>`;
         
     } else if (data.type === 'planet') {
-        icon = '🪐'; typeText = 'Планета';
+        icon = '🪐';
+        typeText = 'Планета';
         extraInfo = `
             <div class="tooltip-row"><span class="tooltip-label">Зв. величина:</span><span class="tooltip-value">${data.magnitude?.toFixed(1) || '—'}m</span></div>
             <div class="tooltip-row"><span class="tooltip-label">Азимут:</span><span class="tooltip-value">${data.azimuth?.toFixed(1) || '—'}°</span></div>
@@ -4631,14 +4732,15 @@ function showTooltip(x, y, data) {
             <div class="tooltip-row"><span class="tooltip-label">Закат:</span><span class="tooltip-value">${formatTime(data.setTime)}</span></div>
             <div class="tooltip-row"><span class="tooltip-label">Зенит:</span><span class="tooltip-value">${formatTime(data.transitTime)}</span></div>
             <div class="tooltip-row"><span class="tooltip-label">Надир:</span><span class="tooltip-value">${formatTime(data.nadirTime)}</span></div>`;
-        if (PLANETS_DATA[data.name]) extraInfo += `<div class="tooltip-hint">🖱️ Двойной клик — подробнее</div>`;
+        if (PLANETS_DATA && PLANETS_DATA[data.name]) extraInfo += `<div class="tooltip-hint">🖱️ Двойной клик — подробнее</div>`;
         
     } else if (data.type === 'sun') {
-        icon = '☀️'; typeText = 'Звезда (наша)';
+        icon = '☀️';
+        typeText = 'Звезда (наша)';
         extraInfo = `
             <div class="tooltip-row"><span class="tooltip-label">Зв. величина:</span><span class="tooltip-value">-26.7m</span></div>
-            <div class="tooltip-row"><span class="tooltip-label">Азимут:</span><span class="tooltip-value">${data.azimuth?.toFixed(1)}°</span></div>
-            <div class="tooltip-row"><span class="tooltip-label">Высота:</span><span class="tooltip-value">${data.altitude?.toFixed(1)}°</span></div>
+            <div class="tooltip-row"><span class="tooltip-label">Азимут:</span><span class="tooltip-value">${data.azimuth?.toFixed(1) || '—'}°</span></div>
+            <div class="tooltip-row"><span class="tooltip-label">Высота:</span><span class="tooltip-value">${data.altitude?.toFixed(1) || '—'}°</span></div>
             <div class="tooltip-row"><span class="tooltip-label">Макс. высота:</span><span class="tooltip-value">${data.maxAltitude?.toFixed(1) || '—'}°</span></div>
             <div class="tooltip-row"><span class="tooltip-label">Восход:</span><span class="tooltip-value">${formatTime(data.riseTime)}</span></div>
             <div class="tooltip-row"><span class="tooltip-label">Закат:</span><span class="tooltip-value">${formatTime(data.setTime)}</span></div>
@@ -4646,22 +4748,25 @@ function showTooltip(x, y, data) {
             <div class="tooltip-row"><span class="tooltip-label">Надир:</span><span class="tooltip-value">${formatTime(data.nadirTime)}</span></div>`;
         
     } else if (data.type === 'moon') {
-        icon = '🌙'; typeText = 'Спутник Земли';
+        icon = '🌙';
+        typeText = 'Спутник Земли';
         extraInfo = `
             <div class="tooltip-row"><span class="tooltip-label">Зв. величина:</span><span class="tooltip-value">~-12.7m</span></div>
-            <div class="tooltip-row"><span class="tooltip-label">Азимут:</span><span class="tooltip-value">${data.azimuth?.toFixed(1)}°</span></div>
-            <div class="tooltip-row"><span class="tooltip-label">Высота:</span><span class="tooltip-value">${data.altitude?.toFixed(1)}°</span></div>
+            <div class="tooltip-row"><span class="tooltip-label">Азимут:</span><span class="tooltip-value">${data.azimuth?.toFixed(1) || '—'}°</span></div>
+            <div class="tooltip-row"><span class="tooltip-label">Высота:</span><span class="tooltip-value">${data.altitude?.toFixed(1) || '—'}°</span></div>
             <div class="tooltip-row"><span class="tooltip-label">Макс. высота:</span><span class="tooltip-value">${data.maxAltitude?.toFixed(1) || '—'}°</span></div>
             <div class="tooltip-row"><span class="tooltip-label">Восход:</span><span class="tooltip-value">${formatTime(data.riseTime)}</span></div>
             <div class="tooltip-row"><span class="tooltip-label">Закат:</span><span class="tooltip-value">${formatTime(data.setTime)}</span></div>
             <div class="tooltip-row"><span class="tooltip-label">Зенит:</span><span class="tooltip-value">${formatTime(data.transitTime)}</span></div>
             <div class="tooltip-row"><span class="tooltip-label">Надир:</span><span class="tooltip-value">${formatTime(data.nadirTime)}</span></div>`;
+        extraInfo += `<div class="tooltip-hint">🖱️ Двойной клик — подробнее</div>`;
         
     } else if (data.type === 'iss') {
-        icon = '🛰️'; typeText = 'Космическая станция';
+        icon = '🛰️';
+        typeText = 'Космическая станция';
         extraInfo = `
-            <div class="tooltip-row"><span class="tooltip-label">Азимут:</span><span class="tooltip-value">${data.azimuth?.toFixed(1)}°</span></div>
-            <div class="tooltip-row"><span class="tooltip-label">Высота:</span><span class="tooltip-value">${data.altitude?.toFixed(1)}°</span></div>
+            <div class="tooltip-row"><span class="tooltip-label">Азимут:</span><span class="tooltip-value">${data.azimuth?.toFixed(1) || '—'}°</span></div>
+            <div class="tooltip-row"><span class="tooltip-label">Высота:</span><span class="tooltip-value">${data.altitude?.toFixed(1) || '—'}°</span></div>
             <div class="tooltip-row"><span class="tooltip-label">Орбита:</span><span class="tooltip-value">~408 км</span></div>`;
     }
 
@@ -4670,8 +4775,11 @@ function showTooltip(x, y, data) {
         </div>${extraInfo}`;
 
     let left = x + 15, top = y + 15;
-    if (left + 260 > window.innerWidth) left = x - 270;
-    if (top + 390 > window.innerHeight) top = y - 390;
+    if (left + 270 > window.innerWidth) left = x - 280;
+    if (top + 420 > window.innerHeight) top = y - 420;
+    if (left < 10) left = 10;
+    if (top < 10) top = 10;
+    
     tooltip.style.left = left + 'px';
     tooltip.style.top = top + 'px';
     tooltip.style.display = 'block';
@@ -4734,16 +4842,26 @@ function setupUniversalSearch() {
 
 async function performSearch(query, includeCity = false) {
     const results = document.getElementById('search-results');
+    const q = query.trim().toLowerCase();
     let html = '';
 
-    
+    // 1. Созвездия
     const matchedConstellations = [];
     Object.keys(CONSTELLATIONS).forEach(name => {
         const data = CONSTELLATIONS[name];
-        if (name.toLowerCase().includes(query) || data.latin.toLowerCase().includes(query) || (data.abbr && data.abbr.toLowerCase().includes(query))) {
-            matchedConstellations.push({ name, latin: data.latin, visible: constellationVisibility[name] });
+        if (
+            name.toLowerCase().includes(q) || 
+            data.latin.toLowerCase().includes(q) || 
+            (data.abbr && data.abbr.toLowerCase().includes(q))
+        ) {
+            matchedConstellations.push({ 
+                name, 
+                latin: data.latin, 
+                visible: constellationVisibility[name] 
+            });
         }
     });
+
     if (matchedConstellations.length > 0) {
         html += `<div class="search-group-title">✨ Созвездия</div>`;
         matchedConstellations.forEach(c => {
@@ -4754,35 +4872,56 @@ async function performSearch(query, includeCity = false) {
         });
     }
 
-    
+    // 2. Звёзды и Туманности / Галактики (DSO)
     const matchedStars = [];
     Object.keys(CONSTELLATIONS).forEach(constName => {
         CONSTELLATIONS[constName].stars.forEach(star => {
-            if (star.name.toLowerCase().includes(query)) {
-                matchedStars.push({ name: star.name, constellation: constName, mag: star.mag, bayer: star.bayer });
+            const sName = star.name.toLowerCase();
+            const sBayer = star.bayer ? star.bayer.toLowerCase() : '';
+            const isNebulaMatch = star.isNebula && (
+                q.includes('m31') || 
+                q.includes('м31') || 
+                'm31'.includes(q) || 
+                'м31'.includes(q) || 
+                'туманность андромеды'.includes(q) || 
+                'галактика андромеды'.includes(q) || 
+                'туманность'.includes(q) || 
+                'галактика'.includes(q)
+            );
+
+            if (sName.includes(q) || sBayer.includes(q) || isNebulaMatch) {
+                matchedStars.push({ 
+                    name: star.name, 
+                    constellation: constName, 
+                    mag: star.mag, 
+                    bayer: star.bayer,
+                    isNebula: !!star.isNebula
+                });
             }
         });
     });
+
     if (matchedStars.length > 0) {
-        html += `<div class="search-group-title">⭐ Звёзды</div>`;
+        html += `<div class="search-group-title">⭐ Звёзды и туманности</div>`;
         matchedStars.slice(0, 10).forEach(s => {
+            const icon = s.isNebula ? '🌀' : '⭐';
             html += `<div class="search-item" data-type="star" data-name="${s.name}" data-constellation="${s.constellation}">
-                <span><span class="search-item-icon">⭐</span>${s.name} ${s.bayer || ''}</span>
+                <span><span class="search-item-icon">${icon}</span>${s.name} ${s.bayer ? `(${s.bayer})` : ''}</span>
                 <span class="search-item-info">${s.constellation}, ${s.mag.toFixed(2)}m</span>
             </div>`;
         });
     }
 
-    
+    // 3. Планеты и светила
     const matchedPlanets = [];
     PLANETS.forEach(p => {
-        const ruName = PLANET_NAMES_RU[p];
-        if (p.toLowerCase().includes(query) || ruName.toLowerCase().includes(query)) {
+        const ruName = PLANET_NAMES_RU[p] || p;
+        if (p.toLowerCase().includes(q) || ruName.toLowerCase().includes(q)) {
             matchedPlanets.push({ en: p, ru: ruName, mag: PLANET_MAG[p] });
         }
     });
-    if ('солнце'.includes(query) || 'sun'.includes(query)) matchedPlanets.push({ en: 'Sun', ru: 'Солнце', mag: -26.7 });
-    if ('луна'.includes(query) || 'moon'.includes(query)) matchedPlanets.push({ en: 'Moon', ru: 'Луна', mag: -12.7 });
+    if ('солнце'.includes(q) || 'sun'.includes(q)) matchedPlanets.push({ en: 'Sun', ru: 'Солнце', mag: -26.7 });
+    if ('луна'.includes(q) || 'moon'.includes(q)) matchedPlanets.push({ en: 'Moon', ru: 'Луна', mag: -12.7 });
 
     if (matchedPlanets.length > 0) {
         html += `<div class="search-group-title">🪐 Планеты и светила</div>`;
@@ -4795,7 +4934,7 @@ async function performSearch(query, includeCity = false) {
         });
     }
 
-    
+    // 4. Города и координаты
     if (includeCity) {
         try {
             const response = await fetch(`https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=5&accept-language=ru`);
@@ -4803,21 +4942,25 @@ async function performSearch(query, includeCity = false) {
             if (cities.length > 0) {
                 html += `<div class="search-group-title">📍 Города и места</div>`;
                 cities.forEach(city => {
-                    html += `<div class="search-item" data-type="city" data-lat="${city.lat}" data-lon="${city.lon}" data-name="${city.display_name.split(',')[0]}">
-                        <span><span class="search-item-icon">📍</span>${city.display_name.split(',')[0]}</span>
+                    const cityName = city.display_name.split(',')[0];
+                    html += `<div class="search-item" data-type="city" data-lat="${city.lat}" data-lon="${city.lon}" data-name="${cityName}">
+                        <span><span class="search-item-icon">📍</span>${cityName}</span>
                         <span class="search-item-info">${parseFloat(city.lat).toFixed(2)}°, ${parseFloat(city.lon).toFixed(2)}°</span>
                     </div>`;
                 });
             }
-        } catch (e) { }
+        } catch (e) {}
     } else {
         html += `<div class="search-group-title" style="opacity: 0.5;">📍 Нажмите Enter для поиска городов</div>`;
     }
 
+    // Вывод результатов и привязка клика
     if (html) {
         results.innerHTML = html;
         results.style.display = 'block';
-        results.querySelectorAll('.search-item').forEach(item => { item.addEventListener('click', () => handleSearchSelect(item)); });
+        results.querySelectorAll('.search-item').forEach(item => {
+            item.addEventListener('click', () => handleSearchSelect(item));
+        });
     } else {
         results.innerHTML = '<div style="padding: 15px; text-align: center; opacity: 0.5;">Ничего не найдено</div>';
         results.style.display = 'block';
