@@ -11985,6 +11985,67 @@ async function loadFromLocalArchive(quarterNumber, type = 'ZU') {
 }
 
 
+async function findQuartersInLocalArea(mapLat, mapLon, radiusMeters = 500) {
+    try {
+        const db = await openLocalDB();
+        const tx = db.transaction('quarters_index', 'readonly');
+        const allQuarters = await new Promise(r => {
+            const req = tx.objectStore('quarters_index').getAll();
+            req.onsuccess = () => r(req.result || []);
+            req.onerror = () => r([]);
+        });
+
+        if (allQuarters.length === 0) return [];
+
+        const [trueLat, trueLon] = getTrueWgs84Coords(mapLat, mapLon);
+        const ptCenter = turf.point([trueLon, trueLat]);
+        
+        // BBox 1000x1000м (буфер 500м)
+        const searchBboxWgs = turf.bbox(turf.buffer(ptCenter, radiusMeters, { units: 'meters' }));
+        const searchPolyWgs = turf.bboxPolygon(searchBboxWgs);
+
+        const center3857 = proj4('EPSG:4326', 'EPSG:3857', [trueLon, trueLat]);
+        const searchBbox3857 = [
+            center3857[0] - radiusMeters,
+            center3857[1] - radiusMeters,
+            center3857[0] + radiusMeters,
+            center3857[1] + radiusMeters
+        ];
+        const searchPoly3857 = turf.bboxPolygon(searchBbox3857);
+
+        const matchedQuarters = [];
+
+        for (const q of allQuarters) {
+            if (q.geojson_geom && q.geojson_geom.coordinates) {
+                try {
+                    const geom = q.geojson_geom;
+                    const isMulti = geom.type === 'MultiPolygon';
+
+                    // Проверка пересечения в EPSG:3857
+                    const turfPoly3857 = isMulti ? turf.multiPolygon(geom.coordinates) : turf.polygon(geom.coordinates);
+                    if (turf.booleanIntersects(searchPoly3857, turfPoly3857)) {
+                        matchedQuarters.push(q);
+                        continue;
+                    }
+
+                    // Проверка пересечения в WGS84
+                    const convertCoord = (c) => (Math.abs(c[0]) > 200 || Math.abs(c[1]) > 200) ? proj4('EPSG:3857', 'EPSG:4326', c) : c;
+                    const wgsCoords = isMulti
+                        ? geom.coordinates.map(p => p.map(r => r.map(convertCoord)))
+                        : geom.coordinates.map(r => r.map(convertCoord));
+                    const turfPolyWgs = isMulti ? turf.multiPolygon(wgsCoords) : turf.polygon(wgsCoords);
+                    if (turf.booleanIntersects(searchPolyWgs, turfPolyWgs)) {
+                        matchedQuarters.push(q);
+                    }
+                } catch (err) {}
+            }
+        }
+        return matchedQuarters;
+    } catch (e) {
+        return [];
+    }
+}
+
 async function findQuarterInLocalIndex(mapLat, mapLon) {
     try {
         const db = await openLocalDB();
@@ -14789,37 +14850,36 @@ async function handleEgrnRelatedAction(lat, lon, targetUrl) {
 
 
 document.addEventListener('DOMContentLoaded', () => {
-   const quickBtn = document.getElementById('local-archive-quick-btn');
-    if (quickBtn) {
-        quickBtn.addEventListener('click', (e) => {
-            e.stopPropagation();
-            isLocalArchiveQuickViewActive = !isLocalArchiveQuickViewActive;
-            quickBtn.classList.toggle('active', isLocalArchiveQuickViewActive);
+  const quickBtn = document.getElementById('local-archive-quick-btn');
+if (quickBtn) {
+    quickBtn.addEventListener('click', (e) => {
+        e.stopPropagation();
+        isLocalArchiveQuickViewActive = !isLocalArchiveQuickViewActive;
+        quickBtn.classList.toggle('active', isLocalArchiveQuickViewActive);
 
-            if (isLocalArchiveQuickViewActive) {
-                quickBtn.title = "Отображать локальные КПТ в центре экрана (ВКЛ)";
+        if (isLocalArchiveQuickViewActive) {
+            quickBtn.title = "Отображать локальные КПТ в радиусе 500м (ВКЛ)";
 
-                
-                if (localStorage.getItem('isLocalArchiveAutoSaveEnabled') !== 'true') {
-                    showNotification('Автосохранение выключено! Пожалуйста, включите сохранение в открывшемся окне.', 'warning', 'exclamation-triangle', 6000);
-                    openLocalArchiveModal();
-                } else {
-                    showNotification('Автоотображение локальных КПТ включено', 'success');
-                }
-
-                checkAndRenderViewportLocalQuarters();
+            if (localStorage.getItem('isLocalArchiveAutoSaveEnabled') !== 'true') {
+                showNotification('Автосохранение выключено! Пожалуйста, включите сохранение в открывшемся окне.', 'warning', 'exclamation-triangle', 6000);
+                openLocalArchiveModal();
             } else {
-                quickBtn.title = "Отображать локальные КПТ в центре экрана (ВЫКЛ)";
-                
-                activeRenderedQuartersObjects.forEach(objs => {
-                    objs.forEach(o => map.geoObjects.remove(o));
-                });
-                activeRenderedQuartersObjects.clear();
-                activeRenderedQuartersLRU = [];
-                showNotification('Автоотображение локальных КПТ отключено', 'info');
+                showNotification('Автоотображение локальных КПТ в радиусе 500м включено', 'success');
             }
-        });
-    }
+
+            checkAndRenderViewportLocalQuarters();
+        } else {
+            quickBtn.title = "Отображать локальные КПТ в радиусе 500м (ВЫКЛ)";
+            
+            activeRenderedQuartersObjects.forEach(objs => {
+                objs.forEach(o => map.geoObjects.remove(o));
+            });
+            activeRenderedQuartersObjects.clear();
+            activeRenderedQuartersLRU = [];
+            showNotification('Автоотображение локальных КПТ отключено', 'info');
+        }
+    });
+}
 
     
     const autoSaveCb = document.getElementById('localArchiveAutoSave');
@@ -14845,51 +14905,60 @@ async function checkAndRenderViewportLocalQuarters() {
     const [centerMapLat, centerMapLon] = center;
 
     try {
-        const q = await findQuarterInLocalIndex(centerMapLat, centerMapLon);
-        if (!q) return;
-
-        const qNum = q.quarter_number;
-
-        if (activeRenderedQuartersObjects.has(qNum)) {
-            return;
-        }
+        // Поиск всех КПТ в радиусе 500м (bbox 1000x1000м)
+        const quarters = await findQuartersInLocalArea(centerMapLat, centerMapLon, 500);
+        if (!quarters || quarters.length === 0) return;
 
         const showZU = localStorage.getItem('laLayerZU') !== 'false';
         const showOKS = localStorage.getItem('laLayerOKS') !== 'false';
         const showSTR = localStorage.getItem('laLayerSTR') !== 'false';
 
-        const drawnForThisQuarter = [];
+        let newQuartersLoaded = 0;
 
-        if (showZU) {
-            const zu = await loadFromLocalArchive(qNum, 'ZU');
-            if (zu && zu.data && zu.data.length > 0) {
-                // Передаем true третьим параметром для отмены зумирования
-                const objs = await processAndDrawParcels(zu.data, 'quarter', true);
-                drawnForThisQuarter.push(...objs);
+        for (const q of quarters) {
+            const qNum = q.quarter_number;
+
+            if (activeRenderedQuartersObjects.has(qNum)) {
+                continue;
             }
-        }
-        if (showOKS) {
-            const oks = await loadFromLocalArchive(qNum, 'OKS');
-            if (oks && oks.data && oks.data.length > 0) {
-                const start = polygons.length;
-                await processAndDrawBuildings(oks.data);
-                drawnForThisQuarter.push(...polygons.slice(start));
+
+            const drawnForThisQuarter = [];
+
+            if (showZU) {
+                const zu = await loadFromLocalArchive(qNum, 'ZU');
+                if (zu && zu.data && zu.data.length > 0) {
+                    const objs = await processAndDrawParcels(zu.data, 'quarter', true);
+                    drawnForThisQuarter.push(...objs);
+                }
             }
-        }
-        if (showSTR) {
-            const str = await loadFromLocalArchive(qNum, 'STR');
-            if (str && str.data && str.data.length > 0) {
-                const start = polygons.length;
-                await processAndDrawStructures(str.data);
-                drawnForThisQuarter.push(...polygons.slice(start));
+            if (showOKS) {
+                const oks = await loadFromLocalArchive(qNum, 'OKS');
+                if (oks && oks.data && oks.data.length > 0) {
+                    const start = polygons.length;
+                    await processAndDrawBuildings(oks.data);
+                    drawnForThisQuarter.push(...polygons.slice(start));
+                }
+            }
+            if (showSTR) {
+                const str = await loadFromLocalArchive(qNum, 'STR');
+                if (str && str.data && str.data.length > 0) {
+                    const start = polygons.length;
+                    await processAndDrawStructures(str.data);
+                    drawnForThisQuarter.push(...polygons.slice(start));
+                }
+            }
+
+            if (drawnForThisQuarter.length > 0) {
+                activeRenderedQuartersObjects.set(qNum, drawnForThisQuarter);
+                newQuartersLoaded++;
             }
         }
 
-        if (drawnForThisQuarter.length > 0) {
-            activeRenderedQuartersObjects.set(qNum, drawnForThisQuarter);
+        if (newQuartersLoaded > 0) {
+            showNotification(`Загружено локальных КПТ в радиусе 500м: ${newQuartersLoaded}`, 'info');
         }
     } catch (e) {
-        console.warn('[Локальный архив] Ошибка автопросмотра по центру экрана:', e);
+        console.warn('[Локальный архив] Ошибка автопросмотра по области:', e);
     }
 }
 
