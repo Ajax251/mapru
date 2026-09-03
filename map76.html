@@ -15905,7 +15905,6 @@ async function executeQuickReport(targetObject) {
             }
         });
         
-       window.map3DCenter = map.getCenter();
         window.quickReportTargetObjects = quickReportTargetObjects;
         window.parcelFeaturesData = parcelFeaturesData;
         window.buildingFeaturesData = buildingFeaturesData;
@@ -20131,6 +20130,7 @@ function showAnalysisSelectionModal(polygons, onSelect) {
 
 async function openVisibleMapIn3D(clipToScreen = true) {
     try {
+        
         const bounds = map.getBounds();
         const center = map.getCenter();
         
@@ -20139,14 +20139,18 @@ async function openVisibleMapIn3D(clipToScreen = true) {
             return;
         }
 
-        // BBox видимого экрана: [minLon, minLat, maxLon, maxLat]
-        const screenBbox = [
-            Math.min(bounds[0][1], bounds[1][1]), 
-            Math.min(bounds[0][0], bounds[1][0]), 
-            Math.max(bounds[0][1], bounds[1][1]), 
-            Math.max(bounds[0][0], bounds[1][0])
-        ];
+        let screenBbox = null;
+        if (clipToScreen) {
+            
+            screenBbox = [
+                Math.min(bounds[0][1], bounds[1][1]), 
+                Math.min(bounds[0][0], bounds[1][0]), 
+                Math.max(bounds[0][1], bounds[1][1]), 
+                Math.max(bounds[0][0], bounds[1][0])
+            ];
+        }
 
+        
         const allDrawableObjects = new Set([...polygons, ...areaObjects]);
         const objectsToProcess = Array.from(allDrawableObjects).filter(obj => 
             obj instanceof ymaps.Polygon || obj instanceof ymaps.Polyline
@@ -20159,60 +20163,66 @@ async function openVisibleMapIn3D(clipToScreen = true) {
         const sData = [];
         const zData = [];
         let processedCount = 0;
+        
+        
+        if (objectsToProcess.length === 0) {
+            
+            const virtualTargetPoint = new ymaps.Placemark(center, {
+                cadastralNumber: 'Центр экрана', 
+            });
+            window.quickReportTargetObjects = [virtualTargetPoint];
+        } else {
+            
+            window.quickReportTargetObjects = objectsToProcess; 
+            
 
-        for (const targetObject of objectsToProcess) {
-            let turfFeature;
-            const isPolygon = targetObject instanceof ymaps.Polygon;
+            
+            for (const targetObject of objectsToProcess) {
+                let turfFeature;
+                const isPolygon = targetObject instanceof ymaps.Polygon;
 
-            try {
+                
                 if (isPolygon) {
                     const rings = targetObject.geometry.getCoordinates();
-                    const geoJsonCoords = rings.map(ring => {
-                        let r = ring.map(c => [c[1], c[0]]);
-                        if (r.length > 2) {
-                            const f = r[0], l = r[r.length - 1];
-                            if (Math.abs(f[0] - l[0]) > 1e-9 || Math.abs(f[1] - l[1]) > 1e-9) r.push([...f]);
-                        }
-                        return r;
-                    }).filter(r => r.length >= 4);
-
-                    if (geoJsonCoords.length === 0) continue;
+                    const geoJsonCoords = rings.map(ring => ring.map(c => [c[1], c[0]])); 
                     turfFeature = turf.polygon(geoJsonCoords);
                 } else { 
                     const coords = targetObject.geometry.getCoordinates();
-                    if (!coords || coords.length < 2) continue;
-                    turfFeature = turf.lineString(coords.map(c => [c[1], c[0]]));
+                    const geoJsonCoords = coords.map(c => [c[1], c[0]]);
+                    turfFeature = turf.lineString(geoJsonCoords);
                 }
 
                 let geometry;
                 if (clipToScreen) {
+                    
                     const clipped = turf.bboxClip(turfFeature, screenBbox);
-                    geometry = clipped ? clipped.geometry : null;
+                    geometry = clipped.geometry;
                 } else {
                     geometry = turfFeature.geometry;
                 }
                 
+                
                 if (!geometry || !geometry.coordinates || geometry.coordinates.length === 0) continue; 
-                if (geometry.type === 'Polygon' && (!geometry.coordinates[0] || geometry.coordinates[0].length < 4)) continue;
-                if (geometry.type === 'MultiPolygon' && geometry.coordinates.length === 0) continue;
-                if (geometry.type === 'LineString' && geometry.coordinates.length < 2) continue;
-                if (geometry.type === 'MultiLineString' && geometry.coordinates.length === 0) continue;
 
                 processedCount++;
 
+                
                 const restoreCoordsRecursively = (coords) => {
                     if (typeof coords[0] === 'number') {
                         const trueLat = coords[1] + (mapOffsetY * 0.000008983);
                         const trueLon = coords[0] + (mapOffsetX * 0.000008983);
-                        return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
+                        return proj4("EPSG:4326", "EPSG:3857",[trueLon, trueLat]);
                     } else {
                         return coords.map(restoreCoordsRecursively);
                     }
                 };
 
                 const restoredCoordinates = restoreCoordsRecursively(geometry.coordinates);
+
                 const props = targetObject.properties.getAll();
+                const opts = targetObject.options.getAll();
                 const originalFeatureData = props.featureData || {};
+                
                 
                 let categoryId = 36368; 
                 if (props.isBuilding || props.categoryName === 'Здания') categoryId = 36369;
@@ -20252,21 +20262,15 @@ async function openVisibleMapIn3D(clipToScreen = true) {
                 else if (categoryId === 36383) sData.push(feature3D);
                 else if (categoryId === 36940) zData.push(feature3D);
                 else pData.push(feature3D);
+            }
 
-            } catch (err) {
-                continue;
+            if (processedCount === 0 && objectsToProcess.length > 0) {
+                showNotification('В видимой области нет объектов для отображения', 'warning');
+                return;
             }
         }
-
-        if (clipToScreen && processedCount === 0 && objectsToProcess.length > 0) {
-            showNotification('В видимой области экрана нет объектов для отображения', 'warning');
-            return;
-        }
-
-        // Фиксируем центр сцены строго по центру текущей карты на экране
-        window.map3DCenter = center;
-        // Не дублируем все объекты в слой целевых
-        window.quickReportTargetObjects = [];
+        
+        
         window.parcelFeaturesData = pData;
         window.buildingFeaturesData = bData;
         window.structureFeaturesData = sData;
@@ -20276,6 +20280,7 @@ async function openVisibleMapIn3D(clipToScreen = true) {
         window.proj4 = proj4;
         window.isGlobalMapMode = true; 
 
+        
         if (typeof window.open3DVisualization === 'function') {
             const msg = processedCount > 0 ? `Подготовлено ${processedCount} объектов. Открытие 3D...` : 'Открытие 3D вида...';
             showNotification(msg, 'success');
