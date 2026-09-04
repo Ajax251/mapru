@@ -4643,8 +4643,9 @@ function extractSpecifyRelatedParcelData(element) {
     const cadNumber = element.getAttribute('CadastralNumber');
     const contours = [];
 
-    // 1. Проверка полного описания через EntitySpatial / AllBorder
+    
     const entitySpatial = element.querySelector('EntitySpatial');
+
     if (entitySpatial || element.tagName === 'ExistParcel' || element.querySelector('AllBorder')) {
         const spatialElements = element.querySelectorAll('EntitySpatial > SpatialElement, AllBorder EntitySpatial > SpatialElement');
         spatialElements.forEach(spEl => {
@@ -4662,6 +4663,7 @@ function extractSpecifyRelatedParcelData(element) {
         });
 
         if (contours.length > 0) {
+            
             const areaNode = element.querySelector('Area > Area');
             const declaredArea = areaNode ? parseFloat(areaNode.textContent.trim()) : null;
             const areaInGknNode = element.querySelector('AreaInGKN');
@@ -4670,7 +4672,6 @@ function extractSpecifyRelatedParcelData(element) {
             return {
                 cadNumber,
                 isAllBorder: true,
-                isInnerContour: false,
                 contours,
                 declaredArea,
                 areaInGkn
@@ -4678,18 +4679,13 @@ function extractSpecifyRelatedParcelData(element) {
         }
     }
 
-    // 2. Сбор ChangeBorder по текущему узлу и парным узлам этого же кадастрового номера
-    const allMatchingNodes = lastXmlDoc ? 
-        Array.from(lastXmlDoc.querySelectorAll(`SpecifyRelatedParcel[CadastralNumber="${cadNumber}"]`)) : [element];
+    
+    const changeBorders = element.querySelectorAll('ChangeBorder');
+    if (changeBorders.length > 0) {
+        const junctionPoints = [];
+        const removedPoints = [];
+        const newPoints = [];
 
-    const allOldPoints = [];
-    const allNewPoints = [];
-    const junctionPoints = [];
-    const removedPoints = [];
-    const newPoints = [];
-
-    allMatchingNodes.forEach(node => {
-        const changeBorders = node.querySelectorAll('ChangeBorder');
         changeBorders.forEach(cb => {
             const oldOrd = cb.querySelector('OldOrdinate');
             const newOrd = cb.querySelector('NewOrdinate');
@@ -4709,71 +4705,27 @@ function extractSpecifyRelatedParcelData(element) {
                     });
                 }
             } else if (oldOrd && !newOrd) {
-                const pt = {
+                removedPoints.push({
                     x: parseFloat(oldOrd.getAttribute('X')),
                     y: parseFloat(oldOrd.getAttribute('Y')),
                     num: oldOrd.getAttribute('NumGeopoint')
-                };
-                removedPoints.push(pt);
-                allOldPoints.push(pt);
+                });
             } else if (!oldOrd && newOrd) {
-                const pt = {
-                    x: parseFloat(newOrd.getAttribute('X')),
-                    y: parseFloat(newOrd.getAttribute('Y')),
-                    num: (newOrd.getAttribute('PointPref') || '') + (newOrd.getAttribute('NumGeopoint') || '')
-                };
-                allNewPoints.push(pt);
-                if (newOrd.getAttribute('PointPref') === 'н') {
-                    newPoints.push(pt);
+                const pref = newOrd.getAttribute('PointPref');
+                if (pref === 'н') {
+                    newPoints.push({
+                        x: parseFloat(newOrd.getAttribute('X')),
+                        y: parseFloat(newOrd.getAttribute('Y')),
+                        num: newOrd.getAttribute('NumGeopoint')
+                    });
                 }
             }
         });
-    });
 
-    // 3. Распознавание замены внутреннего контура (вырезки / дырки):
-    // когда старый контур полностью удаляется (замкнутый цикл), а новый полностью создается (замкнутый цикл)
-    const isLoop = (pts) => pts.length >= 3 && (
-        (Math.abs(pts[0].x - pts[pts.length - 1].x) < 0.05 && Math.abs(pts[0].y - pts[pts.length - 1].y) < 0.05) ||
-        pts.length >= 4
-    );
-
-    const isInnerContour = (allOldPoints.length >= 3 && allNewPoints.length >= 3 && isLoop(allNewPoints)) ||
-        (junctionPoints.length === 0 && allNewPoints.length >= 3 && isLoop(allNewPoints));
-
-    if (isInnerContour) {
-        // Замыкаем новый контур при необходимости
-        const closedNew = [...allNewPoints];
-        if (Math.abs(closedNew[0].x - closedNew[closedNew.length - 1].x) > 0.01 || 
-            Math.abs(closedNew[0].y - closedNew[closedNew.length - 1].y) > 0.01) {
-            closedNew.push({ ...closedNew[0] });
-        }
-
-        const closedOld = allOldPoints.length > 0 ? [...allOldPoints] : [];
-        if (closedOld.length > 0 && (Math.abs(closedOld[0].x - closedOld[closedOld.length - 1].x) > 0.01 || 
-            Math.abs(closedOld[0].y - closedOld[closedOld.length - 1].y) > 0.01)) {
-            closedOld.push({ ...closedOld[0] });
-        }
-
-        return {
-            cadNumber,
-            isAllBorder: false,
-            isInnerContour: true,
-            contours: [closedNew],
-            oldContour: closedOld.length > 0 ? [closedOld] : null,
-            junctionPoints: [],
-            removedPoints: allOldPoints,
-            newPoints: allNewPoints
-        };
+        return { cadNumber, isAllBorder: false, junctionPoints, removedPoints, newPoints };
     }
 
-    return { 
-        cadNumber, 
-        isAllBorder: false, 
-        isInnerContour: false, 
-        junctionPoints, 
-        removedPoints, 
-        newPoints 
-    };
+    return { cadNumber, isAllBorder: false };
 }
 
 
@@ -5561,7 +5513,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
     const infoDiv = document.getElementById('relatedParcelInfo');
     
     modal.style.display = 'flex';
-    infoDiv.innerHTML = `<div style="display:flex; align-items:center; justify-content:center; gap:12px; padding:20px; color:var(--text-secondary);"><div class="loader"></div><span>Загрузка данных и проверка геометрии...</span></div>`;
+    infoDiv.innerHTML = `<div style="display:flex; align-items:center; justify-content:center; gap:12px; padding:20px; color:var(--text-secondary);"><div class="loader"></div><span>Загрузка данных и проверка пересечений...</span></div>`;
     
     try {
         const xmlData = extractSpecifyRelatedParcelData(specifyRelatedParcel);
@@ -5576,6 +5528,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
         const otherCorrectedParcels = [];
         const allRelatedNodes = All(lastXmlDoc, 'SpecifyRelatedParcel, SpecifyParcelApproximal > ExistParcel');
         const currentCadNumLower = xmlData.cadNumber.toLowerCase();
+        
         
         const xmlParcelsCadSet = new Set(
             Array.from(allRelatedNodes).map(n => (A(n, 'CadastralNumber') || '').toLowerCase()).filter(Boolean)
@@ -5602,50 +5555,8 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
         let comparisonResults = null;
         let neighboringOverlaps = [];
         const problemPoints = [];
-        let isMainInsideHole = false;
 
-        // ВАРИАНТ 1: Исправление внутреннего контура (вырезки / дырки)
-        if (xmlData.isInnerContour) {
-            resultContour = xmlData.contours;
-
-            if (mainContoursXml.length > 0 && resultContour.length > 0) {
-                const holeContour = resultContour[0];
-                let pointsInside = 0;
-                let totalPoints = 0;
-
-                mainContoursXml.forEach(mContour => {
-                    mContour.forEach(pt => {
-                        totalPoints++;
-                        // Точка внутри вырезки или лежит на ее границе (погрешность до 20 см)
-                        let onBoundary = false;
-                        for (let i = 0; i < holeContour.length - 1; i++) {
-                            if (getDistanceToSegment(pt, holeContour[i], holeContour[i + 1]) <= 0.20) {
-                                onBoundary = true;
-                                break;
-                            }
-                        }
-                        if (isPointInPolygon(pt, holeContour) || onBoundary) {
-                            pointsInside++;
-                        }
-                    });
-                });
-
-                isMainInsideHole = totalPoints > 0 && (pointsInside / totalPoints) >= 0.75;
-
-                if (!isMainInsideHole) {
-                    hasOverlap = true;
-                    errors.push(`ВНИМАНИЕ: Основной земельный участок (${mainParcelCadNumber}) НЕ располагается внутри создаваемого внутреннего контура (вырезки) смежного ЗУ! Проверьте соответствие координат на местности.`);
-                    
-                    resultContour.forEach(subContour => {
-                        mainContoursXml.forEach(mainContour => {
-                            problemPoints.push(...findProblematicOverlappingPoints(subContour, mainContour));
-                        });
-                    });
-                }
-            }
-        }
-        // ВАРИАНТ 2: Полное описание границы (AllBorder)
-        else if (xmlData.isAllBorder) {
+        if (xmlData.isAllBorder) {
             const comp = compareFullBoundaries(xmlData.contours, egrnContours);
             comparisonResults = comp.comparisonResults;
             resultContour = xmlData.contours;
@@ -5655,7 +5566,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
                 if (overlapArea > 0.0001) {
                     hasOverlap = true;
                     const areaStr = overlapArea < 0.01 ? `${(overlapArea * 10000).toFixed(1)} кв.см.` : `${overlapArea.toFixed(2)} кв.м.`;
-                    errors.push(`НАЛОЖЕНИЕ НА ПРОЕКТНЫЙ ЗУ: Новые границы смежного ЗУ ${xmlData.cadNumber} накладываются на границы основного ЗУ <b>${mainParcelCadNumber}</b>! Площадь: <b>${areaStr}</b>`);
+                    errors.push(`НАЛОЖЕНИЕ НА ПРОЕКТНЫЙ ЗУ: Новые границы смежного ЗУ ${xmlData.cadNumber} накладываются на НОВЫЕ границы основного ЗУ <b>${mainParcelCadNumber}</b>! Площадь: <b>${areaStr}</b>`);
                 }
                 
                 xmlData.contours.forEach(subContour => {
@@ -5664,9 +5575,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
                     });
                 });
             }
-        } 
-        // ВАРИАНТ 3: Частичное изменение границы (ChangeBorder через точки стыковки)
-        else {
+        } else {
             if (!egrnContours?.length) throw new Error(`Смежный ЗУ ${xmlData.cadNumber} не найден в ЕГРН`);
             const egrnContour = egrnContours[0];
 
@@ -5681,7 +5590,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
                 for (const mainContour of mainContoursXml) {
                     if (checkPolygonsOverlap(resultContour, mainContour)) {
                         hasOverlap = true;
-                        errors.push(`НАЛОЖЕНИЕ НА ПРОЕКТНЫЙ ЗУ: Новые границы смежного ЗУ ${xmlData.cadNumber} накладываются на границы основного ЗУ <b>${mainParcelCadNumber}</b>!`);
+                        errors.push(`НАЛОЖЕНИЕ НА ПРОЕКТНЫЙ ЗУ: Новые границы смежного ЗУ ${xmlData.cadNumber} накладываются на НОВЫЕ границы основного ЗУ <b>${mainParcelCadNumber}</b>!`);
                     }
                     problemPoints.push(...findProblematicOverlappingPoints(resultContour, mainContour));
                 }
@@ -5689,7 +5598,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             if (resultContour) resultContour = [resultContour];
         }
 
-        // Проверка взаимных пересечений с другими изменяемыми участками межевого плана
+        
         if (resultContour && otherCorrectedParcels.length > 0) {
             otherCorrectedParcels.forEach(other => {
                 const overlapWithOther = checkPlanarOverlap(resultContour, other.contours);
@@ -5698,7 +5607,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
                     neighboringOverlaps.push({
                         cadNumber: other.cadNumber,
                         area: overlapWithOther,
-                        isXmlProject: true,
+                        isXmlProject: true, 
                         contours: other.contours
                     });
                 }
@@ -5710,8 +5619,8 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             });
         }
 
-        // Поиск наложений на сторонние земельные участки из ЕГРН
-        if (resultContour && resultContour.length > 0 && !xmlData.isInnerContour) {
+        
+        if (resultContour && resultContour.length > 0) {
             try {
                 const intersectedFeatures = await searchIntersectingObjects(resultContour, NSPD_CATEGORY_ZU, mskSystem);
                 
@@ -5720,6 +5629,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
                     if (!fCadNum) continue;
 
                     const fCadLower = fCadNum.toLowerCase();
+                    
                     if (xmlParcelsCadSet.has(fCadLower)) continue;
 
                     let neighborContours = [];
@@ -5733,7 +5643,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
                             neighboringOverlaps.push({
                                 cadNumber: fCadNum,
                                 area: overlapWithNeighbor,
-                                isXmlProject: false,
+                                isXmlProject: false, 
                                 contours: neighborContours
                             });
                         }
@@ -5744,20 +5654,14 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             }
         }
 
-        const hasCriticalErrors = errors.length > 0 || !resultContour;
+       const hasCriticalErrors = errors.length > 0 || !resultContour;
         const statusClass = (hasOverlap || hasCriticalErrors || neighboringOverlaps.length) 
             ? (hasOverlap || hasCriticalErrors ? 'error' : 'warning') 
             : 'success';
 
         let statusText = '';
-        if (xmlData.isInnerContour) {
-            if (isMainInsideHole) {
-                statusText = `ИСПРАВЛЕНИЕ ВНУТРЕННЕГО КОНТУРА (ВЫРЕЗКИ): Старый контур удален, новый контур добавлен. Основной ЗУ ${mainParcelCadNumber} расположен внутри вырезки!`;
-            } else {
-                statusText = `ВНИМАНИЕ: Исправлен внутренний контур смежного ЗУ, но основной ЗУ ${mainParcelCadNumber} находится ВНЕ границ данной вырезки!`;
-            }
-        } else if (hasOverlap) {
-            statusText = `НАЛОЖЕНИЕ НА ГРАНИЦЫ ОСНОВНОГО УЧАСТКА ${mainParcelCadNumber}!`;
+        if (hasOverlap) {
+            statusText = `НАЛОЖЕНИЕ НА НОВЫЕ ГРАНИЦЫ ОСНОВНОГО УЧАСТКА ${mainParcelCadNumber}!`;
         } else if (hasCriticalErrors) {
             statusText = 'ОШИБКА СОПРЯЖЕНИЯ ГРАНИЦ: Точки стыковки не найдены в ЕГРН (проверьте кадастровый номер или координаты)!';
         } else if (neighboringOverlaps.length > 0) {
@@ -5766,10 +5670,6 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             statusText = 'Проектные границы смежного участка успешно изменены относительно ЕГРН (наложений нет)';
         }
         
-        const methodDescription = xmlData.isInnerContour 
-            ? '<span style="color:#0284c7; font-weight:bold;"><i class="fas fa-vector-square"></i> Замена внутреннего контура (вырезки / дырки под ЗУ)</span>' 
-            : (xmlData.isAllBorder ? 'Полное описание границы (AllBorder)' : 'Частичное изменение границы (ChangeBorder)');
-
         let html = `
             <div class="related-parcel-status ${statusClass}">
                 <i class="fas ${statusClass === 'success' ? 'fa-check-circle' : (hasCriticalErrors ? 'fa-times-circle' : 'fa-exclamation-triangle')}"></i>
@@ -5777,17 +5677,7 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             </div>
             <div class="related-parcel-details">
                 <div class="related-parcel-detail-item"><div class="label">Смежный ЗУ</div><div class="value">${xmlData.cadNumber}</div></div>
-                <div class="related-parcel-detail-item"><div class="label">Метод описания</div><div class="value">${methodDescription}</div></div>
-                ${xmlData.isInnerContour ? `
-                <div class="related-parcel-detail-item" style="grid-column: 1 / -1; background: #f0f9ff; border-color: #bae6fd;">
-                    <div class="label" style="color:#0369a1;">Положение основного ЗУ (${mainParcelCadNumber})</div>
-                    <div class="value" style="color: ${isMainInsideHole ? '#059669' : '#dc2626'};">
-                        <i class="fas ${isMainInsideHole ? 'fa-check-double' : 'fa-exclamation-triangle'}"></i>
-                        ${isMainInsideHole 
-                            ? 'Основной участок расположен внутри создаваемого внутреннего контура (корректно)' 
-                            : 'Основной участок не попадает в границы создаваемого внутреннего контура (смещение координат)'}
-                    </div>
-                </div>` : ''}
+                <div class="related-parcel-detail-item"><div class="label">Метод описания</div><div class="value">${xmlData.isAllBorder ? 'Полное описание границы (AllBorder)' : 'Частичное изменение границы (ChangeBorder)'}</div></div>
             </div>
         `;
 
@@ -5795,9 +5685,12 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             html += `
                 <div class="related-parcel-errors">
                     <div class="error-title" style="font-weight:600; color:#991b1b; margin-bottom:6px; display:flex; align-items:center; gap:8px;">
-                        <i class="fas fa-exclamation-circle"></i> Замечания по смежному участку:
+                        <i class="fas fa-exclamation-circle"></i> Не удалось изменить границы смежного участка:
                     </div>
                     <ul>${errors.map(e => `<li>${e}</li>`).join('')}</ul>
+                    <div style="margin-top:8px; font-size:0.85rem; color:#7f1d1d; background:#fee2e2; padding:8px 10px; border-radius:6px;">
+                        <i class="fas fa-info-circle"></i> <b>Возможные причины:</b> указан ошибочный кадастровый номер смежного ЗУ в XML (&lt;SpecifyRelatedParcel&gt;), либо точки стыковки в XML не совпадают с актуальным контуром участка в ЕГРН.
+                    </div>
                 </div>`;
         }
 
@@ -5810,13 +5703,13 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             if (xmlOverlaps.length > 0) {
                 html += `
                     <div class="error-title" style="color:#991b1b;">
-                        <i class="fas fa-layer-group"></i> НАЛОЖЕНИЕ НА ДРУГИЕ ИСПРАВЛЯЕМЫЕ ГРАНИЦЫ ИЗ МЕЖЕВОГО ПЛАНА:
+                        <i class="fas fa-layer-group"></i> НАЛОЖЕНИЕ НА НОВЫЕ (ИСПРАВЛЕННЫЕ) ГРАНИЦЫ СМЕЖНИКОВ ИЗ ЭТОГО ЖЕ МЕЖЕВОГО ПЛАНА:
                     </div>
                     <ul style="margin: 0 0 10px 0; padding-left: 20px;">
                         ${xmlOverlaps.map(no => {
                             const areaStr = no.area < 0.01 ? `${(no.area * 10000).toFixed(1)} кв.см.` : `${no.area.toFixed(2)} кв.м.`;
                             return `<li style="color:#991b1b; padding: 2px 0;">
-                                Новые границы <b>${xmlData.cadNumber}</b> накладываются на исправленные границы смежного ЗУ <b>${no.cadNumber}</b>. Площадь наложения: <b style="color:#ef4444;">${areaStr}</b>
+                                Новые границы <b>${xmlData.cadNumber}</b> накладываются на <b>НОВЫЕ (исправленные) границы смежного ЗУ ${no.cadNumber}</b> (участок также изменяется в этом межевом плане). Площадь наложения: <b style="color:#ef4444;">${areaStr}</b>
                             </li>`;
                         }).join('')}
                     </ul>
@@ -5826,13 +5719,13 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
             if (egrnOverlaps.length > 0) {
                 html += `
                     <div class="error-title" style="color:#991b1b;">
-                        <i class="fas fa-exclamation-triangle"></i> НАЛОЖЕНИЕ НА СТОРОННИЕ УЧАСТКИ ЕГРН:
+                        <i class="fas fa-exclamation-triangle"></i> НАЛОЖЕНИЕ НА СТОРОННИЕ УЧАСТКИ ЕГРН (НЕ ВХОДЯТ В МЕЖЕВОЙ ПЛАН):
                     </div>
                     <ul style="margin: 0; padding-left: 20px;">
                         ${egrnOverlaps.map(no => {
                             const areaStr = no.area < 0.01 ? `${(no.area * 10000).toFixed(1)} кв.см.` : `${no.area.toFixed(2)} кв.м.`;
                             return `<li style="color:#991b1b; padding: 2px 0;">
-                                Новые границы накладываются на сторонний земельный участок ЕГРН <b>${no.cadNumber}</b>. Площадь наложения: <b style="color:#ef4444;">${areaStr}</b>
+                                Новые границы накладываются на <b>сторонний земельный участок ЕГРН ${no.cadNumber}</b> (не включен в межевой план). Площадь наложения: <b style="color:#ef4444;">${areaStr}</b>
                             </li>`;
                         }).join('')}
                     </ul>
@@ -5875,7 +5768,7 @@ function drawRelatedParcelSchema() {
     
     if (!relatedParcelCheckData) return;
 
-    // Режим одновременного отображения всех смежных ЗУ
+    
     if (relatedParcelCheckData.isAllMode) {
         const { mainContours, parcelsList, problemPoints } = relatedParcelCheckData;
         const pointsForScale = [];
@@ -5933,12 +5826,14 @@ function drawRelatedParcelSchema() {
             ctx.setLineDash([]);
         };
 
+        
         parcelsList.forEach(p => {
             if (p.egrnContours && p.egrnContours.length > 0) {
                 drawPolygonalObject(p.egrnContours, p.color, 'transparent', [5, 4], 1.5);
             }
         });
 
+        
         if (mainContours && mainContours.length > 0) {
             drawPolygonalObject(mainContours, '#10b981', 'rgba(16, 185, 129, 0.12)', [], 2.5);
             const cp = toCanvas(mainContours[0][0]);
@@ -5947,6 +5842,7 @@ function drawRelatedParcelSchema() {
             ctx.fillText('Основной ЗУ', cp.x, cp.y - 10);
         }
 
+        
         parcelsList.forEach(p => {
             if (p.resultContour && p.resultContour.length > 0) {
                 const r = parseInt(p.color.slice(1, 3), 16) || 0;
@@ -5962,6 +5858,7 @@ function drawRelatedParcelSchema() {
             }
         });
 
+        
         if (problemPoints && problemPoints.length > 0) {
             problemPoints.forEach(p => {
                 const cp = toCanvas(p);
@@ -5979,6 +5876,7 @@ function drawRelatedParcelSchema() {
             });
         }
 
+        
         const legend = document.getElementById('relatedParcelLegend');
         if (legend) {
             let legHtml = `<div class="legend-item"><span class="legend-line" style="background:#10b981;"></span> <b>Основной ЗУ</b></div>`;
@@ -5994,7 +5892,7 @@ function drawRelatedParcelSchema() {
         return;
     }
 
-    // Режим детального просмотра одного смежного ЗУ
+    
     const { xmlData, egrnContour, mainContours, resultContour, hasOverlap, neighboringOverlaps, otherCorrectedParcels, problemPoints } = relatedParcelCheckData;
 
     const pointsForScale = [];
@@ -6004,9 +5902,6 @@ function drawRelatedParcelSchema() {
             if (Array.isArray(c)) c.forEach(p => pointsForScale.push(p));
             else pointsForScale.push(c);
         });
-    }
-    if (xmlData && xmlData.isInnerContour && xmlData.oldContour) {
-        xmlData.oldContour.forEach(c => c.forEach(p => pointsForScale.push(p)));
     }
     if (problemPoints) problemPoints.forEach(p => pointsForScale.push(p));
 
@@ -6042,10 +5937,10 @@ function drawRelatedParcelSchema() {
     
     const toCanvas = (p) => ({ x: offX + (p.y - minY) * scale, y: offY + (maxX - p.x) * scale });
 
-    const drawPolygonalObject = (contoursArray, strokeStyle, fillStyle, lineDash = [], lineWidth = 2) => {
+    const drawPolygonalObject = (contoursArray, strokeStyle, fillStyle, lineDash = []) => {
         ctx.strokeStyle = strokeStyle;
         ctx.fillStyle = fillStyle;
-        ctx.lineWidth = lineWidth;
+        ctx.lineWidth = 2;
         ctx.setLineDash(lineDash);
         
         ctx.beginPath();
@@ -6062,17 +5957,19 @@ function drawRelatedParcelSchema() {
         ctx.setLineDash([]);
     };
 
-    // 1. Границы смежного участка по ЕГРН
+    if (mainContours && mainContours.length > 0) {
+        const color = hasOverlap ? '#ef4444' : '#10b981';
+        drawPolygonalObject(mainContours, color, 'rgba(16, 185, 129, 0.08)');
+        const cp = toCanvas(mainContours[0][0]);
+        ctx.font = 'bold 11px Arial';
+        ctx.fillStyle = color;
+        ctx.fillText('Проектный ЗУ', cp.x, cp.y - 10);
+    }
+
     if (egrnContour && egrnContour.length > 0) {
         drawPolygonalObject(egrnContour, '#f59e0b', 'rgba(245, 158, 11, 0.03)', [6, 4]);
     }
 
-    // 2. Старый удаляемый внутренний контур (вырезка)
-    if (xmlData && xmlData.isInnerContour && xmlData.oldContour && xmlData.oldContour.length > 0) {
-        drawPolygonalObject(xmlData.oldContour, '#ef4444', 'rgba(239, 68, 68, 0.05)', [4, 4], 2);
-    }
-
-    // 3. Другие изменяемые смежные участки
     if (otherCorrectedParcels && otherCorrectedParcels.length > 0) {
         otherCorrectedParcels.forEach(oc => {
             drawPolygonalObject(oc.contours, '#ec4899', 'rgba(236, 72, 153, 0.08)');
@@ -6084,22 +5981,10 @@ function drawRelatedParcelSchema() {
         });
     }
 
-    // 4. Результат изменения смежного ЗУ (новый контур / новая вырезка)
     if (resultContour && resultContour.length > 0) {
-        drawPolygonalObject(resultContour, '#2563eb', 'rgba(37, 99, 235, 0.12)', [], 2.5);
+        drawPolygonalObject(resultContour, '#2563eb', 'rgba(37, 99, 235, 0.12)');
     }
 
-    // 5. Основной проектируемый / уточняемый участок
-    if (mainContours && mainContours.length > 0) {
-        const color = hasOverlap ? '#ef4444' : '#10b981';
-        drawPolygonalObject(mainContours, color, 'rgba(16, 185, 129, 0.15)', [], 2);
-        const cp = toCanvas(mainContours[0][0]);
-        ctx.font = 'bold 11px Arial';
-        ctx.fillStyle = color;
-        ctx.fillText('Основной ЗУ', cp.x, cp.y - 10);
-    }
-
-    // 6. Сторонние участки с наложениями
     if (neighboringOverlaps && neighboringOverlaps.length > 0) {
         neighboringOverlaps.forEach(no => {
             if (no.contours && no.contours.length > 0) {
@@ -6112,7 +5997,6 @@ function drawRelatedParcelSchema() {
         });
     }
 
-    // 7. Точки пересечений / наложений
     if (problemPoints && problemPoints.length > 0) {
         problemPoints.forEach(p => {
             const cp = toCanvas(p);
@@ -6134,25 +6018,15 @@ function drawRelatedParcelSchema() {
         });
     }
 
-    // Легенда схемы
     const legend = document.getElementById('relatedParcelLegend');
     if (legend) {
-        if (xmlData && xmlData.isInnerContour) {
-            legend.innerHTML = `
-                <div class="legend-item"><span class="legend-line" style="background:#10b981;"></span> Основной ЗУ (${relatedParcelCheckData.mainParcelCadNumber || 'проект'})</div>
-                <div class="legend-item"><span class="legend-line dashed" style="border-color:#ef4444;"></span> Удаляемый внутренний контур (старая вырезка)</div>
-                <div class="legend-item"><span class="legend-line" style="background:#2563eb;"></span> Новый внутренний контур (новая вырезка)</div>
-                <div class="legend-item"><span class="legend-line dashed" style="border-color:#f59e0b;"></span> Внешняя граница смежного ЗУ (ЕГРН)</div>
-            `;
-        } else {
-            legend.innerHTML = `
-                <div class="legend-item"><span class="legend-line" style="background:#10b981;"></span> Проектный ЗУ</div>
-                <div class="legend-item"><span class="legend-line dashed" style="border-color:#f59e0b;"></span> Смежный ЗУ (ЕГРН)</div>
-                <div class="legend-item"><span class="legend-line" style="background:#2563eb;"></span> Изменяемый ЗУ (Результат)</div>
-                <div class="legend-item"><span class="legend-line" style="background:#ec4899;"></span> Другой смежник из XML</div>
-                <div class="legend-item"><span class="legend-point" style="background:#ef4444; width:11px; height:11px;"></span> Точка наложения</div>
-            `;
-        }
+        legend.innerHTML = `
+            <div class="legend-item"><span class="legend-line" style="background:#10b981;"></span> Проектный ЗУ</div>
+            <div class="legend-item"><span class="legend-line dashed" style="border-color:#f59e0b;"></span> Смежный ЗУ (ЕГРН)</div>
+            <div class="legend-item"><span class="legend-line" style="background:#2563eb;"></span> Изменяемый ЗУ (Результат)</div>
+            <div class="legend-item"><span class="legend-line" style="background:#ec4899;"></span> Другой смежник из XML</div>
+            <div class="legend-item"><span class="legend-point" style="background:#ef4444; width:11px; height:11px;"></span> Точка наложения</div>
+        `;
     }
 }
 
@@ -10787,8 +10661,7 @@ function runTechPlanValidation(xmlDoc, xmlText) {
 function runValidation(xmlDoc, xmlText) {
     let messages = [];
 
-    // --- 1. Проверка адресов и уникальных номеров ФИАС/ГАР ---
-    const addresses = All(xmlDoc, 'Address, ObjectAddress');
+  const addresses = All(xmlDoc, 'Address, ObjectAddress');
     addresses.forEach(addr => {
         const addrType = addr.getAttribute('AddressOrLocation');
         const parentParcel = addr.closest('NewParcel, ExistParcel, ExistEZ, SpecifyRelatedParcel');
@@ -10803,6 +10676,7 @@ function runValidation(xmlDoc, xmlText) {
 
         const isNewParcel = parentParcel && parentParcel.tagName === 'NewParcel';
 
+   
         if (isNewParcel && addrType === '0') {
             messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${ownerName}] Ошибка адреса:</strong> Для образуемого земельного участка указано "Описание местоположения" (<code>AddressOrLocation="0"</code>). При образовании ЗУ должен быть указан присвоенный в установленном порядке адрес (<code>AddressOrLocation="1"</code>) с заполнением уникального номера ФИАС/ГАР.</div>`);
         } else if (addrType === '1') {
@@ -10813,7 +10687,6 @@ function runValidation(xmlDoc, xmlText) {
         }
     });
 
-    // --- 2. Проверка электронных подписей (.sig) в архиве ---
     if (currentZipSigErrors && currentZipSigErrors.length > 0) {
         messages.push(`
             <div class="validation-message validation-error" style="align-items:flex-start; flex-direction: column;">
@@ -10838,7 +10711,6 @@ function runValidation(xmlDoc, xmlText) {
         `);
     }
 
-    // --- 3. Проверка Схемы расположения ЗУ (Schema*.zip) ---
     const newParcelsNodes = Array.from(xmlDoc.querySelectorAll('NewParcel'));
 
     if (newParcelsNodes.length > 0) {
@@ -10947,7 +10819,6 @@ function runValidation(xmlDoc, xmlText) {
             </div>`);
     }
 
-    // --- 4. Проверка пересечений образуемых участков со смежными по XML ---
     const xmlApproxParcels = All(xmlDoc, 'SpecifyParcelApproximal > ExistParcel, SpecifyRelatedParcel');
 
     newParcelsNodes.forEach((newParcel, npIdx) => {
@@ -10974,69 +10845,6 @@ function runValidation(xmlDoc, xmlText) {
         });
     });
 
-    // --- 5. Проверка исправления внутренних контуров (вырезок/дырок) смежных ЗУ ---
-    const allSpecifyRelated = All(xmlDoc, 'SpecifyRelatedParcel');
-    const checkedRelatedCads = new Set();
-    const mainContoursForInnerCheck = extractMainParcelContoursFromXml();
-
-    allSpecifyRelated.forEach(node => {
-        const cNum = node.getAttribute('CadastralNumber');
-        if (!cNum || checkedRelatedCads.has(cNum.toLowerCase())) return;
-        checkedRelatedCads.add(cNum.toLowerCase());
-
-        const rData = extractSpecifyRelatedParcelData(node);
-        if (rData && rData.isInnerContour) {
-            let isInside = false;
-
-            if (mainContoursForInnerCheck.length > 0 && rData.contours.length > 0) {
-                const hole = rData.contours[0];
-                let ptsIn = 0;
-                let totalPts = 0;
-
-                mainContoursForInnerCheck.forEach(mc => {
-                    mc.forEach(p => {
-                        totalPts++;
-                        let onBoundary = false;
-                        for (let i = 0; i < hole.length - 1; i++) {
-                            if (getDistanceToSegment(p, hole[i], hole[i + 1]) <= 0.20) {
-                                onBoundary = true;
-                                break;
-                            }
-                        }
-                        if (isPointInPolygon(p, hole) || onBoundary) {
-                            ptsIn++;
-                        }
-                    });
-                });
-
-                isInside = totalPts > 0 && (ptsIn / totalPts) >= 0.75;
-            }
-
-            if (isInside) {
-                messages.push(`
-                    <div class="validation-message validation-success">
-                        <i class="fas fa-vector-square" style="font-size: 1.2rem; color: #10b981;"></i>
-                        <div>
-                            <strong>[${cNum}] Исправление внутреннего контура смежного ЗУ:</strong> 
-                            выполняется замена внутреннего контура (вырезки). Основной ЗУ корректно располагается внутри образованного внутреннего контура.
-                        </div>
-                    </div>
-                `);
-            } else {
-                messages.push(`
-                    <div class="validation-message validation-error" style="align-items:flex-start;">
-                        ${sectionIcons.errorIcon}
-                        <div>
-                            <strong>[${cNum}] Ошибка расположения в вырезке смежного ЗУ:</strong> 
-                            в XML старый контур удаляется и добавляется новый внутренний контур (вырезка), однако координаты основного ЗУ не попадают внутрь этого контура (смещение границ). Проверьте правильность координат.
-                        </div>
-                    </div>
-                `);
-            }
-        }
-    });
-
-    // --- 6. Проверка наличия Акта согласования границ ---
     const isClarificationOrCorrection = xmlDoc.querySelectorAll('SpecifyParcel > ExistParcel, SpecifyParcel > ExistEZ, SpecifyParcelApproximal > ExistParcel').length > 0;
     const hasRelatedParcel = xmlDoc.querySelectorAll('SpecifyRelatedParcel').length > 0;
 
@@ -11063,29 +10871,13 @@ function runValidation(xmlDoc, xmlText) {
         messages.push(`<div class="validation-message validation-success">${sectionIcons.successIcon} <strong>[Акт согласования]:</strong> "Акт согласования местоположения границ" приложен к межевому плану.</div>`);
     }
 
-    // --- 7. Проверка обязательных документов (пользовательский список) ---
     const requiredDocsList = (localStorage.getItem(DOCS_LIST_KEY) || '').trim();
     if (requiredDocsList) {
         const requiredDocs = requiredDocsList.split('\n').map(d => d.trim().toLowerCase()).filter(Boolean);
         const foundDocs = [];
-        [
-            A(E(xmlDoc, 'SchemeGeodesicPlotting'), 'Name'),
-            A(E(xmlDoc, 'SchemeDisposition'), 'Name'),
-            A(E(xmlDoc, 'DiagramParcelsSubParcels > AppliedFile'), 'Name'),
-            A(E(xmlDoc, 'AgreementDocument > AppliedFile'), 'Name')
-        ].forEach(file => { if (file && file !== '—') foundDocs.push({ type: 'file', text: file }); });
-
-        All(xmlDoc, 'InputData Documents Document').forEach(doc => {
-            const name = T(doc, 'Name');
-            if (name && name !== '—') foundDocs.push({ type: 'docName', text: name });
-        });
-        All(xmlDoc, 'Appendix > AppliedFiles').forEach(f => {
-            const name = T(f, 'NameAppendix');
-            const file = A(E(f, 'AppliedFile'), 'Name');
-            if (name && name !== '—') foundDocs.push({ type: 'docName', text: name });
-            if (file && file !== '—') foundDocs.push({ type: 'file', text: file });
-        });
-
+        [A(E(xmlDoc, 'SchemeGeodesicPlotting'), 'Name'), A(E(xmlDoc, 'SchemeDisposition'), 'Name'), A(E(xmlDoc, 'DiagramParcelsSubParcels > AppliedFile'), 'Name'), A(E(xmlDoc, 'AgreementDocument > AppliedFile'), 'Name')].forEach(file => { if (file && file !== '—') foundDocs.push({ type: 'file', text: file }); });
+        All(xmlDoc, 'InputData Documents Document').forEach(doc => { const name = T(doc, 'Name'); if (name && name !== '—') foundDocs.push({ type: 'docName', text: name }); });
+        All(xmlDoc, 'Appendix > AppliedFiles').forEach(f => { const name = T(f, 'NameAppendix'); const file = A(E(f, 'AppliedFile'), 'Name'); if (name && name !== '—') foundDocs.push({ type: 'docName', text: name }); if (file && file !== '—') foundDocs.push({ type: 'file', text: file }); });
         const searchableDocsText = foundDocs.map(item => item.text.toLowerCase());
         let docCheckHtml = `<div class="subsection"><div class="subsection-title">Проверка обязательных документов</div><ul class="doc-check-list">`;
         requiredDocs.forEach(reqDoc => {
@@ -11102,7 +10894,6 @@ function runValidation(xmlDoc, xmlText) {
         messages.push(docCheckHtml);
     }
 
-    // --- 8. Проверка дат на актуальность ---
     const today = new Date();
     const currentDateString = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
     const generalWorksEl = E(xmlDoc, 'GeneralCadastralWorks');
@@ -11123,7 +10914,6 @@ function runValidation(xmlDoc, xmlText) {
             break;
         }
     }
-
     const geoBasePoints = All(xmlDoc, 'GeodesicBases GeodesicBase ConditionPoint');
     let geoDateMismatch = false;
     for (const point of geoBasePoints) {
@@ -11139,7 +10929,7 @@ function runValidation(xmlDoc, xmlText) {
 
     let usedAnalytical = false;
     let usedSatellite = false;
-    const allOrdinates = All(xmlDoc, 'Ordinate, NewOrdinate');
+    const allOrdinates = All(xmlDoc, 'Ordinate');
     for (const ord of allOrdinates) {
         const m = A(ord, 'GeopointOpred');
         if (m === '692006000000') usedAnalytical = true;
@@ -11160,7 +10950,6 @@ function runValidation(xmlDoc, xmlText) {
          messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>Предупреждение:</strong> Использован только "Аналитический метод", но заполнены даты состояния пунктов геодезической основы. При аналитическом методе пункты ГГС обычно не обследуются.</div>`);
     }
 
-    // --- 9. Проверка соответствия пунктов ОМЗ/ОМС району работ ---
     let districtPrefix = '';
     const blockEl = xmlDoc.querySelector('CadastralBlock');
     const blockText = blockEl ? blockEl.textContent.trim() : '';
@@ -11195,7 +10984,6 @@ function runValidation(xmlDoc, xmlText) {
         });
     }
 
-    // --- 10. Проверка номеров и дат документов на совпадение с именами файлов ---
     const inputDocuments = All(xmlDoc, 'InputData Documents Document');
     inputDocuments.forEach(doc => {
         const docName = T(doc, 'Name');
@@ -11250,7 +11038,6 @@ function runValidation(xmlDoc, xmlText) {
         }
     });
 
-    // Проверка диапазона дат (1990 - сегодня)
     const dateWarnings = [];
     const foundDates = new Set();
     const dateRegex = /(?:\b(\d{2})\.(\d{2})\.(\d{4})\b)|(?:\b(\d{4})-(\d{2})-(\d{2})\b)/g;
@@ -11277,22 +11064,20 @@ function runValidation(xmlDoc, xmlText) {
         messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>Предупреждение о датах:</strong> Найдены даты за пределами допустимого диапазона (01.01.1990 - сегодня): ${dateWarnings.join(', ')}.</div>`);
     }
 
-    // --- 11. Список всех кадастровых номеров документа ---
     const zuNumbersSet = new Set();
     const oksNumbersSet = new Set();
     const linkedOksSet = new Set();
+    const coordsOksSet = new Set();
 
-    All(xmlDoc, 'ExistParcel, ExistEZParcels, SpecifyRelatedParcel, ChangeParcel').forEach(el => { 
-        const kn = A(el, 'CadastralNumber'); 
-        if (kn && kn !== '—') zuNumbersSet.add(kn); 
-    });
-    All(xmlDoc, 'PrevCadastralNumbers > CadastralNumber, ParentCadastralNumbers > CadastralNumber, ProvidingPassCadastralNumbers > CadastralNumber').forEach(el => { 
-        zuNumbersSet.add(el.textContent.trim()); 
-    });
+    All(xmlDoc, 'ExistParcel, ExistEZParcels, SpecifyRelatedParcel, ChangeParcel').forEach(el => { const kn = A(el, 'CadastralNumber'); if (kn && kn !== '—') zuNumbersSet.add(kn); });
+    All(xmlDoc, 'PrevCadastralNumbers > CadastralNumber, ParentCadastralNumbers > CadastralNumber, ProvidingPassCadastralNumbers > CadastralNumber').forEach(el => { zuNumbersSet.add(el.textContent.trim()); });
 
     All(xmlDoc, 'NewBuilding, ExistBuilding, NewConstruction, ExistConstruction, NewFlat, ExistFlat, NewRoom, ExistRoom, NewUncompleted, ExistUncompleted').forEach(el => {
         const kn = A(el, 'CadastralNumber');
-        if (kn && kn !== '—') oksNumbersSet.add(kn);
+        if (kn && kn !== '—') {
+            oksNumbersSet.add(kn);
+            if (el.querySelector('EntitySpatial')) coordsOksSet.add(kn);
+        }
     });
 
     All(xmlDoc, 'ObjectsRealty CadastralNumber, InnerCadastralNumbers > CadastralNumber').forEach(el => {
@@ -11377,7 +11162,6 @@ function runValidation(xmlDoc, xmlText) {
 
     messages.push(`<div class="subsection" style="margin-top:0"><div class="subsection-title">Все кадастровые номера в документе</div>${numberListHtml}</div>`);
 
-    // --- 12. Анализ характеристик участков, зон СК, Mt, площадей и формул ---
     const targetParcels = All(xmlDoc, 'NewParcel, SpecifyParcel > ExistParcel, SpecifyParcel > ExistEZ');
 
     targetParcels.forEach((parcel, index) => {
@@ -11421,7 +11205,7 @@ function runValidation(xmlDoc, xmlText) {
         const ordinates = Array.from(All(parcel, 'Ordinate, NewOrdinate'));
 
         if (ordinates.length > 0) {
-            const spatialEl = parcel.querySelector('EntitySpatial');
+           const spatialEl = parcel.querySelector('EntitySpatial');
             if (spatialEl) {
                 const sysInfo = parseSpatialSystemInfo(spatialEl, xmlDoc);
                 if (sysInfo) {
@@ -11515,7 +11299,7 @@ function runValidation(xmlDoc, xmlText) {
                 messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>[${parcelId}] Проверка Mt:</strong> Не удалось определить норматив погрешности, так как категория земель не указана в XML.</div>`);
             }
 
-            if (area && actualMt && statedAreaInaccuracy) {
+          if (area && actualMt && statedAreaInaccuracy) {
                 const calculatedAreaInaccuracy = Math.round(3.5 * actualMt * Math.sqrt(area));
                 if (calculatedAreaInaccuracy !== statedAreaInaccuracy) {
                     messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${parcelId}] Ошибка ΔP:</strong> Расчетная погрешность площади <strong>(${calculatedAreaInaccuracy} м²)</strong> не совпадает с указанной в XML <strong>(${statedAreaInaccuracy} м²)</strong>.</div>`);
@@ -11524,14 +11308,14 @@ function runValidation(xmlDoc, xmlText) {
                 }
             }
 
-            // Анализ текста формулы <Formula>
+            // --- Анализ текста формулы <Formula> ---
             const formulaNode = parcel.querySelector('Area > Formula, :scope > Formula, ExistEZParcels > Area > Formula');
             const formulaText = formulaNode ? formulaNode.textContent.trim() : '';
 
             if (formulaText) {
                 let formulaErrors = [];
 
-                // 1. Площадь под знаком корня
+                // 1. Проверка площади под знаком корня (√, sqrt, корень)
                 const sqrtMatch = formulaText.match(/(?:√|sqrt|корень\s*\(?)\s*(\d+(?:[.,]\d+)?)/i);
                 if (sqrtMatch) {
                     const formulaArea = parseFloat(sqrtMatch[1].replace(',', '.'));
@@ -11540,7 +11324,7 @@ function runValidation(xmlDoc, xmlText) {
                     }
                 }
 
-                // 2. Значение Mt в формуле
+                // 2. Проверка значения Mt (погрешности точек) в формуле
                 const mtMatch = formulaText.match(/(?:3[.,]5|2)\s*[*xX·*]\s*(\d+(?:[.,]\d+)?)\s*[*xX·*]\s*(?:√|sqrt|корень)/i);
                 if (mtMatch && actualMt) {
                     const formulaMt = parseFloat(mtMatch[1].replace(',', '.'));
@@ -11549,7 +11333,7 @@ function runValidation(xmlDoc, xmlText) {
                     }
                 }
 
-                // 3. Итоговое вычисленное значение формулы
+                // 3. Проверка итогового вычисленного значения в конце формулы (= 2)
                 const resultMatch = formulaText.match(/=\s*(\d+(?:[.,]\d+)?)\s*(?:кв\.?\s*м\.?|м2|м²)?$/);
                 if (resultMatch && statedAreaInaccuracy) {
                     const formulaRes = parseFloat(resultMatch[1].replace(',', '.'));
@@ -11578,7 +11362,6 @@ function runValidation(xmlDoc, xmlText) {
         }
     });
 
-    // --- 13. Блок проверки противоречий через ИИ ---
     const contradictionHtml = `
         <div class="subsection">
             <div class="subsection-title" style="display:flex; align-items:center; gap: 8px;">
@@ -11704,7 +11487,7 @@ function runValidation(xmlDoc, xmlText) {
     let sidebarHtml = '';
     let sectionsFound = 0;
 
-    // Раздел: Общие сведения
+    
     const formParcels = E(xmlDoc, 'FormParcels');
     const generalWorks = E(xmlDoc, 'GeneralCadastralWorks');
     const reasonText = T(xmlDoc, 'GeneralCadastralWorks > Reason');
@@ -11732,7 +11515,7 @@ function runValidation(xmlDoc, xmlText) {
         sidebarHtml += `<div class="section"><div class="section-header">${sectionIcons.generalInfo}<h3 class="section-title">Общая информация</h3></div><div class="section-content" style="padding:16px"><div class="info-grid">${generalInfoContent}</div></div></div>`;
     }
 
-    // Раздел: Участники работ
+    
     const contractor = E(xmlDoc, 'Contractor');
     const client = E(xmlDoc, 'Client');
     if (contractor || client) {
@@ -11758,7 +11541,7 @@ function runValidation(xmlDoc, xmlText) {
         sidebarHtml += participantsHtml;
     }
 
-    // Раздел: Исходные данные
+    
     const inputData = E(xmlDoc, 'InputData');
     if (inputData) {
         sectionsFound++;
@@ -11766,11 +11549,11 @@ function runValidation(xmlDoc, xmlText) {
         const documents = All(inputData, 'Documents > Document');
         if (documents.length > 0) {
             inputDataHtml += `<div class="subsection" style="margin-top:0;"><div class="subsection-title">Документы</div><table class="data-table"><thead><tr><th class="left-align">Наименование</th><th class="no-wrap">№</th><th class="no-wrap">Дата</th></tr></thead><tbody>${Array.from(documents).map(doc => {
-                const appliedFile = doc.querySelector('AppliedFile');
-                const fileName = appliedFile ? (appliedFile.getAttribute('Name') || '') : '';
-                const fileHtml = fileName ? `<div style="font-size: 0.85em; color: var(--text-secondary); margin-top: 4px; display: inline-flex; align-items: center; gap: 4px;">Файл: ${getFileLabelAndButtonHtml(fileName)}</div>` : '';
-                return `<tr><td class="left-align"><div>${T(doc, 'Name')}</div>${fileHtml}</td><td class="no-wrap">${T(doc, 'Number')}</td><td class="no-wrap">${T(doc, 'Date')}</td></tr>`;
-            }).join('')}</tbody></table></div>`;
+    const appliedFile = doc.querySelector('AppliedFile');
+    const fileName = appliedFile ? (appliedFile.getAttribute('Name') || '') : '';
+   const fileHtml = fileName ? `<div style="font-size: 0.85em; color: var(--text-secondary); margin-top: 4px; display: inline-flex; align-items: center; gap: 4px;">Файл: ${getFileLabelAndButtonHtml(fileName)}</div>` : '';
+    return `<tr><td class="left-align"><div>${T(doc, 'Name')}</div>${fileHtml}</td><td class="no-wrap">${T(doc, 'Number')}</td><td class="no-wrap">${T(doc, 'Date')}</td></tr>`;
+}).join('')}</tbody></table></div>`;
         }
         const geoBases = All(inputData, 'GeodesicBases > GeodesicBase');
         if (geoBases.length > 0) {
@@ -11784,7 +11567,7 @@ function runValidation(xmlDoc, xmlText) {
         sidebarHtml += inputDataHtml;
     }
 
-    // Раздел: Образуемые участки (NewParcel)
+    
     const newParcels = All(xmlDoc, 'NewParcel');
     for (let index = 0; index < newParcels.length; index++) {
         const newParcel = newParcels[index];
@@ -11802,26 +11585,29 @@ function runValidation(xmlDoc, xmlText) {
             areaInacc = T(newParcel, 'Area > Inaccuracy');
         }
 
+        
         const prevNodes = All(newParcel, 'PrevCadastralNumbers > CadastralNumber');
         const prevNumbers = Array.from(prevNodes).map(n => n.textContent.trim()).join(', ');
         const prevHtml = prevNumbers ? `<div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Исходный земельный участок</div><div class="info-value"><code>${prevNumbers}</code></div></div>` : '';
 
-        const minArea = newParcel.querySelector('MinArea > Area')?.textContent || '—';
-        const maxArea = newParcel.querySelector('MaxArea > Area')?.textContent || '—';
+    const minArea = newParcel.querySelector('MinArea > Area')?.textContent || '—';
+const maxArea = newParcel.querySelector('MaxArea > Area')?.textContent || '—';
 
-        let sectionContent = `<div class="new-parcel-bounds-status"></div>`;
+let sectionContent = `<div class="new-parcel-bounds-status"></div>`;
 
-        sectionContent += `<div class="info-grid" style="margin-top: 16px;">
-            ${prevHtml}
-            <div class="info-card"><div class="info-label">Кадастровый квартал</div><div class="info-value">${T(newParcel, 'CadastralBlock')}</div></div>
-            <div class="info-card"><div class="info-label">Площадь, кв.м.</div><div class="info-value">${areaVal} (±${areaInacc})</div></div>
-            <div class="info-card"><div class="info-label">Категория земель</div><div class="info-value">${categoryName} <code>${categoryCode}</code></div></div>
-            <div class="info-card"><div class="info-label">Вид разрешенного использования</div><div class="info-value">${A(E(newParcel, 'PermittedUseEstablished, PermittedUsesLand > PermittedUseEstablished'), 'ByDocument')}</div></div>
-            <div class="info-card"><div class="info-label">Обеспечение доступа</div><div class="info-value">${getAccessInfo(newParcel)}</div></div>
-            <div class="info-card"><div class="info-label">Минимальная площадь, кв.м.</div><div class="info-value">${minArea}</div></div>
-            <div class="info-card"><div class="info-label">Максимальная площадь, кв.м.</div><div class="info-value">${maxArea}</div></div>
-        </div>`;
 
+sectionContent += `<div class="info-grid" style="margin-top: 16px;">
+    ${prevHtml}
+    <div class="info-card"><div class="info-label">Кадастровый квартал</div><div class="info-value">${T(newParcel, 'CadastralBlock')}</div></div>
+    <div class="info-card"><div class="info-label">Площадь, кв.м.</div><div class="info-value">${areaVal} (±${areaInacc})</div></div>
+    <div class="info-card"><div class="info-label">Категория земель</div><div class="info-value">${categoryName} <code>${categoryCode}</code></div></div>
+    <div class="info-card"><div class="info-label">Вид разрешенного использования</div><div class="info-value">${A(E(newParcel, 'PermittedUseEstablished, PermittedUsesLand > PermittedUseEstablished'), 'ByDocument')}</div></div>
+    <div class="info-card"><div class="info-label">Обеспечение доступа</div><div class="info-value">${getAccessInfo(newParcel)}</div></div>
+    <div class="info-card"><div class="info-label">Минимальная площадь, кв.м.</div><div class="info-value">${minArea}</div></div>
+    <div class="info-card"><div class="info-label">Максимальная площадь, кв.м.</div><div class="info-value">${maxArea}</div></div>
+</div>`;
+
+        
         const prevRedist = E(newParcel, 'PrevWithRedistributed');
         if (prevRedist) {
             let redistRows = '';
@@ -11845,6 +11631,7 @@ function runValidation(xmlDoc, xmlText) {
             }
         }
 
+        
         const oksNodesNewParcel = All(newParcel, 'ObjectsRealty CadastralNumber, ObjectsRealty > ObjectRealty > InnerCadastralNumbers > CadastralNumber');
         const oksNumbersNewParcel = Array.from(oksNodesNewParcel).map(node => node.textContent.trim());
         sectionContent += `
@@ -11862,39 +11649,40 @@ function runValidation(xmlDoc, xmlText) {
             <div class="oks-check-status" style="margin-top:12px;"></div>
         </div>`;
 
+        
         if (E(newParcel, 'Address')) {
             sectionContent += `<div class="subsection"><div class="subsection-title">Адрес</div>${getAddressHtml(E(newParcel, 'Address'))}</div>`;
         }
 
-        const contours = All(newParcel, 'Contours > NewContour, Contours > Contour, Contours > ExistContour');
-        const hasEntitySpatial = !!E(newParcel, 'EntitySpatial');
+       const contours = All(newParcel, 'Contours > NewContour, Contours > Contour, Contours > ExistContour');
+const hasEntitySpatial = !!E(newParcel, 'EntitySpatial');
 
-        if (contours.length > 0) {
-            contours.forEach((contour, cIdx) => {
-                let contourNum = contour.getAttribute('NumberRecord') || contour.getAttribute('Definition') || '';
-                if (contourNum) {
-                    const match = contourNum.match(/\((\d+)\)$/);
-                    if (match) {
-                        contourNum = match[1]; 
-                    } else if (contourNum.includes(':')) {
-                        contourNum = contourNum.split(':').pop(); 
-                    }
-                }
-                if (!contourNum || contourNum === '—') {
-                    contourNum = cIdx + 1; 
-                }
-                const contourArea = T(contour, 'Area > Area');
-                const entitySpatial = E(contour, 'EntitySpatial');
-                if (entitySpatial) {
-                    sectionContent += `<div class="subsection"><div class="subsection-title">Контур ${contourNum}${contourArea && contourArea !== '—' ? ` — (площадь: ${contourArea} кв.м.)` : ''}</div>${createSpatialDataHtml(entitySpatial)}</div>`;
-                }
-            });
-        } else {
-            const entitySpatial = E(newParcel, 'EntitySpatial');
-            if (entitySpatial) {
-                sectionContent += createSpatialDataHtml(entitySpatial);
+if (contours.length > 0) {
+    contours.forEach((contour, cIdx) => {
+        let contourNum = contour.getAttribute('NumberRecord') || contour.getAttribute('Definition') || '';
+        if (contourNum) {
+            const match = contourNum.match(/\((\d+)\)$/);
+            if (match) {
+                contourNum = match[1]; 
+            } else if (contourNum.includes(':')) {
+                contourNum = contourNum.split(':').pop(); 
             }
         }
+        if (!contourNum || contourNum === '—') {
+            contourNum = cIdx + 1; 
+        }
+        const contourArea = T(contour, 'Area > Area');
+        const entitySpatial = E(contour, 'EntitySpatial');
+        if (entitySpatial) {
+            sectionContent += `<div class="subsection"><div class="subsection-title">Контур ${contourNum}${contourArea && contourArea !== '—' ? ` — (площадь: ${contourArea} кв.м.)` : ''}</div>${createSpatialDataHtml(entitySpatial)}</div>`;
+        }
+    });
+} else {
+    const entitySpatial = E(newParcel, 'EntitySpatial');
+    if (entitySpatial) {
+        sectionContent += createSpatialDataHtml(entitySpatial);
+    }
+}
 
         let actionButtons = '';
         if (prevNumbers && hasEntitySpatial) {
@@ -11918,7 +11706,7 @@ function runValidation(xmlDoc, xmlText) {
         mainHtml += `<div class="section"><div class="section-header">${sectionIcons.newParcel}<h3 class="section-title">Сведения об образуемом участке (${A(newParcel, 'Definition')})</h3><div style="margin-left:auto; display:flex;">${actionButtons}</div></div><div class="section-content" style="padding:16px">${sectionContent}</div></div>`;
     }
 
-    // Раздел: Образуемые части ЗУ (SubParcels)
+    
     const subParcels = All(xmlDoc, 'SubParcels');
     const encTypes = {
         '022001000000': 'Сервитут',
@@ -11939,6 +11727,7 @@ function runValidation(xmlDoc, xmlText) {
             const totalArea = T(newSub, 'Area > Area');
             const totalInaccuracy = T(newSub, 'Area > Inaccuracy');
             const totalFormula = T(newSub, 'Area > Formula');
+            
             
             const encType = T(newSub, 'Encumbrance > Type');
             const encTypeName = encTypes[encType] || `Ограничение/Обременение (${encType})`;
@@ -11982,6 +11771,7 @@ function runValidation(xmlDoc, xmlText) {
                 ${totalFormula && totalFormula !== '—' ? `<div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Формула погрешности площади</div><div class="info-value"><code>${totalFormula}</code></div></div>` : ''}
             </div>
             ${encDocsHtml}`;
+            
             
             const contours = All(newSub, 'Contours > Contour');
             let hasCoords = false;
@@ -12029,7 +11819,7 @@ function runValidation(xmlDoc, xmlText) {
         });
     });
 
-    // Раздел: Измененный земельный участок (ChangeParcel)
+    
     const changeParcels = All(xmlDoc, 'FormParcels > ChangeParcel, ChangeParcel');
     for (const changeParcel of changeParcels) {
         sectionsFound++;
@@ -12038,15 +11828,17 @@ function runValidation(xmlDoc, xmlText) {
         let sectionContent = `<div class="info-grid">
             <div class="info-card"><div class="info-label">Кадастровый номер измененного ЗУ</div><div class="info-value"><code>${cadNum}</code></div></div>
             <div class="info-card"><div class="info-label">Кадастровый квартал</div><div class="info-value">${T(changeParcel, 'CadastralBlock')}</div></div>
-            <div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Обеспечение доступа</div><div class="info-value">${getAccessInfo(changeParcel)}</div></div>
+         <div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Обеспечение доступа</div><div class="info-value">${getAccessInfo(changeParcel)}</div></div>
         </div>`;
 
+        
         const innerOksNodes = All(changeParcel, 'InnerCadastralNumbers > CadastralNumber');
         if (innerOksNodes.length > 0) {
             const oksList = Array.from(innerOksNodes).map(node => `<div class="info-card"><div class="info-value">${node.textContent.trim()}</div></div>`).join('');
             sectionContent += `<div class="subsection"><div class="subsection-title">Сохраняемые ОКС в границах измененного ЗУ</div><div class="info-grid">${oksList}</div></div>`;
         }
 
+        
         const delBorders = All(changeParcel, 'DeleteAllBorder');
         if(delBorders.length > 0) {
             const delList = Array.from(delBorders).map(db => A(db, 'NumberRecord') || A(db, 'Definition') || 'б/н').join(', ');
@@ -12056,7 +11848,9 @@ function runValidation(xmlDoc, xmlText) {
         mainHtml += `<div class="section"><div class="section-header">${sectionIcons.newParcel}<h3 class="section-title">Сведения об измененном земельном участке</h3></div><div class="section-content" style="padding:16px">${sectionContent}</div></div>`;
     }
 
-    // Раздел: Уточняемые участки (SpecifyParcel > ExistParcel)
+    
+    
+    
     const specifiedParcels = All(xmlDoc, 'SpecifyParcel > ExistParcel');
     for (let index = 0; index < specifiedParcels.length; index++) {
         const parcel = specifiedParcels[index];
@@ -12064,20 +11858,21 @@ function runValidation(xmlDoc, xmlText) {
         const cadNum = A(parcel, 'CadastralNumber');
         const categoryCode = A(E(parcel, 'Category'), 'Category');
         const categoryName = landCategories[categoryCode] || 'Категория не определена';
-        const minArea = parcel.querySelector('MinArea > Area')?.textContent || '—';
-        const maxArea = parcel.querySelector('MaxArea > Area')?.textContent || '—';
+      const minArea = parcel.querySelector('MinArea > Area')?.textContent || '—';
+const maxArea = parcel.querySelector('MaxArea > Area')?.textContent || '—';
 
-        let sectionContent = `<div class="info-grid">
-            <div class="info-card"><div class="info-label">Кадастровый номер</div><div class="info-value"><code>${cadNum}</code></div></div>
-            <div class="info-card"><div class="info-label">Кадастровый квартал</div><div class="info-value">${T(parcel, 'CadastralBlock')}</div></div>
-            ${categoryCode && categoryCode !== '—' ? `<div class="info-card"><div class="info-label">Категория земель</div><div class="info-value">${categoryName} <code>${categoryCode}</code></div></div>` : ''}
-            <div class="info-card"><div class="info-label">Уточненная площадь, кв.м.</div><div class="info-value">${T(parcel, 'Area > Area')} (погрешность ±${T(parcel, 'Area > Inaccuracy')})</div></div>
-            <div class="info-card"><div class="info-label">Площадь по ЕГРН, кв.м.</div><div class="info-value">${T(parcel, 'AreaInGKN')}</div></div>
-            <div class="info-card"><div class="info-label">Разница площадей, кв.м.</div><div class="info-value">${T(parcel, 'DeltaArea')}</div></div>
-            <div class="info-card"><div class="info-label">Минимальная площадь, кв.м.</div><div class="info-value">${minArea}</div></div>
-            <div class="info-card"><div class="info-label">Максимальная площадь, кв.м.</div><div class="info-value">${maxArea}</div></div>
-        </div>`;
+let sectionContent = `<div class="info-grid">
+    <div class="info-card"><div class="info-label">Кадастровый номер</div><div class="info-value"><code>${cadNum}</code></div></div>
+    <div class="info-card"><div class="info-label">Кадастровый квартал</div><div class="info-value">${T(parcel, 'CadastralBlock')}</div></div>
+    ${categoryCode && categoryCode !== '—' ? `<div class="info-card"><div class="info-label">Категория земель</div><div class="info-value">${categoryName} <code>${categoryCode}</code></div></div>` : ''}
+    <div class="info-card"><div class="info-label">Уточненная площадь, кв.м.</div><div class="info-value">${T(parcel, 'Area > Area')} (погрешность ±${T(parcel, 'Area > Inaccuracy')})</div></div>
+    <div class="info-card"><div class="info-label">Площадь по ЕГРН, кв.м.</div><div class="info-value">${T(parcel, 'AreaInGKN')}</div></div>
+    <div class="info-card"><div class="info-label">Разница площадей, кв.м.</div><div class="info-value">${T(parcel, 'DeltaArea')}</div></div>
+    <div class="info-card"><div class="info-label">Минимальная площадь, кв.м.</div><div class="info-value">${minArea}</div></div>
+    <div class="info-card"><div class="info-label">Максимальная площадь, кв.м.</div><div class="info-value">${maxArea}</div></div>
+</div>`;
 
+        
         const oksNodesExist = All(parcel, 'ObjectsRealty CadastralNumber');
         const oksNumbersExist = Array.from(oksNodesExist).map(node => node.textContent.trim());
         sectionContent += `
@@ -12096,34 +11891,34 @@ function runValidation(xmlDoc, xmlText) {
         </div>`;
 
         const contours = All(parcel, 'Contours > ExistContour, Contours > NewContour, Contours > Contour');
-        const hasEntitySpatial = !!E(parcel, 'EntitySpatial');
+const hasEntitySpatial = !!E(parcel, 'EntitySpatial');
 
-        if (contours.length > 0) {
-            contours.forEach((contour, cIdx) => {
-                let contourNum = contour.getAttribute('NumberRecord') || contour.getAttribute('Definition') || '';
-                if (contourNum) {
-                    const match = contourNum.match(/\((\d+)\)$/);
-                    if (match) {
-                        contourNum = match[1];
-                    } else if (contourNum.includes(':')) {
-                        contourNum = contourNum.split(':').pop();
-                    }
-                }
-                if (!contourNum || contourNum === '—') {
-                    contourNum = cIdx + 1;
-                }
-                const contourArea = T(contour, 'Area > Area');
-                const entitySpatial = E(contour, 'EntitySpatial');
-                if (entitySpatial) {
-                    sectionContent += `<div class="subsection"><div class="subsection-title">Контур ${contourNum}${contourArea && contourArea !== '—' ? ` — (площадь: ${contourArea} кв.м.)` : ''}</div>${createSpatialDataHtml(entitySpatial)}</div>`;
-                }
-            });
-        } else {
-            const entitySpatial = E(parcel, 'EntitySpatial');
-            if (entitySpatial) {
-                sectionContent += createSpatialDataHtml(entitySpatial);
+if (contours.length > 0) {
+    contours.forEach((contour, cIdx) => {
+        let contourNum = contour.getAttribute('NumberRecord') || contour.getAttribute('Definition') || '';
+        if (contourNum) {
+            const match = contourNum.match(/\((\d+)\)$/);
+            if (match) {
+                contourNum = match[1];
+            } else if (contourNum.includes(':')) {
+                contourNum = contourNum.split(':').pop();
             }
         }
+        if (!contourNum || contourNum === '—') {
+            contourNum = cIdx + 1;
+        }
+        const contourArea = T(contour, 'Area > Area');
+        const entitySpatial = E(contour, 'EntitySpatial');
+        if (entitySpatial) {
+            sectionContent += `<div class="subsection"><div class="subsection-title">Контур ${contourNum}${contourArea && contourArea !== '—' ? ` — (площадь: ${contourArea} кв.м.)` : ''}</div>${createSpatialDataHtml(entitySpatial)}</div>`;
+        }
+    });
+} else {
+    const entitySpatial = E(parcel, 'EntitySpatial');
+    if (entitySpatial) {
+        sectionContent += createSpatialDataHtml(entitySpatial);
+    }
+}
 
         const btnOverlap = `
             <button class="check-overlap-btn print-btn contradiction-btn" data-type="exist" data-index="${index}" data-cadnum="${cadNum}" style="padding:4px 10px; font-size:0.85rem; margin-left:auto; margin-right:8px;">
@@ -12139,7 +11934,7 @@ function runValidation(xmlDoc, xmlText) {
         mainHtml += `</div><div class="section-content" style="padding:16px">${sectionContent}</div></div>`;
     }
 
-    // Раздел: Уточняемые единые землепользования (ExistEZ)
+    
     const existEZs = All(xmlDoc, 'SpecifyParcel > ExistEZ');
     existEZs.forEach((ez, index) => {
         sectionsFound++;
@@ -12154,6 +11949,7 @@ function runValidation(xmlDoc, xmlText) {
             <div class="info-card"><div class="info-label">Разница площадей, кв.м.</div><div class="info-value">${T(ezParcels, 'DeltaArea')}</div></div>
         </div>`;
 
+        
         const oksNodesExist = All(ezParcels, 'ObjectsRealty CadastralNumber, ObjectsRealty > ObjectRealty > InnerCadastralNumbers > CadastralNumber');
         const oksNumbersExist = Array.from(oksNodesExist).map(node => node.textContent.trim());
         sectionContent += `
@@ -12171,6 +11967,7 @@ function runValidation(xmlDoc, xmlText) {
             <div class="oks-check-status" style="margin-top:12px;"></div>
         </div>`;
 
+        
         const entryParcels = All(ez, 'ExistEZEntryParcels > ExistEZEntryParcel');
         if (entryParcels.length > 0) {
             sectionContent += `<div class="subsection"><div class="subsection-title">Входящие обособленные/условные участки (${entryParcels.length} шт.)</div>`;
@@ -12190,7 +11987,7 @@ function runValidation(xmlDoc, xmlText) {
         mainHtml += `<div class="section"><div class="section-header">${sectionIcons.newParcel}<h3 class="section-title">Сведения об уточняемом едином землепользовании</h3><button class="header-button copy-coords-btn" title="Скопировать координаты">${sectionIcons.copyXY}</button></div><div class="section-content" style="padding:16px">${sectionContent}</div></div>`;
     });
 
-    // Раздел: Исправление реестровой ошибки смежного ЗУ (SpecifyParcelApproximal)
+    
     const approxParcels = All(xmlDoc, 'SpecifyParcelApproximal > ExistParcel');
     approxParcels.forEach((parcel, index) => {
         sectionsFound++;
@@ -12212,6 +12009,7 @@ function runValidation(xmlDoc, xmlText) {
             sectionContent += `<div class="subsection"><div class="subsection-title">Формула погрешности</div><div class="conclusion-text">${T(parcel, 'Area > Formula')}</div></div>`;
         }
 
+        
         const oksNodesApprox = All(parcel, 'ObjectsRealty CadastralNumber, ObjectsRealty > ObjectRealty > InnerCadastralNumbers > CadastralNumber');
         const oksNumbersApprox = Array.from(oksNodesApprox).map(node => node.textContent.trim());
 
@@ -12230,33 +12028,33 @@ function runValidation(xmlDoc, xmlText) {
             <div class="oks-check-status" style="margin-top:12px;"></div>
         </div>`;
         
-        const contours = All(parcel, 'Contours > ExistContour, Contours > NewContour, Contours > Contour');
-        const hasEntitySpatial = !!E(parcel, 'EntitySpatial');
+       const contours = All(parcel, 'Contours > ExistContour, Contours > NewContour, Contours > Contour');
+const hasEntitySpatial = !!E(parcel, 'EntitySpatial');
 
-        if (contours.length > 0) {
-            contours.forEach((contour, cIdx) => {
-                let contourNum = contour.getAttribute('NumberRecord') || contour.getAttribute('Definition') || '';
-                if (contourNum) {
-                    const match = contourNum.match(/\((\d+)\)$/);
-                    if (match) {
-                        contourNum = match[1];
-                    } else if (contourNum.includes(':')) {
-                        contourNum = contourNum.split(':').pop();
-                    }
-                }
-                if (!contourNum || contourNum === '—') {
-                    contourNum = cIdx + 1;
-                }
-                const contourArea = T(contour, 'Area > Area');
-                const entitySpatial = E(contour, 'EntitySpatial');
-                sectionContent += `<div class="subsection"><div class="subsection-title">Контур ${contourNum}${contourArea !== '—' ? ` — (площадь: ${contourArea} кв.м.)` : ''}</div>${entitySpatial ? createSpatialDataHtml(entitySpatial) : ''}</div>`;
-            });
-        } else {
-            const entitySpatial = E(parcel, 'EntitySpatial');
-            if (entitySpatial) {
-                sectionContent += createSpatialDataHtml(entitySpatial);
+if (contours.length > 0) {
+    contours.forEach((contour, cIdx) => {
+        let contourNum = contour.getAttribute('NumberRecord') || contour.getAttribute('Definition') || '';
+        if (contourNum) {
+            const match = contourNum.match(/\((\d+)\)$/);
+            if (match) {
+                contourNum = match[1];
+            } else if (contourNum.includes(':')) {
+                contourNum = contourNum.split(':').pop();
             }
         }
+        if (!contourNum || contourNum === '—') {
+            contourNum = cIdx + 1;
+        }
+        const contourArea = T(contour, 'Area > Area');
+        const entitySpatial = E(contour, 'EntitySpatial');
+        sectionContent += `<div class="subsection"><div class="subsection-title">Контур ${contourNum}${contourArea !== '—' ? ` — (площадь: ${contourArea} кв.м.)` : ''}</div>${entitySpatial ? createSpatialDataHtml(entitySpatial) : ''}</div>`;
+    });
+} else {
+    const entitySpatial = E(parcel, 'EntitySpatial');
+    if (entitySpatial) {
+        sectionContent += createSpatialDataHtml(entitySpatial);
+    }
+}
 
         const mainParcelCadNum = E(xmlDoc, 'SpecifyParcel > ExistParcel')?.getAttribute('CadastralNumber') || 
                                  E(xmlDoc, 'NewParcel')?.querySelector('CadastralBlock')?.textContent?.trim() || '';
@@ -12283,7 +12081,8 @@ function runValidation(xmlDoc, xmlText) {
         </div>`;
     });
 
-    // Кнопка одновременной проверки всех смежников
+
+
     const totalRelatedCount = All(xmlDoc, 'SpecifyRelatedParcel, SpecifyParcelApproximal > ExistParcel').length;
     const targetMainCadNumber = E(xmlDoc, 'SpecifyParcel > ExistParcel')?.getAttribute('CadastralNumber') || 
                                 E(xmlDoc, 'NewParcel')?.querySelector('CadastralBlock')?.textContent?.trim() || '';
@@ -12300,7 +12099,8 @@ function runValidation(xmlDoc, xmlText) {
         </div>`;
     }
     
-    // Раздел: Уточнение границ смежных земельных участков (SpecifyRelatedParcel)
+    
+    
     const specifyRelatedParcels = All(xmlDoc, 'SpecifyRelatedParcel');
     specifyRelatedParcels.forEach((specifyRelatedParcel, index) => {
         sectionsFound++;
@@ -12311,31 +12111,6 @@ function runValidation(xmlDoc, xmlText) {
         const entitySpatialSimple = E(specifyRelatedParcel, 'EntitySpatial');
         const allBorderSpatial = E(specifyRelatedParcel, 'AllBorder > EntitySpatial');
         const hasEntitySpatial = !!(contours.length > 0 || entitySpatialSimple || allBorderSpatial);
-
-        // Анализируем структуру на предмет внутреннего контура (вырезки)
-        const checkInnerData = extractSpecifyRelatedParcelData(specifyRelatedParcel);
-        let innerContourBadge = '';
-        let innerSubtitleTag = '';
-
-        if (checkInnerData.isInnerContour) {
-            const hasOnlyOld = specifyRelatedParcel.querySelectorAll('ChangeBorder > OldOrdinate').length > 0 && 
-                               specifyRelatedParcel.querySelectorAll('ChangeBorder > NewOrdinate').length === 0;
-            const hasOnlyNew = specifyRelatedParcel.querySelectorAll('ChangeBorder > NewOrdinate').length > 0 && 
-                               specifyRelatedParcel.querySelectorAll('ChangeBorder > OldOrdinate').length === 0;
-
-            const actionLabel = hasOnlyOld ? 'Удаление старого внутреннего контура (вырезки)' : 
-                               (hasOnlyNew ? 'Внесение нового внутреннего контура (вырезки)' : 'Замена внутреннего контура (вырезки)');
-
-            innerSubtitleTag = ` <span style="font-size:0.85em; color:var(--accent-color); font-weight:normal;">(${actionLabel})</span>`;
-
-            innerContourBadge = `
-            <div class="info-card" style="margin-bottom: 12px; background: #f0f9ff; border-color: #bae6fd;">
-                <div class="info-value" style="color: #0369a1; font-size: 0.95rem;">
-                    <i class="fas fa-vector-square"></i> <b>Исправление внутреннего контура (вырезки):</b> 
-                    выполняется ${actionLabel.toLowerCase()} смежного ЗУ. Основной участок должен располагаться внутри образуемого внутреннего контура.
-                </div>
-            </div>`;
-        }
 
         if (contours.length > 0) {
             contours.forEach((cnt, idx) => {
@@ -12371,48 +12146,51 @@ function runValidation(xmlDoc, xmlText) {
             }
         }
 
-        const randomId = 'rel_' + Math.floor(Math.random() * 1000000);
-        const mainParcelCadNum = E(xmlDoc, 'SpecifyParcel > ExistParcel')?.getAttribute('CadastralNumber') || 
-                                 E(xmlDoc, 'NewParcel')?.querySelector('CadastralBlock')?.textContent?.trim() || '';
+        if (relatedContentHtml) {
+            const randomId = 'rel_' + Math.floor(Math.random() * 1000000);
+            const mainParcelCadNum = E(xmlDoc, 'SpecifyParcel > ExistParcel')?.getAttribute('CadastralNumber') || 
+                                     E(xmlDoc, 'NewParcel')?.querySelector('CadastralBlock')?.textContent?.trim() || '';
 
-        mainHtml += `
-        <div class="section">
-            <div class="section-header">
-                ${sectionIcons.relatedParcel}
-                <h3 class="section-title">Уточнение смежного участка: ${relatedCadNum} (Запись ${index + 1})${innerSubtitleTag}</h3>
-                <button class="check-related-btn" 
-                        data-related-cad-number="${relatedCadNum}" 
-                        data-main-cad-number="${mainParcelCadNum}"
-                        data-index="${index}">
-                    <i class="fas fa-draw-polygon"></i>
-                    <span>Проверить границы</span>
-                </button>
-                ${hasEntitySpatial ? `<button class="header-button copy-coords-btn" title="Скопировать координаты">${sectionIcons.copyXY}</button>` : ''}
-            </div>
-            <div class="section-content" style="padding:16px">
-                ${innerContourBadge}
-                <div class="info-card" style="margin-bottom: 12px; background: #fff8e1; border-color: #ffe0b2;">
-                    <div class="info-value">Координаты смежного земельного участка</div>
+            mainHtml += `
+            <div class="section">
+                <div class="section-header">
+                    ${sectionIcons.relatedParcel}
+                    <h3 class="section-title">Уточнение смежного участка: ${relatedCadNum} (Запись ${index + 1})</h3>
+                    <button class="check-related-btn" 
+                            data-related-cad-number="${relatedCadNum}" 
+                            data-main-cad-number="${mainParcelCadNum}"
+                            data-index="${index}">
+                        <i class="fas fa-draw-polygon"></i>
+                        <span>Проверить границы</span>
+                    </button>`;
+            
+            if (hasEntitySpatial) {
+                mainHtml += `<button class="header-button copy-coords-btn" title="Скопировать координаты">${sectionIcons.copyXY}</button>`;
+            }
+            
+            mainHtml += `</div>
+                <div class="section-content" style="padding:16px">
+                    <div class="info-card" style="margin-bottom: 12px; background: #fff8e1; border-color: #ffe0b2;">
+                        <div class="info-value">Координаты смежного земельного участка</div>
+                    </div>
+                    <button class="print-btn" style="padding: 8px 16px; font-size: 0.9rem;" onclick="document.getElementById('${randomId}').classList.toggle('hidden'); this.textContent = this.textContent.includes('Раскрыть') ? 'Скрыть координаты' : 'Раскрыть список координат';">
+                        Раскрыть список координат
+                    </button>
+                    <div id="${randomId}" class="hidden" style="margin-top: 16px;">
+                        ${relatedContentHtml}
+                    </div>
                 </div>
-                <button class="print-btn" style="padding: 8px 16px; font-size: 0.9rem;" onclick="document.getElementById('${randomId}').classList.toggle('hidden'); this.textContent = this.textContent.includes('Раскрыть') ? 'Скрыть координаты' : 'Раскрыть список координат';">
-                    Раскрыть список координат
-                </button>
-                <div id="${randomId}" class="hidden" style="margin-top: 16px;">
-                    ${relatedContentHtml || '<div style="padding: 10px; color: var(--text-secondary);">Координаты точек отсутствуют</div>'}
-                </div>
-            </div>
-        </div>`;
+            </div>`;
+        }
     });
 
-    // Раздел: Заключение кадастрового инженера
+    
     const conclusion = E(xmlDoc, 'Conclusion');
     if (conclusion && conclusion.textContent.trim()) {
         sectionsFound++;
         mainHtml += `<div class="section"><div class="section-header">${sectionIcons.conclusion}<h3 class="section-title">Заключение кадастрового инженера</h3><button class="header-button ai-check-btn" data-conclusion-text="${escapeHtml(conclusion.textContent.trim())}" title="Проверить заключение с помощью ИИ"><i class="fas fa-atom"></i></button></div><div class="section-content" style="padding:16px"><div class="conclusion-text">${conclusion.textContent.trim()}</div></div></div>`;
     }
-
-    // Раздел: Графические разделы
-    const graphicFiles = [];
+  const graphicFiles = [];
     const addGraphicFile = (title, node) => {
         if (!node) return;
         const nameAttr = node.getAttribute('Name');
@@ -12432,19 +12210,18 @@ function runValidation(xmlDoc, xmlText) {
     xmlDoc.querySelectorAll('DiagramParcelsSubParcels').forEach(el => addGraphicFile('Чертеж земельного участка', el));
     xmlDoc.querySelectorAll('AgreementDocument').forEach(el => addGraphicFile('Акт согласования границ', el));
     
-    if (graphicFiles.length > 0) {
+    
+   if (graphicFiles.length > 0) {
         sectionsFound++;
         mainHtml += `<div class="section"><div class="section-header">${sectionIcons.graphics}<h3 class="section-title">Графические разделы</h3></div><div class="section-content" style="padding:16px"><table class="data-table"><thead><tr><th class="left-align">Наименование раздела</th><th class="left-align">Имя файла</th></tr></thead><tbody>${graphicFiles.map(f => `<tr><td class="left-align">${f.title}</td><td class="left-align">${getFileLabelAndButtonHtml(f.file)}</td></tr>`).join('')}</tbody></table></div></div>`;
     }
-
-    // Раздел: Приложения
     const appendixFiles = All(xmlDoc, 'Appendix > AppliedFiles');
     if (appendixFiles.length > 0) {
         sectionsFound++;
-        mainHtml += `<div class="section"><div class="section-header">${sectionIcons.appendix}<h3 class="section-title">Приложения</h3></div><div class="section-content" style="padding:16px"><table class="data-table"><thead><tr><th>№</th><th class="left-align">Наименование</th><th class="left-align">Имя файла</th></tr></thead><tbody>${Array.from(appendixFiles).map(f => `<tr><td>${T(f, 'NumberAppendix')}</td><td class="left-align">${T(f, 'NameAppendix')}</td><td class="left-align">${getFileLabelAndButtonHtml(A(E(f, 'AppliedFile'), 'Name'))}</td></tr>`).join('')}</tbody></table></div></div>`;
+    mainHtml += `<div class="section"><div class="section-header">${sectionIcons.appendix}<h3 class="section-title">Приложения</h3></div><div class="section-content" style="padding:16px"><table class="data-table"><thead><tr><th>№</th><th class="left-align">Наименование</th><th class="left-align">Имя файла</th></tr></thead><tbody>${Array.from(appendixFiles).map(f => `<tr><td>${T(f, 'NumberAppendix')}</td><td class="left-align">${T(f, 'NameAppendix')}</td><td class="left-align">${getFileLabelAndButtonHtml(A(E(f, 'AppliedFile'), 'Name'))}</td></tr>`).join('')}</tbody></table></div></div>`;
     }
 
-    // Раздел: Проверка межевого плана
+    
     const validationHtml = runValidation(xmlDoc, xmlText);
     if (validationHtml) {
         mainHtml += `<div class="section validation-section"><div class="section-header">${sectionIcons.validation}<h3 class="section-title">Проверка межевого плана</h3></div><div class="section-content" style="padding:16px">${validationHtml}</div></div>`;
