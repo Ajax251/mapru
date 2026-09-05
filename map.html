@@ -11642,6 +11642,7 @@ if (event.target.id === 'change-color-menu-item') {
     if (isCameraHeightLabelVisible) {
         updateCameraHeightLabel();
     }
+     setupMagnifierMapListeners();
 }
 
 
@@ -40043,11 +40044,62 @@ function updateMainMapCrosshair(coords, syncMapCenter = false) {
         map.geoObjects.add(mainMapCrosshair);
     } else {
         mainMapCrosshair.geometry.setCoordinates(coords);
-        mainMapCrosshair.options.set('visible', true);
+        if (!mainMapCrosshair.options.get('visible')) {
+            mainMapCrosshair.options.set('visible', true);
+        }
     }
 
-    if (syncMapCenter) {
-        map.setCenter(coords, map.getZoom(), { duration: 0 });
+    // Мягко доводим основную карту только если прицел вышел за пределы экрана
+    if (syncMapCenter && map) {
+        const bounds = map.getBounds();
+        if (bounds && (coords[0] < bounds[0][0] || coords[0] > bounds[1][0] || coords[1] < bounds[0][1] || coords[1] > bounds[1][1])) {
+            map.panTo(coords, { duration: 300 });
+        }
+    }
+}
+
+
+function setupMagnifierMapListeners() {
+    if (!map || map._magListenersAttached) return;
+    map._magListenersAttached = true;
+
+    // ПК: плавное слежение мыши без перегрузки DOM
+    map.events.add('mousemove', (e) => {
+        if (!isMapMagnifierOpen || isMagnifierFrozen) return;
+        const coords = e.get('coords');
+        if (coords && isFinite(coords[0]) && isFinite(coords[1])) {
+            currentMouseMapCoords = coords;
+            requestMagnifierSync(coords);
+        }
+    });
+
+    // ПК и Планшет: клик/тап по свободной карте
+    map.events.add('click', (e) => {
+        if (!isMapMagnifierOpen) return;
+        const coords = e.get('coords');
+        if (coords) {
+            const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0) || (e.get('domEvent')?.originalEvent?.type?.startsWith('touch'));
+            handleMainMapPointSelect(coords, isTouch);
+        }
+    });
+
+    // ПК и Планшет: клик/тап по объектам (полигонам, линиям, меткам)
+    if (map.geoObjects) {
+        map.geoObjects.events.add('click', (e) => {
+            if (!isMapMagnifierOpen) return;
+            const coords = e.get('coords');
+            if (coords) {
+                const isTouch = ('ontouchstart' in window) || (navigator.maxTouchPoints > 0) || (e.get('domEvent')?.originalEvent?.type?.startsWith('touch'));
+                handleMainMapPointSelect(coords, isTouch);
+            }
+        });
+
+        map.geoObjects.events.add(['add', 'remove'], () => {
+            if (isMapMagnifierOpen) {
+                clearTimeout(window._magSyncDebounce);
+                window._magSyncDebounce = setTimeout(syncMagnifierObjects, 100);
+            }
+        });
     }
 }
 
@@ -40060,6 +40112,34 @@ function freezeMagnifier(duration = 5000) {
     }, duration);
 }
 
+function handleMainMapPointSelect(coords, isTouch = false) {
+    if (!isMapMagnifierOpen || !mapMagnifierInstance || !coords) return;
+
+    currentMouseMapCoords = coords;
+    requestMagnifierSync(coords);
+
+    // На ПК (мышь): заморозка на 5 сек, чтобы довести курсор до окна
+    // На планшете (тач): без заморозки, мгновенно реагирует на каждый новый тап
+    if (!isTouch) {
+        freezeMagnifier(5000);
+    } else {
+        isMagnifierFrozen = false;
+        if (magFreezeTimer) {
+            clearTimeout(magFreezeTimer);
+            magFreezeTimer = null;
+        }
+    }
+
+    // Вспышка рамки окна лупы
+    const win = document.getElementById('mapMagnifierWindow');
+    if (win) {
+        win.classList.remove('mag-freeze-flash');
+        void win.offsetWidth;
+        win.classList.add('mag-freeze-flash');
+        setTimeout(() => win.classList.remove('mag-freeze-flash'), 900);
+    }
+}
+
 function initMapMagnifier() {
     const btn = document.getElementById('map-magnifier-quick-btn');
     const win = document.getElementById('mapMagnifierWindow');
@@ -40067,13 +40147,6 @@ function initMapMagnifier() {
     const header = document.getElementById('mapMagnifierHeader');
     const layerSelect = document.getElementById('magLayerSelect');
     const zoomSelect = document.getElementById('magZoomSelect');
-    const mapElement = document.getElementById('map');
-    
-    const magBody = document.getElementById('mapMagnifierBody');
-    if (magBody) {
-        magBody.addEventListener('mouseenter', () => { isUserMovingMagnifier = true; });
-        magBody.addEventListener('mouseleave', () => { isUserMovingMagnifier = false; });
-    }
 
     if (!btn || !win) return;
 
@@ -40087,7 +40160,6 @@ function initMapMagnifier() {
         closeMapMagnifier();
     });
 
-  
     layerSelect.value = magCurrentLayer;
     zoomSelect.value = magZoomSetting;
 
@@ -40102,58 +40174,7 @@ function initMapMagnifier() {
         localStorage.setItem('mapMagnifierZoom', magZoomSetting);
         syncMagnifierView();
     });
-    
-    
-    if (mapElement) {
-        mapElement.addEventListener('dblclick', (e) => {
-            if (!isMapMagnifierOpen || !mapMagnifierInstance || !map || !map.converter) return;
 
-            
-            e.preventDefault();
-            e.stopPropagation();
-
-            
-            const pageX = e.clientX + window.scrollX;
-            const pageY = e.clientY + window.scrollY;
-
-            try {
-                const globalPx = map.converter.pageToGlobal([pageX, pageY]);
-                const coords = map.options.get('projection').fromGlobalPixels(globalPx, map.getZoom());
-
-                if (coords && isFinite(coords[0]) && isFinite(coords[1])) {
-                    
-                    syncMagnifierView(coords);
-                    updateMagnifierCoordinatesDisplay(coords);
-
-                    
-                    const win = document.getElementById('mapMagnifierWindow');
-                    const header = document.getElementById('mapMagnifierHeader');
-                    if (win) {
-                        const winW = win.offsetWidth;
-                        const winH = win.offsetHeight;
-                        const headerH = header ? header.offsetHeight : 30;
-
-                        
-                        let targetLeft = e.clientX - winW / 2;
-                        let targetTop = e.clientY - (headerH + (winH - headerH) / 2);
-
-                        
-                        targetLeft = Math.max(10, Math.min(window.innerWidth - winW - 10, targetLeft));
-                        targetTop = Math.max(10, Math.min(window.innerHeight - winH - 10, targetTop));
-
-                        win.style.left = `${targetLeft}px`;
-                        win.style.top = `${targetTop}px`;
-                        win.style.right = 'auto';
-                        win.style.bottom = 'auto';
-
-                        mapMagnifierInstance.container.fitToViewport();
-                    }
-                }
-            } catch (err) {}
-        }, true); 
-    }
-
-    
     let isHeaderDragging = false;
     let startX = 0, startY = 0, startLeft = 0, startTop = 0;
 
@@ -40185,8 +40206,7 @@ function initMapMagnifier() {
     document.addEventListener('mouseup', () => {
         isHeaderDragging = false;
     });
-    
-    
+
     const geoBadge = document.getElementById('magCoordGeo');
     const mskBadge = document.getElementById('magCoordMsk');
 
@@ -40212,7 +40232,6 @@ function initMapMagnifier() {
         });
     }
 
-    
     if (window.ResizeObserver) {
         new ResizeObserver(() => {
             if (mapMagnifierInstance && isMapMagnifierOpen) {
@@ -40222,65 +40241,11 @@ function initMapMagnifier() {
         }).observe(win);
     }
 
-    
-     if (mapElement) {
-        mapElement.addEventListener('mousemove', (e) => {
-          
-            if (!isMapMagnifierOpen || isMagnifierFrozen || !mapMagnifierInstance || !map || !map.converter) return;
-
-            const pageX = e.clientX + window.scrollX;
-            const pageY = e.clientY + window.scrollY;
-
-            try {
-                const globalPx = map.converter.pageToGlobal([pageX, pageY]);
-                const coords = map.options.get('projection').fromGlobalPixels(globalPx, map.getZoom());
-
-                if (coords && isFinite(coords[0]) && isFinite(coords[1])) {
-                    currentMouseMapCoords = coords;
-                    requestMagnifierSync(coords);
-                }
-            } catch (err) {}
-        });
+    if (typeof map !== 'undefined' && map) {
+        setupMagnifierMapListeners();
     }
-    
-       if (map && map.geoObjects) {
-        map.geoObjects.events.add(['add', 'remove'], () => {
-            if (isMapMagnifierOpen) {
-                clearTimeout(window._magSyncDebounce);
-                window._magSyncDebounce = setTimeout(syncMagnifierObjects, 100);
-            }
-        });
-    }
-   if (mapElement) {
-        mapElement.addEventListener('click', (e) => {
-            if (!isMapMagnifierOpen || !mapMagnifierInstance || !map || !map.converter) return;
-
-            const pageX = e.clientX + window.scrollX;
-            const pageY = e.clientY + window.scrollY;
-
-            try {
-                const globalPx = map.converter.pageToGlobal([pageX, pageY]);
-                const coords = map.options.get('projection').fromGlobalPixels(globalPx, map.getZoom());
-
-                if (coords && isFinite(coords[0]) && isFinite(coords[1])) {
-                    currentMouseMapCoords = coords;
-                    requestMagnifierSync(coords);
-                    freezeMagnifier(5000);
-
-                    // Вспышка рамки окна лупы вместо всплывающего уведомления
-                    const win = document.getElementById('mapMagnifierWindow');
-                    if (win) {
-                        win.classList.remove('mag-freeze-flash');
-                        void win.offsetWidth; // перезапуск анимации
-                        win.classList.add('mag-freeze-flash');
-                        setTimeout(() => win.classList.remove('mag-freeze-flash'), 900);
-                    }
-                }
-            } catch (err) {}
-        });
-    }
-
 }
+
 
 function toggleMapMagnifier() {
     if (isMapMagnifierOpen) {
@@ -40377,16 +40342,14 @@ function openMapMagnifier() {
     if (!win || !btn) return;
 
     isMapMagnifierOpen = true;
+    isMagnifierFrozen = false;
     win.style.display = 'flex';
     btn.classList.add('active');
-    
-    if (map && map.behaviors) {
-        map.behaviors.disable('dblClickZoom'); 
-    }
+
+    setupMagnifierMapListeners();
 
     const focusCoords = currentMouseMapCoords || (map ? map.getCenter() : [54.8492, 50.7910]);
 
- 
     if (!mapMagnifierInstance) {
         ymaps.ready(() => {
             const targetZoom = calculateMagnifierZoom();
@@ -40401,14 +40364,27 @@ function openMapMagnifier() {
 
             applyMagnifierMapType();
 
-            mapMagnifierInstance.events.add(['actiontick', 'boundschange'], () => {
+            // При перетаскивании лупы двигаем только крестик прицела на основной карте (без рывков)
+            mapMagnifierInstance.events.add('actiontick', () => {
                 const center = mapMagnifierInstance.getCenter();
                 if (center) {
                     updateMagnifierCoordinatesDisplay(center);
-                    // Перемещаем прицел и сдвигаем основную карту при навигации в лупе
-                    if (isUserMovingMagnifier) {
-                        updateMainMapCrosshair(center, true);
-                    }
+                    updateMainMapCrosshair(center, false);
+                }
+            });
+
+            mapMagnifierInstance.events.add('actionend', () => {
+                const center = mapMagnifierInstance.getCenter();
+                if (center) {
+                    updateMagnifierCoordinatesDisplay(center);
+                    updateMainMapCrosshair(center, true);
+                }
+            });
+
+            mapMagnifierInstance.events.add('boundschange', () => {
+                const center = mapMagnifierInstance.getCenter();
+                if (center) {
+                    updateMagnifierCoordinatesDisplay(center);
                 }
                 applyMagnifierGoogleOffset();
             });
@@ -40431,9 +40407,8 @@ function openMapMagnifier() {
         applyMagnifierGoogleOffset();
     }
 
-updateMagnifierCoordinatesDisplay(focusCoords);
-
-    showNotification('Лупа активна: наведите курсор на объект', 'info', 'search-plus');
+    updateMagnifierCoordinatesDisplay(focusCoords);
+    showNotification('Лупа активна', 'info', 'search-plus');
 }
 
 function closeMapMagnifier() {
@@ -40529,7 +40504,6 @@ function applyMagnifierGoogleOffset() {
 
 function requestMagnifierSync(coords) {
     pendingMagCoords = coords;
-    updateMainMapCrosshair(coords, false);
     if (!magRafId) {
         magRafId = requestAnimationFrame(() => {
             magRafId = null;
@@ -40537,7 +40511,9 @@ function requestMagnifierSync(coords) {
                 const zoom = calculateMagnifierZoom();
                 mapMagnifierInstance.setCenter(pendingMagCoords, zoom, { duration: 0 });
                 applyMagnifierGoogleOffset();
-                updateMagnifierCoordinatesDisplay(pendingMagCoords); 
+                updateMagnifierCoordinatesDisplay(pendingMagCoords);
+                // Обновление прицела строго синхронизировано с кадрами экрана (убирает рывки)
+                updateMainMapCrosshair(pendingMagCoords, false);
             }
         });
     }
