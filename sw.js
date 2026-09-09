@@ -1,4 +1,4 @@
-const CACHE_NAME = 'map-pwa-v1.3';
+//sw.js
 
 const CACHE_NAME = 'map-pwa-v1.4';
 
