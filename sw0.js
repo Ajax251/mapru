@@ -1,6 +1,6 @@
 //sw.js
 
-const CACHE_NAME = 'map-pwa-v1.5'; // Подняли версию для очистки старого мусора из кэша
+const CACHE_NAME = 'map-pwa-v1.4';
 
 const ASSETS_TO_CACHE = [
     './',
@@ -65,28 +65,17 @@ self.addEventListener('activate', (event) => {
 self.addEventListener('fetch', (event) => {
     const url = new URL(event.request.url);
 
-    // 1. ИГНОРИРУЕМ ВСЕ ВНЕШНИЕ ТАЙЛЫ, КАРТЫ, СЕРВЕРЫ И АНАЛИТИКУ
-    // Браузер выполнит их напрямую, консоль и сетевая вкладка не будут забиваться через sw.js
-    if (
-        url.origin !== self.location.origin ||
-        url.hostname.includes('yandex') ||
-        url.hostname.includes('yastatic') ||
-        url.hostname.includes('renderer') ||
-        url.hostname.includes('openstreetmap') ||
-        url.hostname.includes('google') ||
-        url.hostname.includes('nspd.gov.ru') || 
+    if (url.hostname.includes('nspd.gov.ru') || 
         url.hostname.includes('supabase.co') || 
         url.hostname.includes('mapruapp.ru') ||
-        url.pathname.includes('/rum')
-    ) {
+        url.hostname.includes('googleapis.com')) {
         return;
     }
 
-    // 2. Кэшируем и отдаем только локальные файлы приложения (HTML, локальные JS, CSS, иконки)
     event.respondWith(
         caches.match(event.request).then((cachedResponse) => {
             const fetchPromise = fetch(event.request).then((networkResponse) => {
-                if (networkResponse && networkResponse.status === 200 && event.request.method === 'GET') {
+                if (networkResponse && (networkResponse.status === 200 || networkResponse.type === 'opaque') && event.request.method === 'GET') {
                     const responseClone = networkResponse.clone();
                     caches.open(CACHE_NAME).then((cache) => {
                         cache.put(event.request, responseClone);
