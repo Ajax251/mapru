@@ -14052,7 +14052,7 @@ async function generateLinearObjectReport(targetObject) {
             coordinates: allCoords
         };
 
-         showLoader('Поиск пересекаемых объектов...');
+        showLoader('Поиск пересекаемых объектов...');
 
         const bufferedLine = turf.buffer(multiLineString, 100, {units: 'meters'});
         const totalBbox = turf.bbox(bufferedLine);
@@ -14066,13 +14066,11 @@ async function generateLinearObjectReport(targetObject) {
             [bounds[0][1], bounds[0][0]]
         ].map(coord => proj4("EPSG:4326", "EPSG:3857", coord));
 
-        
-        const allObjectsInArea = await searchObjectsByArea(searchPolygonForApi, [36368, 36369, 36383, 36940]);
-        const demuxed = demuxFeatures(allObjectsInArea);
-
-        const parcelsInArea = demuxed.zu;
-        const oksInArea = demuxed.oks;
-        const zouitsInArea = demuxed.zouit;
+        const parcelsInArea = await searchObjectsByArea(searchPolygonForApi, 36368);
+        await delay(100);
+        const oksInArea = await searchObjectsByArea(searchPolygonForApi, 36369);
+        await delay(100);
+        const zouitsInArea = await searchObjectsByArea(searchPolygonForApi, 36940);
 
         showLoader('Анализ наложений...');
         
@@ -14136,6 +14134,24 @@ async function generateLinearObjectReport(targetObject) {
 }
 
 
+async function searchObjectsByArea(searchPolygonCoordsEPSG3857, categoryId) {
+    const requestBody = {
+        "geom": { "type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"crs": { "type": "name", "properties": { "name": "EPSG:3857" } }, "type": "Polygon", "coordinates": [searchPolygonCoordsEPSG3857]}, "properties": {}}] },
+        "categories": [{"id": categoryId}]
+    };
+    try {
+        const response = await fetchNspd('https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody)
+        });
+        const text = await response.text();
+        if (!text) return [];
+        const data = JSON.parse(text);
+        return data.features || [];
+    } catch (error) {
+        console.error(`Ошибка при запросе объектов для категории ${categoryId}:`, error);
+        return [];
+    }
+}
 
 
 function findLinearIntersections(turfLines, targetFeatures) {
@@ -15849,12 +15865,12 @@ function filterFeaturesByTurfLogic(rawFeatures, targetTurfPolygons) {
 
 
 async function executeQuickReport(targetObject) {
-    if (isAreaLimitExceeded(targetObject)) return;     
+  if (isAreaLimitExceeded(targetObject)) return;     
 
     showLoader('<div style="text-align:center;"><i class="fas fa-crosshairs fa-spin" style="font-size: 2.2rem; color: #f59e0b; margin-bottom: 10px;"></i><br></div>');
     await new Promise(resolve => setTimeout(resolve, 50));
     
-    console.log("=== ЗАПУСК БЫСТРОГО ОТЧЕТА (ПАКЕТНЫЙ ЗАПРОС) ===");
+    console.log("=== ЗАПУСК БЫСТРОГО ОТЧЕТА ===");
     
     const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
@@ -15903,32 +15919,29 @@ async function executeQuickReport(targetObject) {
     });
 
     try {
-        const linkedPromises = objects.map(async obj => {
+         const linkedPromises = objects.map(async obj => {
             const cn = obj.properties.get('cadastralNumber');
             if (cn && cn.includes(':')) {
                 try { return await fetchLinkedOks(cn); } catch(e) { return []; }
             }
-            return [];
+            return[];
         });
         const linkedResults = await Promise.all(linkedPromises);
         let linkedOksCns = [...new Set(linkedResults.flat())];
 
-        const results = { zu: [], oks: [], structure: [], zouit: [] };
+        const results = { zu: [], oks:[], structure: [], zouit:[] };
 
         const processApiRing = (ring3857) => {
             const mappedRing = ring3857.map(convertApi3857ToMapCoords);
             return ensureClosedRing(mappedRing);
         };
 
-        
+       
         showLoader(getRadarLoaderHtml(0));
-        const allRawFeatures = await searchFeaturesByGeometry(objects, [36368, 36369, 36383, 36940]) || [];
-        const demuxed = demuxFeatures(allRawFeatures);
-
+        const rawZu = await searchFeaturesByGeometry(objects, 36368);
         
-        showLoader(getRadarLoaderHtml(1));
-        if (demuxed.zu.length > 0) {
-            for (const feature of demuxed.zu) {
+        if (rawZu.length > 0) {
+            for (const feature of rawZu) {
                 if (!feature.geometry || !feature.geometry.coordinates) continue;
                 
                 let featureTurfPolys = [];
@@ -15953,6 +15966,7 @@ async function executeQuickReport(targetObject) {
                     featureTotalArea += selfResult.area;
 
                     for (const target of targetTurfGeoms) {
+                        
                         let inHole = false;
                         if (target.geom.geometry.type === 'Polygon' && target.geom.geometry.coordinates.length > 1) {
                             for (let i = 1; i < target.geom.geometry.coordinates.length; i++) {
@@ -15963,12 +15977,15 @@ async function executeQuickReport(targetObject) {
                                 }
                             }
                         }
-                        if (inHole) continue;
+                        if (inHole) continue; 
 
                         const result = checkPreciseIntersection(target.geom, fPoly, target.isLine, `[Intersect]`);
                         if (result.isIntersecting) {
-                            if (target.isLine) isIntersectingWithLine = true;
-                            else totalIntersectionArea += result.area;
+                            if (target.isLine) {
+                                isIntersectingWithLine = true;
+                            } else {
+                                totalIntersectionArea += result.area;
+                            }
                         }
                     }
                 }
@@ -15980,7 +15997,12 @@ async function executeQuickReport(targetObject) {
                             percent = 100;
                         } else {
                             let rawPercent = (totalIntersectionArea / featureTotalArea) * 100;
-                            percent = rawPercent < 10 ? Math.max(1, Math.ceil(rawPercent)) : Math.floor(rawPercent);
+                            if (rawPercent < 10) {
+                                percent = Math.ceil(rawPercent); 
+                                if (percent === 0) percent = 1;
+                            } else {
+                                percent = Math.floor(rawPercent); 
+                            }
                         }
                     }
                     if (!feature.properties) feature.properties = {};
@@ -15992,12 +16014,16 @@ async function executeQuickReport(targetObject) {
                 }
             }
         }
+        
+        await delay(500);
 
         
-        showLoader(getRadarLoaderHtml(2));
+        showLoader(getRadarLoaderHtml(1));
+        const rawOksFeatures = await searchFeaturesByGeometry(objects, 36369);
         const spatialOksFeatures = [];
-        if (demuxed.oks.length > 0) {
-            for (const feature of demuxed.oks) {
+
+        if (rawOksFeatures.length > 0) {
+            for (const feature of rawOksFeatures) {
                 if (!feature.geometry || !feature.geometry.coordinates) continue;
 
                 let featureTurfPolys = [];
@@ -16022,6 +16048,7 @@ async function executeQuickReport(targetObject) {
                     featureTotalArea += selfResult.area;
 
                     for (const target of targetTurfGeoms) {
+                        
                         let inHole = false;
                         if (target.geom.geometry.type === 'Polygon' && target.geom.geometry.coordinates.length > 1) {
                             for (let i = 1; i < target.geom.geometry.coordinates.length; i++) {
@@ -16032,12 +16059,15 @@ async function executeQuickReport(targetObject) {
                                 }
                             }
                         }
-                        if (inHole) continue;
+                        if (inHole) continue; 
 
                         const result = checkPreciseIntersection(target.geom, fPoly, target.isLine, `[Intersect]`);
                         if (result.isIntersecting) {
-                            if (target.isLine) isIntersectingWithLine = true;
-                            else totalIntersectionArea += result.area;
+                            if (target.isLine) {
+                                isIntersectingWithLine = true;
+                            } else {
+                                totalIntersectionArea += result.area;
+                            }
                         }
                     }
                 }
@@ -16049,7 +16079,12 @@ async function executeQuickReport(targetObject) {
                             percent = 100;
                         } else {
                             let rawPercent = (totalIntersectionArea / featureTotalArea) * 100;
-                            percent = rawPercent < 10 ? Math.max(1, Math.ceil(rawPercent)) : Math.floor(rawPercent);
+                            if (rawPercent < 10) {
+                                percent = Math.ceil(rawPercent);
+                                if (percent === 0) percent = 1;
+                            } else {
+                                percent = Math.floor(rawPercent);
+                            }
                         }
                     }
                     if (!feature.properties) feature.properties = {};
@@ -16069,14 +16104,18 @@ async function executeQuickReport(targetObject) {
             if (!f.properties) f.properties = {};
             f.properties._isSpatial = true;
             const cn = getCn(f);
-            if (cn) oksMap.set(cn, f);
-            else oksMap.set(`unknown_${Math.random()}`, f);
+            if (cn) {
+                oksMap.set(cn, f);
+            } else {
+                oksMap.set(`unknown_${Math.random()}`, f);
+            }
         });
         
         linkedOksCns.forEach(lCn => {
             const cn = lCn.trim();
             if (oksMap.has(cn)) {
-                oksMap.get(cn).properties._isLinked = true;
+                const existing = oksMap.get(cn);
+                existing.properties._isLinked = true;
             } else {
                 oksMap.set(cn, {
                     properties: { 
@@ -16089,12 +16128,20 @@ async function executeQuickReport(targetObject) {
                 });
             }
         });
+        
         results.oks = Array.from(oksMap.values());
-
+        await delay(500);
+        
+        
+        showLoader(getRadarLoaderHtml(2));
+        const rawStructures = await searchFeaturesByGeometry(objects, 36383);
+        results.structure = filterFeaturesByTurfLogic(rawStructures, targetTurfGeoms.map(t => t.geom));
+        await delay(500);
+        
         
         showLoader(getRadarLoaderHtml(3));
-        results.structure = filterFeaturesByTurfLogic(demuxed.structure, targetTurfGeoms.map(t => t.geom));
-        results.zouit = filterFeaturesByTurfLogic(demuxed.zouit, targetTurfGeoms.map(t => t.geom));
+        const rawZouits = await searchFeaturesByGeometry(objects, 36940);
+        results.zouit = filterFeaturesByTurfLogic(rawZouits, targetTurfGeoms.map(t => t.geom));
         
         
         showLoader('<div style="text-align:center;"><i class="fas fa-paint-brush fa-spin" style="font-size: 2.5rem; color: #10b981; margin-bottom: 15px;"></i><br><span style="font-size: 1.1rem; color: #10b981; font-weight: 600;">Отрисовка слоев на карте...</span></div>');
@@ -16123,7 +16170,7 @@ async function executeQuickReport(targetObject) {
             }
         });
         
-        window.map3DCenter = map.getCenter();
+       window.map3DCenter = map.getCenter();
         window.quickReportTargetObjects = quickReportTargetObjects;
         window.parcelFeaturesData = parcelFeaturesData;
         window.buildingFeaturesData = buildingFeaturesData;
@@ -24754,23 +24801,36 @@ async function executeObjectsNearbySearch(lat, lon, radius, selectedTypes) {
             return;
         }
 
+        const results = { zu: [], oks: [], structure: [], zouit: [] };
         
-        const categoryIdsToQuery = [];
-        if (selectedTypes.zu) categoryIdsToQuery.push(36368);
-        if (selectedTypes.oks) categoryIdsToQuery.push(36369);
-        if (selectedTypes.structure) categoryIdsToQuery.push(36383);
-        if (selectedTypes.zouit) categoryIdsToQuery.push(36940);
+        const enabledSteps = [];
+        if (selectedTypes.zu) enabledSteps.push('zu');
+        if (selectedTypes.oks) enabledSteps.push('oks');
+        if (selectedTypes.structure) enabledSteps.push('structure');
+        if (selectedTypes.zouit) enabledSteps.push('zouit');
 
-        
-        const rawFeatures = await searchFeaturesByGeometry(tempPolygon, categoryIdsToQuery) || [];
-        const demuxed = demuxFeatures(rawFeatures);
+        for (let i = 0; i < enabledSteps.length; i++) {
+            const type = enabledSteps[i];
+            showLoader(getObjectsNearbyLoaderHtml(i, selectedTypes));
 
-        const results = {
-            zu: selectedTypes.zu ? demuxed.zu : [],
-            oks: selectedTypes.oks ? demuxed.oks : [],
-            structure: selectedTypes.structure ? demuxed.structure : [],
-            zouit: selectedTypes.zouit ? demuxed.zouit : []
-        };
+            if (type === 'zu') {
+                const rawZu = await searchFeaturesByGeometry(tempPolygon, 36368);
+                results.zu = rawZu || [];
+            } else if (type === 'oks') {
+                const rawOks = await searchFeaturesByGeometry(tempPolygon, 36369);
+                results.oks = rawOks || [];
+            } else if (type === 'structure') {
+                const rawStructures = await searchFeaturesByGeometry(tempPolygon, 36383);
+                results.structure = rawStructures || [];
+            } else if (type === 'zouit') {
+                const rawZouits = await searchFeaturesByGeometry(tempPolygon, 36940);
+                results.zouit = rawZouits || [];
+            }
+
+            if (i < enabledSteps.length - 1) {
+                await new Promise(r => setTimeout(r, 800));
+            }
+        }
 
         showLoader('<div style="text-align:center;"><i class="fas fa-paint-brush fa-spin" style="font-size: 2.5rem; color: #10b981; margin-bottom: 15px;"></i><br><span style="font-size: 1.1rem; color: #10b981; font-weight: 600;">Отрисовка слоев на карте...</span></div>');
 
@@ -24815,6 +24875,7 @@ async function executeObjectsNearbySearch(lat, lon, radius, selectedTypes) {
         hideLoader();
     }
 }
+
 
 
 
@@ -25766,44 +25827,14 @@ function buildLinearReportHtml(mainObjectData, parcelsResults, oksResults, zouit
     return { html };
 }
 
-
-function demuxFeatures(features) {
-    const results = { zu: [], oks: [], structure: [], zouit: [] };
-    if (!Array.isArray(features)) return results;
-
-    for (const f of features) {
-        if (!f) continue;
-        const props = f.properties || {};
-        const opts = props.options || {};
-        const cat = props.category;
-        const catName = (props.categoryName || '').toLowerCase();
-
-        if (cat === 36368 || catName.includes('земельн') || opts.land_record_type || opts.land_record_category_type || opts.specified_area || opts.declared_area) {
-            results.zu.push(f);
-        } else if (cat === 36369 || catName.includes('здани') || opts.build_record_area || (opts.cad_num && opts.purpose)) {
-            results.oks.push(f);
-        } else if (cat === 36383 || catName.includes('сооружен') || opts.params_extension || opts.params_purpose || (opts.cad_number && opts.params_year_built)) {
-            results.structure.push(f);
-        } else if (cat === 36940 || cat === 36315 || cat === 36281 || cat === 36278 || cat === 36314 ||
-                   catName.includes('зон') || catName.includes('границ') || catName.includes('пункт') || catName.includes('лесничеств') ||
-                   opts.reg_numb_border || opts.content_restrict_encumbrances) {
-            results.zouit.push(f);
-        } else {
-            results.zu.push(f);
-        }
-    }
-    return results;
-}
-
-
-
-async function searchFeaturesByGeometry(targetObject, categoryIdOrIds) {
+async function searchFeaturesByGeometry(targetObject, categoryId) {
     try {
         const objects = Array.isArray(targetObject) ? targetObject : [targetObject];
         const apiFeatures = [];
 
         objects.forEach(obj => {
             const geometryType = obj.geometry.getType();
+            
             if (geometryType === 'LineString') {
                 const coords = obj.geometry.getCoordinates();
                 if (!coords || coords.length < 2) return;
@@ -25834,8 +25865,10 @@ async function searchFeaturesByGeometry(targetObject, categoryIdOrIds) {
 
         if (apiFeatures.length === 0) return [];
 
-        const ids = Array.isArray(categoryIdOrIds) ? categoryIdOrIds : [categoryIdOrIds];
-        const categoriesArray = ids.map(id => ({ id }));
+        let categoriesArray = [{ "id": categoryId }];
+        if (categoryId === 36940) {
+            categoriesArray = [{ "id": 36940 }];
+        }
 
         const requestBody = {
             "geom": { "type": "FeatureCollection", "features": apiFeatures },
@@ -25851,28 +25884,6 @@ async function searchFeaturesByGeometry(targetObject, categoryIdOrIds) {
         return data.features || [];
     } catch (error) {
         return null;
-    }
-}
-
-async function searchObjectsByArea(searchPolygonCoordsEPSG3857, categoryIdOrIds) {
-    const ids = Array.isArray(categoryIdOrIds) ? categoryIdOrIds : [categoryIdOrIds];
-    const categoriesArray = ids.map(id => ({ id }));
-
-    const requestBody = {
-        "geom": { "type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"crs": { "type": "name", "properties": { "name": "EPSG:3857" } }, "type": "Polygon", "coordinates": [searchPolygonCoordsEPSG3857]}, "properties": {}}] },
-        "categories": categoriesArray
-    };
-    try {
-        const response = await fetchNspd('https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject', {
-            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody)
-        });
-        const text = await response.text();
-        if (!text) return [];
-        const data = JSON.parse(text);
-        return data.features || [];
-    } catch (error) {
-        console.error(`Ошибка при запросе объектов для категорий:`, categoryIdOrIds, error);
-        return [];
     }
 }
 
@@ -26112,7 +26123,7 @@ async function generateConsolidatedReport(targetObject) {
         const centerLat = (minLat + maxLat) / 2;
         const centerLon = (minLon + maxLon) / 2;
 
-            showLoader('Анализ данных ...');
+        showLoader('Анализ данных...');
         const bufferedBoundsForSearch = [[minLat - 0.00005, minLon - 0.00005],[maxLat + 0.00005, maxLon + 0.00005]];
         const searchPolygonForApi = [
             [bufferedBoundsForSearch[0][1], bufferedBoundsForSearch[0][0]], 
@@ -26122,20 +26133,13 @@ async function generateConsolidatedReport(targetObject) {
             [bufferedBoundsForSearch[0][1], bufferedBoundsForSearch[0][0]]
         ].map(coord => proj4("EPSG:4326", "EPSG:3857", coord));
 
-        
-        const allCandidateFeatures = await searchObjectsByArea(searchPolygonForApi, [36368, 36369, 36383, 36940]);
-        const demuxed = demuxFeatures(allCandidateFeatures);
+        const fetchedCandidateFeatures = await searchParcelsByArea(searchPolygonForApi);
 
-        const fetchedCandidateFeatures = demuxed.zu;
-        const oksResults = demuxed.oks;
-        const rawStructures = demuxed.structure;
-        const rawZouits = demuxed.zouit;
-
-        const processRingsToTurf = (featureGeom) => {
-            if (!featureGeom || !featureGeom.coordinates) return [];
+       const processRingsToTurf = (featureGeom) => {
+            if (!featureGeom || !featureGeom.coordinates) return[];
             const processRing = (ring3857) => ring3857.map(convertApi3857ToMapCoords);
 
-            let turfPolys = [];
+            let turfPolys =[];
             if (featureGeom.type === 'Polygon') {
                 turfPolys.push(turf.polygon(featureGeom.coordinates.map(processRing)));
             } else if (featureGeom.type === 'MultiPolygon') {
@@ -26144,7 +26148,6 @@ async function generateConsolidatedReport(targetObject) {
             return turfPolys;
         };
 
-        
         if (fetchedCandidateFeatures.length > 0) {
             fetchedCandidateFeatures.forEach(feature => {
                 if (!isMulti && feature.properties.descr === mainObjectData.cadastralNumber) return;
@@ -26156,6 +26159,7 @@ async function generateConsolidatedReport(targetObject) {
                 
                 candidateTurfPolys.forEach(candidateTurfPoly => {
                     targetTurfPolygons.forEach(searchTurfPoly => {
+                        
                         let inHole = false;
                         if (searchTurfPoly.geometry.type === 'Polygon' && searchTurfPoly.geometry.coordinates.length > 1) {
                             const coords = searchTurfPoly.geometry.coordinates;
@@ -26183,15 +26187,19 @@ async function generateConsolidatedReport(targetObject) {
             });
         }
 
-        
+        const oksResults = await searchFeaturesByGeometry(targetPolygons, 36369);
+
         if (oksResults.length > 0) {
+             showLoader('Анализ наложений с ОКС...');
              oksResults.forEach(feature => {
                  const candidateTurfPolys = processRingsToTurf(feature.geometry);
                  if (candidateTurfPolys.length === 0) return;
 
                  let totalIntersectionArea = 0;
+                 
                  candidateTurfPolys.forEach(candidateTurfPoly => {
                      targetTurfPolygons.forEach(searchTurfPoly => {
+                        
                         let inHole = false;
                         if (searchTurfPoly.geometry.type === 'Polygon' && searchTurfPoly.geometry.coordinates.length > 1) {
                             const coords = searchTurfPoly.geometry.coordinates;
@@ -26219,8 +26227,14 @@ async function generateConsolidatedReport(targetObject) {
              });
         }
 
+        await delay(100);
+        const rawStructures = await searchFeaturesByGeometry(targetPolygons, 36383);
         const structuresResults = filterFeaturesByTurfLogic(rawStructures, targetTurfPolygons);
+        
+        await delay(100);
+        const rawZouits = await searchFeaturesByGeometry(targetPolygons, 36940);
         const zouitResults = filterFeaturesByTurfLogic(rawZouits, targetTurfPolygons);
+        await delay(100);
 
         const drawnZouits = [];
         const coveringZouits =[];
@@ -38277,27 +38291,49 @@ async function fetchNearbyCategoryData(mapLat, mapLon) {
         [centerPoint.x - radius, centerPoint.y - radius]
     ];
 
-    try {
-        
-        const rawFeatures = await searchObjectsByArea(box3857, [36368, 36369, 36383]);
-        
+    const categories = [
+        { id: 36368, type: 'zu' },
+        { id: 36369, type: 'oks' },
+        { id: 36383, type: 'structure' }
+    ];
+
+    for (let i = 0; i < categories.length; i++) {
         if (isPanoFetchAborted) {
             hidePanoStatus();
             return;
         }
 
-        if (rawFeatures && rawFeatures.length > 0) {
-            const demuxed = demuxFeatures(rawFeatures);
-            if (demuxed.zu.length > 0) await drawFoundParcels(demuxed.zu, true);
-            if (demuxed.oks.length > 0) await processAndDrawBuildings(demuxed.oks);
-            if (demuxed.structure.length > 0) await processAndDrawStructures(demuxed.structure);
+        const cat = categories[i];
+        
+        try {
+            const rawFeatures = await searchObjectsByArea(box3857, cat.id);
+            
+            if (isPanoFetchAborted) {
+                hidePanoStatus();
+                return;
+            }
+
+            if (rawFeatures && rawFeatures.length > 0) {
+                if (cat.type === 'zu') {
+                    await drawFoundParcels(rawFeatures, true);
+                } else if (cat.type === 'oks') {
+                    await processAndDrawBuildings(rawFeatures);
+                } else if (cat.type === 'structure') {
+                    await processAndDrawStructures(rawFeatures);
+                }
+            }
+        } catch (e) {
+            console.warn("Ошибка фоновой загрузки НСПД:", e);
         }
-    } catch (e) {
-        console.warn("Ошибка фоновой загрузки НСПД для панорам:", e);
+
+        if (i < categories.length - 1) {
+            await new Promise(r => setTimeout(r, 800));
+        }
     }
 
     hidePanoStatus();
 
+    
     if (currentPanoCoords) {
         updateGooglePanoHouseNumbers(currentPanoCoords.mapLat, currentPanoCoords.mapLon);
         renderGooglePanoCadastralMarkers();
@@ -40015,7 +40051,7 @@ function updateMainMapCrosshair(coords, syncMapCenter = false) {
         }
     }
 
-    
+    // Мягко доводим основную карту только если прицел вышел за пределы экрана
     if (syncMapCenter && map) {
         const bounds = map.getBounds();
         if (bounds && (coords[0] < bounds[0][0] || coords[0] > bounds[1][0] || coords[1] < bounds[0][1] || coords[1] > bounds[1][1])) {
@@ -40029,7 +40065,7 @@ function setupMagnifierMapListeners() {
     if (!map || map._magListenersAttached) return;
     map._magListenersAttached = true;
 
-    
+    // ПК: плавное слежение мыши без перегрузки DOM
     map.events.add('mousemove', (e) => {
         if (!isMapMagnifierOpen || isMagnifierFrozen) return;
         const coords = e.get('coords');
@@ -40039,7 +40075,7 @@ function setupMagnifierMapListeners() {
         }
     });
 
-    
+    // ПК и Планшет: клик/тап по свободной карте
     map.events.add('click', (e) => {
         if (!isMapMagnifierOpen) return;
         const coords = e.get('coords');
@@ -40049,7 +40085,7 @@ function setupMagnifierMapListeners() {
         }
     });
 
-    
+    // ПК и Планшет: клик/тап по объектам (полигонам, линиям, меткам)
     if (map.geoObjects) {
         map.geoObjects.events.add('click', (e) => {
             if (!isMapMagnifierOpen) return;
@@ -40084,8 +40120,8 @@ function handleMainMapPointSelect(coords, isTouch = false) {
     currentMouseMapCoords = coords;
     requestMagnifierSync(coords);
 
-    
-    
+    // На ПК (мышь): заморозка на 5 сек, чтобы довести курсор до окна
+    // На планшете (тач): без заморозки, мгновенно реагирует на каждый новый тап
     if (!isTouch) {
         freezeMagnifier(5000);
     } else {
@@ -40096,7 +40132,7 @@ function handleMainMapPointSelect(coords, isTouch = false) {
         }
     }
 
-    
+    // Вспышка рамки окна лупы
     const win = document.getElementById('mapMagnifierWindow');
     if (win) {
         win.classList.remove('mag-freeze-flash');
@@ -40330,7 +40366,7 @@ function openMapMagnifier() {
 
             applyMagnifierMapType();
 
-            
+            // При перетаскивании лупы двигаем только крестик прицела на основной карте (без рывков)
             mapMagnifierInstance.events.add('actiontick', () => {
                 const center = mapMagnifierInstance.getCenter();
                 if (center) {
@@ -40478,7 +40514,7 @@ function requestMagnifierSync(coords) {
                 mapMagnifierInstance.setCenter(pendingMagCoords, zoom, { duration: 0 });
                 applyMagnifierGoogleOffset();
                 updateMagnifierCoordinatesDisplay(pendingMagCoords);
-                
+                // Обновление прицела строго синхронизировано с кадрами экрана (убирает рывки)
                 updateMainMapCrosshair(pendingMagCoords, false);
             }
         });
