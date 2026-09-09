@@ -4475,7 +4475,9 @@ body:has(#parcel-results-sidebar.collapsed:not(.hidden)) #map-magnifier-quick-wr
 
      <div id="map"></div>
      
- 
+     <button id="google-sv-btn" class="google-sv-btn" title="Включить синие линии панорам Google">
+         <i class="fas fa-street-view"></i>
+     </button>
      
      <div class="offset-dropdown-wrapper" id="offset-dropdown-wrapper">
          <button id="auto-offset-btn" class="google-sv-btn" style="display: flex; position: relative; top: 0; right: 0;" title="Параметры">
@@ -5312,128 +5314,72 @@ const FIXED_CATEGORY_COLORS = {
 };
 
 
-const failedCadastralCache = new Set(); 
+let nspdRequestQueue = Promise.resolve();
+let geocoderPinkMarker = null;
 
-class NspdQueueManager {
-    constructor() {
-        this.queue = [];
-        this.isProcessing = false;
-        this.isLocked = false;
-        this.lockUntil = 0;
-        this.consecutiveFailures = 0;
-        this.FAILURE_THRESHOLD = 3;   
-        this.COOLDOWN_MS = 30000;     
-        this.MIN_INTERVAL_MS = 1200;  
-    }
+const MIN_NSPD_INTERVAL = 700; 
 
-    
-    trip(reason, status) {
-        this.isLocked = true;
-        this.lockUntil = Date.now() + this.COOLDOWN_MS;
-        console.warn(`[NspdQueue] Предохранитель сработал: ${reason}. Пауза ${this.COOLDOWN_MS / 1000}с.`);
+window.isPanoramaOpen = false;
 
-        const droppedCount = this.queue.length;
-        while (this.queue.length > 0) {
-            const task = this.queue.shift();
-            task.reject(new Error(`Очередь сброшена: сработал предохранитель (${status || reason})`));
-        }
+let lastNspdErrorTime = 0;
+let lastNspdErrorStatus = null;
 
-        if (typeof showNotification === 'function') {
-            showNotification(
-                `Превышен лимит запросов (${status || 'Ошибка'}). Все фоновые запросы отменены. Пауза 30 сек.`,
-                'error',
-                'exclamation-triangle',
-                6000
-            );
-        }
-    }
+async function fetchNspd(url, options = {}) {
+    return new Promise((resolve, reject) => {
+        nspdRequestQueue = nspdRequestQueue.then(async () => {
+            try {
+                await new Promise(r => setTimeout(r, MIN_NSPD_INTERVAL));
 
-    enqueue(url, options) {
-        return new Promise((resolve, reject) => {
-            if (this.isLocked) {
-                if (Date.now() < this.lockUntil) {
-                    return reject(new Error('Сетевой шлюз временно заблокирован предохранителем'));
+                let response;
+                if (isMobileProxyMode) {
+                    try {
+                        const urlObject = new URL(url);
+                        const mapruProxyUrl = `https://mapruapp.ru/api/sync${urlObject.pathname}${urlObject.search}`;
+                        
+                        const newOptions = { ...options };
+                        const headers = new Headers(newOptions.headers || {});
+                        headers.set('x-sync-host', 'https://nspd.gov.ru');
+                        newOptions.headers = headers;
+
+                        response = await fetch(mapruProxyUrl, newOptions);
+                    } catch (proxyError) {
+                        console.error("[MobileProxy] Ошибка:", proxyError);
+                    }
                 }
-                this.isLocked = false;
-                this.consecutiveFailures = 0;
-            }
 
-            this.queue.push({ url, options, resolve, reject });
-            this.processNext();
-        });
-    }
+                if (!response) {
+                    response = await fetch(url, options);
+                }
 
-    async processNext() {
-        if (this.isProcessing || this.queue.length === 0) return;
-        this.isProcessing = true;
-
-        const task = this.queue.shift();
-
-        try {
-            
-            await new Promise(r => setTimeout(r, this.MIN_INTERVAL_MS));
-
-            let response;
-            if (typeof isMobileProxyMode !== 'undefined' && isMobileProxyMode) {
-                try {
-                    const urlObject = new URL(task.url);
-                    const mapruProxyUrl = `https://mapruapp.ru/api/sync${urlObject.pathname}${urlObject.search}`;
+                
+                if (response.status === 403 || response.status === 429 || response.status === 502 || response.status === 503) {
+                    lastNspdErrorStatus = response.status;
+                    const now = Date.now();
                     
-                    const newOptions = { ...task.options };
-                    const headers = new Headers(newOptions.headers || {});
-                    headers.set('x-sync-host', 'https://nspd.gov.ru');
-                    newOptions.headers = headers;
-
-                    response = await fetch(mapruProxyUrl, newOptions);
-                } catch (proxyError) {
-                    console.error("[MobileProxy] Ошибка:", proxyError);
+                    if (now - lastNspdErrorTime > 3000) {
+                        lastNspdErrorTime = now;
+                        showNotification('Сервис временно недоступен. Попробуйте, пожалуйста, позже', 'error', 'exclamation-circle', 5000);
+                    }
+                } else if (response.ok) {
+                    lastNspdErrorStatus = null;
                 }
-            }
 
-            if (!response) {
-                response = await fetch(task.url, task.options);
-            }
+                resolve(response);
 
-            
-            if (response.status === 429 || response.status === 403 || response.status === 503) {
-                this.trip(`HTTP ${response.status}`, response.status);
-                task.resolve(response);
-                return;
-            }
-
-            if (response.status >= 500) {
-                this.consecutiveFailures++;
-                if (this.consecutiveFailures >= this.FAILURE_THRESHOLD) {
-                    this.trip('Серия ошибок 5xx сервера', response.status);
+            } catch (error) {
+                console.error("Fetch failed:", error);
+                lastNspdErrorStatus = 500;
+                const now = Date.now();
+                if (now - lastNspdErrorTime > 3000) {
+                    lastNspdErrorTime = now;
+                    showNotification('Сервис временно недоступен. Попробуйте, пожалуйста, позже', 'error', 'exclamation-circle', 5000);
                 }
-            } else {
-                this.consecutiveFailures = 0;
+                resolve(new Response(JSON.stringify({ error: `Request failed: ${error.message}` }), {
+                    status: 502, headers: { 'Content-Type': 'application/json' }
+                }));
             }
-
-            task.resolve(response);
-
-        } catch (error) {
-            this.consecutiveFailures++;
-            if (this.consecutiveFailures >= this.FAILURE_THRESHOLD) {
-                this.trip('Разрыв соединения', 502);
-            }
-            task.resolve(new Response(JSON.stringify({ error: error.message }), {
-                status: 502, headers: { 'Content-Type': 'application/json' }
-            }));
-        } finally {
-            this.isProcessing = false;
-            
-            if (this.queue.length > 0 && !this.isLocked) {
-                this.processNext();
-            }
-        }
-    }
-}
-
-const nspdQueueManager = new NspdQueueManager();
-
-function fetchNspd(url, options = {}) {
-    return nspdQueueManager.enqueue(url, options);
+        });
+    });
 }
 
 function setLoadedObjectOpacity(opacity) {
@@ -8022,7 +7968,8 @@ if (landCategoryLegendList) {
 
 
 
-window.isStreetViewActive = false;
+const savedSvState = localStorage.getItem('isStreetViewActive');
+window.isStreetViewActive = savedSvState === null ? true : savedSvState === 'true';
 
 const svBtn = document.getElementById('google-sv-btn');
 
@@ -8239,24 +8186,11 @@ orangePegmanLayout = ymaps.templateLayoutFactory.createClass(
 });
 
 
-
 async function fetchCadastralData(cadastralNumber) {
-    if (!cadastralNumber) return null;
-    
-    
-    if (failedCadastralCache.has(cadastralNumber)) {
-        return null;
-    }
-
     const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(cadastralNumber)}`;
 
     try {
         const response = await fetchNspd(url);
-
-        if (response.status === 404) {
-            failedCadastralCache.add(cadastralNumber);
-            return null;
-        }
 
         if (!response.ok) {
             console.warn(`Запрос для ${cadastralNumber} завершился со статусом ${response.status}`);
@@ -8268,7 +8202,6 @@ async function fetchCadastralData(cadastralNumber) {
         if (data && data.data && data.data.features && data.data.features.length > 0) {
             return data.data.features[0];
         } else {
-            failedCadastralCache.add(cadastralNumber);
             return null;
         }
     } catch (error) {
@@ -11202,28 +11135,60 @@ if (event.target.id === 'find-on-map-menu-item') {
     contextMenu.style.display = 'none';
 }
 
-         if (event.target.id === 'cadastre-menu-item') {
+           if (event.target.id === 'cadastre-menu-item') {
             const lat = parseFloat(contextMenu.dataset.lat);
             const lon = parseFloat(contextMenu.dataset.lon);
 
             try {
-                showLoader("Поиск участка...");
-                const cadastralData = await queryCadastralInfo(lat, lon);
-                const feature = cadastralData?.features?.[0];
-
-                if (!feature) {
-                    showNotification('Земельный участок в точке клика не найден', 'warning');
-                    contextMenu.style.display = 'none';
-                    hideLoader();
-                    return;
+                
+                async function tryGetCadastralData(latitude, longitude) {
+                    const cadastralData = await queryCadastralInfo(latitude, longitude);
+                    if (!cadastralData || !cadastralData.features || cadastralData.features.length === 0) {
+                        return null;
+                    }
+                    return cadastralData.features[0];
                 }
 
+                
+                let feature = await tryGetCadastralData(lat, lon);
+                let found = !!feature;
+                let attempts = 0;
+                const maxAttempts = 3;
+                const squareWidthMeters = 50;
+                const timeoutMs = 500;
+
+                if (!found) {
+                    const earthRadius = 6378137;
+                    const latRadians = lat * Math.PI / 180;
+                    const squareWidthLat = squareWidthMeters / earthRadius * (180 / Math.PI);
+                    const squareWidthLon = squareWidthMeters / (earthRadius * Math.cos(latRadians)) * (180 / Math.PI);
+
+                    while (!found && attempts < maxAttempts) {
+                        attempts++;
+                        const offsetLat = (Math.random() - 0.5) * squareWidthLat;
+                        const offsetLon = (Math.random() - 0.5) * squareWidthLon;
+                        const newLat = lat + offsetLat;
+                        const newLon = lon + offsetLon;
+                        feature = await tryGetCadastralData(newLat, newLon);
+                        found = !!feature;
+                        if (!found && attempts < maxAttempts) {
+                            await new Promise(resolve => setTimeout(resolve, timeoutMs));
+                        }
+                    }
+                }
+
+                if (!found) {
+                     showNotification('Данные не найдены, выберите для клика место с полигоном', 'error', 'exclamation-circle');
+                    contextMenu.style.display = 'none';
+                    return;
+                }
+                
+                
                 await drawFeatureFromNspd(feature);
+
             } catch (error) {
                 console.error('Ошибка при получении участка:', error);
-                showNotification('Ошибка подключения, попробуйте позже', 'error');
-            } finally {
-                hideLoader();
+                showNotification('Ошибка подключения, попробуйте позже', 'error', 'exclamation-circle');
             }
             contextMenu.style.display = 'none';
         }
@@ -16498,7 +16463,38 @@ async function generateObjectPassportHtml() {
         const today = new Date().toLocaleDateString('ru-RU');
 
         
-   const linkedCns = feature._linkedOksCache || [];
+        const linkedCns = feature._linkedOksCache || [];
+        if (type === 'zu' && linkedCns.length > 0) {
+            for (let i = 0; i < linkedCns.length; i++) {
+                const oksCn = linkedCns[i];
+                let foundFeature = buildingFeaturesData.find(f => 
+                    f.properties?.options?.cad_num === oksCn || f.properties?.descr === oksCn
+                ) || structureFeaturesData.find(f => 
+                    f.properties?.options?.cad_number === oksCn || f.properties?.descr === oksCn
+                );
+
+                if (!foundFeature) {
+                    const matchedPoly = polygons.find(p => p instanceof ymaps.Polygon && p.properties.get('cadastralNumber') === oksCn);
+                    if (matchedPoly) foundFeature = matchedPoly.properties.get('featureData');
+                }
+
+                if (!foundFeature) {
+                    try {
+                        const fetchedFeature = await fetchCadastralData(oksCn);
+                        if (fetchedFeature) {
+                            const category = fetchedFeature.properties?.category;
+                            if (category === 36369) {
+                                buildingFeaturesData.push(fetchedFeature);
+                            } else if (category === 36383) {
+                                structureFeaturesData.push(fetchedFeature);
+                            }
+                        }
+                    } catch (e) {
+                        console.error(`Ошибка фоновой загрузки OKS ${oksCn}:`, e);
+                    }
+                }
+            }
+        }
 
         const widgets = document.querySelectorAll('.widget, .map-mode-switcher, .input-container, .mobile-menu-btn, .camera-height-label, .map-legend, .raster-controls-panel, #dashboard-popover, #quick-report-panel');
         widgets.forEach(w => { if (w) w.style.display = 'none'; });
@@ -16983,12 +16979,53 @@ async function loadLinkedOksForPopover(feature) {
     let list = feature._linkedOksCache;
     if (!list) {
         try {
-          
             list = await fetchLinkedOks(cn, feature);
             feature._linkedOksCache = list || [];
         } catch (e) {
             if (el) el.innerHTML = '<span style="color:#ef4444;">Ошибка загрузки</span>';
             return;
+        }
+    }
+
+    
+    if (list && list.length > 0) {
+        for (let i = 0; i < list.length; i++) {
+            const oksCn = list[i];
+            const normOksCn = normalizeCadastralNumber(oksCn);
+            
+            let foundFeature = buildingFeaturesData.find(f => {
+                const fCn1 = f.properties?.options?.cad_num || '';
+                const fCn2 = f.properties?.descr || '';
+                return normalizeCadastralNumber(fCn1) === normOksCn || normalizeCadastralNumber(fCn2) === normOksCn;
+            }) || structureFeaturesData.find(f => {
+                const fCn1 = f.properties?.options?.cad_number || f.properties?.options?.cad_num || '';
+                const fCn2 = f.properties?.descr || '';
+                return normalizeCadastralNumber(fCn1) === normOksCn || normalizeCadastralNumber(fCn2) === normOksCn;
+            });
+
+            if (!foundFeature) {
+                const matchedObj = polygons.find(p => {
+                    const pCn = p.properties?.get('cadastralNumber') || '';
+                    return normalizeCadastralNumber(pCn) === normOksCn;
+                });
+                if (matchedObj) foundFeature = matchedObj.properties.get('featureData');
+            }
+
+            if (!foundFeature) {
+                try {
+                    const fetchedFeature = await fetchCadastralData(oksCn);
+                    if (fetchedFeature) {
+                        const category = fetchedFeature.properties?.category;
+                        if (category === 36369) {
+                            buildingFeaturesData.push(fetchedFeature);
+                        } else if (category === 36383) {
+                            structureFeaturesData.push(fetchedFeature);
+                        }
+                    }
+                } catch (e) {
+                    console.error(`Ошибка фоновой загрузки OKS ${oksCn}:`, e);
+                }
+            }
         }
     }
 
@@ -17000,11 +17037,9 @@ function renderLinkedOksInPopover(el, list) {
         el.innerHTML = '<span style="color:#888;">Не найдены</span>';
         return;
     }
-
     const items = list.map(oksCn => {
         const normOksCn = normalizeCadastralNumber(oksCn);
-
-      
+        
         let foundFeature = buildingFeaturesData.find(f => {
             const fCn1 = f.properties?.options?.cad_num || '';
             const fCn2 = f.properties?.descr || '';
@@ -17031,7 +17066,7 @@ function renderLinkedOksInPopover(el, list) {
             const isStructure = !!(opts.params_extension || opts.params_purpose || foundFeature.properties?.category === 36383);
             const areaUnit = isStructure && opts.params_extension ? 'м' : 'м²';
             const area = areaVal ? `${areaVal} ${areaUnit}` : '';
-
+            
             const year = opts.year_built || opts.params_year_built ? `${opts.year_built || opts.params_year_built} г.` : '';
             const floors = opts.floors ? `${opts.floors} эт.` : '';
             const cost = opts.cost_value ? `${Math.round(parseFloat(opts.cost_value)).toLocaleString('ru-RU')} руб.` : '';
@@ -17043,69 +17078,23 @@ function renderLinkedOksInPopover(el, list) {
 
             const detailsArr = [basicInfo, techInfo, legalInfo].filter(Boolean);
             if (detailsArr.length > 0) {
-                detailsText = `<span style="font-size: 10px; font-weight: normal; color: #4b5563; display: block; margin-top: 3px; line-height: 1.3;">${detailsArr.join(' | ')}</span>`;
+                detailsText = ` <span style="font-size: 10px; font-weight: normal; color: #4b5563; display: block; margin-top: 3px; line-height: 1.3;">${detailsArr.join(' | ')}</span>`;
             }
         }
 
-      
-        const infoBtnHtml = !foundFeature 
-            ? `<i class="fas fa-info-circle" style="cursor:pointer; color:#3b82f6;" title="Загрузить сведения" onclick="fetchSingleOksInfo('${oksCn}', this)"></i>`
-            : '';
-
         return `
-            <span class="popover-oks-badge" data-cn="${oksCn}" style="display:inline-flex; flex-direction: column; align-items:flex-start; gap:2px; background:#eff6ff; border:1px solid #3b82f6; color:#1d4ed8; padding:5px 9px; border-radius:6px; font-weight:bold; margin:3px; font-size:11px; box-shadow: 0 1px 2px rgba(0,0,0,0.05); width: calc(100% - 6px); box-sizing: border-box;">
+            <span style="display:inline-flex; flex-direction: column; align-items:flex-start; gap:2px; background:#eff6ff; border:1px solid #3b82f6; color:#1d4ed8; padding:5px 9px; border-radius:6px; font-weight:bold; margin:3px; font-size:11px; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
                 <span style="display: flex; align-items: center; gap: 6px; width: 100%;">
                     ${oksCn}
                     <i class="fas fa-copy" style="cursor:pointer;" title="Скопировать" onclick="copyPanoText('${oksCn}')"></i>
                     <i class="fas fa-file-alt" style="cursor:pointer;" title="Открыть ЕГРН" onclick="openEgrnPage('${oksCn}')"></i>
-                    ${infoBtnHtml}
                 </span>
                 ${detailsText}
             </span>
         `;
     }).join('');
-
-    el.innerHTML = `<div style="display:flex; flex-direction:column; gap:4px; max-height:220px; overflow-y:auto; padding-right:2px;">${items}</div>`;
+    el.innerHTML = `<div style="display:flex; flex-wrap:wrap; gap:4px;">${items}</div>`;
 }
-
-
-window.fetchSingleOksInfo = async function(oksCn, iconEl) {
-    if (!oksCn || iconEl.dataset.loading === 'true') return;
-    iconEl.dataset.loading = 'true';
-
-    const originalClass = iconEl.className;
-    iconEl.className = 'fas fa-spinner fa-spin';
-
-    try {
-        const feature = await fetchCadastralData(oksCn);
-        if (feature && feature.properties) {
-            const category = feature.properties?.category;
-            if (category === 36369) {
-                buildingFeaturesData.push(feature);
-            } else if (category === 36383) {
-                structureFeaturesData.push(feature);
-            } else {
-                buildingFeaturesData.push(feature);
-            }
-
-            
-            const popoverEl = document.getElementById('popover-linked-oks');
-            if (popoverEl && window.currentPopoverFeature?._linkedOksCache) {
-                renderLinkedOksInPopover(popoverEl, window.currentPopoverFeature._linkedOksCache);
-            }
-        } else {
-            iconEl.className = 'fas fa-exclamation-circle';
-            iconEl.style.color = '#94a3b8';
-            iconEl.title = 'Сведения отсутствуют в ЕГРН';
-        }
-    } catch (e) {
-        iconEl.className = 'fas fa-exclamation-circle';
-        iconEl.style.color = '#ef4444';
-        iconEl.title = 'Ошибка загрузки';
-    } finally {
-        iconEl.dataset.loading = 'false';
-    }
-};
 
 
 function hideDashboardPopover() {
@@ -17735,57 +17724,83 @@ async function drawAdditionalZonesForReport(features) {
 
 
 async function enrichDashboardLayer(layerType, panelElement) {
+   
     const items = panelElement.querySelectorAll(`.bd-item[data-type="${layerType}"]`);
     if (items.length === 0) return;
 
     let successCount = 0;
-    let queryCount = 0;
-    const MAX_ENRICH_PER_CLICK = 3;
 
     for (const item of items) {
-        if (queryCount >= MAX_ENRICH_PER_CLICK) break;
-
         const cn = item.dataset.cn;
+        
+       
         if (!cn || !cn.includes(':')) continue;
 
         const descSpan = item.querySelector('.bd-item-desc');
-        if (descSpan && (descSpan.innerHTML.includes('Площадь:') || descSpan.innerHTML.includes('Протяженность:'))) {
-            continue;
-        }
-
-        queryCount++;
         const originalText = descSpan.innerHTML;
-        descSpan.innerHTML = `<span style="color:#f59e0b; font-size: 0.9em;"><i class="fas fa-spinner fa-spin"></i> Запрос...</span>`;
+        
+      
+        const iconsMatch = originalText.match(/^(<i[^>]*><\/i>\s*)+/i); 
+        const iconsHtml = iconsMatch ? iconsMatch[0] : '';
+
+       
+        descSpan.innerHTML = `${iconsHtml} <span style="color:#f59e0b; font-size: 0.9em;">Загрузка данных...</span>`;
 
         try {
+         
             const feature = await fetchCadastralData(cn);
+
             if (feature && feature.properties) {
                 const opts = feature.properties.options || {};
+                
+             
                 let newDescParts = [];
+                
+            
                 const name = opts.name || opts.params_name || opts.building_name || opts.purpose;
                 if (name) newDescParts.push(`<b>${name}</b>`);
-                if (opts.build_record_area) newDescParts.push(`Площадь: ${opts.build_record_area} м²`);
-                else if (opts.params_extension) newDescParts.push(`Протяженность: ${opts.params_extension} м`);
+                
+              
+                if (opts.build_record_area) {
+                    newDescParts.push(`Площадь: ${opts.build_record_area} м²`);
+                } 
+              
+                else if (opts.params_extension) {
+                    newDescParts.push(`Протяженность: ${opts.params_extension} м`);
+                }
 
+           
                 if (newDescParts.length > 0) {
-                    descSpan.innerHTML = newDescParts.join('<br>');
+                    descSpan.innerHTML = iconsHtml + newDescParts.join('<br>');
+                    
+                
+                    const globalArr = (layerType === 'oks') ? buildingFeaturesData : structureFeaturesData;
+                    const existingFeatureIndex = globalArr.findIndex(f => 
+                        (f.properties?.options?.cad_num === cn) || (f.properties?.descr === cn)
+                    );
+                    
+                    if (existingFeatureIndex !== -1) {
+                   
+                        globalArr[existingFeatureIndex].properties.options = {
+                            ...globalArr[existingFeatureIndex].properties.options,
+                            ...opts
+                        };
+                    }
+                    
                     successCount++;
                 } else {
-                    descSpan.innerHTML = "Нет данных в ЕГРН";
+                    descSpan.innerHTML = iconsHtml + "Нет детальных данных";
                 }
             } else {
-                descSpan.innerHTML = "Объект не найден";
+                descSpan.innerHTML = iconsHtml + "Данные не найдены";
             }
         } catch (e) {
-            descSpan.innerHTML = originalText;
+            console.error(`Ошибка обновления ${cn}:`, e);
+            descSpan.innerHTML = iconsHtml + "Ошибка запроса"; 
         }
     }
-
-    if (queryCount === 0) {
-        showNotification('Все объекты в списке уже содержат подробные сведения', 'info');
-    } else {
-        showNotification(`Обновлено ${successCount} из ${queryCount} запрошенных объектов`, 'success');
-    }
+    
+    showNotification(`Обновлено объектов: ${successCount}`, 'success');
 }
 
 
@@ -18128,14 +18143,15 @@ function renderClipboardList(numbers) {
     const listContainer = document.getElementById('clipboardList');
     listContainer.innerHTML = '';
     
-    numbers.forEach((num, index) => {
+    numbers.forEach(num => {
         const item = document.createElement('div');
         item.className = 'clipboard-list-item';
         
         const checkbox = document.createElement('input');
         checkbox.type = 'checkbox';
         checkbox.value = num;
-        checkbox.checked = index < 3;
+        checkbox.checked = true; 
+        
         
         const label = document.createElement('label');
         label.textContent = num;
@@ -18143,47 +18159,35 @@ function renderClipboardList(numbers) {
         item.appendChild(checkbox);
         item.appendChild(label);
         
-        const handleCheckChange = () => {
-            const currentlyChecked = listContainer.querySelectorAll('input[type="checkbox"]:checked').length;
-            if (checkbox.checked && currentlyChecked > 3) {
-                checkbox.checked = false;
-                showNotification('Максимум 3 объекта для одновременной загрузки', 'warning');
-            }
-            updateBatchButton();
-        };
-
+        
         item.addEventListener('click', (e) => {
+            
             if (e.target !== checkbox) {
                 checkbox.checked = !checkbox.checked;
-                handleCheckChange();
+                updateBatchButton();
             }
         });
         
-        checkbox.addEventListener('change', handleCheckChange);
+        
+        checkbox.addEventListener('change', updateBatchButton);
+        
         listContainer.appendChild(item);
     });
     
     updateBatchButton();
     
-    const selectBtn = document.getElementById('clipSelectAllBtn');
-    if (selectBtn) {
-        selectBtn.textContent = 'Первые 3';
-        selectBtn.onclick = () => {
-            listContainer.querySelectorAll('input[type="checkbox"]').forEach((cb, idx) => {
-                cb.checked = idx < 3;
-            });
-            updateBatchButton();
-        };
-    }
     
-    const deselectBtn = document.getElementById('clipDeselectAllBtn');
-    if (deselectBtn) {
-        deselectBtn.onclick = () => {
-            listContainer.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
-            updateBatchButton();
-        };
-    }
-
+    document.getElementById('clipSelectAllBtn').onclick = () => {
+        listContainer.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = true);
+        updateBatchButton();
+    };
+    
+    document.getElementById('clipDeselectAllBtn').onclick = () => {
+        listContainer.querySelectorAll('input[type="checkbox"]').forEach(cb => cb.checked = false);
+        updateBatchButton();
+    };
+    
+    
     const loadBtn = document.getElementById('batchLoadBtn');
     const newLoadBtn = loadBtn.cloneNode(true); 
     loadBtn.parentNode.replaceChild(newLoadBtn, loadBtn);
@@ -18210,43 +18214,42 @@ function updateBatchButton() {
 
 async function handleBatchLoad(selectedNumbers) {
     closeClipboardDialog();
-    
-    const numbersToLoad = selectedNumbers.slice(0, 3);
+    const numbersToLoad = selectedNumbers.slice(0, 20);
+    if (selectedNumbers.length > 20) {
+        showNotification(`Будет загружено первых 20 из ${selectedNumbers.length} объектов.`, 'warning');
+    }
     showLoader(`Загрузка ${numbersToLoad.length} объектов...`);
-
     const allFeatures = [];
     const failedNumbers = [];
-
-    for (let i = 0; i < numbersToLoad.length; i++) {
-        const cadNum = numbersToLoad[i];
-        const loadingText = document.querySelector('.loading-text');
-        if (loadingText) loadingText.textContent = `Загрузка (${i + 1}/${numbersToLoad.length}): ${cadNum}`;
-
+    const fetchPromises = numbersToLoad.map(async (cadNum, index) => {
         try {
+            const loadingText = document.querySelector('.loading-text');
+            if (loadingText) loadingText.textContent = `Загрузка ${index + 1}/${numbersToLoad.length}: ${cadNum}`;
             const feature = await fetchCadastralData(cadNum);
-            if (feature && feature.geometry) {
+            if (feature) {
                 allFeatures.push(feature);
             } else {
                 failedNumbers.push(cadNum);
             }
         } catch (error) {
+            console.error(`Ошибка загрузки ${cadNum}:`, error);
             failedNumbers.push(cadNum);
         }
-    }
-
+    });
+    await Promise.all(fetchPromises);
     clearMapAndResetTheme();
     if (allFeatures.length > 0) {
         await processAndDrawParcels(allFeatures, 'areaSearch');
-        await populateSidebarWithFoundObjects(allFeatures, 'Загружено из списка');
+        await populateSidebarWithFoundObjects(allFeatures, `Загружено из списка`);
     }
-
     hideLoader();
     if (failedNumbers.length === 0) {
-        showNotification(`Успешно загружено объектов: ${allFeatures.length}`, 'success');
+        showNotification(`Успешно загружено ${allFeatures.length} объектов.`, 'success');
     } else {
         showNotification(`Загружено: ${allFeatures.length}. Не найдено: ${failedNumbers.length}.`, 'warning');
     }
 }
+
 
 
 
@@ -28273,59 +28276,73 @@ async function findParcelInArchive(targetCadastralNumber) {
 
 async function getQuarterCadastre(lat, lon) {
     showLoader("Определение квартала...");
-
+    
     try {
-        const { x: pointX, y: pointY } = toEPSG3857(lat, lon);
-        const quarterInfo = await findQuarterByPointSupabase(pointX, pointY);
-
-        if (quarterInfo && quarterInfo.found_quarter_number) {
-            const qNum = quarterInfo.found_quarter_number;
-
-            if (isZeroQuarterRequest(qNum)) {
-                showNotification('Нулевой квартал не отображается', 'warning');
-                return;
+      
+        async function tryGetQuarterNumber(latitude, longitude) {
+            const cadastralData = await queryCadastralInfo(latitude, longitude);
+            if (!cadastralData || !cadastralData.features || cadastralData.features.length === 0) {
+                return null;
             }
-
-            if (quarterInfo.quarter_geometry_geojson) {
-                drawQuarterFromGeoJson(qNum, quarterInfo.quarter_geometry_geojson, '#FF0000');
-                showNotification(`Границы квартала ${qNum} загружены из базы Supabase`, 'success');
-                return;
+            
+            const feature = cadastralData.features[0];
+            const cadastralNumber = feature.properties?.descr;
+            if (!cadastralNumber || cadastralNumber.split(':').length < 3) { 
+                return null;
             }
-
-            showLoader(`Загрузка границ ${qNum}...`);
-            await drawCadastralQuarter(qNum);
-            return;
+            return cadastralNumber.split(':').slice(0, 3).join(':');
         }
 
-        const cadastralData = await queryCadastralInfo(lat, lon);
-        const cn = cadastralData?.features?.[0]?.properties?.descr;
+       
+        let quarterNumber = await tryGetQuarterNumber(lat, lon);
+        let attempts = 0;
+        const maxAttempts = 3;
+        const squareWidthMeters = 50;
 
-        if (!cn || cn.split(':').length < 3) {
-            showNotification('Кадастровый квартал в этой точке не найден', 'warning');
-            return;
-        }
+     
+        if (!quarterNumber) {
+            const earthRadius = 6378137; 
+            const latRadians = lat * Math.PI / 180;
+            const squareWidthLat = squareWidthMeters / earthRadius * (180 / Math.PI);
+            const squareWidthLon = squareWidthMeters / (earthRadius * Math.cos(latRadians)) * (180 / Math.PI);
 
-        const qNum = cn.split(':').slice(0, 3).join(':');
+            while (!quarterNumber && attempts < maxAttempts) {
+                attempts++;
+                const offsetLat = (Math.random() - 0.5) * squareWidthLat;
+                const offsetLon = (Math.random() - 0.5) * squareWidthLon;
 
-        if (isZeroQuarterRequest(qNum)) {
-            showNotification('Нулевой квартал не отображается', 'warning');
-            return;
-        }
-
-        showLoader(`Загрузка границ ${qNum}...`);
-        const poly = await drawCadastralQuarter(qNum);
-
-        if (poly && typeof fetchNSPDQuarterGeometry === 'function') {
-            fetchNSPDQuarterGeometry(qNum).then(qFeature => {
-                if (qFeature?.geometry) {
-                    saveQuarterGeometryToSupabase(qNum, qFeature.geometry);
+                quarterNumber = await tryGetQuarterNumber(lat + offsetLat, lon + offsetLon);
+                if (!quarterNumber && attempts < maxAttempts) {
+                    await new Promise(resolve => setTimeout(resolve, 300));
                 }
-            });
+            }
         }
+
+   
+        if (!quarterNumber) {
+            console.log('[getQuarterCadastre] Участок не найден. Запрос квартала по координатам ...');
+            const { x: pointX, y: pointY } = toEPSG3857(lat, lon);
+            const quarterInfoFromSupabase = await findQuarterByPointSupabase(pointX, pointY);
+
+            if (quarterInfoFromSupabase && quarterInfoFromSupabase.found_quarter_number) {
+                quarterNumber = quarterInfoFromSupabase.found_quarter_number;
+                console.log(`[getQuarterCadastre] Квартал успешно определен через Supabase: ${quarterNumber}`);
+            }
+        }
+
+       
+        if (!quarterNumber) {
+            showNotification('Не удалось определить кадастровый квартал в этой точке', 'error', 'exclamation-circle');
+            return;
+        }
+
+ 
+        showLoader(`Загрузка границ квартала ${quarterNumber}...`);
+        await drawCadastralQuarter(quarterNumber);
 
     } catch (error) {
-        console.error('Ошибка в getQuarterCadastre:', error);
-        showNotification('Ошибка при получении границ квартала', 'error');
+        console.error('Ошибка при получении квартала:', error);
+        showNotification('Ошибка подключения, попробуйте позже', 'error', 'exclamation-circle');
     } finally {
         hideLoader();
     }
@@ -33735,7 +33752,7 @@ async function ensureEzMetadataLoaded(ezList) {
                     }
                 }
             } catch (e) {
-                console.error(`[Export EZ] Ошибка запроса для ${ezCn}:`, e);
+                console.error(`[Export EZ] Ошибка запроса НСПД для ${ezCn}:`, e);
             }
             await new Promise(resolve => setTimeout(resolve, 300));
         }
@@ -34524,11 +34541,23 @@ async function handleObjectInfoAction(lat, lon) {
 
         if (zuFeatureData) {
             const zuCn = zuFeatureData.properties?.descr || zuFeatureData.properties?.options?.cad_num;
-         if (zuCn) {
-          
-            const linkedCns = await fetchLinkedOks(zuCn, zuFeatureData);
-            zuFeatureData._linkedOksCache = linkedCns || [];
-        }
+            if (zuCn) {
+                showLoader("Загрузка связанных ОКС...");
+                
+                const linkedCns = await fetchLinkedOks(zuCn, zuFeatureData);
+                
+                
+                zuFeatureData._linkedOksCache = linkedCns || [];
+
+                if (linkedCns && linkedCns.length > 0) {
+                    for (const oksCn of linkedCns) {
+                        const oksFeature = await fetchCadastralData(oksCn);
+                        if (oksFeature && oksFeature.geometry) {
+                            await processAndDrawBuildings([oksFeature]);
+                        }
+                    }
+                }
+            }
 
             const globalPx = map.options.get('projection').toGlobalPixels([lat, lon], map.getZoom());
             const pagePx = map.converter.globalToPage(globalPx);
@@ -38289,7 +38318,6 @@ function showPanoInfoCard(item, buildingInfo, parcelInfo, structureInfo) {
 }
 
 async function fetchNearbyCategoryData(mapLat, mapLon) {
-    return;
     if (googlePanoHouseMode < 2 || !mapLat || !mapLon) return;
 
     if (lastPanoFetchCenter) {
@@ -38328,7 +38356,7 @@ async function fetchNearbyCategoryData(mapLat, mapLon) {
             if (demuxed.structure.length > 0) await processAndDrawStructures(demuxed.structure);
         }
     } catch (e) {
-        console.warn("Ошибка фоновой загрузки для панорам:", e);
+        console.warn("Ошибка фоновой загрузки НСПД для панорам:", e);
     }
 
     hidePanoStatus();
@@ -39187,7 +39215,7 @@ async function loadEzDataAndApplyAccess(ezList, options, forceNspd = false) {
         ezToFetchFromNspd = [...ezList];
     }
     if (ezToFetchFromNspd.length > 0) {
-        showLoader("Запрос ...");
+        showLoader("Запрос к НСПД...");
         for (let i = 0; i < ezToFetchFromNspd.length; i++) {
             const ezCn = ezToFetchFromNspd[i];
             const loaderText = document.querySelector('.loading-text');
