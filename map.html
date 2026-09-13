@@ -7954,7 +7954,7 @@ let advDotLayout;
 let advTextLayout;
 
 document.addEventListener('DOMContentLoaded', async () => {
-    
+    cleanExpiredFastCacheOnce(); 
     
     
 if ('serviceWorker' in navigator) {
@@ -8339,39 +8339,59 @@ orangePegmanLayout = ymaps.templateLayoutFactory.createClass(
 
 async function fetchCadastralData(cadastralNumber) {
     if (!cadastralNumber) return null;
-    
-    
+
+    const cacheKey = `cad_${cadastralNumber.trim()}`;
+
+    // 1. Проверяем готовый кэш
+    const cached = await getFastCache(cacheKey);
+    if (cached !== null) {
+        return cached === '__404__' ? null : cached;
+    }
+
     if (failedCadastralCache.has(cadastralNumber)) {
         return null;
     }
 
-    const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(cadastralNumber)}`;
-
-    try {
-        const response = await fetchNspd(url);
-
-        if (response.status === 404) {
-            failedCadastralCache.add(cadastralNumber);
-            return null;
-        }
-
-        if (!response.ok) {
-            console.warn(`Запрос для ${cadastralNumber} завершился со статусом ${response.status}`);
-            return response.status === 403 ? { isError: true, status: 403 } : null;
-        }
-
-        const data = await response.json();
-
-        if (data && data.data && data.data.features && data.data.features.length > 0) {
-            return data.data.features[0];
-        } else {
-            failedCadastralCache.add(cadastralNumber);
-            return null;
-        }
-    } catch (error) {
-        console.error(`Ошибка при получении данных для ${cadastralNumber}:`, error);
-        return { isError: true }; 
+    // 2. Если такой запрос прямо сейчас летит по сети — ждём его, а не шлём второй
+    if (inFlightRequests.has(cacheKey)) {
+        return await inFlightRequests.get(cacheKey);
     }
+
+    const fetchPromise = (async () => {
+        const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(cadastralNumber)}`;
+        try {
+            const response = await fetchNspd(url);
+
+            if (response.status === 404) {
+                failedCadastralCache.add(cadastralNumber);
+                await setFastCache(cacheKey, '__404__', 60 * 60 * 1000);
+                return null;
+            }
+
+            if (!response.ok) {
+                return response.status === 403 ? { isError: true, status: 403 } : null;
+            }
+
+            const data = await response.json();
+            if (data?.data?.features?.length > 0) {
+                const feature = data.data.features[0];
+                await setFastCache(cacheKey, feature, DEFAULT_CACHE_TTL);
+                return feature;
+            } else {
+                failedCadastralCache.add(cadastralNumber);
+                await setFastCache(cacheKey, '__404__', 60 * 60 * 1000);
+                return null;
+            }
+        } catch (error) {
+            console.error(`Ошибка при получении данных для ${cadastralNumber}:`, error);
+            return { isError: true };
+        } finally {
+            inFlightRequests.delete(cacheKey);
+        }
+    })();
+
+    inFlightRequests.set(cacheKey, fetchPromise);
+    return await fetchPromise;
 }
 
 
@@ -12514,7 +12534,158 @@ function copyPolygonWithMap(originalPolygon, strokeColor, opacityHex) {
 
 
 const LOCAL_DB_NAME = 'NspdLocalArchiveDB';
-const LOCAL_DB_VERSION = 2;
+const inFlightRequests = new Map();
+
+const LOCAL_DB_VERSION = 3.1;
+
+function openLocalDB() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open(LOCAL_DB_NAME, LOCAL_DB_VERSION);
+
+        req.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains('quarters_index')) {
+                db.createObjectStore('quarters_index', { keyPath: 'quarter_number' });
+            }
+            if (!db.objectStoreNames.contains('files_store')) {
+                db.createObjectStore('files_store', { keyPath: 'file_key' });
+            }
+            if (!db.objectStoreNames.contains('zones_store')) {
+                db.createObjectStore('zones_store', { keyPath: 'key' }); 
+            }
+            // Создание хранилища кэша
+            if (!db.objectStoreNames.contains('fast_cache')) {
+                const cacheStore = db.createObjectStore('fast_cache', { keyPath: 'key' });
+                cacheStore.createIndex('expire_idx', 'expireAt');
+            }
+        };
+
+        req.onsuccess = (e) => {
+            const db = req.result;
+
+            // Самовосстановление: если база открыта со старой структурой без fast_cache
+            if (!db.objectStoreNames.contains('fast_cache')) {
+                const nextVersion = db.version + 1;
+                db.close();
+                const upgradeReq = indexedDB.open(LOCAL_DB_NAME, nextVersion);
+                upgradeReq.onupgradeneeded = (ue) => {
+                    const udb = ue.target.result;
+                    if (!udb.objectStoreNames.contains('fast_cache')) {
+                        const cacheStore = udb.createObjectStore('fast_cache', { keyPath: 'key' });
+                        cacheStore.createIndex('expire_idx', 'expireAt');
+                    }
+                };
+                upgradeReq.onsuccess = () => resolve(upgradeReq.result);
+                upgradeReq.onerror = () => resolve(db); // fallback
+                return;
+            }
+
+            resolve(db);
+        };
+
+        req.onerror = () => reject(req.error);
+    });
+}
+
+// === МЕНЕДЖЕР ДВУХУРОВНЕВОГО КЭША (с защитой от отсутствия store) ===
+const memoryCacheL1 = new Map();
+const DEFAULT_CACHE_TTL = 4 * 60 * 60 * 1000; // 4 часа
+
+async function getFastCache(key) {
+    if (!key) return null;
+    const now = Date.now();
+
+    // 1. Проверяем L1 (оперативка)
+    if (memoryCacheL1.has(key)) {
+        const memItem = memoryCacheL1.get(key);
+        if (now < memItem.expireAt) {
+            return memItem.data;
+        }
+        memoryCacheL1.delete(key);
+    }
+
+    // 2. Проверяем L2 (IndexedDB)
+    try {
+        const db = await openLocalDB();
+        if (!db.objectStoreNames.contains('fast_cache')) return null;
+
+        const tx = db.transaction('fast_cache', 'readwrite');
+        const store = tx.objectStore('fast_cache');
+
+        const record = await new Promise(r => {
+            const req = store.get(key);
+            req.onsuccess = () => r(req.result);
+            req.onerror = () => r(null);
+        });
+
+        if (!record) return null;
+
+        if (now > record.expireAt) {
+            store.delete(key);
+            return null;
+        }
+
+        memoryCacheL1.set(key, { data: record.data, expireAt: record.expireAt });
+        return record.data;
+    } catch (e) {
+        return null;
+    }
+}
+
+async function setFastCache(key, data, ttl = DEFAULT_CACHE_TTL) {
+    if (!key) return;
+    const expireAt = Date.now() + ttl;
+
+    // В память пишем всегда мгновенно
+    memoryCacheL1.set(key, { data, expireAt });
+
+    // На диск пишем с проверкой существования таблицы
+    try {
+        const db = await openLocalDB();
+        if (!db.objectStoreNames.contains('fast_cache')) return;
+
+        const tx = db.transaction('fast_cache', 'readwrite');
+        tx.objectStore('fast_cache').put({
+            key: key,
+            data: data,
+            expireAt: expireAt
+        });
+    } catch (e) {
+        console.warn('[Cache] Ошибка записи в fast_cache:', e);
+    }
+}
+
+async function cleanExpiredFastCacheOnce() {
+    try {
+        const db = await openLocalDB();
+        if (!db.objectStoreNames.contains('fast_cache')) return;
+
+        const tx = db.transaction('fast_cache', 'readwrite');
+        const store = tx.objectStore('fast_cache');
+        const now = Date.now();
+        const index = store.index('expire_idx');
+        const range = IDBKeyRange.upperBound(now);
+
+        const req = index.openCursor(range);
+        req.onsuccess = (e) => {
+            const cursor = e.target.result;
+            if (cursor) {
+                store.delete(cursor.primaryKey);
+                cursor.continue();
+            }
+        };
+    } catch (e) {}
+}
+
+
+
+
+
+
+
+
+
+
 
 
 let isLocalArchiveQuickViewActive = false;
@@ -20708,26 +20879,24 @@ async function fetchZipFromLocalServer(bucketName, filePathInBucket) {
 
 async function fetchOksOnZuHandler(lat, lon) {
     showLoader("Поиск земельного участка...");
-    
     let zuCadastralNumberForDisplay = "Не удалось определить ЗУ";
 
     try {
-        
         const cadastralInfo = await queryCadastralInfo(lat, lon);
-        if (!cadastralInfo || !cadastralInfo.features || cadastralInfo.features.length === 0) {
+        if (!cadastralInfo?.features?.length) {
             throw new Error('Не удалось определить земельный участок в точке клика.');
         }
 
-        const zuFeature = cadastralInfo.features[0]; 
+        const zuFeature = cadastralInfo.features[0];
         const zuCadastralNumber = zuFeature.properties.descr;
         if (!zuCadastralNumber) {
             throw new Error('Не удалось получить кадастровый номер земельного участка.');
         }
-        
+
         zuCadastralNumberForDisplay = zuCadastralNumber;
 
-        
-        if (zuFeature.geometry && zuFeature.geometry.coordinates) {
+        // Отрисовка контура ЗУ при необходимости
+        if (zuFeature.geometry?.coordinates) {
             const coordinates = zuFeature.geometry.coordinates[0].map(coord => {
                 const point = proj4('EPSG:3857', 'EPSG:4326', coord);
                 return [point[1], point[0]];
@@ -20752,21 +20921,7 @@ async function fetchOksOnZuHandler(lat, lon) {
             polygons.push(polygon);
 
             const bounds = polygon.geometry.getBounds();
-            const centerGeo = [
-                (bounds[0][0] + bounds[1][0]) / 2,
-                (bounds[0][1] + bounds[1][1]) / 2
-            ];
-
-            getAddressByCoords(centerGeo).then(address => {
-                document.getElementById('city-name-display').innerHTML = address;
-            });
-
-            const center3857 = proj4("EPSG:4326", "EPSG:3857", [centerGeo[1], centerGeo[0]]);
-            lastPolygonCenter = {
-                geo: { lat: centerGeo[0], lon: centerGeo[1] },
-                epsg3857: { x: center3857[0], y: center3857[1] },
-                native: { x: zuFeature.geometry.coordinates[0][0][0], y: zuFeature.geometry.coordinates[0][0][1] }
-            };
+            const centerGeo = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
 
             const cadastralText = new ymaps.Placemark([
                 centerGeo[0] - mapOffsetY * 0.000008983,
@@ -20784,61 +20939,23 @@ async function fetchOksOnZuHandler(lat, lon) {
 
         showLoader(`Запрос ОКС для ${zuCadastralNumber}...`);
 
-        
-        const firstApiUrl = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?query=${encodeURIComponent(zuCadastralNumber)}&thematicSearchId=1`;
-        const response1 = await fetchNspd(firstApiUrl);
-        if (!response1.ok) throw new Error(`Ошибка запроса (1): ${response1.status}`);
-        const data1 = await response1.json();
-        
-        const feature = data1?.data?.features?.[0];
-        if (!feature) {
-             console.warn(`Объект с КН ${zuCadastralNumber} не найден по КН, хотя был найден по координатам.`);
-             displayOksInModal(null, zuCadastralNumber);
-             return;
-        }
+        // ТЕПЕРЬ ИСПОЛЬЗУЕМ КЭШИРОВАННЫЙ ВЫЗОВ:
+        const oksList = await fetchLinkedOks(zuCadastralNumber, zuFeature);
 
-        
-        
-        const geomId = feature.id; 
-        const categoryId = feature.properties?.category;
-        const registersId = feature.properties?.options?.registersId; 
-        
-        let secondApiUrl = ''; 
+        // Формируем структуру данных для существующего модального окна
+        const modalData = {
+            object: [{
+                value: oksList
+            }]
+        };
 
-        
-        if (registersId) {
-            
-            console.log(`Используется новый метод для поиска ОКС (с registersId: ${registersId})`);
-            secondApiUrl = `https://nspd.gov.ru/api/geoportal/v1/tab-group-data?tabClass=objectsList&objdocId=${geomId}&registersId=${registersId}`;
-        } else if (geomId && categoryId) {
-            
-            console.log("registersId не найден. Используется старый метод для поиска ОКС.");
-            secondApiUrl = `https://nspd.gov.ru/api/geoportal/v1/tab-group-data?tabClass=objectsList&categoryId=${categoryId}&geomId=${geomId}`;
-        } else {
-            
-            console.warn(`Не удалось извлечь необходимые ID для ${zuCadastralNumber}. Поиск ОКС невозможен.`);
-            displayOksInModal(null, zuCadastralNumber);
-            return;
-        }
-
-        
-
-        
-        const response2 = await fetchNspd(secondApiUrl);
-        if (!response2.ok) throw new Error(`Ошибка запроса(2): ${response2.status}`);
-        const data2 = await response2.json();
-
-        
-        displayOksInModal(data2, zuCadastralNumber);
+        displayOksInModal(modalData, zuCadastralNumber);
 
     } catch (error) {
-        
         console.error("Ошибка в fetchOksOnZuHandler:", error);
         showNotification('ОКС не найдены или произошла ошибка при запросе', 'error', 'exclamation-circle');
-        
         displayOksInModal(null, zuCadastralNumberForDisplay);
     } finally {
-        
         hideLoader();
     }
 }
@@ -26610,19 +26727,21 @@ async function searchObjectsByArea(searchPolygonCoordsEPSG3857, categoryIdOrIds)
 
 async function fetchLinkedOks(cadastralNumber, existingFeature = null) {
     if (!cadastralNumber) return [];
+
+    const cacheKey = `linked_oks_${cadastralNumber.trim()}`;
+
+    // 1. Проверяем кэш
+    const cached = await getFastCache(cacheKey);
+    if (cached !== null) {
+        return cached;
+    }
+
     try {
         let feature = existingFeature;
         
-        
         if (!feature) {
-            const url1 = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?query=${encodeURIComponent(cadastralNumber)}&thematicSearchId=1`;
-            const response1 = await fetchNspd(url1);
-            if (!response1.ok) {
-                console.error(`Ошибка запроса связанных ОКС (шаг 1): ${response1.status}`);
-                return [];
-            }
-            const data1 = await response1.json();
-            feature = data1?.data?.features?.[0];
+            // fetchCadastralData уже использует кэш!
+            feature = await fetchCadastralData(cadastralNumber);
         }
 
         if (!feature) {
@@ -26640,18 +26759,20 @@ async function fetchLinkedOks(cadastralNumber, existingFeature = null) {
         } else if (geomId && categoryId) {
             url2 = `https://nspd.gov.ru/api/geoportal/v1/tab-group-data?tabClass=objectsList&categoryId=${categoryId}&geomId=${geomId}`;
         } else {
-            console.warn(`Недостаточно ID для поиска связанных ОКС для ${cadastralNumber}.`);
             return [];
         }
 
         const response2 = await fetchNspd(url2);
         if (!response2.ok) {
-             console.error(`Ошибка запроса связанных ОКС (шаг 2): ${response2.status}`);
             return [];
         }
         const data2 = await response2.json();
+        const resultList = data2?.object?.[0]?.value || [];
+
+        // Сохраняем список связанных ОКС в кэш на 4 часа
+        await setFastCache(cacheKey, resultList, DEFAULT_CACHE_TTL);
         
-        return data2?.object?.[0]?.value || [];
+        return resultList;
     } catch (error) {
         console.error("Критическая ошибка при запросе связанных ОКС:", error);
         return [];
@@ -31627,11 +31748,11 @@ async function loadDualPanoPreviews(feature) {
                 
                 const imgUrl = `https://maps.googleapis.com/maps/api/streetview?size=220x130&location=${panoLat},${panoLon}&heading=${heading}&pitch=5&key=${GOOGLE_API_KEY}`;
                 
-                googleBox.innerHTML = `
-                    <div class="popover-pano-badge"><i class="fas fa-street-view" style="color:#fbbf24;"></i> Google</div>
-                    <img src="${imgUrl}" alt="Google Street View">
-                    <div class="popover-pano-overlay"><i class="fas fa-search-plus"></i></div>
-                `;
+               googleBox.innerHTML = `
+    <div class="popover-pano-badge"><i class="fas fa-street-view" style="color:#fbbf24;"></i> Google</div>
+    <img src="` + imgUrl + `" alt="Google Street View">
+    <div class="popover-pano-overlay"><i class="fas fa-search-plus"></i></div>
+`;
                 googleBox.onclick = () => openPanoramaModal(mapLat, mapLon, 'google');
             } else {
                 googleBox.innerHTML = '<span style="padding:10px; font-size:10px; text-align:center; color:#94a3b8; display:block; margin-top:35px;">Панорама Google недоступна</span>';
