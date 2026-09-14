@@ -9,13 +9,6 @@
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/xlsx/0.18.5/xlsx.full.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/html2canvas/1.4.1/html2canvas.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js"></script>
-<script>
-  if (window.pdfjsLib) {
-    pdfjsLib.GlobalWorkerOptions.workerSrc =
-      'https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js';
-  }
-</script>
 
 <style>
 
@@ -1514,7 +1507,7 @@ mark.search-hit { background: #fde68a; padding: 1px 3px; border-radius: 2px; }
 <div class="toast" id="toast" hidden></div>
 
 <script>
-/* ======================= МОДЕЛИ ======================= */
+
 const MODELS = [
   { id: "gemini-2.5-flash-lite",   name: "Gemini 2.5 Flash Lite" },
   { id: "gemini-3-flash-preview",  name: "Gemini 3 Flash (preview)" },
@@ -1529,18 +1522,11 @@ const MODELS = [
 const PROXY_MAP = "https://mapruapp.ru/ai/api/v1/chat/completions";
 const PROXY_VER = "https://ver-olive-delta.vercel.app";
 
-/* ======================= КОНСТАНТЫ ======================= */
 const DB_NAME = 'scanner-captures-db';
 const DB_VERSION = 1;
 const STORE_NAME = 'captures';
+const MAX_IMAGE_BYTES = 1024 * 1024; 
 
-const MAX_IMAGE_BYTES   = 1024 * 1024;        // 1 МБ — целевой размер изображения
-const MAX_PDF_BYTES     = 20 * 1024 * 1024;   // 20 МБ — максимум для одного PDF
-const MAX_PDF_PAGES     = 10;                 // 10 стр. — жёсткий лимит на PDF
-const WARN_PDF_PAGES    = 7;                  // 7 стр. — мягкое предупреждение
-const PDF_IMG_MAX_BYTES = 1024 * 1024;        // 1 МБ на отрендеренную страницу PDF
-
-/* ======================= СОСТОЯНИЕ ======================= */
 const state = {
   files: [],
   activeFileIndex: 0,
@@ -1561,7 +1547,6 @@ const state = {
   mobileView: 'source'
 };
 
-/* ======================= ПРОМПТЫ ======================= */
 const PROMPTS = {
   original: `Ты — эксперт по верстке и OCR документов.
 ТВОЯ ЗАДАЧА: Воспроизвести прикрепленный документ 1:1 в виде автономного чистого HTML со встроенными стилями.
@@ -1594,9 +1579,6 @@ const PRESET_HINTS = {
   form: "\nВАЖНО: Это анкета/форма. Сохрани все поля, чекбоксы, подписи и отметки."
 };
 
-/* ==========================================================================
-   INDEXEDDB — ПОСТОЯННОЕ ХРАНИЛИЩЕ СНИМКОВ
-   ========================================================================== */
 function openDB() {
   return new Promise((resolve, reject) => {
     if (!window.indexedDB) return reject(new Error('IndexedDB недоступен'));
@@ -1675,9 +1657,6 @@ async function dbClearAll() {
   } catch (e) {}
 }
 
-/* ==========================================================================
-   КОМПРЕССИЯ ИЗОБРАЖЕНИЙ
-   ========================================================================== */
 function dataUrlSize(url) {
   const i = url.indexOf(',');
   if (i < 0) return 0;
@@ -1708,6 +1687,7 @@ async function compressImage(dataUrl, maxBytes = MAX_IMAGE_BYTES) {
   let height = img.naturalHeight;
   let quality = 0.85;
 
+  
   canvas.width = width;
   canvas.height = height;
   ctx.fillStyle = '#ffffff';
@@ -1716,9 +1696,11 @@ async function compressImage(dataUrl, maxBytes = MAX_IMAGE_BYTES) {
   let out = canvas.toDataURL('image/jpeg', quality);
   if (dataUrlSize(out) <= maxBytes) return out;
 
+  
   width = Math.max(320, Math.round(width / 2));
   height = Math.max(240, Math.round(height / 2));
 
+  
   for (let i = 0; i < 10; i++) {
     canvas.width = width;
     canvas.height = height;
@@ -1739,51 +1721,6 @@ async function compressImage(dataUrl, maxBytes = MAX_IMAGE_BYTES) {
   return out;
 }
 
-/* ==========================================================================
-   PDF-УТИЛИТЫ
-   ========================================================================== */
-async function getPdfInfo(dataUrl) {
-  if (!window.pdfjsLib) return { numPages: 0, error: 'pdf.js не загружен' };
-  const raw = dataUrl.split(',')[1];
-  const bin = atob(raw);
-  const bytes = new Uint8Array(bin.length);
-  for (let i = 0; i < bin.length; i++) bytes[i] = bin.charCodeAt(i);
-  try {
-    const pdf = await pdfjsLib.getDocument({ data: bytes }).promise;
-    return { numPages: pdf.numPages, pdf };
-  } catch (e) {
-    return { numPages: 0, error: e.message };
-  }
-}
-
-async function pdfPageToImage(pdf, pageNum, maxBytes = PDF_IMG_MAX_BYTES) {
-  const page = await pdf.getPage(pageNum);
-  const viewport = page.getViewport({ scale: 2 });
-  const canvas = document.createElement('canvas');
-  canvas.width = viewport.width;
-  canvas.height = viewport.height;
-  const ctx = canvas.getContext('2d');
-  await page.render({ canvasContext: ctx, viewport }).promise;
-  let url = canvas.toDataURL('image/jpeg', 0.9);
-  if (dataUrlSize(url) > maxBytes) {
-    try { url = await compressImage(url, maxBytes); } catch (_) {}
-  }
-  return url;
-}
-
-async function buildPdfContentParts(file) {
-  const info = await getPdfInfo(file.dataUrl);
-  if (!info.numPages) throw new Error('Не удалось открыть PDF: ' + (info.error || '?'));
-  const parts = [];
-  for (let p = 1; p <= info.numPages; p++) {
-    setLoading(true, 'Рендеринг PDF...', `Страница ${p} из ${info.numPages}`);
-    const img = await pdfPageToImage(info.pdf, p);
-    parts.push({ type: 'image_url', image_url: { url: img } });
-  }
-  return parts;
-}
-
-/* ======================= ИНИЦИАЛИЗАЦИЯ ======================= */
 document.addEventListener('DOMContentLoaded', async () => {
   renderModelSelects();
   setupEventListeners();
@@ -1843,7 +1780,6 @@ function restoreCustomPrompt() {
   }
 }
 
-/* ======================= ОБРАБОТЧИКИ ======================= */
 function setupEventListeners() {
   document.getElementById('btn-settings').onclick = () => openModal('settings-modal');
   document.getElementById('set-api-mode').onchange = (e) => {
@@ -1958,7 +1894,6 @@ function switchToMobileView(view) {
   }
 }
 
-/* ======================= ГОРЯЧИЕ КЛАВИШИ ======================= */
 function setupKeyboardShortcuts() {
   window.addEventListener('keydown', (e) => {
     if ((e.ctrlKey || e.metaKey) && e.key === 'Enter') {
@@ -1985,7 +1920,6 @@ function setupKeyboardShortcuts() {
   });
 }
 
-/* ======================= ЗАГРУЗКА ФАЙЛОВ ======================= */
 function setupDragAndDrop() {
   const dropzone = document.getElementById('dropzone');
   const fileInput = document.getElementById('file-input');
@@ -2037,52 +1971,23 @@ async function handleFiles(fileList) {
     }
     let base64 = await fileToBase64(file);
 
-    /* ===== PDF: проверка размера и страниц ===== */
-    if (file.type === 'application/pdf') {
-      const bytes = dataUrlSize(base64);
-      if (bytes > MAX_PDF_BYTES) {
-        showToast(
-          `PDF ${(bytes/1024/1024).toFixed(1)} МБ превышает лимит ${MAX_PDF_BYTES/1024/1024} МБ. Разделите документ.`,
-          'error'
-        );
-        continue;
+    
+    if (file.type.startsWith('image/')) {
+      const before = dataUrlSize(base64);
+      if (before > MAX_IMAGE_BYTES) {
+        setLoading(true, 'Оптимизация изображения...', `${(before/1024/1024).toFixed(2)} МБ → сжатие`);
+        try {
+          base64 = await compressImage(base64, MAX_IMAGE_BYTES);
+        } catch (e) {
+          console.warn('Compression failed:', e);
+        }
+        setLoading(false);
       }
-      setLoading(true, 'Анализ PDF...', 'Подсчёт страниц');
-      const info = await getPdfInfo(base64);
-      setLoading(false);
-
-      if (info.error || !info.numPages) {
-        showToast('Не удалось прочитать PDF: ' + (info.error || '?'), 'error');
-        continue;
-      }
-      if (info.numPages > MAX_PDF_PAGES) {
-        showToast(`PDF содержит ${info.numPages} стр. Максимум ${MAX_PDF_PAGES} стр. Разделите документ.`, 'error');
-        continue;
-      }
-      if (info.numPages > WARN_PDF_PAGES) {
-        showToast(`PDF содержит ${info.numPages} стр. Обработка займёт больше времени.`, 'warn');
-      }
-      state.files.push({
-        name: file.name,
-        type: 'application/pdf',
-        size: bytes,
-        dataUrl: base64,
-        rawBase64: base64.split(',')[1],
-        numPages: info.numPages
-      });
-      continue;
     }
 
-    /* ===== Изображения ===== */
-    const before = dataUrlSize(base64);
-    if (before > MAX_IMAGE_BYTES) {
-      setLoading(true, 'Оптимизация изображения...', `${(before/1024/1024).toFixed(2)} МБ → сжатие`);
-      try { base64 = await compressImage(base64, MAX_IMAGE_BYTES); } catch (e) {}
-      setLoading(false);
-    }
     state.files.push({
       name: file.name,
-      type: 'image/jpeg',
+      type: file.type.startsWith('image/') ? 'image/jpeg' : file.type,
       size: dataUrlSize(base64),
       dataUrl: base64,
       rawBase64: base64.split(',')[1]
@@ -2106,9 +2011,6 @@ function fileToBase64(file) {
   });
 }
 
-/* ==========================================================================
-   ВОССТАНОВЛЕНИЕ СНИМКОВ ИЗ ХРАНИЛИЩА
-   ========================================================================== */
 async function restoreSavedCaptures() {
   try {
     const list = await dbGetAllCaptures();
@@ -2144,7 +2046,6 @@ async function clearSavedCaptures() {
   showToast('Хранилище снимков очищено', 'success');
 }
 
-/* ======================= ВЬЮЕР ======================= */
 function renderViewer() {
   const dropzone = document.getElementById('dropzone');
   const viewer = document.getElementById('viewer-container');
@@ -2168,10 +2069,7 @@ function renderViewer() {
   processBtnAll.style.display = state.files.length > 1 ? 'inline-flex' : 'none';
 
   const current = state.files[state.activeFileIndex];
-
-  fileInfo.textContent = current.type === 'application/pdf'
-    ? `${current.name} · ${current.numPages || '?'} стр. · ${(current.size/1024/1024).toFixed(2)} МБ`
-    : `${current.name} · ${(current.size/1024/1024).toFixed(2)} МБ`;
+  fileInfo.textContent = `${current.name} · ${(current.size / 1024 / 1024).toFixed(2)} МБ`;
 
   if (current.type === 'application/pdf') {
     imgEl.style.display = 'none';
@@ -2192,7 +2090,7 @@ function renderViewer() {
   thumbBar.innerHTML = state.files.map((f, i) => `
     <div class="thumb-item ${i === state.activeFileIndex ? 'active' : ''}" onclick="selectThumbnail(${i})" title="${escapeHtml(f.name)}${f.fromCamera ? ' • сохранён' : ''}">
       ${f.type === 'application/pdf'
-        ? `<div style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100%;font-size:9px;font-weight:700;color:#ef4444;background:#fef2f2;line-height:1.15;">PDF<div style="font-size:8px;font-weight:600;color:#64748b;">${f.numPages || '?'} стр.</div></div>`
+        ? '<div style="display:flex;align-items:center;justify-content:center;height:100%;font-size:10px;font-weight:700;color:#ef4444;background:#fef2f2;">PDF</div>'
         : `<img src="${f.dataUrl}">`}
       ${f.fromCamera ? '<span style="position:absolute;top:2px;left:2px;width:7px;height:7px;border-radius:50%;background:#10b981;box-shadow:0 0 3px rgba(255,255,255,.9);" title="Сохранено локально"></span>' : ''}
       <span class="thumb-index">${i + 1}</span>
@@ -2235,7 +2133,6 @@ async function removeThumbnail(e, idx) {
   renderViewer();
 }
 
-/* ======================= ЗУМ / ПОВОРОТ ======================= */
 function setZoom(z) {
   state.zoom = Math.max(0.2, Math.min(4, z));
   applyZoomRotation();
@@ -2251,9 +2148,6 @@ function applyZoomRotation() {
   document.getElementById('zoom-label').textContent = Math.round(state.zoom * 100) + '%';
 }
 
-/* ==========================================================================
-   КАМЕРА
-   ========================================================================== */
 let cameraStream = null;
 let cameraFacing = 'environment';
 let cameraDevicesCount = 0;
@@ -2308,7 +2202,6 @@ async function startCamera() {
   }
 }
 
-/* closeCamera напрямую снимает класс open — без рекурсии */
 function closeCamera() {
   try {
     if (cameraStream) {
@@ -2317,7 +2210,7 @@ function closeCamera() {
     }
     const video = document.getElementById('camera-video');
     if (video) video.srcObject = null;
-  } catch (e) { /* noop */ }
+  } catch (e) {  }
   const modal = document.getElementById('camera-modal');
   if (modal) modal.classList.remove('open');
 }
@@ -2349,6 +2242,7 @@ async function capturePhoto() {
 
     let dataUrl = canvas.toDataURL('image/jpeg', 0.92);
 
+    
     if (dataUrlSize(dataUrl) > MAX_IMAGE_BYTES) {
       document.getElementById('loader-subtitle').textContent =
         `${(dataUrlSize(dataUrl)/1024/1024).toFixed(2)} МБ → сжатие до 1 МБ`;
@@ -2369,7 +2263,7 @@ async function capturePhoto() {
       dataUrl
     };
 
-    // Сохраняем в IndexedDB — до запроса к ИИ
+    
     const id = await dbAddCapture(record);
 
     state.files.push({
@@ -2389,6 +2283,7 @@ async function capturePhoto() {
     switchToMobileView('source');
     showToast(`Снимок сохранён (${(sizeBytes/1024).toFixed(0)} КБ)`, 'success');
 
+    
     const stage = document.querySelector('.camera-stage');
     if (stage) {
       const flash = document.createElement('div');
@@ -2405,14 +2300,13 @@ async function capturePhoto() {
   }
 }
 
-/* Нативный fallback (если getUserMedia недоступен) */
 document.getElementById('camera-input').addEventListener('change', async (e) => {
   if (e.target.files?.length) {
     const file = e.target.files[0];
     let base64 = await fileToBase64(file);
     if (dataUrlSize(base64) > MAX_IMAGE_BYTES) {
       setLoading(true, 'Оптимизация...', 'Сжатие фото');
-      try { base64 = await compressImage(base64, MAX_IMAGE_BYTES); } catch (_) {}
+      try { base64 = await compressImage(base64, MAX_IMAGE_BYTES); } catch(_) {}
       setLoading(false);
     }
     const record = {
@@ -2440,7 +2334,6 @@ document.getElementById('camera-input').addEventListener('change', async (e) => 
   e.target.value = '';
 });
 
-/* ======================= ОЦИФРОВКА ======================= */
 async function runDigitization() {
   if (state.files.length === 0) {
     showToast('Сначала загрузите скан документа', 'warn');
@@ -2478,7 +2371,7 @@ async function runDigitization() {
     showToast('Документ успешно оцифрован!', 'success');
   } catch (error) {
     console.error(error);
-    // Снимок уже сохранён в IndexedDB — можно повторить попытку
+    
     showToast('Ошибка ИИ: ' + error.message + '. Снимок сохранён, попробуйте снова.', 'error');
   } finally {
     state.isProcessing = false;
@@ -2540,14 +2433,7 @@ async function callAI(current, sysPrompt, userPrompt) {
   if (state.apiMode === 'mapruapp') {
     const messages = [{ role: 'system', content: sysPrompt }];
     const content = [{ type: 'text', text: userPrompt }];
-
-    if (current.type === 'application/pdf') {
-      // Прокси (OpenAI-style) не принимает PDF — рендерим страницы в JPEG
-      const pages = await buildPdfContentParts(current);
-      content.push(...pages);
-    } else if (current.dataUrl) {
-      content.push({ type: 'image_url', image_url: { url: current.dataUrl } });
-    }
+    if (current.dataUrl) content.push({ type: 'image_url', image_url: { url: current.dataUrl } });
     messages.push({ role: 'user', content });
 
     const res = await fetch(PROXY_MAP, {
@@ -2562,20 +2448,12 @@ async function callAI(current, sysPrompt, userPrompt) {
     const data = await res.json();
     return data.choices?.[0]?.message?.content || '';
   } else {
-    // Gemini direct/vercel — PDF отправляется как application/pdf напрямую
     const url = state.apiMode === 'direct'
       ? `https://generativelanguage.googleapis.com/v1beta/models/${state.model}:generateContent?key=${state.apiKey}`
       : `${PROXY_VER}/v1beta/models/${state.model}:generateContent`;
 
     const parts = [{ text: userPrompt }];
-    if (current.rawBase64) {
-      parts.push({
-        inlineData: {
-          mimeType: current.type, // application/pdf | image/jpeg
-          data: current.rawBase64
-        }
-      });
-    }
+    if (current.rawBase64) parts.push({ inlineData: { mimeType: current.type, data: current.rawBase64 } });
 
     const res = await fetch(url, {
       method: 'POST',
@@ -2725,7 +2603,6 @@ function triggerPrinter() {
   setTimeout(() => window.print(), 50);
 }
 
-/* ======================= ЭКСПОРТ ======================= */
 function exportToDocx() {
   if (!state.digitizedHtml) return showToast('Нет данных для экспорта', 'warn');
   const content = document.getElementById('digitized-content').innerHTML;
@@ -2867,7 +2744,6 @@ function downloadBlob(blob, filename) {
   URL.revokeObjectURL(a.href);
 }
 
-/* ======================= КАДРИРОВАНИЕ ======================= */
 let cropState = { isDrawing: false, startX: 0, startY: 0, endX: 0, endY: 0 };
 let cropCleanup = null;
 
@@ -2976,6 +2852,7 @@ function openCropTool() {
     current.rawBase64 = croppedUrl.split(',')[1];
     current.size = dataUrlSize(croppedUrl);
 
+    
     if (current.fromCamera && current.id != null) {
       await dbUpdateCapture(current.id, {
         name: current.name,
@@ -2993,10 +2870,8 @@ function openCropTool() {
   };
 }
 
-/* ======================= УТИЛИТЫ ======================= */
 function openModal(id) { document.getElementById(id).classList.add('open'); }
 
-/* closeModal не вызывает closeCamera() — никакой рекурсии */
 function closeModal(id) {
   const el = document.getElementById(id);
   if (el) el.classList.remove('open');
