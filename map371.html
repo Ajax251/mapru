@@ -5409,27 +5409,27 @@ class NspdQueueManager {
         this.isLocked = false;
         this.lockUntil = 0;
         this.consecutiveFailures = 0;
-        this.FAILURE_THRESHOLD = 4;   
-        this.COOLDOWN_MS = 15000;     
-        this.MIN_INTERVAL_MS = 500;  
+        this.FAILURE_THRESHOLD = 3;   
+        this.COOLDOWN_MS = 30000;     
+        this.MIN_INTERVAL_MS = 700;  
     }
 
     trip(reason, status) {
         this.isLocked = true;
         this.lockUntil = Date.now() + this.COOLDOWN_MS;
-        console.warn(`[NspdQueue] Шлюз временно заблокирован: ${reason}. Пауза ${this.COOLDOWN_MS / 1000}с.`);
+        console.warn(`[NspdQueue] Предохранитель сработал: ${reason}. Пауза ${this.COOLDOWN_MS / 1000}с.`);
 
         while (this.queue.length > 0) {
             const task = this.queue.shift();
-            task.reject(new Error(`Запрос отменен: шлюз перегружен (${status || reason})`));
+            task.reject(new Error(`Очередь сброшена: сработал предохранитель (${status || reason})`));
         }
 
         if (typeof showNotification === 'function') {
             showNotification(
-                `Шлюз перегружен (${status || 'Ошибка'}). Подождите 15 сек...`,
-                'warning',
+                `Ошибка связи (${status || 'Ошибка'}). Пауза 30 сек.`,
+                'error',
                 'exclamation-triangle',
-                5000
+                6000
             );
         }
     }
@@ -5438,7 +5438,7 @@ class NspdQueueManager {
         return new Promise((resolve, reject) => {
             if (this.isLocked) {
                 if (Date.now() < this.lockUntil) {
-                    return reject(new Error('Сетевой шлюз на паузе (восстановление связи)'));
+                    return reject(new Error('Сетевой шлюз временно заблокирован'));
                 }
                 this.isLocked = false;
                 this.consecutiveFailures = 0;
@@ -5459,11 +5459,11 @@ class NspdQueueManager {
             await new Promise(r => setTimeout(r, this.MIN_INTERVAL_MS));
 
             let response;
-
+            
+          
             if (typeof isMobileProxyMode !== 'undefined' && isMobileProxyMode) {
-               
                 const proxyController = new AbortController();
-                const proxyTimeout = setTimeout(() => proxyController.abort(), 15000); 
+                const proxyTimeout = setTimeout(() => proxyController.abort(), 7000); 
 
                 try {
                     const urlObject = new URL(task.url);
@@ -5477,11 +5477,10 @@ class NspdQueueManager {
 
                     response = await fetch(mapruProxyUrl, newOptions);
                 } catch (proxyError) {
-                    console.warn("[MobileProxy] Сбой/таймаут прокси mapruapp:", proxyError.name);
-                    
-                
+                    console.warn("[MobileProxy] Прокси mapruapp не ответил:", proxyError.name || proxyError.message);
+                   
                     response = new Response(JSON.stringify({ 
-                        error: `Сервер mapruapp не ответил вовремя (${proxyError.name}).` 
+                        error: `Прокси mapruapp недоступен (${proxyError.name || 'Сбой сети'}). Доступ к nspd заблокирован.` 
                     }), {
                         status: 504,
                         headers: { 'Content-Type': 'application/json' }
@@ -5490,7 +5489,7 @@ class NspdQueueManager {
                     clearTimeout(proxyTimeout);
                 }
             } else {
-              
+             
                 response = await fetch(task.url, task.options);
             }
 
@@ -5503,7 +5502,7 @@ class NspdQueueManager {
             if (response.status >= 500) {
                 this.consecutiveFailures++;
                 if (this.consecutiveFailures >= this.FAILURE_THRESHOLD) {
-                    this.trip('Ошибки прокси-сервера', response.status);
+                    this.trip('Серия ошибок сервера/прокси', response.status);
                 }
             } else {
                 this.consecutiveFailures = 0;
@@ -5514,7 +5513,7 @@ class NspdQueueManager {
         } catch (error) {
             this.consecutiveFailures++;
             if (this.consecutiveFailures >= this.FAILURE_THRESHOLD) {
-                this.trip('Сбой сети', 502);
+                this.trip('Разрыв соединения', 502);
             }
             task.resolve(new Response(JSON.stringify({ error: error.message }), {
                 status: 502, 
@@ -5529,7 +5528,6 @@ class NspdQueueManager {
         }
     }
 }
-
 
 const nspdQueueManager = new NspdQueueManager();
 
