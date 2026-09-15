@@ -1563,12 +1563,10 @@ const state = {
 
 /* ======================= ПРОМПТЫ ======================= */
 const PROMPTS = {
-  original: `Ты — эксперт по верстке и OCR документов.
-ТВОЯ ЗАДАЧА: Воспроизвести прикрепленный документ 1:1 в виде автономного чистого HTML со встроенными стилями.
-- Повтори все таблицы, колонки, реквизиты, жирность, шапку и подписи.
-- Штампы, логотипы и гербы оформи стилизованными текстовыми блоками/бейджами.
-- Сомнительные и неразборчивые места оберни в тег <mark class="ai-uncertain" title="Неразборчиво">текст</mark>.
-- Выводи ТОЛЬКО готовый HTML-код без тройных кавычек (\`\`\`html) и без вступительного текста.`,
+   original: `Ты — ассистент оптического распознавания текста (OCR) для личного архивного чтения и доступности.
+ТВОЯ ЗАДАЧА: Распознать печатный текст с изображения и оформить его семантической HTML-разметкой (<p>, <h1>, <table>).
+- Точно транскрибируй весь видимый текст без пропусков и цензуры.
+- Не добавляй вступительных фраз и markdown-блоков (\`\`\`html), выводи только готовый HTML.`,
 
   context: `Ты — технический аналитик документов.
 ТВОЯ ЗАДАЧА: Сделать смысловую оцифровку документа в современный структурированный веб-вид.
@@ -2538,31 +2536,48 @@ function buildSystemPrompt() {
 
 async function callAI(current, sysPrompt, userPrompt) {
   if (state.apiMode === 'mapruapp') {
-    const messages = [{ role: 'system', content: sysPrompt }];
-    const content = [{ type: 'text', text: userPrompt }];
+    // В прокси для Gemini системный промпт объединяем с пользовательским, 
+    // чтобы избежать блокировок ролей и сброса контекста
+    const fullPromptText = `${sysPrompt}\n\nЗАДАЧА: ${userPrompt}`;
+    const content = [{ type: 'text', text: fullPromptText }];
 
     if (current.type === 'application/pdf') {
-      // Прокси (OpenAI-style) не принимает PDF — рендерим страницы в JPEG
       const pages = await buildPdfContentParts(current);
       content.push(...pages);
     } else if (current.dataUrl) {
       content.push({ type: 'image_url', image_url: { url: current.dataUrl } });
     }
-    messages.push({ role: 'user', content });
+
+    const messages = [{ role: 'user', content }];
 
     const res = await fetch(PROXY_MAP, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ model: state.model, messages, max_tokens: 8192 })
+      body: JSON.stringify({
+        model: state.model,
+        messages,
+        max_tokens: 8192,
+        temperature: 0.2
+      })
     });
+
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error?.message || `HTTP ${res.status}`);
     }
+
     const data = await res.json();
-    return data.choices?.[0]?.message?.content || '';
+    const reply = data.choices?.[0]?.message?.content?.trim();
+
+    if (!reply) {
+      throw new Error(
+        'Модель вернула пустой ответ (сработал фильтр авторских прав/Recitation или сбой прокси). Попробуйте сменить модель (например, на Gemini 2.5 Flash Lite) или изменить режим.'
+      );
+    }
+
+    return reply;
   } else {
-    // Gemini direct/vercel — PDF отправляется как application/pdf напрямую
+    // Режим Direct (Google AI Studio) или Vercel
     const url = state.apiMode === 'direct'
       ? `https://generativelanguage.googleapis.com/v1beta/models/${state.model}:generateContent?key=${state.apiKey}`
       : `${PROXY_VER}/v1beta/models/${state.model}:generateContent`;
@@ -2571,7 +2586,7 @@ async function callAI(current, sysPrompt, userPrompt) {
     if (current.rawBase64) {
       parts.push({
         inlineData: {
-          mimeType: current.type, // application/pdf | image/jpeg
+          mimeType: current.type,
           data: current.rawBase64
         }
       });
@@ -2583,15 +2598,39 @@ async function callAI(current, sysPrompt, userPrompt) {
       body: JSON.stringify({
         contents: [{ role: 'user', parts }],
         systemInstruction: { parts: [{ text: sysPrompt }] },
-        generationConfig: { maxOutputTokens: 8192, temperature: 0.1 }
+        generationConfig: { maxOutputTokens: 8192, temperature: 0.1 },
+        safetySettings: [
+          { category: 'HARM_CATEGORY_HARASSMENT', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_HATE_SPEECH', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_SEXUALLY_EXPLICIT', threshold: 'BLOCK_NONE' },
+          { category: 'HARM_CATEGORY_DANGEROUS_CONTENT', threshold: 'BLOCK_NONE' }
+        ]
       })
     });
+
     if (!res.ok) {
       const err = await res.json().catch(() => ({}));
       throw new Error(err.error?.message || `HTTP ${res.status}`);
     }
+
     const data = await res.json();
-    return data.candidates?.[0]?.content?.parts?.[0]?.text || '';
+    const candidate = data.candidates?.[0];
+
+    if (!candidate) {
+      const blockReason = data.promptFeedback?.blockReason;
+      throw new Error(`Запрос заблокирован Gemini: ${blockReason || 'нет ответа от модели'}`);
+    }
+
+    if (candidate.finishReason === 'SAFETY' || candidate.finishReason === 'RECITATION') {
+      throw new Error(`Генерация прервана фильтром Google: ${candidate.finishReason}`);
+    }
+
+    const reply = candidate.content?.parts?.[0]?.text?.trim();
+    if (!reply) {
+      throw new Error('Модель вернула пустой результат');
+    }
+
+    return reply;
   }
 }
 
