@@ -4849,10 +4849,11 @@ body:has(#parcel-results-sidebar.collapsed:not(.hidden)) #map-magnifier-quick-wr
                 <input type="checkbox" id="toggleOpenGoogleEarth" onchange="updateGoogleEarthSetting()">
             </div>
          
-<div class="style-setting" style="display: none;">
+<div class="style-setting">
     <label for="toggleMobileProxy">Мобильный режим:</label>
-    <input type="checkbox" id="toggleMobileProxy">
-</div>    
+    <input type="checkbox" id="toggleMobileProxy" checked onchange="updateMobileProxySetting()">
+</div>
+            
             
             <div class="style-setting">
                 <label for="toggleHeightLabel">Высота/Обзор:</label>
@@ -5361,9 +5362,8 @@ let selectedVriFromLegend = null;
         const ALTITUDE_CORRECTION_FACTOR = 3; 
         let selectedLine = null;
         
-const PROXY_DEFAULT = 1; 
-let isMobileProxyMode = 2;
-
+const PROXY_DEFAULT = true; 
+let isMobileProxyMode = PROXY_DEFAULT;
        let isVercelProxyBlocked = false;
        let lastVercelBlockTime = 0;
        let isGlobalFillActive = localStorage.getItem('isGlobalFillActive') === 'true'; 
@@ -5409,21 +5409,26 @@ class NspdQueueManager {
         this.isLocked = false;
         this.lockUntil = 0;
         this.consecutiveFailures = 0;
-        this.FAILURE_THRESHOLD = 3;   
-        this.COOLDOWN_MS = 25000;     
-        this.MIN_INTERVAL_MS = 600;  
+        this.FAILURE_THRESHOLD = 4;   
+        this.COOLDOWN_MS = 15000;     
+        this.MIN_INTERVAL_MS = 500;  
     }
 
     trip(reason, status) {
         this.isLocked = true;
-        const cooldown = (status === 403) ? 60000 : this.COOLDOWN_MS;
-        this.lockUntil = Date.now() + cooldown;
+        this.lockUntil = Date.now() + this.COOLDOWN_MS;
+        console.warn(`[NspdQueue] Шлюз временно заблокирован: ${reason}. Пауза ${this.COOLDOWN_MS / 1000}с.`);
+
+        while (this.queue.length > 0) {
+            const task = this.queue.shift();
+            task.reject(new Error(`Запрос отменен: шлюз перегружен (${status || reason})`));
+        }
 
         if (typeof showNotification === 'function') {
             showNotification(
-                `Защита НСПД: пауза ${cooldown / 1000}с (${status || reason}). Запросы приостановлены.`,
+                `Шлюз перегружен (${status || 'Ошибка'}). Подождите 15 сек...`,
                 'warning',
-                'shield-alt',
+                'exclamation-triangle',
                 5000
             );
         }
@@ -5431,7 +5436,15 @@ class NspdQueueManager {
 
     enqueue(url, options) {
         return new Promise((resolve, reject) => {
-            this.queue.push({ url, options, resolve, reject, retries: 0 });
+            if (this.isLocked) {
+                if (Date.now() < this.lockUntil) {
+                    return reject(new Error('Сетевой шлюз на паузе (восстановление связи)'));
+                }
+                this.isLocked = false;
+                this.consecutiveFailures = 0;
+            }
+
+            this.queue.push({ url, options, resolve, reject });
             this.processNext();
         });
     }
@@ -5440,29 +5453,17 @@ class NspdQueueManager {
         if (this.isProcessing || this.queue.length === 0) return;
         this.isProcessing = true;
 
-        if (this.isLocked) {
-            const waitTime = this.lockUntil - Date.now();
-            if (waitTime > 0) {
-                this.isProcessing = false;
-                setTimeout(() => this.processNext(), waitTime + 500);
-                return;
-            }
-            this.isLocked = false;
-            this.consecutiveFailures = 0;
-        }
-
         const task = this.queue.shift();
 
         try {
             await new Promise(r => setTimeout(r, this.MIN_INTERVAL_MS));
 
             let response;
-            const isIntersectUrl = task.url.includes('/intersects') || task.url.includes('/intersect') || task.url.includes('/spatial');
-            const shouldRouteViaProxy = (isMobileProxyMode === 1) || (isMobileProxyMode === 2 && isIntersectUrl);
 
-            if (shouldRouteViaProxy) {
+            if (typeof isMobileProxyMode !== 'undefined' && isMobileProxyMode) {
+               
                 const proxyController = new AbortController();
-                const proxyTimeout = setTimeout(() => proxyController.abort(), 20000);
+                const proxyTimeout = setTimeout(() => proxyController.abort(), 15000); 
 
                 try {
                     const urlObject = new URL(task.url);
@@ -5476,6 +5477,9 @@ class NspdQueueManager {
 
                     response = await fetch(mapruProxyUrl, newOptions);
                 } catch (proxyError) {
+                    console.warn("[MobileProxy] Сбой/таймаут прокси mapruapp:", proxyError.name);
+                    
+                
                     response = new Response(JSON.stringify({ 
                         error: `Сервер mapruapp не ответил вовремя (${proxyError.name}).` 
                     }), {
@@ -5486,28 +5490,20 @@ class NspdQueueManager {
                     clearTimeout(proxyTimeout);
                 }
             } else {
+              
                 response = await fetch(task.url, task.options);
             }
 
-            if (response.status === 403) {
-                this.trip('HTTP 403 Доступ ограничен WAF', 403);
+            if (response.status === 429 || response.status === 403 || response.status === 503) {
+                this.trip(`HTTP ${response.status}`, response.status);
                 task.resolve(response);
                 return;
-            }
-
-            if (response.status === 429 || response.status === 503) {
-                task.retries = (task.retries || 0) + 1;
-                if (task.retries <= 2) {
-                    this.queue.unshift(task);
-                    this.trip(`HTTP ${response.status}`, response.status);
-                    return;
-                }
             }
 
             if (response.status >= 500) {
                 this.consecutiveFailures++;
                 if (this.consecutiveFailures >= this.FAILURE_THRESHOLD) {
-                    this.trip('Ошибки сервера НСПД', response.status);
+                    this.trip('Ошибки прокси-сервера', response.status);
                 }
             } else {
                 this.consecutiveFailures = 0;
@@ -5517,13 +5513,16 @@ class NspdQueueManager {
 
         } catch (error) {
             this.consecutiveFailures++;
-            this.trip('Сбой сети или блокировка CORS', 0);
+            if (this.consecutiveFailures >= this.FAILURE_THRESHOLD) {
+                this.trip('Сбой сети', 502);
+            }
             task.resolve(new Response(JSON.stringify({ error: error.message }), {
                 status: 502, 
                 headers: { 'Content-Type': 'application/json' }
             }));
         } finally {
             this.isProcessing = false;
+            
             if (this.queue.length > 0 && !this.isLocked) {
                 this.processNext();
             }
@@ -6358,17 +6357,27 @@ function openStyleSettings() {
     document.getElementById('kmlMapOffsetX').value = kmlMapOffsetX;
     document.getElementById('kmlMapOffsetY').value = kmlMapOffsetY;
 
+   
     const toggleOpenGoogleEarthCheckbox = document.getElementById('toggleOpenGoogleEarth');
     if (toggleOpenGoogleEarthCheckbox) {
         const savedGoogleEarthSetting = localStorage.getItem('openGoogleEarthAfterExport');
         openGoogleEarthAfterExport = savedGoogleEarthSetting === null ? true : (savedGoogleEarthSetting === 'true');
         toggleOpenGoogleEarthCheckbox.checked = openGoogleEarthAfterExport;
     }
-
+  
+const toggleMobileProxyCheckbox = document.getElementById('toggleMobileProxy');
+if (toggleMobileProxyCheckbox) {
+    const settingRow = toggleMobileProxyCheckbox.closest('.style-setting');
+    if (settingRow) {
+        settingRow.style.display = PROXY_DEFAULT ? 'none' : 'flex';
+    }
+    toggleMobileProxyCheckbox.checked = isMobileProxyMode;
+}
     const toggleHeightLabelCheckbox = document.getElementById('toggleHeightLabel');
     if (toggleHeightLabelCheckbox) {
         toggleHeightLabelCheckbox.checked = isCameraHeightLabelVisible;
     }
+ 
 }
 
 
@@ -14986,6 +14995,14 @@ function findLinearIntersections(turfLines, targetFeatures) {
 
 
 function updateMobileProxySetting() {
+    const checkbox = document.getElementById('toggleMobileProxy');
+    if (checkbox) {
+        isMobileProxyMode = checkbox.checked;
+        showNotification(
+            isMobileProxyMode ? 'Мобильный режим включен' : 'Мобильный режим выключен',
+            'info'
+        );
+    }
 }
 
 async function drawLinearObjectToCanvas(mainLines, otherObjects) {
@@ -36640,7 +36657,6 @@ async function processEzFromNspdAndUpload(ezNumber) {
 
         let aggregatedParcels = [];
         let requestCounter = 0;
-        let consecutiveErrors = 0;
 
         for (const quarter of quarterQueue) {
             if (isEzProcessingAborted) break;
@@ -36656,61 +36672,24 @@ async function processEzFromNspdAndUpload(ezNumber) {
                     const targetZuSet = new Set(zusInQuarter);
                     const filteredParcels = allParcelsInQuarter.filter(f => targetZuSet.has(f.properties?.descr));
                     aggregatedParcels.push(...filteredParcels);
-                    consecutiveErrors = 0;
-                } else {
-                    consecutiveErrors++;
-                    if (nspdQueueManager.isLocked || consecutiveErrors >= 2) {
-                        showNotification('Обнаружена блокировка запросов. Обработка ЕЗ прервана для защиты от спама.', 'error', 7000);
-                        break;
-                    }
                 }
             } else {
                 for (const zu of zusInQuarter) {
                     if (isEzProcessingAborted) break;
-
-                    if (nspdQueueManager.isLocked) {
-                        showNotification('Шлюз заблокирован НСПД. Загрузка остановлена во избежание бана.', 'error', 7000);
-                        isEzProcessingAborted = true;
-                        break;
-                    }
-
                     requestCounter++;
                     showLoader(`Обработка ${requestCounter}/${totalRequests}: ${zu}`);
-                    const result = await fetchSingleParcelData(zu);
-
-                    if (result && result.isBlocked) {
-                        showNotification(`НСПД отклонил запрос (${result.status}). Обработка остановлена для защиты IP.`, 'error', 8000);
-                        isEzProcessingAborted = true;
-                        break;
+                    const parcelFeature = await fetchSingleParcelData(zu);
+                    if (parcelFeature) {
+                        aggregatedParcels.push(parcelFeature);
                     }
-
-                    if (result && result.geometry) {
-                        aggregatedParcels.push(result);
-                        consecutiveErrors = 0;
-                    } else {
-                        consecutiveErrors++;
-                        if (consecutiveErrors >= 3 || nspdQueueManager.isLocked) {
-                            showNotification('Слишком много ошибок подряд. Процесс остановлен во избежание спама.', 'error', 7000);
-                            isEzProcessingAborted = true;
-                            break;
-                        }
-                    }
-                    await delay(1200);
+                    await delay(1000);
                 }
             }
-
-            if (isEzProcessingAborted) break;
-            await delay(2000);
+            if (!isEzProcessingAborted) await delay(2000);
         }
 
         if (isEzProcessingAborted) {
-            showNotification('Операция прервана. Архив ЕЗ не был изменен.', 'warning');
-            return;
-        }
-
-        if (aggregatedParcels.length !== zuList.length) {
-            const missingCount = zuList.length - aggregatedParcels.length;
-            showNotification(`Ошибка: получено ${aggregatedParcels.length} из ${zuList.length} участков (не загружено: ${missingCount}). Архив не изменен.`, 'error', 8000);
+            showNotification('Загрузка данных была отменена.', 'info');
             return;
         }
 
@@ -36731,7 +36710,7 @@ async function processEzFromNspdAndUpload(ezNumber) {
             await processAndDrawParcels(aggregatedParcels, 'quarter');
             populateSidebarWithParcels(aggregatedParcels, dateString);
             document.getElementById('city-name-display').innerHTML = `ЕЗ (Данные от ${dateString}):<br>${ezNumber}`;
-            showNotification(`Обработка ЕЗ завершена. Все ${aggregatedParcels.length} участков сохранены в архив.`, 'success');
+            showNotification(`Обработка ЕЗ завершена. Найдено ${aggregatedParcels.length} участков.`, 'success');
         } else {
             showNotification('Не удалось загрузить данные для участков ЕЗ.', 'warning');
         }
@@ -36815,23 +36794,13 @@ async function uploadEzFileToServer(zipBlob, zipFilename) {
 async function fetchSingleParcelData(cadastralNumber) {
     try {
         const url = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?query=${encodeURIComponent(cadastralNumber)}&thematicSearchId=1`;
-        const response = await fetchNspd(url);
-
-        if (response.status === 403 || response.status === 429) {
-            logMessage(`NSPDRU: Получен статус ${response.status} для ${cadastralNumber}. Срабатывает защита от спама.`, 'error');
-            return { isBlocked: true, status: response.status };
-        }
-
-        if (!response.ok) {
-            throw new Error(`HTTP ${response.status}`);
-        }
+       const response = await fetchNspd(url);
+        if (!response.ok) throw new Error(`HTTP ${response.status}`);
 
         const data = await response.json();
         const feature = data?.data?.features?.[0];
-        if (!feature) {
-            throw new Error('Объект не найден в ответе.');
-        }
-
+        if (!feature) throw new Error('Объект не найден в ответе.');
+        
         return feature;
     } catch (error) {
         logMessage(`NSPDRU: Ошибка при загрузке участка ${cadastralNumber}: ${error.message}`, 'error');
