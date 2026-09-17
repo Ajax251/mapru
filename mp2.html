@@ -4692,33 +4692,7 @@ function checkPlanarOverlap(contoursA, contoursB) {
 }
 
 
-function classifyRingsToPolygons(rings) {
-    if (!rings || rings.length === 0) return [];
-    
-   
-    const sorted = rings.map(r => ({
-        ring: r,
-        area: calculatePlanarArea(r)
-    })).sort((a, b) => b.area - a.area);
 
-    const polygons = [];
-    sorted.forEach(({ ring }) => {
-        const testPt = ring[0];
-        let parentPoly = null;
-        for (const poly of polygons) {
-            if (isPointInPolygon(testPt, poly.outer)) {
-                parentPoly = poly;
-                break;
-            }
-        }
-        if (parentPoly) {
-            parentPoly.holes.push(ring);
-        } else {
-            polygons.push({ outer: ring, holes: [] });
-        }
-    });
-    return polygons;
-}
 
 function extractSpecifyRelatedParcelData(element) {
     const cadNumber = element.getAttribute('CadastralNumber');
@@ -4752,7 +4726,6 @@ function extractSpecifyRelatedParcelData(element) {
                 cadNumber,
                 isAllBorder: true,
                 isInnerContour: false,
-                isNewInnerHole: false,
                 contours,
                 declaredArea,
                 areaInGkn
@@ -4760,7 +4733,7 @@ function extractSpecifyRelatedParcelData(element) {
         }
     }
 
-    // 2. Сбор ChangeBorder по текущему и парным узлам этого же кадастрового номера
+    // 2. Сбор ChangeBorder по текущему узлу и парным узлам этого же кадастрового номера
     const allMatchingNodes = lastXmlDoc ? 
         Array.from(lastXmlDoc.querySelectorAll(`SpecifyRelatedParcel[CadastralNumber="${cadNumber}"]`)) : [element];
 
@@ -4812,21 +4785,23 @@ function extractSpecifyRelatedParcelData(element) {
         });
     });
 
-    // 3. Распознавание внутреннего контура (вырезки)
-    const isLoop = (pts) => pts.length >= 4 && (
-        Math.abs(pts[0].x - pts[pts.length - 1].x) < 0.05 && 
-        Math.abs(pts[0].y - pts[pts.length - 1].y) < 0.05
-    );
+    // 3. Распознавание замены внутреннего контура (вырезки / дырки):
+    // когда старый контур полностью удаляется (замкнутый цикл), а новый полностью создается (замкнутый цикл)
+const isLoop = (pts) => pts.length >= 4 && (
+    Math.abs(pts[0].x - pts[pts.length - 1].x) < 0.05 && 
+    Math.abs(pts[0].y - pts[pts.length - 1].y) < 0.05
+);
 
-    const isInnerContour = junctionPoints.length === 0 && (
-        (allNewPoints.length >= 4 && isLoop(allNewPoints)) ||
-        (allOldPoints.length >= 4 && isLoop(allOldPoints))
-    );
+const isInnerContour = junctionPoints.length === 0 && (
+    (allNewPoints.length >= 4 && isLoop(allNewPoints)) ||
+    (allOldPoints.length >= 4 && isLoop(allOldPoints))
+);
 
     if (isInnerContour) {
-        const closedNew = allNewPoints.length > 0 ? [...allNewPoints] : [];
-        if (closedNew.length > 0 && (Math.abs(closedNew[0].x - closedNew[closedNew.length - 1].x) > 0.01 || 
-            Math.abs(closedNew[0].y - closedNew[closedNew.length - 1].y) > 0.01)) {
+        // Замыкаем новый контур при необходимости
+        const closedNew = [...allNewPoints];
+        if (Math.abs(closedNew[0].x - closedNew[closedNew.length - 1].x) > 0.01 || 
+            Math.abs(closedNew[0].y - closedNew[closedNew.length - 1].y) > 0.01) {
             closedNew.push({ ...closedNew[0] });
         }
 
@@ -4836,15 +4811,11 @@ function extractSpecifyRelatedParcelData(element) {
             closedOld.push({ ...closedOld[0] });
         }
 
-        // Отличительный признак новой вырезки без удаления старой:
-        const isNewInnerHole = allOldPoints.length === 0 && allNewPoints.length >= 4;
-
         return {
             cadNumber,
             isAllBorder: false,
             isInnerContour: true,
-            isNewInnerHole: isNewInnerHole,
-            contours: closedNew.length > 0 ? [closedNew] : [],
+            contours: [closedNew],
             oldContour: closedOld.length > 0 ? [closedOld] : null,
             junctionPoints: [],
             removedPoints: allOldPoints,
@@ -4856,7 +4827,6 @@ function extractSpecifyRelatedParcelData(element) {
         cadNumber, 
         isAllBorder: false, 
         isInnerContour: false, 
-        isNewInnerHole: false,
         junctionPoints, 
         removedPoints, 
         newPoints 
@@ -5170,30 +5140,13 @@ async function getCorrectedContourForCadastralNumber(cadNum, mskSystem) {
     if (!lastXmlDoc) return null;
     const cadNumLower = cadNum.toLowerCase();
     
-    const relatedNodes = All(lastXmlDoc, 'SpecifyRelatedParcel, SpecifyParcelApproximal > ExistParcel');
+    
+    const relatedNodes = All(lastXmlDoc, 'SpecifyRelatedParcel');
     for (const node of relatedNodes) {
         if ((A(node, 'CadastralNumber') || '').toLowerCase() === cadNumLower) {
             const xmlData = extractSpecifyRelatedParcelData(node);
             if (xmlData.isAllBorder && xmlData.contours) {
                 return xmlData.contours;
-            } else if (xmlData.isInnerContour && xmlData.contours.length > 0) {
-                try {
-                    const egrnContours = await fetchEgrnCoordinates(xmlData.cadNumber);
-                    if (egrnContours && egrnContours.length > 0) {
-                        const polys = classifyRingsToPolygons(egrnContours);
-                        const newHole = xmlData.contours[0];
-                        const matched = polys.find(p => newHole.some(pt => isPointInPolygon(pt, p.outer))) || polys[0];
-                        if (xmlData.oldContour) {
-                            matched.holes = matched.holes.filter(h => !doContoursMatch([h], xmlData.oldContour));
-                        }
-                        matched.holes.push(newHole);
-                        const resultRings = [];
-                        polys.forEach(p => resultRings.push(p.outer, ...p.holes));
-                        return resultRings;
-                    }
-                } catch (e) {
-                    console.error(`Ошибка формирования геометрии с вырезкой для ${cadNum}:`, e);
-                }
             } else if (xmlData.junctionPoints) {
                 try {
                     const egrnContours = await fetchEgrnCoordinates(xmlData.cadNumber);
@@ -5201,10 +5154,37 @@ async function getCorrectedContourForCadastralNumber(cadNum, mskSystem) {
                         const res = applyBorderChangesToContour(
                             egrnContours[0], xmlData.junctionPoints, xmlData.removedPoints, xmlData.newPoints
                         );
-                        if (res.resultContour) return [res.resultContour];
+                        if (res.resultContour) {
+                            return [res.resultContour];
+                        }
                     }
                 } catch (e) {
                     console.error(`Ошибка построения границ для смежника ${cadNum}:`, e);
+                }
+            }
+        }
+    }
+    
+    
+    const approxNodes = All(lastXmlDoc, 'SpecifyParcelApproximal > ExistParcel');
+    for (const node of approxNodes) {
+        if ((A(node, 'CadastralNumber') || '').toLowerCase() === cadNumLower) {
+            const xmlData = extractSpecifyRelatedParcelData(node);
+            if (xmlData.isAllBorder && xmlData.contours) {
+                return xmlData.contours;
+            } else if (xmlData.junctionPoints) {
+                try {
+                    const egrnContours = await fetchEgrnCoordinates(xmlData.cadNumber);
+                    if (egrnContours && egrnContours.length > 0) {
+                        const res = applyBorderChangesToContour(
+                            egrnContours[0], xmlData.junctionPoints, xmlData.removedPoints, xmlData.newPoints
+                        );
+                        if (res.resultContour) {
+                            return [res.resultContour];
+                        }
+                    }
+                } catch (e) {
+                    console.error(`Ошибка построения границ для исправляемого смежника ${cadNum}:`, e);
                 }
             }
         }
@@ -5679,112 +5659,47 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
         let comparisonResults = null;
         let neighboringOverlaps = [];
         const problemPoints = [];
-    let isMainInsideHole = false;
-let isExactCoordsMatch = false;
+        let isMainInsideHole = false;
 
         // ВАРИАНТ 1: Исправление внутреннего контура (вырезки / дырки)
         if (xmlData.isInnerContour) {
-            const newHole = xmlData.contours[0];
-            const polys = classifyRingsToPolygons(egrnContours);
+            resultContour = xmlData.contours;
 
-            // 1. Поиск контура многоконтурного участка (MultiPolygon), в который попадает вырезка
-            let targetPolygon = null;
-            for (const poly of polys) {
-                let ptsIn = 0;
-                newHole.forEach(pt => {
-                    if (isPointInPolygon(pt, poly.outer)) ptsIn++;
-                });
-                if (ptsIn / newHole.length >= 0.7) {
-                    targetPolygon = poly;
-                    break;
-                }
-            }
+            if (mainContoursXml.length > 0 && resultContour.length > 0) {
+                const holeContour = resultContour[0];
+                let pointsInside = 0;
+                let totalPoints = 0;
 
-            if (!targetPolygon) {
-                hasOverlap = true;
-                errors.push(`КРИТИЧЕСКАЯ ОШИБКА: Новая вырезка находится ВНЕ границ смежного ЗУ ${xmlData.cadNumber}!`);
-            } else {
-                // Проверка: не выходят ли точки вырезки за внешнюю границу найденного контура
-                let pointsOutside = 0;
-                newHole.forEach(pt => {
-                    let onBound = false;
-                    for (let i = 0; i < targetPolygon.outer.length - 1; i++) {
-                        if (getDistanceToSegment(pt, targetPolygon.outer[i], targetPolygon.outer[i + 1]) <= 0.05) {
-                            onBound = true;
-                            break;
-                        }
-                    }
-                    if (!isPointInPolygon(pt, targetPolygon.outer) && !onBound) pointsOutside++;
-                });
-                if (pointsOutside > 0) {
-                    errors.push(`ВНИМАНИЕ: Часть точек новой вырезки (${pointsOutside} шт.) выходит за внешнюю границу смежного ЗУ!`);
-                }
-
-                // 2. Проверка наложений на уже существующие в ЕГРН дырки этого ЗУ
-                if (targetPolygon.holes && targetPolygon.holes.length > 0) {
-                    targetPolygon.holes.forEach((existingHole, hIdx) => {
-                        // Если это замена дырки и дырка является старой удаляемой, пропускаем
-                        if (xmlData.oldContour && doContoursMatch([existingHole], xmlData.oldContour)) {
-                            return;
-                        }
-
-                        // Проверка площади пересечения двух дырок
-                        const overlapHoleArea = checkPlanarOverlap([newHole], [existingHole]);
-                        if (overlapHoleArea > 0.0001) {
-                            hasOverlap = true;
-                            const areaStr = overlapHoleArea < 0.01 ? `${(overlapHoleArea * 10000).toFixed(1)} кв.см.` : `${overlapHoleArea.toFixed(2)} кв.м.`;
-                            errors.push(`КРИТИЧЕСКАЯ ОШИБКА: Новая вырезка накладывается на уже существующую в ЕГРН дырку смежного ЗУ (дырка №${hIdx + 1})! Площадь наложения: ${areaStr}. Нельзя вырезать новую дырку поверх существующей без удаления старой.`);
-                            problemPoints.push(...findProblematicOverlappingPoints(newHole, existingHole));
-                        }
-
-                        // Проверка касания вершин (нарушение топологии)
-                        let touchCount = 0;
-                        newHole.forEach(pt => {
-                            if (existingHole.some(ep => Math.abs(pt.x - ep.x) < 0.01 && Math.abs(pt.y - ep.y) < 0.01)) {
-                                touchCount++;
+                mainContoursXml.forEach(mContour => {
+                    mContour.forEach(pt => {
+                        totalPoints++;
+                        // Точка внутри вырезки или лежит на ее границе (погрешность до 20 см)
+                        let onBoundary = false;
+                        for (let i = 0; i < holeContour.length - 1; i++) {
+                            if (getDistanceToSegment(pt, holeContour[i], holeContour[i + 1]) <= 0.20) {
+                                onBoundary = true;
+                                break;
                             }
-                        });
-                        if (touchCount > 0 && overlapHoleArea <= 0.0001) {
-                            errors.push(`ВНИМАНИЕ (ТОПОЛОГИЯ): Граница новой вырезки соприкасается с существующей в ЕГРН дыркой в ${touchCount} точках. Касание внутренних контуров недопустимо в ЕГРН.`);
+                        }
+                        if (isPointInPolygon(pt, holeContour) || onBoundary) {
+                            pointsInside++;
                         }
                     });
-                }
-            }
+                });
 
-          // 3. Строгая проверка совпадения координат вырезки и образуемого ЗУ (точка-в-точку)
-      isExactCoordsMatch = false;
-            if (mainContoursXml.length > 0 && newHole) {
-                isExactCoordsMatch = doContoursMatch([newHole], mainContoursXml);
-                
-                if (!isExactCoordsMatch) {
-                    hasOverlap = true; // Считаем несовпадение координат ошибкой
-                    const holeArea = calculatePlanarArea(newHole);
-                    const mainArea = calculatePlanarArea(mainContoursXml[0]);
-                    const diff = Math.abs(holeArea - mainArea);
+                isMainInsideHole = totalPoints > 0 && (pointsInside / totalPoints) >= 0.75;
+
+                if (!isMainInsideHole) {
+                    hasOverlap = true;
+                    errors.push(`ВНИМАНИЕ: Основной земельный участок (${mainParcelCadNumber}) НЕ располагается внутри создаваемого внутреннего контура (вырезки) смежного ЗУ! Проверьте соответствие координат на местности.`);
                     
-                    errors.push(`КРИТИЧЕСКАЯ ОШИБКА: Координаты новой вырезки смежного ЗУ НЕ совпадают с координатами образуемого ЗУ ${mainParcelCadNumber}! (Площадь вырезки: ${holeArea.toFixed(2)} кв.м, площадь ЗУ: ${mainArea.toFixed(2)} кв.м, разница: ${diff.toFixed(2)} кв.м). Координаты вырезки должны быть идентичны образуемому участку.`);
-                    
-                    // Подсвечиваем несовпадающие точки
-                    newHole.forEach(pt => {
-                        const exists = mainContoursXml[0].some(mp => Math.abs(pt.x - mp.x) <= 0.01 && Math.abs(pt.y - mp.y) <= 0.01);
-                        if (!exists) problemPoints.push(pt);
+                    resultContour.forEach(subContour => {
+                        mainContoursXml.forEach(mainContour => {
+                            problemPoints.push(...findProblematicOverlappingPoints(subContour, mainContour));
+                        });
                     });
                 }
             }
-
-            // 4. Формирование итоговой геометрии смежного ЗУ (внешняя граница + дырка)
-            const combinedResultRings = [];
-            polys.forEach(p => {
-                combinedResultRings.push(p.outer);
-                p.holes.forEach(h => {
-                    if (xmlData.oldContour && doContoursMatch([h], xmlData.oldContour)) return;
-                    combinedResultRings.push(h);
-                });
-                if (p === targetPolygon) {
-                    combinedResultRings.push(newHole);
-                }
-            });
-            resultContour = combinedResultRings.length > 0 ? combinedResultRings : [newHole];
         }
         // ВАРИАНТ 2: Полное описание границы (AllBorder)
         else if (xmlData.isAllBorder) {
@@ -5891,18 +5806,9 @@ let isExactCoordsMatch = false;
             ? (hasOverlap || hasCriticalErrors ? 'error' : 'warning') 
             : 'success';
 
-      
         let statusText = '';
         if (xmlData.isInnerContour) {
-            if (xmlData.isNewInnerHole) {
-                if (errors.length === 0 && isMainInsideHole) {
-                    statusText = `Корректное формирование нового внутреннего контура (вырезки ЗУ) в смежном участке: границы новой вырезки полностью совпадают с образуемым ЗУ ${mainParcelCadNumber}.`;
-                } else if (errors.length === 0) {
-                    statusText = `Новый внутренний контур смежного ЗУ сформирован в границах ЕГРН.`;
-                } else {
-                    statusText = `ОШИБКИ ПРИ ФОРМИРОВАНИИ ВНУТРЕННЕГО КОНТУРА СМЕЖНОГО ЗУ!`;
-                }
-            } else if (isMainInsideHole) {
+            if (isMainInsideHole) {
                 statusText = `ИСПРАВЛЕНИЕ ВНУТРЕННЕГО КОНТУРА (ВЫРЕЗКИ): Старый контур удален, новый контур добавлен. Основной ЗУ ${mainParcelCadNumber} расположен внутри вырезки!`;
             } else {
                 statusText = `ВНИМАНИЕ: Исправлен внутренний контур смежного ЗУ, но основной ЗУ ${mainParcelCadNumber} находится ВНЕ границ данной вырезки!`;
@@ -5929,14 +5835,14 @@ let isExactCoordsMatch = false;
             <div class="related-parcel-details">
                 <div class="related-parcel-detail-item"><div class="label">Смежный ЗУ</div><div class="value">${xmlData.cadNumber}</div></div>
                 <div class="related-parcel-detail-item"><div class="label">Метод описания</div><div class="value">${methodDescription}</div></div>
-              ${xmlData.isInnerContour ? `
+                ${xmlData.isInnerContour ? `
                 <div class="related-parcel-detail-item" style="grid-column: 1 / -1; background: #f0f9ff; border-color: #bae6fd;">
-                    <div class="label" style="color:#0369a1;">Соответствие координат образуемого ЗУ (${mainParcelCadNumber})</div>
-                    <div class="value" style="color: ${isExactCoordsMatch ? '#059669' : '#dc2626'};">
-                        <i class="fas ${isExactCoordsMatch ? 'fa-check-double' : 'fa-times-circle'}"></i>
-                        ${isExactCoordsMatch 
-                            ? 'Координаты образуемого ЗУ и вырезки смежного ЗУ полностью совпадают' 
-                            : 'Координаты НЕ совпадают! Контур вырезки отличается от границ образуемого ЗУ'}
+                    <div class="label" style="color:#0369a1;">Положение основного ЗУ (${mainParcelCadNumber})</div>
+                    <div class="value" style="color: ${isMainInsideHole ? '#059669' : '#dc2626'};">
+                        <i class="fas ${isMainInsideHole ? 'fa-check-double' : 'fa-exclamation-triangle'}"></i>
+                        ${isMainInsideHole 
+                            ? 'Основной участок расположен внутри создаваемого внутреннего контура (корректно)' 
+                            : 'Основной участок не попадает в границы создаваемого внутреннего контура (смещение координат)'}
                     </div>
                 </div>` : ''}
             </div>
@@ -6286,18 +6192,14 @@ function drawRelatedParcelSchema() {
     }
 
     // Легенда схемы
-  const legend = document.getElementById('relatedParcelLegend');
+    const legend = document.getElementById('relatedParcelLegend');
     if (legend) {
         if (xmlData && xmlData.isInnerContour) {
-            const holeTitle = xmlData.isNewInnerHole 
-                ? 'Новая вырезка (внутренний контур смежника)' 
-                : 'Новый внутренний контур (новая вырезка)';
             legend.innerHTML = `
                 <div class="legend-item"><span class="legend-line" style="background:#10b981;"></span> Основной ЗУ (${relatedParcelCheckData.mainParcelCadNumber || 'проект'})</div>
-                ${xmlData.oldContour ? `<div class="legend-item"><span class="legend-line dashed" style="border-color:#ef4444;"></span> Удаляемый внутренний контур</div>` : ''}
-                <div class="legend-item"><span class="legend-line" style="background:#2563eb;"></span> ${holeTitle}</div>
-                <div class="legend-item"><span class="legend-line dashed" style="border-color:#f59e0b;"></span> Границы смежного ЗУ (ЕГРН)</div>
-                ${problemPoints && problemPoints.length > 0 ? `<div class="legend-item"><span class="legend-point" style="background:#ef4444; width:11px; height:11px;"></span> Наложение на дырку / ошибку</div>` : ''}
+                <div class="legend-item"><span class="legend-line dashed" style="border-color:#ef4444;"></span> Удаляемый внутренний контур (старая вырезка)</div>
+                <div class="legend-item"><span class="legend-line" style="background:#2563eb;"></span> Новый внутренний контур (новая вырезка)</div>
+                <div class="legend-item"><span class="legend-line dashed" style="border-color:#f59e0b;"></span> Внешняя граница смежного ЗУ (ЕГРН)</div>
             `;
         } else {
             legend.innerHTML = `
@@ -11254,7 +11156,7 @@ function runValidation(xmlDoc, xmlText) {
         });
     });
 
-  // --- 5. Проверка формирования / исправления внутренних контуров (вырезок/дырок) смежных ЗУ ---
+    // --- 5. Проверка исправления внутренних контуров (вырезок/дырок) смежных ЗУ ---
     const allSpecifyRelated = All(xmlDoc, 'SpecifyRelatedParcel');
     const checkedRelatedCads = new Set();
     const mainContoursForInnerCheck = extractMainParcelContoursFromXml();
@@ -11292,53 +11194,26 @@ function runValidation(xmlDoc, xmlText) {
                 isInside = totalPts > 0 && (ptsIn / totalPts) >= 0.75;
             }
 
-            // 1. Новая вырезка без удаления старой
-            if (rData.isNewInnerHole) {
-                const matchesMain = doContoursMatch(mainContoursForInnerCheck, rData.contours);
-                if (matchesMain) {
-                    messages.push(`
-                        <div class="validation-message validation-success">
-                            <i class="fas fa-vector-square" style="font-size: 1.2rem; color: #10b981;"></i>
-                            <div>
-                                <strong>[${cNum}] Корректное формирование нового внутреннего контура (вырезки ЗУ) в смежном участке:</strong> 
-                                координаты новой вырезки полностью совпадают с координатами образуемого земельного участка.
-                            </div>
+            if (isInside) {
+                messages.push(`
+                    <div class="validation-message validation-success">
+                        <i class="fas fa-vector-square" style="font-size: 1.2rem; color: #10b981;"></i>
+                        <div>
+                            <strong>[${cNum}] Исправление внутреннего контура смежного ЗУ:</strong> 
+                            выполняется замена внутреннего контура (вырезки). Основной ЗУ корректно располагается внутри образованного внутреннего контура.
                         </div>
-                    `);
-                } else {
-                    messages.push(`
-                        <div class="validation-message validation-error" style="align-items:flex-start;">
-                            ${sectionIcons.errorIcon}
-                            <div>
-                                <strong>[${cNum}] Ошибка координат вырезки смежного ЗУ:</strong> 
-                                координаты формируемого внутреннего контура (вырезки) смежного ЗУ <b>не совпадают</b> с координатами образуемого ЗУ. Они должны быть строго идентичны.
-                            </div>
-                        </div>
-                    `);
-                }
+                    </div>
+                `);
             } else {
-                // 2. Замена существующей вырезки
-                if (isInside) {
-                    messages.push(`
-                        <div class="validation-message validation-success">
-                            <i class="fas fa-vector-square" style="font-size: 1.2rem; color: #10b981;"></i>
-                            <div>
-                                <strong>[${cNum}] Исправление внутреннего контура смежного ЗУ:</strong> 
-                                выполняется замена внутреннего контура (вырезки). Образуемый/уточняемый ЗУ корректно располагается внутри вырезки.
-                            </div>
+                messages.push(`
+                    <div class="validation-message validation-error" style="align-items:flex-start;">
+                        ${sectionIcons.errorIcon}
+                        <div>
+                            <strong>[${cNum}] Ошибка расположения в вырезке смежного ЗУ:</strong> 
+                            в XML старый контур удаляется и добавляется новый внутренний контур (вырезка), однако координаты основного ЗУ не попадают внутрь этого контура (смещение границ). Проверьте правильность координат.
                         </div>
-                    `);
-                } else {
-                    messages.push(`
-                        <div class="validation-message validation-error" style="align-items:flex-start;">
-                            ${sectionIcons.errorIcon}
-                            <div>
-                                <strong>[${cNum}] Ошибка расположения в вырезке смежного ЗУ:</strong> 
-                                старый контур удаляется и добавляется новый внутренний контур (вырезка), однако координаты участка не попадают внутрь этого контура.
-                            </div>
-                        </div>
-                    `);
-                }
+                    </div>
+                `);
             }
         }
     });
