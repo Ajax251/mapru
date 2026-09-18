@@ -1225,25 +1225,6 @@ const escapeHtml = s => String(s == null ? "" : s).replace(/[&<>"']/g, c => ({
   "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;"
 })[c]);
 const escapeRe = s => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-const LAT2CYR = (() => {
-  const lLat = "qwertyuiop[]asdfghjkl;'zxcvbnm,./`";
-  const uLat = "QWERTYUIOP{}ASDFGHJKL:\"ZXCVBNM<>?~";
-  const lCyr = "йцукенгшщзхъфывапролджэячсмитьбю.ё";
-  const uCyr = "ЙЦУКЕНГШЩЗХЪФЫВАПРОЛДЖЭЯЧСМИТЬБЮ,Ё";
-  const m = {};
-  for (let i = 0; i < lLat.length; i++) m[lLat[i]] = lCyr[i];
-  for (let i = 0; i < uLat.length; i++) m[uLat[i]] = uCyr[i];
-  return m;
-})();
-
-function transliterateLatinToCyrillic(str) {
-  if (!/[a-zA-Z]/.test(str)) return null;
-  let out = "";
-  for (const ch of str) out += (LAT2CYR[ch] || ch);
-  return out;
-}
-
 const nextFrame = () => new Promise(r => requestAnimationFrame(() => r()));
 const isMobile = () => window.matchMedia("(max-width: 900px)").matches;
 
@@ -1353,7 +1334,6 @@ const prefs = Object.assign(
   },
   JSON.parse(localStorage.getItem(PREFS_KEY) || "{}")
 );
-
 const savePrefs = () => localStorage.setItem(PREFS_KEY, JSON.stringify(prefs));
 
 let STATE = freshState();
@@ -1416,10 +1396,6 @@ function switchTab(name) {
 
 }
 document.querySelectorAll(".tab").forEach(t => t.addEventListener("click", () => switchTab(t.dataset.tab)));
-
-function applyPreferredTab() {
-  switchTab("search");
-}
 
 let _pendingSaveToDb = true;
 async function triggerFilePicker(saveToDb = true) {
@@ -1610,7 +1586,6 @@ async function loadFromDBCache(cached) {
   initScrollSpy();
   restoreScrollPosition();
   updateTTSAvailability();
-  applyPreferredTab();
   if (isMobile()) closeSidebar();
 }
 
@@ -1857,7 +1832,7 @@ async function buildIndex(token, persist) {
   endProgress();
   initScrollSpy();
   updateTTSAvailability();
-  applyPreferredTab();
+  if (!isMobile()) searchInput.focus();
 }
 
 async function extractPDFOutline(pdfDoc) {
@@ -2383,8 +2358,26 @@ function highlightPage(pageEl, query, andMode) {
   });
 }
 
-
-function collectResults(query) {
+function runSearch(rawQuery) {
+  if (!STATE.indexed) return;
+  const query = (rawQuery || "").trim();
+  clearHighlights();
+  STATE.results = []; STATE.activeIdx = -1; STATE.lastQuery = query;
+  if (!STATE.pagesText || !STATE.pagesText.length) {
+    if (STATE.pdfDoc) {
+      STATE.pagesText = [];
+      for (let p = 1; p <= STATE.totalPages; p++) {
+        const segs = STATE.segments.filter(s => s.page === p).map(s => s.text).join(" ");
+        STATE.pagesText.push({ page: p, text: segs });
+      }
+    } else STATE.pagesText = [{ page: 1, text: STATE.fullText }];
+  }
+  if (!query || query.length < 2) {
+    resultsList.innerHTML = `<div class="empty"><div class="e-ico"><svg class="ico-svg" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></div>${query ? "Введите минимум 2 символа." : "Введите запрос — результаты появятся здесь."}</div>`;
+    setStatus(`Готово · Страниц: ${STATE.totalPages}`);
+    updateHitNav();
+    return;
+  }
   const andMode = prefs.andMode;
   const results = [];
   for (const pt of STATE.pagesText) {
@@ -2401,69 +2394,13 @@ function collectResults(query) {
     }
     if (results.length >= 3000) break;
   }
-  return results;
-}
-
-function runSearch(rawQuery) {
-  if (!STATE.indexed) return;
-  const query = (rawQuery || "").trim();
-  clearHighlights();
-  STATE.results = []; STATE.activeIdx = -1; STATE.lastQuery = query;
-  if (!STATE.pagesText || !STATE.pagesText.length) {
-    if (STATE.pdfDoc) {
-      STATE.pagesText = [];
-      for (let p = 1; p <= STATE.totalPages; p++) {
-        const segs = STATE.segments.filter(s => s.page === p).map(s => s.text).join(" ");
-        STATE.pagesText.push({ page: p, text: segs });
-      }
-    } else STATE.pagesText = [{ page: 1, text: STATE.fullText }];
-  }
-  if (!query || query.length < 2) {
-    STATE.lastRawQuery = null;
-    resultsList.innerHTML = `<div class="empty"><div class="e-ico"><svg class="ico-svg" viewBox="0 0 24 24"><circle cx="11" cy="11" r="8"/><line x1="21" y1="21" x2="16.65" y2="16.65"/></svg></div>${query ? "Введите минимум 2 символа." : "Введите запрос — результаты появятся здесь."}</div>`;
-    setStatus(`Готово · Страниц: ${STATE.totalPages}`);
-    updateHitNav();
-    return;
-  }
-  const andMode = prefs.andMode;
-  let results = collectResults(query);
-  let usedQuery = query;
-  let altQueryUsed = false;
-
-  if (!results.length && !prefs.regex) {
-    const alt = transliterateLatinToCyrillic(query);
-    if (alt && alt !== query) {
-      const altResults = collectResults(alt);
-      if (altResults.length) {
-        results = altResults;
-        usedQuery = alt;
-        altQueryUsed = true;
-      }
-    }
-  }
-
-  STATE.lastRawQuery = altQueryUsed ? query : null;
-
-  if (altQueryUsed) {
-    searchInput.value = usedQuery;
-    clearBtn.classList.add("show");
-    try { searchInput.setSelectionRange(usedQuery.length, usedQuery.length); } catch (e) {}
-  }
-
-  STATE.lastQuery = usedQuery;
   STATE.results = results;
-  renderResults(results, usedQuery, altQueryUsed ? query : null);
-  pushHistory(usedQuery);
+  renderResults(results, query);
+  pushHistory(query);
   updateHitNav();
-
-  if (altQueryUsed) {
-    setStatus(`Найдено (раскладка): ${results.length}`);
-  } else {
-    setStatus(results.length ? `Найдено: ${results.length}` : "Ничего не найдено");
-  }
-
+  setStatus(results.length ? `Найдено: ${results.length}` : "Ничего не найдено");
   viewer.querySelectorAll('.pdf-page[data-rendered="1"], .reader').forEach(p => {
-    highlightPage(p, usedQuery, andMode);
+    highlightPage(p, query, andMode);
   });
   if (results.length) gotoResult(0, false);
 }
@@ -2535,7 +2472,7 @@ function buildSnippet(text, start, len) {
     (to < text.length ? " …" : "");
 }
 
-function renderResults(results, query, altOriginal = null) {
+function renderResults(results, query) {
   if (!results.length) {
     const words = query.trim().split(/\s+/).filter(Boolean);
     const hasMultipleWords = words.length > 1;
@@ -2559,22 +2496,7 @@ function renderResults(results, query, altOriginal = null) {
     return;
   }
   resultsList.innerHTML = `
-    <div class="section-label">
-      <span>Результаты</span>
-      <span>${results.length}</span>
-    </div>
-    ${altOriginal ? `
-      <div style="display:flex;align-items:center;gap:8px;flex-wrap:wrap;
-                  font-size:11.5px;color:var(--text-2);line-height:1.4;
-                  padding:8px 10px;background:var(--panel-2);border-radius:var(--r-sm);
-                  margin:2px 0 8px">
-        <span>⌨️ Раскладка изменена на <b>«${escapeHtml(query)}»</b></span>
-        <button id="btnRestoreLayout" style="border:1px solid var(--border);
-                background:var(--panel);color:var(--accent);font-weight:700;font-size:11.5px;
-                padding:3px 9px;border-radius:var(--r-sm);cursor:pointer">
-          Вернуть «${escapeHtml(altOriginal)}»
-        </button>
-      </div>` : ""}
+    <div class="section-label"><span>Результаты</span><span>${results.length}</span></div>
     ${results.slice(0, 500).map((r, i) => `
       <div class="card" data-i="${i}">
         <div class="meta">
@@ -2584,20 +2506,6 @@ function renderResults(results, query, altOriginal = null) {
         <div class="snippet">${r.snippet}</div>
       </div>
     `).join("")}`;
-
-  const restoreBtn = $("btnRestoreLayout");
-  if (restoreBtn) restoreBtn.onclick = () => {
-    const orig = STATE.lastRawQuery;
-    if (!orig) return;
-    searchInput.value = orig;
-    clearBtn.classList.add("show");
-    try { searchInput.setSelectionRange(orig.length, orig.length); } catch (e) {}
-    STATE.lastRawQuery = null;
-    runSearch(orig);
-  };
-
-  const andBtn = $("btnEnableAndMode");
-  if (andBtn) andBtn.onclick = () => andModeBtn.click();
 }
 
 resultsList.addEventListener("click", e => {
