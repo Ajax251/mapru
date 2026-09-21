@@ -6832,35 +6832,52 @@ async function validateNetworkCoverageAndLimit(targetObject) {
     if (!targetObject) return null;
 
     let rawObjects = Array.isArray(targetObject) ? targetObject : [targetObject];
+    
     let objects = deduplicateYmapsObjects(rawObjects);
 
     
     if (objects.length > 30) {
         hideLoader();
-        showNotification(`Выбрано слишком много объектов (${objects.length} шт., максимум: 30).`, 'error', 'ban', 6000);
+        const errMsg = `Отказ запроса! Выбрано ${objects.length} уникальных объектов. Максимально допустимо для одновременного анализа — не более 30 объектов.`;
+        showNotification(errMsg, 'error', 'ban', 8000);
         return null;
     }
 
     
-    if (isAreaLimitExceeded(objects)) {
-        hideLoader();
-        return null;
-    }
+    let totalLengthMeters = 0;
+    let totalPolygonAreaM2 = 0;
+    let polylineCount = 0;
 
-    
-    let totalLen = 0;
     objects.forEach(obj => {
-        totalLen += calculatePreciseGeometry(obj).perimeter;
+        if (obj instanceof ymaps.Polyline) {
+            const stats = calculatePreciseGeometry(obj);
+            totalLengthMeters += stats.perimeter;
+            polylineCount++;
+        } else if (obj instanceof ymaps.Polygon) {
+            const stats = calculatePreciseGeometry(obj);
+            totalPolygonAreaM2 += stats.area;
+        }
     });
 
-    if (totalLen > 6000) {
+    const effectiveBufferArea = totalPolygonAreaM2 + (totalLengthMeters * 20);
+
+    if (totalLengthMeters > 35000 || effectiveBufferArea > MAX_SEARCH_AREA_SQM) {
+        hideLoader();
+        const lenKm = (totalLengthMeters / 1000).toFixed(1);
+        const areaKm = (effectiveBufferArea / 1000000).toFixed(2);
+        const errMsg = `Отказ запроса! Длина выбранных линий (${lenKm} км) или площадь поиска (~${areaKm} км²) превышают допустимый лимит (макс. 35 км / 5 км²).`;
+        showNotification(errMsg, 'error', 'ban', 8000);
+        return null;
+    }
+
+    if (totalLengthMeters > 15000) {
         hideLoader();
         const proceed = confirm(
-            `Внимание: общая протяженность выбранных контуров составляет ${(totalLen / 1000).toFixed(1)} км.\n\n` +
-            `Обработка может потребовать дополнительного времени. Продолжить?`
+            `Внимание: суммарная протяженность выбранных линий ${(totalLengthMeters / 1000).toFixed(1)} км.\n\n` +
+            `Запрос охватывает много участков. Продолжить анализ?`
         );
         if (!proceed) {
-            showNotification('Операция отменена пользователем', 'info');
+            showNotification('Анализ отменен пользователем', 'info');
             return null;
         }
         showLoader('Запуск анализа...');
@@ -6872,88 +6889,45 @@ async function validateNetworkCoverageAndLimit(targetObject) {
 
 function isAreaLimitExceeded(targetObject) {
     if (!targetObject) return false;
-
-    const objects = Array.isArray(targetObject) ? targetObject : [targetObject];
     
-    const MAX_PERIMETER_METERS = 8000;   
-    const MAX_POINTS_COUNT = 400;        
-    const MAX_BBOX_SPAN_METERS = 3500;   
-    const MAX_AREA = typeof MAX_SEARCH_AREA_SQM !== 'undefined' ? MAX_SEARCH_AREA_SQM : 5000000;
-
+    const objects = Array.isArray(targetObject) ? targetObject : [targetObject];
     let totalArea = 0;
-    let totalPerimeter = 0;
-    let totalPoints = 0;
-    let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+    const polylineCoords = [];
 
     for (const obj of objects) {
-        if (!obj || !obj.geometry) continue;
+        if (obj instanceof ymaps.Polygon) {
+            const stats = calculatePreciseGeometry(obj);
+            totalArea += stats.area;
+        } else if (obj instanceof ymaps.Polyline) {
+            const coords = obj.geometry.getCoordinates();
+            if (coords && coords.length >= 2) {
+                polylineCoords.push(coords.map(c => [c[1], c[0]]));
+            }
+        }
+    }
 
-        const props = obj.properties;
-        const isZoneLayer = props && (
-            props.get('isZouit') ||
-            props.get('isQuarterBoundary') ||
-            props.get('zoneType') ||
-            props.get('_zone_type') ||
-            [36940, 36315, 36281, 36278, 36314].includes(props.get('featureData')?.properties?.category)
-        );
-
-        const stats = calculatePreciseGeometry(obj);
-        totalArea += stats.area;
-        totalPerimeter += stats.perimeter;
-
-        const coords = obj.geometry.getCoordinates();
-        if (coords) {
-            const countAndBound = (arr) => {
-                if (!Array.isArray(arr) || arr.length === 0) return 0;
-                if (typeof arr[0] === 'number') {
-                    minLat = Math.min(minLat, arr[0]);
-                    maxLat = Math.max(maxLat, arr[0]);
-                    minLon = Math.min(minLon, arr[1]);
-                    maxLon = Math.max(maxLon, arr[1]);
-                    return 1;
+    
+    if (polylineCoords.length > 0) {
+        try {
+            const mls = turf.multiLineString(polylineCoords);
+            
+            const networkBuffer = turf.buffer(mls, 5, { units: 'meters' });
+            totalArea += turf.area(networkBuffer);
+        } catch (e) {
+            
+            let linesLength = 0;
+            objects.forEach(o => {
+                if (o instanceof ymaps.Polyline) {
+                    linesLength += calculatePreciseGeometry(o).perimeter;
                 }
-                return arr.reduce((acc, sub) => acc + countAndBound(sub), 0);
-            };
-            totalPoints += countAndBound(coords);
-        }
-
-        if (isZoneLayer && (stats.perimeter > 3000 || totalPoints > 150)) {
-            hideLoader(); 
-            showNotification('Выбран системный слой (зона/граница). Пространственный анализ для таких контуров отключен.', 'warning', 'ban', 6000);
-            return true;
+            });
+            totalArea += (linesLength * 8);
         }
     }
 
-    let maxSpanMeters = 0;
-    if (isFinite(minLat) && isFinite(maxLat)) {
-        const heightM = ymaps.coordSystem.geo.getDistance([minLat, minLon], [maxLat, minLon]);
-        const widthM = ymaps.coordSystem.geo.getDistance([minLat, minLon], [minLat, maxLon]);
-        maxSpanMeters = Math.max(heightM, widthM);
-    }
-
-    if (totalPoints > MAX_POINTS_COUNT) {
-        hideLoader(); 
-        showNotification(`Сложный объект: ${totalPoints} точек (лимит: ${MAX_POINTS_COUNT}). Анализ отменен.`, 'warning', 'ban', 6000);
-        return true;
-    }
-
-    if (totalPerimeter > MAX_PERIMETER_METERS) {
-        hideLoader(); 
-        const lenKm = (totalPerimeter / 1000).toFixed(1);
-        showNotification(`Превышена протяженность границ: ${lenKm} км (лимит: ${MAX_PERIMETER_METERS / 1000} км). Анализ отменен.`, 'warning', 'ban', 6000);
-        return true;
-    }
-
-    if (maxSpanMeters > MAX_BBOX_SPAN_METERS) {
-        hideLoader(); 
-        const spanKm = (maxSpanMeters / 1000).toFixed(1);
-        showNotification(`Габариты объекта (${spanKm} км) превышают лимит (${MAX_BBOX_SPAN_METERS / 1000} км). Анализ отменен.`, 'warning', 'ban', 6000);
-        return true;
-    }
-
-    if (totalArea > MAX_AREA) {
-        hideLoader(); 
-        showNotification(`Площадь (~${Math.round(totalArea).toLocaleString('ru-RU')} м²) превышает допустимый лимит. Анализ отменен.`, 'warning', 'ban', 6000);
+    if (totalArea > MAX_SEARCH_AREA_SQM) {
+        const msg = `Площадь охвата сети (~${Math.round(totalArea).toLocaleString('ru-RU')} м²) превышает лимит в ${MAX_SEARCH_AREA_SQM.toLocaleString('ru-RU')} м². Операция отменена.`;
+        showNotification(msg, 'warning', 'exclamation-triangle', 7000);
         return true;
     }
 
@@ -15072,7 +15046,6 @@ function showLineSelectionModal(lines) {
 
 
 async function generateLinearObjectReport(targetObject) {
-      if (isAreaLimitExceeded(targetObject)) return; 
     showLoader(getSonarLoaderHtml());
        if (isAreaLimitExceeded(targetObject)) return; 
     const delay = ms => new Promise(res => setTimeout(res, ms));
@@ -19932,7 +19905,7 @@ async function loadQuartersOverlappingPolygon(targetObject) {
             for (let i = 0; i < missingQuarters.length; i++) {
                 const qNum = missingQuarters[i];
                 if (isZeroQuarterRequest(qNum)) continue;
-                showLoader(`Загрузка КПТ  (${i + 1}/${missingQuarters.length}): ${qNum}...`);
+                showLoader(`Загрузка КПТ онлайн (${i + 1}/${missingQuarters.length}): ${qNum}...`);
                 try {
                     const { parcelFeatures } = await getAllParcelsInQuarter(null, null, true, qNum, true);
                     if (parcelFeatures && parcelFeatures.length > 0) {
@@ -19940,7 +19913,7 @@ async function loadQuartersOverlappingPolygon(targetObject) {
                         loadedQuartersCount++;
                     }
                 } catch (nspdErr) {
-                    console.error(`Ошибка загрузки КПТ ${qNum}:`, nspdErr);
+                    console.error(`Ошибка загрузки КПТ ${qNum} онлайн:`, nspdErr);
                 }
             }
         }
@@ -22274,7 +22247,7 @@ async function executeLocalMapAnalysis(targetObjects, useBuffer = false) {
             }
         });
 
-        const modeLabel = useBuffer ? "с буфером 10м" : "по оси";
+        const modeLabel = useBuffer ? "в полосе 20м" : "по оси";
         const objName = `Сверка с картой (${objects.length} конт., ${modeLabel})`;
 
         
@@ -22397,10 +22370,10 @@ function showAnalysisSelectionModal(rawPolygons, onSelect) {
             
             <div style="display: flex; gap: 6px; background: #e2e8f0; padding: 4px; border-radius: 8px; margin-bottom: 14px;">
                 <button id="src-online-btn" style="flex: 1; padding: 8px 6px; border: none; border-radius: 6px; font-weight: 600; font-size: 0.82rem; cursor: pointer; background: #fff; color: #1e293b; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
-                    <i class="fas fa-globe"></i> ЕГРН
+                    <i class="fas fa-globe"></i> Онлайн ЕГРН
                 </button>
                 <button id="src-archive-btn" style="flex: 1.2; padding: 8px 6px; border: none; border-radius: 6px; font-weight: 600; font-size: 0.82rem; cursor: pointer; background: transparent; color: #64748b;">
-                    <i class="fas fa-database"></i> Локальный Архив КПТ
+                    <i class="fas fa-database"></i> Архив КПТ (БД)
                 </button>
                 <button id="src-map-btn" style="flex: 1; padding: 8px 6px; border: none; border-radius: 6px; font-weight: 600; font-size: 0.82rem; cursor: pointer; background: transparent; color: #64748b;">
                     <i class="fas fa-layer-group"></i> Слой карты (${localObjectsOnMap})
@@ -22460,14 +22433,14 @@ function showAnalysisSelectionModal(rawPolygons, onSelect) {
     function renderActions() {
         const container = modal.querySelector('#analysis-actions-container');
         const btnDirectText = polylineCount > 0 ? `По оси трассы (только пересечения) | L = ${lenStr}` : `Анализировать все ${totalCount} контуров`;
-        const btnBufferText = polylineCount > 0 ? `В полосе 20 м (буфер ±10 м) | S = ${areaStr}` : `Анализировать все ${totalCount} (буфер 10 м)`;
+        const btnBufferText = polylineCount > 0 ? `В полосе 20 м (охранная зона ±10 м) | S = ${areaStr}` : `Анализировать все ${totalCount} (буфер 10 м)`;
 
         if (currentSourceMode === 'online') {
             if (totalCount > maxAllowedLimit) {
                 container.innerHTML = `
                     <div style="background: #fef2f2; border: 1.5px solid #f87171; border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; text-align: left;">
                         <div style="display:flex; align-items:center; gap:8px; font-weight:700; color:#b91c1c; font-size:0.92rem; margin-bottom:4px;">
-                            <i class="fas fa-ban"></i> Запрос ограничен (макс. 30 объектов)
+                            <i class="fas fa-ban"></i> Онлайн-запрос ограничен (макс. 30 объектов)
                         </div>
                         <div style="font-size: 0.83rem; color: #7f1d1d; line-height: 1.4;">
                             Выбрано <b>${totalCount} шт.</b> Используйте вкладку <b>«Слой карты»</b> (на карте доступно ${localObjectsOnMap} объектов) или <b>«Архив КПТ»</b> для анализа всех объектов без ограничений.
@@ -22478,10 +22451,10 @@ function showAnalysisSelectionModal(rawPolygons, onSelect) {
                 container.innerHTML = `
                     <div style="display: flex; flex-direction: column; gap: 8px; width: 100%; margin-bottom: 14px;">
                         <button class="polygon-select-button analyze-online-btn" style="background: linear-gradient(135deg, #10b981, #059669); color: white; text-align: left; padding: 10px 14px; font-weight: 600; border-radius: 8px; border: none; cursor: pointer; display: flex; align-items: center; gap: 10px;">
-                            <i class="fas fa-route"></i> <div><div style="font-size: 0.92rem;">${btnDirectText}</div><div style="font-size: 0.75rem; font-weight: normal; opacity: 0.9;">Запрос данных по оси</div></div>
+                            <i class="fas fa-route"></i> <div><div style="font-size: 0.92rem;">${btnDirectText}</div><div style="font-size: 0.75rem; font-weight: normal; opacity: 0.9;">Онлайн-запрос в ЕГРН строго по оси</div></div>
                         </button>
                         <button class="polygon-select-button analyze-online-buffer-btn" style="background: linear-gradient(135deg, #3b82f6, #1d4ed8); color: white; text-align: left; padding: 10px 14px; font-weight: 600; border-radius: 8px; border: none; cursor: pointer; display: flex; align-items: center; gap: 10px;">
-                            <i class="fas fa-expand-arrows-alt"></i> <div><div style="font-size: 0.92rem;">${btnBufferText}</div><div style="font-size: 0.75rem; font-weight: normal; opacity: 0.9;">Запрос с буфером 10 м</div></div>
+                            <i class="fas fa-expand-arrows-alt"></i> <div><div style="font-size: 0.92rem;">${btnBufferText}</div><div style="font-size: 0.75rem; font-weight: normal; opacity: 0.9;">Онлайн-запрос в ЕГРН в полосе 20 м</div></div>
                         </button>
                     </div>
                 `;
@@ -22509,7 +22482,7 @@ function showAnalysisSelectionModal(rawPolygons, onSelect) {
                         <i class="fas fa-bolt"></i> <div><div style="font-size: 0.92rem;">Сверить с картой по оси (${totalCount} шт.)</div><div style="font-size: 0.75rem; font-weight: normal; opacity: 0.9;">Сверка с ${localObjectsOnMap} загруженными на карту объектами</div></div>
                     </button>
                     <button class="polygon-select-button analyze-map-buffer-btn" style="background: linear-gradient(135deg, #d946ef, #a21caf); color: white; text-align: left; padding: 10px 14px; font-weight: 600; border-radius: 8px; border: none; cursor: pointer; display: flex; align-items: center; gap: 10px;">
-                        <i class="fas fa-expand-arrows-alt"></i> <div><div style="font-size: 0.92rem;">Сверить с картой в с буфером 10м</div><div style="font-size: 0.75rem; font-weight: normal; opacity: 0.9;">Полоса 20 м по нарисованным ЗУ, ОКС и зонам</div></div>
+                        <i class="fas fa-expand-arrows-alt"></i> <div><div style="font-size: 0.92rem;">Сверить с картой в полосе 20м</div><div style="font-size: 0.75rem; font-weight: normal; opacity: 0.9;">Полоса 20 м по нарисованным ЗУ, ОКС и зонам</div></div>
                     </button>
                 </div>
             `;
@@ -25414,7 +25387,7 @@ async function analyzeCoverageAndFillMissing(targetObject, foundQuartersMap) {
                             </div>
                             <h3 style="margin: 0; font-size: 1.15rem; color: #1e3a8a; font-weight: 600;">Лимит запросов (3/3)</h3>
                             <p style="margin: 0; font-size: 0.88rem; color: #475569; line-height: 1.4;">
-                                Выполнено 3 запроса . Осталось неисследованных зон: <b>${remainingCount}</b>.<br>Продолжить поиск?
+                                Выполнено 3 запроса к онлайн-базе. Осталось неисследованных зон: <b>${remainingCount}</b>.<br>Продолжить поиск?
                             </p>
                             <div style="display: flex; gap: 10px; width: 100%; margin-top: 5px;">
                                 <button id="btn-continue-nspd" style="
@@ -28316,7 +28289,6 @@ function isBboxInsidePolygon(bbox, polygonFeature) {
 }
 
 async function generateConsolidatedReport(targetObject) {
-     if (isAreaLimitExceeded(targetObject)) return; 
     showLoader(getSonarLoaderHtml());
     if (isAreaLimitExceeded(targetObject)) return;
     const delay = ms => new Promise(res => setTimeout(res, ms));
