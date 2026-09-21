@@ -5490,7 +5490,7 @@ class NspdQueueManager {
             }
 
             if (response.status === 403) {
-                this.trip('HTTP 403 Доступ ограничен', 403);
+                this.trip('HTTP 403 Доступ ограничен WAF', 403);
                 task.resolve(response);
                 return;
             }
@@ -6824,75 +6824,11 @@ function updateMapOffset() {
         );
 
 
-const BBOX_HARD_LIMIT_SQM = 9000000;   
-const BBOX_WARN_LIMIT_SQM = 4000000;   
-const BBOX_MAX_SIDE_METERS = 3500;     
-
-async function validateNetworkCoverageAndLimit(targetObject) {
-    if (!targetObject) return null;
-
-    let rawObjects = Array.isArray(targetObject) ? targetObject : [targetObject];
-    
-    let objects = deduplicateYmapsObjects(rawObjects);
-
-    
-    if (objects.length > 30) {
-        hideLoader();
-        const errMsg = `Отказ запроса! Выбрано ${objects.length} уникальных объектов. Максимально допустимо для одновременного анализа — не более 30 объектов.`;
-        showNotification(errMsg, 'error', 'ban', 8000);
-        return null;
-    }
-
-    
-    let totalLengthMeters = 0;
-    let totalPolygonAreaM2 = 0;
-    let polylineCount = 0;
-
-    objects.forEach(obj => {
-        if (obj instanceof ymaps.Polyline) {
-            const stats = calculatePreciseGeometry(obj);
-            totalLengthMeters += stats.perimeter;
-            polylineCount++;
-        } else if (obj instanceof ymaps.Polygon) {
-            const stats = calculatePreciseGeometry(obj);
-            totalPolygonAreaM2 += stats.area;
-        }
-    });
-
-    const effectiveBufferArea = totalPolygonAreaM2 + (totalLengthMeters * 20);
-
-    if (totalLengthMeters > 35000 || effectiveBufferArea > MAX_SEARCH_AREA_SQM) {
-        hideLoader();
-        const lenKm = (totalLengthMeters / 1000).toFixed(1);
-        const areaKm = (effectiveBufferArea / 1000000).toFixed(2);
-        const errMsg = `Отказ запроса! Длина выбранных линий (${lenKm} км) или площадь поиска (~${areaKm} км²) превышают допустимый лимит (макс. 35 км / 5 км²).`;
-        showNotification(errMsg, 'error', 'ban', 8000);
-        return null;
-    }
-
-    if (totalLengthMeters > 15000) {
-        hideLoader();
-        const proceed = confirm(
-            `Внимание: суммарная протяженность выбранных линий ${(totalLengthMeters / 1000).toFixed(1)} км.\n\n` +
-            `Запрос охватывает много участков. Продолжить анализ?`
-        );
-        if (!proceed) {
-            showNotification('Анализ отменен пользователем', 'info');
-            return null;
-        }
-        showLoader('Запуск анализа...');
-    }
-
-    return objects;
-}
-
-
 function isAreaLimitExceeded(targetObject) {
     if (!targetObject) return false;
     
     const objects = Array.isArray(targetObject) ? targetObject : [targetObject];
     let totalArea = 0;
-    const polylineCoords = [];
 
     for (const obj of objects) {
         if (obj instanceof ymaps.Polygon) {
@@ -6900,33 +6836,18 @@ function isAreaLimitExceeded(targetObject) {
             totalArea += stats.area;
         } else if (obj instanceof ymaps.Polyline) {
             const coords = obj.geometry.getCoordinates();
-            if (coords && coords.length >= 2) {
-                polylineCoords.push(coords.map(c => [c[1], c[0]]));
-            }
-        }
-    }
-
-    
-    if (polylineCoords.length > 0) {
-        try {
-            const mls = turf.multiLineString(polylineCoords);
             
-            const networkBuffer = turf.buffer(mls, 5, { units: 'meters' });
-            totalArea += turf.area(networkBuffer);
-        } catch (e) {
+            const turfLine = turf.lineString(coords.map(c => [c[1], c[0]]));
             
-            let linesLength = 0;
-            objects.forEach(o => {
-                if (o instanceof ymaps.Polyline) {
-                    linesLength += calculatePreciseGeometry(o).perimeter;
-                }
-            });
-            totalArea += (linesLength * 8);
+            const bufferedLine = turf.buffer(turfLine, 100, { units: 'meters' });
+            totalArea += turf.area(bufferedLine);
         }
     }
 
     if (totalArea > MAX_SEARCH_AREA_SQM) {
-        const msg = `Площадь охвата сети (~${Math.round(totalArea).toLocaleString('ru-RU')} м²) превышает лимит в ${MAX_SEARCH_AREA_SQM.toLocaleString('ru-RU')} м². Операция отменена.`;
+        const msg = `Площадь области поиска (~${Math.round(totalArea).toLocaleString('ru-RU')} м²) превышает допустимый лимит в ${MAX_SEARCH_AREA_SQM.toLocaleString('ru-RU')} м². Операция отменена .`;
+        
+        
         showNotification(msg, 'warning', 'exclamation-triangle', 7000);
         return true;
     }
@@ -11149,14 +11070,10 @@ if (event.target.id === 'quick-report-menu-item') {
                 executeQuickReport(targetObject);
             } else {
                 
-              let candidateObjects = polygons.filter(obj => {
-        if (isCadastralMapLayer(obj)) return false;
-        return obj instanceof ymaps.Polygon || (obj instanceof ymaps.Polyline && obj.properties.get('isDrawableLine'));
-    });
-
-    if (candidateObjects.length === 0) {
-        candidateObjects = polygons.filter(obj => obj instanceof ymaps.Polygon || (obj instanceof ymaps.Polyline && obj.properties.get('isDrawableLine')));
-    }
+                const candidateObjects = polygons.filter(obj => 
+                    obj instanceof ymaps.Polygon || 
+                    (obj instanceof ymaps.Polyline && obj.properties.get('isDrawableLine'))
+                );
 
                 if (candidateObjects.length > 0) {
                     
@@ -12425,7 +12342,7 @@ function setMapMode(mode, fromCheckbox = false) {
                 localStorage.setItem('isHouseNumbersEnabled', 'true');
             }
         } else if (['google-sat', 'google-map', 'google-hyb'].includes(mode)) {
-            
+            // При выборе Google Спутник, Google Схема или Google Гибрид снимаем галочку
             if (houseCheckbox) {
                 houseCheckbox.checked = false;
                 localStorage.setItem('isHouseNumbersEnabled', 'false');
@@ -14833,206 +14750,48 @@ function showLineSelectionModal(lines) {
     const modal = document.createElement('div');
     modal.className = 'style-modal';
     modal.style.display = 'flex';
-    modal.style.alignItems = 'center';
-    modal.style.justifyContent = 'center';
 
     const modalContent = document.createElement('div');
     modalContent.className = 'style-modal-content';
-    modalContent.style.width = '520px';
-    modalContent.style.maxWidth = '95vw';
-    modalContent.style.padding = '20px';
-    modalContent.style.fontFamily = "-apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif";
-
-    const totalCount = lines.length;
-    const maxLineLimit = 30;
-    const countToAnalyze = Math.min(totalCount, maxLineLimit);
-    const selectedLines = lines.slice(0, countToAnalyze);
-
+    modalContent.style.width = '400px';
+    modalContent.innerHTML = '<h3>Выберите объект для отчета</h3>';
     
-    let totalLengthMeters = 0;
-    const polylineCoords = [];
-
-    selectedLines.forEach(line => {
-        const stats = calculatePreciseGeometry(line);
-        totalLengthMeters += stats.perimeter;
-        const c = line.geometry.getCoordinates();
-        if (c && c.length >= 2) {
-            polylineCoords.push(c.map(pt => [pt[1], pt[0]]));
-        }
-    });
-
-    
-    let totalBufferedAreaM2 = 0;
-    if (polylineCoords.length > 0) {
-        try {
-            const mls = turf.multiLineString(polylineCoords);
-            const buffered = turf.buffer(mls, 10, { units: 'meters' });
-            totalBufferedAreaM2 = turf.area(buffered);
-        } catch (e) {
-            totalBufferedAreaM2 = totalLengthMeters * 20;
-        }
-    }
-
-    const formatLen = (m) => m >= 1000 ? `${(m / 1000).toFixed(2)} км` : `${Math.round(m)} м`;
-    const formatArea = (sqm) => {
-        if (sqm >= 10000) return `${(sqm / 10000).toFixed(2)} га (${Math.round(sqm).toLocaleString('ru-RU')} м²)`;
-        return `${Math.round(sqm).toLocaleString('ru-RU')} м²`;
-    };
-
-    const lenFormatted = formatLen(totalLengthMeters);
-    const areaFormatted = formatArea(totalBufferedAreaM2);
-
-    
-    let summaryHtml = `
-        <h3 style="margin: 0 0 12px 0; color: #1e3a8a; font-size: 1.25rem; text-align: center;">Отчет по линейным объектам</h3>
-        <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 14px; margin-bottom: 15px; font-size: 0.88rem; color: #334155; line-height: 1.5; text-align: left;">
-            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                <span>Линейных объектов на карте:</span>
-                <b>${totalCount} шт. ${totalCount > maxLineLimit ? `<span style="color: #ef4444;">(в отчет войдут первые ${maxLineLimit})</span>` : '<span style="color: #10b981;">(все войдут)</span>'}</b>
-            </div>
-            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
-                <span>Суммарная протяженность:</span>
-                <b style="color: #0f172a;">${lenFormatted}</b>
-            </div>
-            <div style="display: flex; justify-content: space-between; border-top: 1px dashed #cbd5e1; padding-top: 5px; margin-top: 5px;">
-                <span>Площадь охранной полосы (±10 м):</span>
-                <b style="color: #2563eb;">${areaFormatted}</b>
-            </div>
-        </div>
-    `;
-    modalContent.innerHTML = summaryHtml;
-
     
     const analyzeAllButton = document.createElement('button');
-    const btnTitle = totalCount > maxLineLimit
-        ? `Анализировать первые ${maxLineLimit} из ${totalCount} линий | L = ${lenFormatted}`
-        : `Анализировать все ${totalCount} контура как один объект | L = ${lenFormatted}`;
-
-    analyzeAllButton.innerHTML = `<i class="fas fa-layer-group" style="margin-right: 8px;"></i>${btnTitle}`;
+    analyzeAllButton.textContent = `Анализировать все ${lines.length} контура как один объект`;
     Object.assign(analyzeAllButton.style, {
-        display: 'flex',
-        alignItems: 'center',
-        justifyContent: 'center',
-        width: '100%',
-        padding: '12px 14px',
-        marginBottom: '15px',
-        cursor: 'pointer',
-        background: 'linear-gradient(135deg, #10b981, #059669)',
-        color: 'white',
-        border: 'none',
-        borderRadius: '8px',
-        fontWeight: '600',
-        fontSize: '0.92rem',
-        boxShadow: '0 2px 5px rgba(16, 185, 129, 0.25)',
-        transition: 'all 0.2s ease'
+        display: 'block', width: '100%', padding: '12px', marginTop: '10px', marginBottom: '20px',
+        cursor: 'pointer', backgroundColor: '#4CAF50', color: 'white', border: 'none', borderRadius: '5px'
     });
-
-    analyzeAllButton.onmouseenter = () => analyzeAllButton.style.filter = 'brightness(1.08)';
-    analyzeAllButton.onmouseleave = () => analyzeAllButton.style.filter = 'none';
-
+    
     analyzeAllButton.onclick = () => {
         document.body.removeChild(modal);
-        
-        generateLinearObjectReport(selectedLines);
+        generateLinearObjectReport(lines); 
     };
     modalContent.appendChild(analyzeAllButton);
 
     
-    const singleTitle = document.createElement('div');
-    singleTitle.textContent = 'Либо выберите один конкретный отрезок:';
-    Object.assign(singleTitle.style, {
-        textAlign: 'left',
-        fontSize: '0.8rem',
-        fontWeight: 'bold',
-        color: '#64748b',
-        textTransform: 'uppercase',
-        marginBottom: '8px'
-    });
-    modalContent.appendChild(singleTitle);
-
-    
-    const listContainer = document.createElement('div');
-    Object.assign(listContainer.style, {
-        maxHeight: '25vh',
-        overflowY: 'auto',
-        width: '100%',
-        border: '1px solid #e2e8f0',
-        borderRadius: '8px',
-        padding: '4px',
-        background: '#fff',
-        boxSizing: 'border-box'
-    });
-
-    
-    const previewLines = lines.slice(0, maxLineLimit);
-    previewLines.forEach((line, index) => {
-        const stats = calculatePreciseGeometry(line);
-        const length = stats.perimeter;
+    lines.forEach((line, index) => {
+        const coords = line.geometry.getCoordinates();
+        const turfLine = turf.lineString(coords.map(c => [c[1], c[0]]));
+        const length = turf.length(turfLine, { units: 'meters' });
 
         const button = document.createElement('button');
-        button.innerHTML = `<span style="font-weight: 600; color: #1e40af;">Отрезок ${index + 1}</span> &nbsp;|&nbsp; Протяженность: ${Math.round(length)} м`;
+        button.textContent = `Только контур ${index + 1} (Протяженность: ${length.toFixed(2)} м)`;
         Object.assign(button.style, {
-            display: 'block',
-            width: '100%',
-            padding: '8px 12px',
-            margin: '3px 0',
-            cursor: 'pointer',
-            border: '1px solid #e2e8f0',
-            borderRadius: '6px',
-            background: '#f8fafc',
-            color: '#1e293b',
-            textAlign: 'left',
-            fontSize: '0.85rem',
-            transition: 'all 0.15s ease'
+            display: 'block', width: '100%', padding: '10px', marginTop: '10px', cursor: 'pointer'
         });
-
-        button.onmouseenter = () => {
-            button.style.background = '#eff6ff';
-            button.style.borderColor = '#93c5fd';
-        };
-        button.onmouseleave = () => {
-            button.style.background = '#f8fafc';
-            button.style.borderColor = '#e2e8f0';
-        };
-
+        
         button.onclick = () => {
             document.body.removeChild(modal);
             generateLinearObjectReport(line);
         };
-        listContainer.appendChild(button);
+        modalContent.appendChild(button);
     });
 
-    if (totalCount > maxLineLimit) {
-        const moreNote = document.createElement('div');
-        moreNote.textContent = `...и еще ${totalCount - maxLineLimit} линий (доступны через групповую кнопку)`;
-        Object.assign(moreNote.style, {
-            textAlign: 'center',
-            padding: '6px',
-            color: '#94a3b8',
-            fontSize: '0.78rem'
-        });
-        listContainer.appendChild(moreNote);
-    }
-    modalContent.appendChild(listContainer);
-
-    
     const cancelBtn = document.createElement('button');
-    cancelBtn.innerHTML = '<i class="fas fa-times" style="margin-right: 6px;"></i>Отмена';
-    Object.assign(cancelBtn.style, {
-        width: '100%',
-        marginTop: '15px',
-        padding: '10px',
-        cursor: 'pointer',
-        border: '1px solid #cbd5e1',
-        borderRadius: '8px',
-        background: '#fff',
-        color: '#475569',
-        fontWeight: '600',
-        fontSize: '0.9rem',
-        transition: 'all 0.2s ease'
-    });
-    cancelBtn.onmouseenter = () => cancelBtn.style.background = '#f1f5f9';
-    cancelBtn.onmouseleave = () => cancelBtn.style.background = '#fff';
+    cancelBtn.textContent = 'Отмена';
+    Object.assign(cancelBtn.style, { marginTop: '20px', padding: '10px', cursor: 'pointer' });
     cancelBtn.onclick = () => document.body.removeChild(modal);
     modalContent.appendChild(cancelBtn);
 
@@ -17049,19 +16808,13 @@ function filterFeaturesByTurfLogic(rawFeatures, targetTurfPolygons) {
 
 
 async function executeQuickReport(targetObject) {
-    if (isAreaLimitExceeded(targetObject)) return;
+    if (isAreaLimitExceeded(targetObject)) return;     
 
     
-    const validated = await validateNetworkCoverageAndLimit(targetObject);
-    if (!validated) {
-        hideLoader();
-        return;
-    }
-
     showLoader(getSonarLoaderHtml());
     
-    const objects = validated;
-    const isMulti = objects.length > 1;
+    const isMulti = Array.isArray(targetObject);
+    const objects = isMulti ? targetObject : [targetObject];
     quickReportTargetObjects = objects;
     
     const sidebar = document.getElementById('parcel-results-sidebar');
@@ -17071,7 +16824,7 @@ async function executeQuickReport(targetObject) {
         polygons = polygons.filter(p => p !== obj);
         parcelPlacemarks = parcelPlacemarks.filter(p => p !== obj);
     });
-    quickReportLayers = { zu: [], oks: [], structure: [], zouit: [] };
+    quickReportLayers = { zu: [], oks: [], structure:[], zouit:[] };
 
     let objName = 'Выбранный объект';
     if (!isMulti) {
@@ -17120,13 +16873,7 @@ async function executeQuickReport(targetObject) {
             return ensureClosedRing(mappedRing);
         };
 
-        const allRawFeatures = await searchFeaturesByGeometry(objects, [36368, 36369, 36383, 36940]);
-        
-        
-        if (allRawFeatures === null) {
-            return;
-        }
-
+        const allRawFeatures = await searchFeaturesByGeometry(objects, [36368, 36369, 36383, 36940]) || [];
         const demuxed = demuxFeatures(allRawFeatures);
 
         if (demuxed.zu.length > 0) {
@@ -17324,8 +17071,8 @@ async function executeQuickReport(targetObject) {
         renderBottomDashboard(objName, results, targetBounds);
 
     } catch (e) {
-        console.error("Ошибка в executeQuickReport:", e);
-        showNotification(e.message || "Ошибка при выполнении анализа", "error", "exclamation-circle", 7000);
+        console.error(e);
+        showNotification("Ошибка анализа: " + e.message, "error");
     } finally {
         hideLoader();
     }
@@ -21721,825 +21468,94 @@ function updateLoaderWithRadiusButtons(lat, lon) {
 
 
 
-
-function deduplicateYmapsObjects(objects) {
-    if (!Array.isArray(objects) || objects.length <= 1) return objects;
-
-    const uniqueList = [];
-    const seenSignatures = new Set();
-
-    const roundCoord = (val) => Number(val).toFixed(6);
-
-    const getPolylineSignature = (coords) => {
-        if (!coords || coords.length === 0) return '';
-        const forwardPts = coords.map(c => `${roundCoord(c[0])},${roundCoord(c[1])}`);
-        const reversePts = [...forwardPts].reverse();
-        
-        const fwdStr = forwardPts.join(';');
-        const revStr = reversePts.join(';');
-        return `line:${fwdStr < revStr ? fwdStr : revStr}`;
-    };
-
-    const getPolygonSignature = (rings) => {
-        if (!rings || !rings[0] || rings[0].length === 0) return '';
-        
-        let pts = rings[0].map(c => `${roundCoord(c[0])},${roundCoord(c[1])}`);
-        if (pts.length > 1 && pts[0] === pts[pts.length - 1]) {
-            pts.pop();
-        }
-        
-        const sortedPts = [...pts].sort();
-        return `poly:${sortedPts.join(';')}`;
-    };
-
-    for (const obj of objects) {
-        if (!obj || !obj.geometry) continue;
-
-        let sig = '';
-        if (obj instanceof ymaps.Polyline) {
-            sig = getPolylineSignature(obj.geometry.getCoordinates());
-        } else if (obj instanceof ymaps.Polygon) {
-            sig = getPolygonSignature(obj.geometry.getCoordinates());
-        } else {
-            uniqueList.push(obj);
-            continue;
-        }
-
-        if (sig && !seenSignatures.has(sig)) {
-            seenSignatures.add(sig);
-            uniqueList.push(obj);
-        }
-    }
-
-    return uniqueList;
-}
-
-
-async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false) {
-    showLoader("Поиск кварталов в локальном архиве КПТ...");
-    try {
-        const db = await openLocalDB();
-        const txQ = db.transaction('quarters_index', 'readonly');
-        const allQuarters = await new Promise((resolve) => {
-            const req = txQ.objectStore('quarters_index').getAll();
-            req.onsuccess = () => resolve(req.result || []);
-            req.onerror = () => resolve([]);
-        });
-
-        if (!allQuarters || allQuarters.length === 0) {
-            showNotification("Локальный архив КПТ пуст. Сохраните или импортируйте кварталы в архив перед анализом.", "warning", "database", 7000);
-            hideLoader();
-            return;
-        }
-
-        const objects = Array.isArray(targetObjects) ? targetObjects : [targetObjects];
-
-        
-        const targetTurfs = [];
-        objects.forEach(obj => {
-            const coords = obj.geometry.getCoordinates();
-            if (obj instanceof ymaps.Polygon) {
-                const rings = coords.map(r => r.map(c => [c[1], c[0]]));
-                rings.forEach(ring => {
-                    if (ring.length > 2 && (ring[0][0] !== ring[ring.length-1][0] || ring[0][1] !== ring[ring.length-1][1])) {
-                        ring.push([...ring[0]]);
-                    }
-                });
-                const poly = turf.polygon(rings);
-                targetTurfs.push({
-                    geom: useBuffer ? turf.buffer(poly, 10, { units: 'meters' }) : poly,
-                    isLine: false
-                });
-            } else if (obj instanceof ymaps.Polyline) {
-                const line = turf.lineString(coords.map(c => [c[1], c[0]]));
-                targetTurfs.push({
-                    geom: useBuffer ? turf.buffer(line, 10, { units: 'meters' }) : line,
-                    isLine: !useBuffer
-                });
-            }
-        });
-
-        if (targetTurfs.length === 0) {
-            showNotification("Не удалось прочитать геометрию линий для анализа", "warning");
-            hideLoader();
-            return;
-        }
-
-        
-        showLoader("Сверка трассы с границами кварталов в БД...");
-        const intersectingQuarters = [];
-
-        for (const q of allQuarters) {
-            if (!q.geojson_geom || !q.geojson_geom.coordinates) continue;
-            try {
-                const geom = q.geojson_geom;
-                const isMulti = geom.type === 'MultiPolygon';
-
-                const mapRings = isMulti
-                    ? geom.coordinates.map(poly => poly.map(ring => ring.map(convertApi3857ToMapCoords)))
-                    : geom.coordinates.map(ring => ring.map(convertApi3857ToMapCoords));
-
-                const closeRings = (ringsList) => ringsList.map(r => {
-                    const copy = [...r];
-                    if (copy.length > 2 && (copy[0][0] !== copy[copy.length-1][0] || copy[0][1] !== copy[copy.length-1][1])) {
-                        copy.push([...copy[0]]);
-                    }
-                    return copy;
-                });
-
-                const turfPoly = isMulti 
-                    ? turf.multiPolygon(mapRings.map(closeRings)) 
-                    : turf.polygon(closeRings(mapRings));
-
-                let qIntersects = false;
-                for (const target of targetTurfs) {
-                    if (turf.booleanIntersects(target.geom, turfPoly)) {
-                        qIntersects = true;
-                        break;
-                    }
-                }
-
-                if (qIntersects) {
-                    intersectingQuarters.push(q);
-                }
-            } catch (e) {}
-        }
-
-        if (intersectingQuarters.length === 0) {
-            showNotification("В локальной БД нет кварталов, пересекающих выбранную трассу.", "warning", "database", 6000);
-            hideLoader();
-            return;
-        }
-
-        showLoader(`Найдено ${intersectingQuarters.length} КПТ в архиве. Распаковка ЗУ и ОКС...`);
-
-        
-        const allCandidateFeatures = { zu: [], oks: [], structure: [] };
-        for (let i = 0; i < intersectingQuarters.length; i++) {
-            const qNum = intersectingQuarters[i].quarter_number;
-            const [zuRes, oksRes, strRes] = await Promise.all([
-                loadFromLocalArchive(qNum, 'ZU'),
-                loadFromLocalArchive(qNum, 'OKS'),
-                loadFromLocalArchive(qNum, 'STR')
-            ]);
-            if (zuRes && Array.isArray(zuRes.data)) allCandidateFeatures.zu.push(...zuRes.data);
-            if (oksRes && Array.isArray(oksRes.data)) allCandidateFeatures.oks.push(...oksRes.data);
-            if (strRes && Array.isArray(strRes.data)) allCandidateFeatures.structure.push(...strRes.data);
-        }
-
-        
-        showLoader("Анализ пересечений объектов...");
-        const results = { zu: [], oks: [], structure: [], zouit: [] };
-        const seenCns = new Set();
-
-        const checkFeatures = (featuresList, type) => {
-            for (const f of featuresList) {
-                if (!f || !f.geometry || !f.geometry.coordinates) continue;
-                const p = f.properties || {};
-                const o = p.options || {};
-                const cn = (type === 'oks' ? (o.cad_num || p.descr) : (type === 'structure' ? (o.cad_number || p.descr) : p.descr)) || f.id;
-                if (cn && seenCns.has(cn)) continue;
-
-                let fTurf = null;
-                try {
-                    const geomType = f.geometry.type;
-                    if (geomType === 'Polygon') {
-                        const rings = f.geometry.coordinates.map(r => r.map(convertApi3857ToMapCoords));
-                        fTurf = turf.polygon(rings);
-                    } else if (geomType === 'MultiPolygon') {
-                        const polys = f.geometry.coordinates.map(p => p.map(r => r.map(convertApi3857ToMapCoords)));
-                        fTurf = turf.multiPolygon(polys);
-                    } else if (geomType === 'LineString') {
-                        fTurf = turf.lineString(f.geometry.coordinates.map(convertApi3857ToMapCoords));
-                    } else if (geomType === 'Point') {
-                        fTurf = turf.point(convertApi3857ToMapCoords(f.geometry.coordinates));
-                    }
-                } catch (err) { continue; }
-
-                if (!fTurf) continue;
-
-                let isHit = false;
-                for (const target of targetTurfs) {
-                    try {
-                        if (turf.booleanIntersects(target.geom, fTurf)) {
-                            isHit = true;
-                            break;
-                        }
-                    } catch (e) {}
-                }
-
-                if (isHit) {
-                    if (cn) seenCns.add(cn);
-                    results[type].push(f);
-                }
-            }
-        };
-
-        checkFeatures(allCandidateFeatures.zu, 'zu');
-        checkFeatures(allCandidateFeatures.oks, 'oks');
-        checkFeatures(allCandidateFeatures.structure, 'structure');
-
-        
-        if (db.objectStoreNames.contains('zones_store')) {
-            try {
-                const txZ = db.transaction('zones_store', 'readonly');
-                const allZones = await new Promise(r => {
-                    const req = txZ.objectStore('zones_store').getAll();
-                    req.onsuccess = () => r(req.result || []);
-                    req.onerror = () => r([]);
-                });
-                const zoneFeatures = allZones.map(z => z.feature).filter(Boolean);
-                checkFeatures(zoneFeatures, 'zouit');
-            } catch(e) {}
-        }
-
-        const totalFound = results.zu.length + results.oks.length + results.structure.length + results.zouit.length;
-
-        if (totalFound === 0) {
-            showNotification(`В пересекаемых кварталах архива (${intersectingQuarters.length} шт.) наложений не найдено`, 'info');
-            hideLoader();
-            return;
-        }
-
-        
-        showLoader(`Отрисовка ${totalFound} найденных объектов...`);
-        
-        Object.values(quickReportLayers).flat().forEach(obj => {
-            if (map.geoObjects.indexOf(obj) !== -1) map.geoObjects.remove(obj);
-            polygons = polygons.filter(p => p !== obj);
-        });
-        quickReportLayers = { zu: [], oks: [], structure: [], zouit: [] };
-
-        if (results.zu.length > 0) quickReportLayers.zu = await drawFoundParcels(results.zu, false);
-        if (results.oks.length > 0) quickReportLayers.oks = await processAndDrawBuildingsProxy(results.oks);
-        if (results.structure.length > 0) quickReportLayers.structure = await processAndDrawStructuresProxy(results.structure);
-        if (results.zouit.length > 0) quickReportLayers.zouit = await processAndDrawZouitsProxy(results.zouit);
-
-        parcelFeaturesData = results.zu;
-        buildingFeaturesData = results.oks;
-        structureFeaturesData = results.structure;
-        zouitFeaturesData = results.zouit;
-
-        window.parcelFeaturesData = parcelFeaturesData;
-        window.buildingFeaturesData = buildingFeaturesData;
-        window.structureFeaturesData = structureFeaturesData;
-        window.zouitFeaturesData = zouitFeaturesData;
-        window.isGlobalMapMode = true;
-
-        let targetBounds = null;
-        objects.forEach(obj => {
-            const b = obj.geometry.getBounds();
-            if (b) {
-                if (!targetBounds) targetBounds = [[...b[0]], [...b[1]]];
-                else {
-                    targetBounds[0][0] = Math.min(targetBounds[0][0], b[0][0]);
-                    targetBounds[0][1] = Math.min(targetBounds[0][1], b[0][1]);
-                    targetBounds[1][0] = Math.max(targetBounds[1][0], b[1][0]);
-                    targetBounds[1][1] = Math.max(targetBounds[1][1], b[1][1]);
-                }
-            }
-        });
-
-        const objName = `Архив БД (${objects.length} конт. / ${intersectingQuarters.length} КПТ)`;
-        renderBottomDashboard(objName, results, targetBounds);
-        showNotification(`Анализ по архиву завершен! Найдено наложений: ${totalFound} (ЗУ: ${results.zu.length}, ОКС: ${results.oks.length})`, 'success', 'database', 8000);
-
-    } catch (err) {
-        console.error("Ошибка в executeLocalArchiveAnalysis:", err);
-        showNotification(`Ошибка анализа по локальному архиву: ${err.message}`, 'error');
-    } finally {
-        hideLoader();
-    }
-}
-
-
-async function executeLocalMapAnalysis(targetObjects, useBuffer = false) {
-    showLoader("Сверка с кадастровым слоем карты...");
-
-    try {
-        const objects = Array.isArray(targetObjects) ? targetObjects : [targetObjects];
-        if (objects.length === 0) {
-            showNotification("Нет объектов для анализа", "warning");
-            hideLoader();
-            return;
-        }
-
-        
-        if (typeof quickReportLayers !== 'undefined') {
-            Object.values(quickReportLayers).flat().forEach(obj => {
-                if (obj && map.geoObjects.indexOf(obj) !== -1) map.geoObjects.remove(obj);
-                polygons = polygons.filter(p => p !== obj);
-            });
-        }
-        quickReportLayers = { zu: [], oks: [], structure: [], zouit: [] };
-
-        
-        const targetTurfs = [];
-        let totalAnalyzedLengthM = 0;
-
-        objects.forEach(obj => {
-            const coords = obj.geometry.getCoordinates();
-            if (obj instanceof ymaps.Polygon) {
-                const rings = coords.map(r => r.map(c => [c[1], c[0]]));
-                rings.forEach(ring => {
-                    if (ring.length > 2 && (ring[0][0] !== ring[ring.length - 1][0] || ring[0][1] !== ring[ring.length - 1][1])) {
-                        ring.push([...ring[0]]);
-                    }
-                });
-                const poly = turf.polygon(rings);
-                const finalGeom = useBuffer ? turf.buffer(poly, 10, { units: 'meters' }) : poly;
-                targetTurfs.push({
-                    geom: finalGeom,
-                    isLine: false,
-                    bbox: turf.bbox(finalGeom)
-                });
-            } else if (obj instanceof ymaps.Polyline) {
-                totalAnalyzedLengthM += calculatePreciseGeometry(obj).perimeter;
-                const line = turf.lineString(coords.map(c => [c[1], c[0]]));
-                if (useBuffer) {
-                    const buffered = turf.buffer(line, 10, { units: 'meters' });
-                    targetTurfs.push({
-                        geom: buffered,
-                        isLine: false,
-                        bbox: turf.bbox(buffered)
-                    });
-                } else {
-                    targetTurfs.push({
-                        geom: line,
-                        isLine: true,
-                        bbox: turf.bbox(line)
-                    });
-                }
-            }
-        });
-
-        if (targetTurfs.length === 0) {
-            showNotification("Не удалось получить геометрию сети для анализа", "warning");
-            hideLoader();
-            return;
-        }
-
-        const selectedSet = new Set(objects);
-        const localResults = { zu: [], oks: [], structure: [], zouit: [] };
-        const processedCns = new Set();
-        const matchedMapObjects = new Set();
-
-        
-        const mapCandidates = [];
-        map.geoObjects.each(function(obj) {
-            if (!(obj instanceof ymaps.Polygon) && !(obj instanceof ymaps.Polyline)) return;
-            if (selectedSet.has(obj)) return; 
-
-            if (obj.properties.get('isQuarterBoundary') ||
-                obj.properties.get('isSearchShape') ||
-                obj.properties.get('isMeasureTool')) return;
-
-            mapCandidates.push(obj);
-        });
-
-        
-        for (const mapObj of mapCandidates) {
-            let feature = mapObj.properties.get('featureData');
-            let cn = mapObj.properties.get('cadastralNumber') ||
-                     (feature && feature.properties?.descr) ||
-                     (feature && feature.properties?.options?.cad_num) ||
-                     (feature && feature.properties?.options?.reg_numb_border) ||
-                     'Объект';
-
-            if (cn && cn !== 'Объект' && processedCns.has(cn)) continue;
-
-            
-            let candTurf = null;
-            const coords = mapObj.geometry.getCoordinates();
-            try {
-                if (mapObj instanceof ymaps.Polygon) {
-                    const rings = coords.map(r => r.map(c => [c[1], c[0]]));
-                    rings.forEach(ring => {
-                        if (ring.length > 2 && (ring[0][0] !== ring[ring.length - 1][0] || ring[0][1] !== ring[ring.length - 1][1])) {
-                            ring.push([...ring[0]]);
-                        }
-                    });
-                    candTurf = turf.polygon(rings);
-                } else if (mapObj instanceof ymaps.Polyline) {
-                    candTurf = turf.lineString(coords.map(c => [c[1], c[0]]));
-                }
-            } catch (e) {
-                continue;
-            }
-
-            if (!candTurf) continue;
-            const candBbox = turf.bbox(candTurf);
-
-            let isIntersecting = false;
-            let totalIntersectArea = 0;
-
-            for (const target of targetTurfs) {
-                const tBox = target.bbox;
-                
-                if (candBbox[0] > tBox[2] || candBbox[2] < tBox[0] || candBbox[1] > tBox[3] || candBbox[3] < tBox[1]) {
-                    continue;
-                }
-
-                
-                const res = checkPreciseIntersection(target.geom, candTurf, target.isLine, `[LocalMap ${cn}]`);
-                if (res.isIntersecting) {
-                    isIntersecting = true;
-                    totalIntersectArea += res.area;
-                }
-            }
-
-            if (isIntersecting) {
-                if (cn && cn !== 'Объект') processedCns.add(cn);
-                matchedMapObjects.add(mapObj);
-
-                if (!feature) {
-                    feature = {
-                        type: "Feature",
-                        geometry: null,
-                        properties: {
-                            descr: cn,
-                            options: {
-                                cad_num: cn,
-                                readable_address: mapObj.properties.get('address') ||
-                                                  (typeof mapObj.properties.get('hintContent') === 'object'
-                                                      ? mapObj.properties.get('hintContent').address
-                                                      : 'Адрес не указан')
-                            }
-                        }
-                    };
-                }
-
-                if (!feature.properties) feature.properties = {};
-                if (totalIntersectArea > 0) {
-                    feature.properties._intersectionArea = totalIntersectArea;
-                }
-
-                
-                const isBuilding = mapObj.properties.get('isBuilding') ||
-                                  (feature.properties?.category === 36369) ||
-                                  (feature.properties?.categoryName === 'Здания');
-
-                const isStructure = mapObj.properties.get('isStructure') ||
-                                   (feature.properties?.category === 36383) ||
-                                   (feature.properties?.categoryName === 'Сооружения');
-
-                const isZouit = mapObj.properties.get('isZouit') ||
-                               [36940, 36315, 36281, 36278, 36314].includes(feature.properties?.category) ||
-                               (feature.properties?.categoryName && feature.properties.categoryName.includes('Зоны'));
-
-                if (isBuilding) {
-                    localResults.oks.push(feature);
-                    quickReportLayers.oks.push(mapObj);
-                } else if (isStructure) {
-                    localResults.structure.push(feature);
-                    quickReportLayers.structure.push(mapObj);
-                } else if (isZouit) {
-                    localResults.zouit.push(feature);
-                    quickReportLayers.zouit.push(mapObj);
-                } else {
-                    localResults.zu.push(feature);
-                    quickReportLayers.zu.push(mapObj);
-                }
-            }
-        }
-
-        const totalFound = localResults.zu.length + localResults.oks.length + localResults.structure.length + localResults.zouit.length;
-
-        if (totalFound === 0) {
-            showNotification("Пересечений с загруженными на карту объектами не найдено.", "info", "info-circle", 5000);
-            hideLoader();
-            return;
-        }
-
-        
-        parcelFeaturesData = localResults.zu;
-        buildingFeaturesData = localResults.oks;
-        structureFeaturesData = localResults.structure;
-        zouitFeaturesData = localResults.zouit;
-
-        window.parcelFeaturesData = parcelFeaturesData;
-        window.buildingFeaturesData = buildingFeaturesData;
-        window.structureFeaturesData = structureFeaturesData;
-        window.zouitFeaturesData = zouitFeaturesData;
-        window.isGlobalMapMode = true;
-
-        
-        matchedMapObjects.forEach(obj => {
-            if (obj && obj.options) {
-                obj.options.set('visible', true);
-                const currentStroke = obj.options.get('strokeColor') || '#3b82f6';
-                obj.options.set('fillColor', `${currentStroke.substring(0, 7)}4D`);
-            }
-        });
-
-        
-        let targetBounds = null;
-        objects.forEach(obj => {
-            const b = obj.geometry.getBounds();
-            if (b) {
-                if (!targetBounds) targetBounds = [[...b[0]], [...b[1]]];
-                else {
-                    targetBounds[0][0] = Math.min(targetBounds[0][0], b[0][0]);
-                    targetBounds[0][1] = Math.min(targetBounds[0][1], b[0][1]);
-                    targetBounds[1][0] = Math.max(targetBounds[1][0], b[1][0]);
-                    targetBounds[1][1] = Math.max(targetBounds[1][1], b[1][1]);
-                }
-            }
-        });
-
-        const modeLabel = useBuffer ? "в полосе 20м" : "по оси";
-        const objName = `Сверка с картой (${objects.length} конт., ${modeLabel})`;
-
-        
-        renderBottomDashboard(objName, localResults, targetBounds);
-        showNotification(`Локальный анализ завершен! Найдено наложений: ${totalFound} (ЗУ: ${localResults.zu.length}, ОКС: ${localResults.oks.length})`, "success", "check-circle", 7000);
-
-    } catch (err) {
-        console.error("Ошибка в executeLocalMapAnalysis:", err);
-        showNotification(`Ошибка анализа: ${err.message}`, "error");
-    } finally {
-        hideLoader();
-    }
-}
-
-
-function isCadastralMapLayer(obj) {
-    if (!obj || !obj.properties) return false;
-    const p = obj.properties;
-
-    
-    if (obj instanceof ymaps.Polyline) {
-        return !!(p.get('isStructure') || p.get('featureData')?.properties?.category === 36383);
-    }
-
-    
-    if (p.get('isParcelInQuarter') || p.get('isFoundInArea') || p.get('isParcelFromSingleSearch')) return true;
-    if (p.get('isBuilding') || p.get('isStructure') || p.get('isZouit') || p.get('isQuarterBoundary')) return true;
-
-    const fd = p.get('featureData');
-    if (fd && fd.properties) {
-        const cat = fd.properties.category;
-        if ([36368, 36369, 36383, 36940, 36315, 36281, 36278, 36314].includes(cat)) return true;
-    }
-
-    
-    const cn = p.get('cadastralNumber');
-    if (cn && !p.get('isManuallyDrawn') && !p.get('isAreaMeasurement') && !p.get('isSearchShape') && !p.get('isFromCoordInput')) {
-        return true;
-    }
-
-    return false;
-}
-
-function showAnalysisSelectionModal(rawPolygons, onSelect) {
+function showAnalysisSelectionModal(polygons, onSelect) {
     const modal = document.createElement('div');
     modal.className = 'color-modal';
-    modal.style.width = '580px';
-    modal.style.maxWidth = '95vw';
+    modal.style.width = '500px';
+    modal.style.maxWidth = '90vw';
 
-    
-    const polygons = (typeof deduplicateYmapsObjects === 'function') 
-        ? deduplicateYmapsObjects(rawPolygons) 
-        : rawPolygons;
-    const duplicatesRemoved = rawPolygons.length - polygons.length;
+    let modalContentHTML = `
+        <div class="color-modal-content">
+            <h3 style="margin-top: 5px; margin-bottom: 15px; font-size: 1.3rem; color: #333;">Выберите объект для анализа</h3>
+            <div style="max-height: 40vh; overflow-y: auto; margin-bottom: 20px; width: 100%; border: 1px solid #eee; border-radius: 8px; padding: 5px;">`;
 
-    const totalCount = polygons.length;
-    const maxAllowedLimit = 30;
-
-    
-    let totalLengthAllM = 0;
-    let polylineCount = 0;
-    let polygonAreaM2 = 0;
-    const allPolylineCoords = [];
-
-    polygons.forEach(obj => {
-        if (obj instanceof ymaps.Polyline) {
-            const stats = calculatePreciseGeometry(obj);
-            totalLengthAllM += stats.perimeter;
-            polylineCount++;
-            const c = obj.geometry.getCoordinates();
-            if (c && c.length >= 2) {
-                allPolylineCoords.push(c.map(pt => [pt[1], pt[0]]));
-            }
-        } else if (obj instanceof ymaps.Polygon) {
-            const stats = calculatePreciseGeometry(obj);
-            polygonAreaM2 += stats.area;
-        }
-    });
-
-    let totalBufferedAreaM2 = polygonAreaM2;
-    if (allPolylineCoords.length > 0) {
-        try {
-            const mls = turf.multiLineString(allPolylineCoords);
-            const buffered = turf.buffer(mls, 10, { units: 'meters' });
-            totalBufferedAreaM2 += turf.area(buffered);
-        } catch (e) {
-            totalBufferedAreaM2 += (totalLengthAllM * 20);
-        }
+    if (polygons.length > 1) {
+        const maxObjects = Math.min(polygons.length, 20);
+        modalContentHTML += `
+            <button class="polygon-select-button analyze-all-btn" style="background-color: #4CAF50; color: white; text-align: center; margin-bottom: 10px; border: 2px solid #388E3C;">
+                <i class="fas fa-layer-group"></i> Анализировать все как один (до ${maxObjects} шт.)
+            </button>
+            <button class="polygon-select-button analyze-all-buffer-btn" style="background-color: #0288D1; color: white; text-align: center; margin-bottom: 15px; border: 2px solid #0277BD;">
+                <i class="fas fa-expand-arrows-alt"></i> Анализировать все с буфером 10м (до ${maxObjects} шт.)
+            </button>
+            <div style="border-top: 1px solid #ddd; margin: 10px 0;"></div>
+        `;
     }
 
-    const formatLen = (m) => m >= 1000 ? `${(m / 1000).toFixed(2)} км` : `${Math.round(m)} м`;
-    const formatArea = (sqm) => {
-        if (sqm >= 10000) return `${(sqm / 10000).toFixed(2)} га (${Math.round(sqm).toLocaleString('ru-RU')} м²)`;
-        return `${Math.round(sqm).toLocaleString('ru-RU')} м²`;
-    };
-
-    const lenStr = polylineCount > 0 ? formatLen(totalLengthAllM) : '';
-    const areaStr = formatArea(totalBufferedAreaM2);
-
-    const dupNotice = duplicatesRemoved > 0 
-        ? `<span style="font-size:0.8rem; color:#64748b; font-weight:normal;"> (дубликатов исключено: ${duplicatesRemoved})</span>` 
-        : '';
-
-    
-    let localObjectsOnMap = 0;
-    const selectedSet = new Set(polygons);
-
-    map.geoObjects.each(obj => {
-        if (selectedSet.has(obj)) return;
-        if (obj.properties?.get('isQuarterBoundary') || obj.properties?.get('isSearchShape') || obj.properties?.get('isMeasureTool')) return;
-
-        if (obj instanceof ymaps.Polygon || obj instanceof ymaps.Polyline) {
-            localObjectsOnMap++;
+    polygons.forEach((obj, index) => {
+        let displayName = obj.properties.get('cadastralNumber');
+        if (!displayName) {
+            const hint = obj.properties.get('hintContent');
+            if (hint && typeof hint === 'object' && hint.cadastralNumber) displayName = hint.cadastralNumber;
+            else if (typeof hint === 'string') displayName = hint.replace(/<[^>]*>?/gm, '').trim();
         }
+        if (!displayName) displayName = (obj instanceof ymaps.Polyline) ? `Линия ${index + 1}` : `Полигон ${index + 1}`;
+        
+        const strokeColor = obj.options.get('strokeColor') || polygonStyle.color || '#f0f0f0';
+        const textColor = getTextColorForBackground(strokeColor);
+        modalContentHTML += `<button class="polygon-select-button individual-btn" data-index="${index}" style="background-color: ${strokeColor}; color: ${textColor};">${displayName}</button>`;
     });
 
-    modal.innerHTML = `
-        <div class="color-modal-content" style="padding: 20px; font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;">
-            <h3 style="margin-top: 0; margin-bottom: 12px; font-size: 1.25rem; color: #1e3a8a; text-align: center;">Анализ наложений на кадастр</h3>
-            
-            <div style="display: flex; gap: 6px; background: #e2e8f0; padding: 4px; border-radius: 8px; margin-bottom: 14px;">
-                <button id="src-online-btn" style="flex: 1; padding: 8px 6px; border: none; border-radius: 6px; font-weight: 600; font-size: 0.82rem; cursor: pointer; background: #fff; color: #1e293b; box-shadow: 0 1px 3px rgba(0,0,0,0.1);">
-                    <i class="fas fa-globe"></i> Онлайн ЕГРН
-                </button>
-                <button id="src-archive-btn" style="flex: 1.2; padding: 8px 6px; border: none; border-radius: 6px; font-weight: 600; font-size: 0.82rem; cursor: pointer; background: transparent; color: #64748b;">
-                    <i class="fas fa-database"></i> Архив КПТ (БД)
-                </button>
-                <button id="src-map-btn" style="flex: 1; padding: 8px 6px; border: none; border-radius: 6px; font-weight: 600; font-size: 0.82rem; cursor: pointer; background: transparent; color: #64748b;">
-                    <i class="fas fa-layer-group"></i> Слой карты (${localObjectsOnMap})
-                </button>
+    modalContentHTML += `
             </div>
-
-            <div style="background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; font-size: 0.88rem; color: #334155; line-height: 1.4;">
-                <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
-                    <span>Объектов сети (трасса):</span>
-                    <b id="summary-obj-count">${totalCount} шт. ${dupNotice}</b>
-                </div>
-                ${polylineCount > 0 ? `
-                    <div style="display: flex; justify-content: space-between; margin-bottom: 6px;">
-                        <span>Общая протяженность:</span>
-                        <b style="color:#0f172a;">${lenStr}</b>
-                    </div>
-                    <div style="display: flex; justify-content: space-between; border-top: 1px dashed #cbd5e1; padding-top: 6px; margin-top: 6px;">
-                        <span>Площадь сети с буфером 10м:</span>
-                        <b style="color:#2563eb;">${areaStr}</b>
-                    </div>
-                ` : ''}
+            <div class="buttons" style="margin-top: 10px;">
+                <button class="cancel-btn" style="min-width: 120px;"><i class="fas fa-times"></i> Отмена</button>
             </div>
+        </div>`;
 
-            <div id="analysis-actions-container"></div>
-
-            <div style="text-align: left; font-size: 0.8rem; font-weight: bold; color: #64748b; text-transform: uppercase; margin-bottom: 6px;">Либо выберите конкретный отрезок:</div>
-            
-            <div style="max-height: 22vh; overflow-y: auto; width: 100%; border: 1px solid #e2e8f0; border-radius: 8px; padding: 4px; background: #fff; box-sizing: border-box;">
-                ${polygons.slice(0, 100).map((obj, index) => {
-                    let displayName = obj.properties.get('cadastralNumber');
-                    if (!displayName) {
-                        const hint = obj.properties.get('hintContent');
-                        if (hint && typeof hint === 'object' && hint.cadastralNumber) displayName = hint.cadastralNumber;
-                        else if (typeof hint === 'string') displayName = hint.replace(/<[^>]*>?/gm, '').trim();
-                    }
-                    if (!displayName) displayName = (obj instanceof ymaps.Polyline) ? `Отрезок ${index + 1}` : `Контур ${index + 1}`;
-                    let subInfo = '';
-                    if (obj instanceof ymaps.Polyline) {
-                        subInfo = ` (${Math.round(calculatePreciseGeometry(obj).perimeter)} м)`;
-                    }
-                    return `<button class="polygon-select-button individual-btn" data-index="${index}" style="margin: 3px 0; padding: 7px 10px; border: 1px solid #e2e8f0; background: #f8fafc; color: #1e293b; border-radius: 6px; width: 100%; text-align: left; cursor: pointer; font-size: 0.85rem;">${displayName}${subInfo}</button>`;
-                }).join('')}
-                ${totalCount > 100 ? `<div style="text-align:center; padding: 6px; color: #94a3b8; font-size: 0.78rem;">...и еще ${totalCount - 100} отрезков</div>` : ''}
-            </div>
-
-            <div class="buttons" style="margin-top: 14px; width: 100%;">
-                <button class="cancel-btn" style="width: 100%; padding: 10px; border-radius: 8px; font-weight: 600; border: 1px solid #cbd5e1; background: #fff; color: #475569; cursor: pointer;">Отмена</button>
-            </div>
-        </div>
+    modal.innerHTML = modalContentHTML;
+    
+    const styleSheet = document.createElement("style");
+    styleSheet.textContent = `
+        .polygon-select-button { display: block; width: calc(100% - 20px); padding: 12px 15px; margin: 10px; border: 1px solid rgba(0,0,0,0.1); border-radius: 6px; text-align: left; cursor: pointer; transition: all 0.2s ease; font-size: 0.9rem; box-shadow: 0 1px 3px rgba(0,0,0,0.1); font-weight: 500; }
+        .polygon-select-button:hover { filter: brightness(85%); box-shadow: 0 2px 5px rgba(0,0,0,0.15); transform: translateY(-1px); }
     `;
-
+    modal.appendChild(styleSheet);
     document.body.appendChild(modal);
     modal.style.display = 'block';
 
-    let currentSourceMode = localObjectsOnMap > 0 ? 'map' : 'online';
-
-    function renderActions() {
-        const container = modal.querySelector('#analysis-actions-container');
-        const btnDirectText = polylineCount > 0 ? `По оси трассы (только пересечения) | L = ${lenStr}` : `Анализировать все ${totalCount} контуров`;
-        const btnBufferText = polylineCount > 0 ? `В полосе 20 м (охранная зона ±10 м) | S = ${areaStr}` : `Анализировать все ${totalCount} (буфер 10 м)`;
-
-        if (currentSourceMode === 'online') {
-            if (totalCount > maxAllowedLimit) {
-                container.innerHTML = `
-                    <div style="background: #fef2f2; border: 1.5px solid #f87171; border-radius: 8px; padding: 12px 14px; margin-bottom: 14px; text-align: left;">
-                        <div style="display:flex; align-items:center; gap:8px; font-weight:700; color:#b91c1c; font-size:0.92rem; margin-bottom:4px;">
-                            <i class="fas fa-ban"></i> Онлайн-запрос ограничен (макс. 30 объектов)
-                        </div>
-                        <div style="font-size: 0.83rem; color: #7f1d1d; line-height: 1.4;">
-                            Выбрано <b>${totalCount} шт.</b> Используйте вкладку <b>«Слой карты»</b> (на карте доступно ${localObjectsOnMap} объектов) или <b>«Архив КПТ»</b> для анализа всех объектов без ограничений.
-                        </div>
-                    </div>
-                `;
-            } else {
-                container.innerHTML = `
-                    <div style="display: flex; flex-direction: column; gap: 8px; width: 100%; margin-bottom: 14px;">
-                        <button class="polygon-select-button analyze-online-btn" style="background: linear-gradient(135deg, #10b981, #059669); color: white; text-align: left; padding: 10px 14px; font-weight: 600; border-radius: 8px; border: none; cursor: pointer; display: flex; align-items: center; gap: 10px;">
-                            <i class="fas fa-route"></i> <div><div style="font-size: 0.92rem;">${btnDirectText}</div><div style="font-size: 0.75rem; font-weight: normal; opacity: 0.9;">Онлайн-запрос в ЕГРН строго по оси</div></div>
-                        </button>
-                        <button class="polygon-select-button analyze-online-buffer-btn" style="background: linear-gradient(135deg, #3b82f6, #1d4ed8); color: white; text-align: left; padding: 10px 14px; font-weight: 600; border-radius: 8px; border: none; cursor: pointer; display: flex; align-items: center; gap: 10px;">
-                            <i class="fas fa-expand-arrows-alt"></i> <div><div style="font-size: 0.92rem;">${btnBufferText}</div><div style="font-size: 0.75rem; font-weight: normal; opacity: 0.9;">Онлайн-запрос в ЕГРН в полосе 20 м</div></div>
-                        </button>
-                    </div>
-                `;
-                container.querySelector('.analyze-online-btn').onclick = () => { document.body.removeChild(modal); onSelect(polygons, false); };
-                container.querySelector('.analyze-online-buffer-btn').onclick = () => { document.body.removeChild(modal); onSelect(polygons, true); };
-            }
-        } else if (currentSourceMode === 'archive') {
-            container.innerHTML = `
-                <div style="display: flex; flex-direction: column; gap: 8px; width: 100%; margin-bottom: 14px;">
-                    <button class="polygon-select-button analyze-archive-btn" style="background: linear-gradient(135deg, #059669, #047857); color: white; text-align: left; padding: 10px 14px; font-weight: 600; border-radius: 8px; border: none; cursor: pointer; display: flex; align-items: center; gap: 10px;">
-                        <i class="fas fa-database"></i> <div><div style="font-size: 0.92rem;">Архив БД по оси (${totalCount} шт.) | L = ${lenStr}</div><div style="font-size: 0.75rem; font-weight: normal; opacity: 0.9;">Загрузит пересекаемые ЗУ/ОКС из базы КПТ без интернета</div></div>
-                    </button>
-                    <button class="polygon-select-button analyze-archive-buffer-btn" style="background: linear-gradient(135deg, #0284c7, #0369a1); color: white; text-align: left; padding: 10px 14px; font-weight: 600; border-radius: 8px; border: none; cursor: pointer; display: flex; align-items: center; gap: 10px;">
-                        <i class="fas fa-expand-arrows-alt"></i> <div><div style="font-size: 0.92rem;">Архив БД с буфером 10м (${totalCount} шт.) | S = ${areaStr}</div><div style="font-size: 0.75rem; font-weight: normal; opacity: 0.9;">Полоса 20 м: найдёт и отобразит ЗУ и строения из базы КПТ</div></div>
-                    </button>
-                </div>
-            `;
-            container.querySelector('.analyze-archive-btn').onclick = () => { document.body.removeChild(modal); executeLocalArchiveAnalysis(polygons, false); };
-            container.querySelector('.analyze-archive-buffer-btn').onclick = () => { document.body.removeChild(modal); executeLocalArchiveAnalysis(polygons, true); };
-        } else {
-            
-            container.innerHTML = `
-                <div style="display: flex; flex-direction: column; gap: 8px; width: 100%; margin-bottom: 14px;">
-                    <button class="polygon-select-button analyze-map-btn" style="background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: white; text-align: left; padding: 10px 14px; font-weight: 600; border-radius: 8px; border: none; cursor: pointer; display: flex; align-items: center; gap: 10px;">
-                        <i class="fas fa-bolt"></i> <div><div style="font-size: 0.92rem;">Сверить с картой по оси (${totalCount} шт.)</div><div style="font-size: 0.75rem; font-weight: normal; opacity: 0.9;">Сверка с ${localObjectsOnMap} загруженными на карту объектами</div></div>
-                    </button>
-                    <button class="polygon-select-button analyze-map-buffer-btn" style="background: linear-gradient(135deg, #d946ef, #a21caf); color: white; text-align: left; padding: 10px 14px; font-weight: 600; border-radius: 8px; border: none; cursor: pointer; display: flex; align-items: center; gap: 10px;">
-                        <i class="fas fa-expand-arrows-alt"></i> <div><div style="font-size: 0.92rem;">Сверить с картой в полосе 20м</div><div style="font-size: 0.75rem; font-weight: normal; opacity: 0.9;">Полоса 20 м по нарисованным ЗУ, ОКС и зонам</div></div>
-                    </button>
-                </div>
-            `;
-            container.querySelector('.analyze-map-btn').onclick = () => { document.body.removeChild(modal); executeLocalMapAnalysis(polygons, false); };
-            container.querySelector('.analyze-map-buffer-btn').onclick = () => { document.body.removeChild(modal); executeLocalMapAnalysis(polygons, true); };
-        }
-    }
-
-    const btnOnline = modal.querySelector('#src-online-btn');
-    const btnArchive = modal.querySelector('#src-archive-btn');
-    const btnMap = modal.querySelector('#src-map-btn');
-
-    const setActiveTab = (btn) => {
-        [btnOnline, btnArchive, btnMap].forEach(b => {
-            b.style.background = 'transparent';
-            b.style.color = '#64748b';
-            b.style.boxShadow = 'none';
-        });
-        btn.style.background = '#fff';
-        btn.style.color = '#1e293b';
-        btn.style.boxShadow = '0 1px 3px rgba(0,0,0,0.1)';
-    };
-
-    btnOnline.onclick = () => { currentSourceMode = 'online'; setActiveTab(btnOnline); renderActions(); };
-    btnArchive.onclick = () => { currentSourceMode = 'archive'; setActiveTab(btnArchive); renderActions(); };
-    btnMap.onclick = () => { currentSourceMode = 'map'; setActiveTab(btnMap); renderActions(); };
-
-    
-    if (localObjectsOnMap > 0) {
-        setActiveTab(btnMap);
-    } else {
-        setActiveTab(btnOnline);
-    }
-    renderActions();
-
-    modal.querySelectorAll('.individual-btn').forEach(btn => {
-        btn.onclick = () => {
-            const idx = parseInt(btn.dataset.index, 10);
+    const analyzeAllBtn = modal.querySelector('.analyze-all-btn');
+    if (analyzeAllBtn) {
+        analyzeAllBtn.addEventListener('click', () => {
             document.body.removeChild(modal);
-            if (currentSourceMode === 'archive') {
-                executeLocalArchiveAnalysis([polygons[idx]], false);
-            } else if (currentSourceMode === 'map') {
-                executeLocalMapAnalysis([polygons[idx]], false);
-            } else {
-                onSelect(polygons[idx], false);
-            }
-        };
+            onSelect(polygons.slice(0, 20), false); 
+        });
+    }
+
+    const analyzeAllBufferBtn = modal.querySelector('.analyze-all-buffer-btn');
+    if (analyzeAllBufferBtn) {
+        analyzeAllBufferBtn.addEventListener('click', () => {
+            document.body.removeChild(modal);
+            onSelect(polygons.slice(0, 20), true); 
+        });
+    }
+
+    modal.querySelectorAll('.individual-btn').forEach(button => {
+        button.addEventListener('click', () => {
+            const selectedIndex = parseInt(button.getAttribute('data-index'));
+            document.body.removeChild(modal);
+            onSelect(polygons[selectedIndex], false);
+        });
     });
 
-    modal.querySelector('.cancel-btn').onclick = () => {
+    modal.querySelector('.cancel-btn').addEventListener('click', () => {
         document.body.removeChild(modal);
         onSelect(null);
-    };
+    });
 
-    modal.onclick = (e) => {
+    modal.addEventListener('click', (e) => {
         if (e.target === modal) modal.querySelector('.cancel-btn').click();
-    };
+    });
 }
 
 async function openVisibleMapIn3D(clipToScreen = true) {
@@ -22758,16 +21774,12 @@ async function getParcelsOnObject(lat, lon) {
         return;
     }
 
-  let candidateObjects = polygons.filter(obj => {
-        if (isCadastralMapLayer(obj)) return false;
-        return (obj instanceof ymaps.Polygon) || (obj instanceof ymaps.Polyline);
+    const candidateObjects = polygons.filter(obj => {
+        const isPoly = obj instanceof ymaps.Polygon;
+        const isLine = obj instanceof ymaps.Polyline && obj.properties.get('isDrawableLine');
+        return isPoly || isLine;
     });
 
-    
-    if (candidateObjects.length === 0) {
-        candidateObjects = polygons.filter(obj => (obj instanceof ymaps.Polygon) || (obj instanceof ymaps.Polyline));
-    }
-    
    if (candidateObjects.length === 0) {
         
         await handleMissingObjectForAnalysis(lat, lon, async (newObj) => {
@@ -22797,45 +21809,16 @@ async function getParcelsOnObject(lat, lon) {
 
 async function executeParcelsOnObjectSearch(targetObject) {
     if (isAreaLimitExceeded(targetObject)) return;
-    
-    
-    const validated = await validateNetworkCoverageAndLimit(targetObject);
-    if (!validated) {
-        hideLoader();
-        return;
-    }
-
-    const objects = validated;
-    const isMulti = objects.length > 1;
-    
-    let totalLengthMeters = 0;
-    let lineCount = 0;
-    
-    objects.forEach(obj => {
-        if (obj instanceof ymaps.Polyline) {
-            const stats = calculatePreciseGeometry(obj);
-            totalLengthMeters += stats.perimeter;
-            lineCount++;
-        }
-    });
-
-    let lengthSummaryText = '';
-    if (lineCount > 0) {
-        lengthSummaryText = totalLengthMeters >= 1000 
-            ? ` | L = ${(totalLengthMeters / 1000).toFixed(2)} км` 
-            : ` | L = ${Math.round(totalLengthMeters)} м`;
-    }
-
-    const objType = isMulti 
-        ? `${objects.length} контурах${lengthSummaryText}` 
-        : ((objects[0] instanceof ymaps.Polyline) ? `линии (${Math.round(totalLengthMeters)} м)` : 'контуре объекта');
+    const isMulti = Array.isArray(targetObject);
+    const objects = isMulti ? targetObject : [targetObject];
+    const objType = isMulti ? 'выбранных объектах' : ((objects[0] instanceof ymaps.Polyline) ? 'линейном объекте' : 'контуре объекта');
     
     showLoader(`Поиск земельных участков на ${objType}...`);
 
     try {
-        const rawFeatures = await searchFeaturesByGeometry(objects, 36368);
+      const rawFeatures = await searchFeaturesByGeometry(objects, 36368);
 
-        
+     
         if (rawFeatures === null) {
             return;
         }
@@ -22851,6 +21834,7 @@ async function executeParcelsOnObjectSearch(targetObject) {
         objects.forEach(obj => {
             const targetCoords = obj.geometry.getCoordinates();
             if (obj instanceof ymaps.Polygon) {
+                
                 const rings = targetCoords.map(ring => {
                     let newRing = ring.map(c => [c[1], c[0]]);
                     const first = newRing[0]; const last = newRing[newRing.length - 1];
@@ -22914,6 +21898,7 @@ async function executeParcelsOnObjectSearch(targetObject) {
             return;
         }
 
+        
         const firstFeature = foundFeatures.find(f => f.properties?.descr && f.properties.descr.includes(':'));
         const firstCn = firstFeature ? firstFeature.properties.descr : '';
         
@@ -22928,7 +21913,9 @@ async function executeParcelsOnObjectSearch(targetObject) {
                 .filter(Boolean);
 
             if (isolatedParcelsCNs.length > 0) {
+                
                 zuToEzMapGlobal.clear(); 
+                
                 const uluRelations = await fetchUluRelations(isolatedParcelsCNs);
                 if (uluRelations && uluRelations.length > 0) {
                     uluRelations.forEach(r => {
@@ -22939,29 +21926,25 @@ async function executeParcelsOnObjectSearch(targetObject) {
                 }
             }
         }
+        
 
         await drawFoundParcels(foundFeatures, true);
+        await populateSidebarWithFoundObjects(foundFeatures, 'ЗУ (на объекте)');
 
-        const sidebarTitle = lineCount > 0 
-            ? `ЗУ (${lineCount} линий${lengthSummaryText})` 
-            : 'ЗУ (на объекте)';
-
-        await populateSidebarWithFoundObjects(foundFeatures, sidebarTitle);
-
+        
         if (firstCn.startsWith('16:')) {
             updateSidebarForUluTheme();
         }
+        
 
-        showNotification(`Найдено участков: ${foundFeatures.length}${lengthSummaryText}`, 'success');
+        showNotification(`Найдено участков: ${foundFeatures.length}`, 'success');
 
     } catch (error) {
-        console.error("Ошибка в executeParcelsOnObjectSearch:", error);
-        showNotification(error.message || "Ошибка при выполнении поиска", 'error', 'exclamation-circle', 7000);
+        showNotification(`Ошибка поиска: ${error.message}`, 'error');
     } finally {
         hideLoader();
     }
 }
-
 
 async function getParcelsNearby(lat, lon) {
     const thisSessionId = Date.now();
@@ -26935,7 +25918,7 @@ function populateSidebarWithAllObjects(results) {
             thirdDesc = options.registration_date ? 'Дата рег.: ' + options.registration_date : null;
         }
 
-        
+        // Пропускаем дублирующийся кадастровый номер
         if (cadNumber && cadNumber !== 'Без номера' && cadNumber !== 'Объект') {
             if (seenAllKeys.has(cadNumber)) return;
             seenAllKeys.add(cadNumber);
@@ -28064,12 +27047,7 @@ function demuxFeatures(features) {
 
 async function searchFeaturesByGeometry(targetObject, categoryIdOrIds) {
     try {
-        const validatedObjects = await validateNetworkCoverageAndLimit(targetObject);
-        if (!validatedObjects) {
-            return null; 
-        }
-
-        const objects = validatedObjects;
+        const objects = Array.isArray(targetObject) ? targetObject : [targetObject];
         const apiFeatures = [];
 
         objects.forEach(obj => {
@@ -28077,11 +27055,9 @@ async function searchFeaturesByGeometry(targetObject, categoryIdOrIds) {
             if (geometryType === 'LineString') {
                 const coords = obj.geometry.getCoordinates();
                 if (!coords || coords.length < 2) return;
-                
                 const transformedCoords = coords.map(coord => {
                     const [trueLat, trueLon] = getTrueWgs84Coords(coord[0], coord[1]);
-                    const p = proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
-                    return [Math.round(p[0] * 100) / 100, Math.round(p[1] * 100) / 100];
+                    return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
                 });
                 apiFeatures.push({
                     "type": "Feature",
@@ -28092,11 +27068,9 @@ async function searchFeaturesByGeometry(targetObject, categoryIdOrIds) {
                 const allCoordRings = obj.geometry.getCoordinates();
                 let outerRing = geometryType === 'Polygon' ? allCoordRings[0] : allCoordRings[0][0];
                 if (!outerRing || outerRing.length < 3) return;
-                
                 const transformedOuterRing = outerRing.map(coord => {
                     const [trueLat, trueLon] = getTrueWgs84Coords(coord[0], coord[1]);
-                    const p = proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
-                    return [Math.round(p[0] * 100) / 100, Math.round(p[1] * 100) / 100];
+                    return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
                 });
                 apiFeatures.push({
                     "type": "Feature",
@@ -28117,31 +27091,13 @@ async function searchFeaturesByGeometry(targetObject, categoryIdOrIds) {
         };
 
         const response = await fetchNspd('https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestBody)
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody)
         });
 
-        
-        if (!response.ok) {
-            let errorMsg = `Сбой запроса (HTTP ${response.status})`;
-            if (response.status === 502) {
-                errorMsg = 'Ошибка запроса';
-            } else if (response.status === 504) {
-                errorMsg = 'Превышено время ожидания ответа';
-            } else if (response.status === 403) {
-                errorMsg = 'Ошибка запроса';
-            }
-            
-            showNotification(errorMsg, 'error', 'exclamation-triangle', 7000);
-            return null; 
-        }
-
+        if (!response.ok) return null; 
         const data = await response.json();
         return data.features || [];
     } catch (error) {
-        console.error("Ошибка в searchFeaturesByGeometry:", error);
-        showNotification(error.message || 'Ошибка соединения при запросе геометрии', 'error', 'exclamation-circle', 7000);
         return null;
     }
 }
@@ -28151,46 +27107,20 @@ async function searchObjectsByArea(searchPolygonCoordsEPSG3857, categoryIdOrIds)
     const categoriesArray = ids.map(id => ({ id }));
 
     const requestBody = {
-        "geom": { 
-            "type": "FeatureCollection", 
-            "features": [{
-                "type": "Feature", 
-                "geometry": {
-                    "crs": { "type": "name", "properties": { "name": "EPSG:3857" } }, 
-                    "type": "Polygon", 
-                    "coordinates": [searchPolygonCoordsEPSG3857]
-                }, 
-                "properties": {}
-            }] 
-        },
+        "geom": { "type": "FeatureCollection", "features": [{"type": "Feature", "geometry": {"crs": { "type": "name", "properties": { "name": "EPSG:3857" } }, "type": "Polygon", "coordinates": [searchPolygonCoordsEPSG3857]}, "properties": {}}] },
         "categories": categoriesArray
     };
-
     try {
         const response = await fetchNspd('https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject', {
-            method: 'POST', 
-            headers: { 'Content-Type': 'application/json' }, 
-            body: JSON.stringify(requestBody)
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(requestBody)
         });
-
-        if (!response.ok) {
-            let errorMsg = `Ошибка сервера НСПД (код ${response.status})`;
-            if (response.status === 502) {
-                errorMsg = 'Сервер НСПД не ответил вовремя (HTTP 502 Bad Gateway). Уменьшите область отчета.';
-            } else if (response.status === 504) {
-                errorMsg = 'Таймаут шлюза НСПД (HTTP 504).';
-            }
-            showNotification(errorMsg, 'error', 'exclamation-triangle', 8000);
-            throw new Error(errorMsg);
-        }
-
         const text = await response.text();
         if (!text) return [];
         const data = JSON.parse(text);
         return data.features || [];
     } catch (error) {
         console.error(`Ошибка при запросе объектов для категорий:`, categoryIdOrIds, error);
-        throw error;
+        return [];
     }
 }
 
@@ -33656,7 +32586,7 @@ async function populateSidebarWithFoundObjects(features, objectType) {
 
     if (!sidebar || !contentDiv || !sidebarTitle) return;
 
-    
+    // --- УДАЛЕНИЕ ДУБЛИКАТОВ ---
     const seenKeys = new Set();
     features = (features || []).filter(f => {
         const p = f.properties || {};
@@ -33668,7 +32598,7 @@ async function populateSidebarWithFoundObjects(features, objectType) {
         }
         return true;
     });
-    
+    // ----------------------------
 
     contentDiv.innerHTML = ''; 
     if (statsDiv) {
