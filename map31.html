@@ -4553,9 +4553,7 @@ body:has(#parcel-results-sidebar.collapsed:not(.hidden)) #map-magnifier-quick-wr
     </button>
     
     
-<div class="offset-dropdown-menu" id="local-archive-dropdown-menu" style="min-width: 275px; padding: 8px 6px; border-radius: 14px; box-shadow: 0 12px 35px rgba(0,0,0,0.18);   top: -50px !important;            
-    max-height: calc(100vh - 90px);   
-    overflow-y: auto;      border: 1px solid #dbeafe; background: rgba(255, 255, 255, 0.98); backdrop-filter: blur(12px);">
+<div class="offset-dropdown-menu" id="local-archive-dropdown-menu" style="min-width: 275px; padding: 8px 6px; border-radius: 14px; box-shadow: 0 12px 35px rgba(0,0,0,0.18); border: 1px solid #dbeafe; background: rgba(255, 255, 255, 0.98); backdrop-filter: blur(12px);">
         <div class="offset-menu-header" style="display: flex; align-items: center; gap: 8px; padding: 6px 10px 10px 10px; color: #1e3a8a; font-size: 0.85rem; font-weight: 800; border-bottom: 1px solid #e2e8f0; margin-bottom: 6px;">
             <i class="fas fa-database" style="color: #10b981; font-size: 1rem;"></i>
             <span>Локальный архив</span>
@@ -4624,17 +4622,7 @@ body:has(#parcel-results-sidebar.collapsed:not(.hidden)) #map-magnifier-quick-wr
             <i class="fas fa-city" style="color: #ea580c; width: 18px; text-align: center;"></i>
             <span>Муниц. образования</span>
         </label>
-        
-        <div class="offset-menu-item" id="btn-sync-cloud-kpt" style="justify-content: flex-start; gap: 10px; padding: 7px 10px; border-radius: 8px; font-weight: 600; color: #1e40af; background: #eff6ff; cursor: pointer;">
-    <i class="fas fa-cloud-download-alt" style="color: #2563eb; width: 18px; text-align: center;"></i>
-    <span>КПТ из облака для объектов</span>
-</div>
-
     </div>
-    
-    <div style="border-top: 1px solid #e2e8f0; margin: 6px 4px;"></div>
-
-
 </div>
     
     <div class="loader-container" id="loaderContainer">
@@ -13147,222 +13135,6 @@ async function loadFromLocalArchive(quarterNumber, type = 'ZU') {
     }
 }
 
-async function syncCloudKptForDrawnObjects() {
-    if (!map) return;
-
-    const allObjects = new Set([...polygons, ...areaObjects]);
-    let targetObjects = [];
-
-    allObjects.forEach(obj => {
-        if (!(obj instanceof ymaps.Polygon) && !(obj instanceof ymaps.Polyline)) return;
-        const p = obj.properties;
-        if (!p) return;
-        if (p.get('isQuarterBoundary') || p.get('isSearchShape') || p.get('isMeasureTool')) return;
-
-        if (p.get('isManuallyDrawn') || p.get('isDrawableLine') || p.get('isAreaMeasurement') || p.get('isFromCoordInput')) {
-            targetObjects.push(obj);
-        }
-    });
-
-    if (targetObjects.length === 0) {
-        allObjects.forEach(obj => {
-            if (!(obj instanceof ymaps.Polygon) && !(obj instanceof ymaps.Polyline)) return;
-            const p = obj.properties;
-            if (!p || p.get('isQuarterBoundary') || p.get('isSearchShape') || p.get('isMeasureTool') || p.get('isZouit')) return;
-            targetObjects.push(obj);
-        });
-    }
-
-    if (targetObjects.length === 0) {
-        showNotification('На карте нет объектов для подбора КПТ', 'warning', 'draw-polygon', 5000);
-        return;
-    }
-
-    showLoader('Поиск КПТ в базе данных...');
-
-    try {
-        const geometries3857 = [];
-
-        targetObjects.forEach(obj => {
-            const coords = obj.geometry.getCoordinates();
-            if (obj instanceof ymaps.Polygon) {
-                const rings3857 = coords.map(ring => {
-                    const r = ring.map(c => {
-                        const [trueLat, trueLon] = getTrueWgs84Coords(c[0], c[1]);
-                        return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
-                    });
-                    if (r.length > 2 && (r[0][0] !== r[r.length - 1][0] || r[0][1] !== r[r.length - 1][1])) {
-                        r.push([...r[0]]);
-                    }
-                    return r;
-                }).filter(r => r.length >= 4);
-
-                if (rings3857.length > 0) {
-                    geometries3857.push({ type: "Polygon", coordinates: rings3857 });
-                }
-            } else if (obj instanceof ymaps.Polyline) {
-                const line3857 = coords.map(c => {
-                    const [trueLat, trueLon] = getTrueWgs84Coords(c[0], c[1]);
-                    return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
-                });
-                if (line3857.length >= 2) {
-                    geometries3857.push({ type: "LineString", coordinates: line3857 });
-                }
-            }
-        });
-
-        if (geometries3857.length === 0) {
-            hideLoader();
-            showNotification('Не удалось прочитать координаты объектов', 'warning');
-            return;
-        }
-
-        const searchGeoJson = geometries3857.length === 1 
-            ? geometries3857[0] 
-            : { type: "GeometryCollection", geometries: geometries3857 };
-
-        const sqlQuery = `SELECT quarter_number, ST_AsGeoJSON(geometry)::json as geometry FROM cadastral_quarters WHERE ST_Intersects(geometry, ST_SetSRID(ST_GeomFromGeoJSON('${JSON.stringify(searchGeoJson)}'), 3857))`;
-        
-        const { data, error } = await supabaseClient.rpc('execute_sql', { query: sqlQuery });
-
-        if (error || !Array.isArray(data) || data.length === 0) {
-            hideLoader();
-            showNotification('Пересекающиеся КПТ не найдены в базе данных', 'info');
-            return;
-        }
-
-        const matchedQuarters = new Map();
-        data.forEach(item => {
-            if (item.quarter_number && !isZeroQuarterRequest(item.quarter_number)) {
-                matchedQuarters.set(item.quarter_number, item.geometry);
-            }
-        });
-
-        if (matchedQuarters.size === 0) {
-            hideLoader();
-            showNotification('Найденные КПТ являются нулевыми или не содержат данных', 'info');
-            return;
-        }
-
-        showLoader(`Найдено ${matchedQuarters.size} КПТ в облаке. Сверка версий...`);
-
-        const db = await openLocalDB();
-        let loadedCount = 0;
-        let upToDateCount = 0;
-        const missingInCloud = [];
-        const qList = Array.from(matchedQuarters.keys());
-
-        for (let i = 0; i < qList.length; i++) {
-            const qNum = qList[i];
-            const filename = qNum.replace(/:/g, '_') + '.nspd';
-            const qGeom = matchedQuarters.get(qNum);
-
-            const txRead = db.transaction('quarters_index', 'readonly');
-            const localMeta = await new Promise(r => {
-                const req = txRead.objectStore('quarters_index').get(qNum);
-                req.onsuccess = () => r(req.result);
-                req.onerror = () => r(null);
-            });
-
-            showLoader(`[${i + 1}/${qList.length}] Загрузка ${qNum}...`);
-
-            const zipBlob = await fetchZipFromLocalServer('nspd', filename);
-            
-            if (!zipBlob) {
-                missingInCloud.push(qNum);
-                
-                if (!localMeta && qGeom) {
-                    try {
-                        const txGeom = db.transaction('quarters_index', 'readwrite');
-                        const coords = qGeom.type === 'Polygon' ? qGeom.coordinates : qGeom.coordinates[0];
-                        txGeom.objectStore('quarters_index').put({
-                            quarter_number: qNum,
-                            date: new Date().toISOString().slice(0, 10),
-                            source: 'cloud_geom_only',
-                            counts: { zu: 0, oks: 0, str: 0 },
-                            geojson_geom: qGeom,
-                            bbox: calculateBBox(coords)
-                        });
-                        await new Promise(r => txGeom.oncomplete = r);
-                    } catch(e) {}
-                }
-                continue;
-            }
-
-            try {
-                const { features, date: cloudDate } = await loadAndParseZipBlob(zipBlob);
-
-                if (localMeta && localMeta.date && cloudDate) {
-                    if (localMeta.date >= cloudDate) {
-                        upToDateCount++;
-                        continue;
-                    }
-                }
-
-                const txWrite = db.transaction(['quarters_index', 'files_store'], 'readwrite');
-                const qStore = txWrite.objectStore('quarters_index');
-                const fStore = txWrite.objectStore('files_store');
-
-                let bbox = null;
-                try {
-                    const coords = qGeom.type === 'Polygon' ? qGeom.coordinates : qGeom.coordinates[0];
-                    bbox = calculateBBox(coords);
-                } catch(e) {}
-
-                qStore.put({
-                    quarter_number: qNum,
-                    date: cloudDate || new Date().toISOString().slice(0, 10),
-                    source: 'cloud_sync',
-                    counts: {
-                        zu: features ? features.length : 0,
-                        oks: 0,
-                        str: 0
-                    },
-                    geojson_geom: qGeom,
-                    bbox: bbox
-                });
-
-                fStore.put({
-                    file_key: `${qNum}_ZU`,
-                    quarter_number: qNum,
-                    type: 'ZU',
-                    blob: zipBlob,
-                    updated_at: cloudDate || new Date().toISOString().slice(0, 10),
-                    source: 'cloud_sync'
-                });
-
-                await new Promise(r => txWrite.oncomplete = r);
-                loadedCount++;
-            } catch (err) {
-                missingInCloud.push(qNum);
-            }
-        }
-
-        hideLoader();
-
-        if (loadedCount > 0) {
-            let msg = `Загружено КПТ из облака: ${loadedCount} шт.`;
-            if (upToDateCount > 0) msg += ` (актуальных: ${upToDateCount})`;
-            if (missingInCloud.length > 0) msg += `<br><span style="font-size:0.8em; opacity:0.9;">Нет в облаке: ${missingInCloud.join(', ')}</span>`;
-            
-            showNotification(msg, 'success', 'database', 7000);
-
-            if (typeof updateLocalArchiveStatsUI === 'function') updateLocalArchiveStatsUI();
-            if (isLocalArchiveQuickViewActive && typeof checkAndRenderViewportLocalQuarters === 'function') {
-                checkAndRenderViewportLocalQuarters(true);
-            }
-        } else if (missingInCloud.length === qList.length) {
-            showNotification(`КПТ найдены (${qList.length} шт.), но файлы архивов в облаке отсутствуют:<br>${missingInCloud.join(', ')}`, 'warning', 'exclamation-triangle', 8000);
-        } else {
-            showNotification(`Все найденные КПТ (${upToDateCount} шт.) уже актуальны в локальном архиве`, 'info', 'check-double', 5000);
-        }
-
-    } catch (e) {
-        hideLoader();
-        showNotification('Ошибка при получении КПТ из облака: ' + e.message, 'error');
-    }
-}
-
 
 async function findQuartersInLocalArea(mapLat, mapLon, radiusMeters = 500) {
     try {
@@ -16384,20 +16156,6 @@ document.addEventListener('DOMContentLoaded', () => {
   const laWrapper = document.getElementById('local-archive-quick-wrapper');
 const laBtn = document.getElementById('local-archive-quick-btn');
 const laMenu = document.getElementById('local-archive-dropdown-menu');
-
-const btnSyncCloudKpt = document.getElementById('btn-sync-cloud-kpt');
-if (btnSyncCloudKpt) {
-    btnSyncCloudKpt.addEventListener('click', (e) => {
-        e.stopPropagation();
-        
-        // Закрываем меню
-        const laMenu = document.getElementById('local-archive-dropdown-menu');
-        if (laMenu) laMenu.classList.remove('show');
-
-        // Запускаем синхронизацию
-        syncCloudKptForDrawnObjects();
-    });
-}
 
 if (laWrapper && laBtn && laMenu) {
     laBtn.addEventListener('click', (e) => {
