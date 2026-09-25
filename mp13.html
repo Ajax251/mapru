@@ -2604,54 +2604,38 @@ async function checkZuForTechPlan(zuNumbers, button) {
         return;
     }
     
-   button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Поиск ОКС (здания и сооружения)...</span>';
-
-    const parcelContours = extractParcelContoursFromXml(targetParcelNode);
-    let nspdOks = [];
-
-    if (parcelContours.length > 0 && currentMskSystem) {
-        // Один пакетный запрос на обе категории сразу
-        const allOksFeatures = await searchIntersectingObjects(
-            parcelContours, 
-            [NSPD_CATEGORY_BUILDINGS, NSPD_CATEGORY_CONSTRUCTIONS], 
-            currentMskSystem
-        );
-
-        button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Обработка...</span>';
-
-        for (const f of allOksFeatures) {
-            const props = f.properties || {};
-            const opts = props.options || {};
-            const cadNum = opts.cad_number || opts.cad_num || props.descr || props.label;
-            
-            if (cadNum) {
-                const cat = props.category;
-                const catName = (props.categoryName || '').toLowerCase();
-                const isBuilding = cat === NSPD_CATEGORY_BUILDINGS || catName.includes('здани') || !!opts.build_record_area;
-
-                const oksItem = {
-                    cadNumber: cadNum,
-                    type: isBuilding ? 'Здание' : 'Сооружение',
-                    address: opts.readable_address || opts.address_readable_address || '',
-                    geometry: f.geometry,
-                    source: 'nspd',
-                    contours: [],
-                    hasCoords: false
-                };
-
-                if (f.geometry) {
-                    oksItem.contours = await convertEgrnGeometryToMsk(f.geometry, currentMskSystem);
-                    oksItem.hasCoords = oksItem.contours && oksItem.contours.length > 0;
-                }
-
-                if (oksItem.hasCoords && parcelContours.length > 0) {
-                    if (!isRealOverlap(parcelContours, oksItem.contours)) {
-                        continue;
-                    }
-                }
-
-                nspdOks.push(oksItem);
+    button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Поиск ЗУ...</span>';
+    
+    let nspdZuFeatures = [];
+    if (isLinear) {
+        nspdZuFeatures = await searchZuForLinearObject(contours, currentMskSystem);
+    } else {
+        nspdZuFeatures = await searchIntersectingObjects(contours, NSPD_CATEGORY_ZU, currentMskSystem);
+    }
+    
+    const nspdZuList = [];
+    for (const f of nspdZuFeatures) {
+        const cadNum = f.properties?.options?.cad_number || f.properties?.options?.cad_num || f.properties?.descr;
+        if (cadNum) {
+            let zuContours = [];
+            if (f.geometry && currentMskSystem) {
+                zuContours = await convertEgrnGeometryToMsk(f.geometry, currentMskSystem);
             }
+            
+            if (zuContours.length > 0 && contours.length > 0) {
+                if (!isRealOverlap(contours, zuContours)) {
+                    continue; 
+                }
+            }
+
+            nspdZuList.push({
+                cadNumber: cadNum,
+                address: f.properties?.options?.readable_address || f.properties?.options?.address_readable_address || '',
+                category: f.properties?.options?.category_name || '',
+                contours: zuContours,
+                hasCoords: zuContours.length > 0,
+                source: 'nspd'
+            });
         }
     }
     
@@ -3206,41 +3190,29 @@ function extractParcelContoursFromXml(mainParcel = null) {
         return allOks;
     }
 
-async function convertEgrnGeometryToMsk(geometry, mskSystem) {
-    if (!geometry || !mskSystem) return [];
-    const convertedContours = [];
-    const convertRing = ring => ring.map(coord => convert3857ToMsk(coord, mskSystem)).filter(p => p !== null);
-    
-    const processGeom = (geom) => {
-        if (!geom) return;
-        if (geom.type === 'Polygon') {
-            geom.coordinates.forEach(ring => {
-                const converted = convertRing(ring);
-                if (converted.length > 0) convertedContours.push(converted);
-            });
-        } else if (geom.type === 'MultiPolygon') {
-            geom.coordinates.forEach(polygon => polygon.forEach(ring => {
-                const converted = convertRing(ring);
-                if (converted.length > 0) convertedContours.push(converted);
-            }));
-        } else if (geom.type === 'LineString') {
-            const converted = convertRing(geom.coordinates);
-            if (converted.length > 0) convertedContours.push(converted);
-        } else if (geom.type === 'MultiLineString') {
-            geom.coordinates.forEach(line => {
-                const converted = convertRing(line);
-                if (converted.length > 0) convertedContours.push(converted);
-            });
-        } else if (geom.type === 'Point') {
-            const pt = convert3857ToMsk(geom.coordinates, mskSystem);
-            if (pt) convertedContours.push([pt]);
-        } else if (geom.type === 'GeometryCollection') {
-            geom.geometries.forEach(processGeom);
-        }
-    };
-    processGeom(geometry);
-    return convertedContours;
-}
+    async function convertEgrnGeometryToMsk(geometry, mskSystem) {
+        if (!geometry || !mskSystem) return [];
+        const convertedContours = [];
+        const convertRing = ring => ring.map(coord => convert3857ToMsk(coord, mskSystem)).filter(p => p !== null);
+        const processGeom = (geom) => {
+            if (!geom) return;
+            if (geom.type === 'Polygon') {
+                geom.coordinates.forEach(ring => {
+                    const converted = convertRing(ring);
+                    if (converted.length > 0) convertedContours.push(converted);
+                });
+            } else if (geom.type === 'MultiPolygon') {
+                geom.coordinates.forEach(polygon => polygon.forEach(ring => {
+                    const converted = convertRing(ring);
+                    if (converted.length > 0) convertedContours.push(converted);
+                }));
+            } else if (geom.type === 'GeometryCollection') {
+                geom.geometries.forEach(processGeom);
+            }
+        };
+        processGeom(geometry);
+        return convertedContours;
+    }
 
 
 
@@ -3258,6 +3230,19 @@ async function cachedNspdFetch(url, options = {}) {
         return nspdMemoryCache.get(cacheKey);
     }
 
+    try {
+        const raw = localStorage.getItem('nspd_cache_' + cacheKey);
+        if (raw) {
+            const item = JSON.parse(raw);
+            if (Date.now() < item.expiry) {
+                nspdMemoryCache.set(cacheKey, item.data);
+                return item.data;
+            } else {
+                localStorage.removeItem('nspd_cache_' + cacheKey);
+            }
+        }
+    } catch (e) {}
+
     if (nspdInFlightPromises.has(cacheKey)) {
         return nspdInFlightPromises.get(cacheKey);
     }
@@ -3267,9 +3252,11 @@ async function cachedNspdFetch(url, options = {}) {
             const response = await fetchSync(url, options);
             if (response.status === 204) {
                 const emptyResult = { code: 204, features: [] };
+                nspdMemoryCache.set(cacheKey, emptyResult);
                 return emptyResult;
             }
             if (!response.ok) {
+             
                 if ([401, 402, 403, 429].includes(response.status)) {
                     const importBtn = document.getElementById('importKptBtn');
                     if (importBtn) importBtn.style.display = 'inline-flex';
@@ -3277,13 +3264,18 @@ async function cachedNspdFetch(url, options = {}) {
                 throw new Error(`Ошибка сервера: ${response.status}`);
             }
             const data = await response.json();
-            
-            // Сохраняем в кеш только непустые успешные ответы в оперативной памяти страницы
-            if (data && (Array.isArray(data.features) ? data.features.length > 0 : true)) {
-                nspdMemoryCache.set(cacheKey, data);
-            }
+
+            nspdMemoryCache.set(cacheKey, data);
+            try {
+                localStorage.setItem('nspd_cache_' + cacheKey, JSON.stringify({
+                    data,
+                    expiry: Date.now() + NSPD_CACHE_TTL
+                }));
+            } catch (e) {}
+
             return data;
         } catch (err) {
+         
             const importBtn = document.getElementById('importKptBtn');
             if (importBtn) importBtn.style.display = 'inline-flex';
             throw err;
@@ -3296,12 +3288,16 @@ async function cachedNspdFetch(url, options = {}) {
     return fetchPromise;
 }
 
-async function searchIntersectingObjects(parcelContours, categoryIdOrIds, mskSystem) {
-    if (!parcelContours || parcelContours.length === 0 || !mskSystem) return [];
-    const categoryIds = Array.isArray(categoryIdOrIds) ? categoryIdOrIds : [categoryIdOrIds];
 
+async function searchIntersectingObjects(parcelContours, categoryId, mskSystem) {
+    if (!parcelContours || parcelContours.length === 0 || !mskSystem) return [];
+
+    
     if (window.offlineKptStore && window.offlineKptStore.active && window.offlineKptStore.allSpatial.length > 0) {
+        console.log(`[Offline KPT] Поиск пересечений в памяти (категория: ${categoryId})...`);
         const matchingFeatures = [];
+        
+        
         const requestWgsRings = parcelContours.map(ring => {
             const wgsRing = ring.map(pt => {
                 const pt3857 = convertMskTo3857(pt, mskSystem);
@@ -3316,17 +3312,20 @@ async function searchIntersectingObjects(parcelContours, categoryIdOrIds, mskSys
         });
 
         const requestTurfPoly = turf.polygon(requestWgsRings);
+
         window.offlineKptStore.allSpatial.forEach(item => {
-            if (categoryIds.length > 0 && !categoryIds.includes(item.categoryId)) return;
+            if (categoryId && item.categoryId !== categoryId) return;
             try {
                 if (turf.booleanIntersects(requestTurfPoly, item.turfGeom)) {
                     matchingFeatures.push(item.feature);
                 }
             } catch (e) {}
         });
+
         return matchingFeatures;
     }
 
+    
     try {
         const multiPolygonCoords = [];
         parcelContours.forEach(ring => {
@@ -3359,7 +3358,7 @@ async function searchIntersectingObjects(parcelContours, categoryIdOrIds, mskSys
                 "type": "FeatureCollection",
                 "features": [{ "type": "Feature", "geometry": geometryForApi, "properties": {} }]
             },
-            "categories": categoryIds.map(id => ({ id }))
+            "categories": [{ "id": categoryId }]
         };
 
         const data = await cachedNspdFetch('https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject', {
@@ -3370,10 +3369,11 @@ async function searchIntersectingObjects(parcelContours, categoryIdOrIds, mskSys
 
         return data.features || [];
     } catch (error) {
-        console.error(`Ошибка при поиске пересечений:`, error);
+        console.error(`Ошибка при поиске пересечений (${categoryId}):`, error);
         return [];
     }
 }
+
 
 async function fetchEgrnCoordinates(cadNumber) {
     if (!cadNumber) throw new Error('Кадастровый номер не указан');
@@ -3564,6 +3564,7 @@ async function fetchLinkedOksFromRegistry(cadNumber, loadDetails = true) {
 function isRealOverlap(contoursA, contoursB) {
     if (!contoursA || !contoursA.length || !contoursB || !contoursB.length) return true;
 
+    
     const calcPlanarArea = (pts) => {
         let area = 0;
         for (let i = 0; i < pts.length - 1; i++) {
@@ -3572,6 +3573,7 @@ function isRealOverlap(contoursA, contoursB) {
         return Math.abs(area) / 2;
     };
 
+    
     const prepareRing = (ring) => {
         const arr = ring.map(p => [p.x, p.y]);
         const first = arr[0];
@@ -3584,30 +3586,13 @@ function isRealOverlap(contoursA, contoursB) {
 
     try {
         for (const ringA of contoursA) {
-            if (ringA.length < 3) continue;
             const polyA = turf.polygon([prepareRing(ringA)]);
-
+            
             for (const ringB of contoursB) {
-                // 1. Точечный объект
-                if (ringB.length === 1) {
-                    if (isPointInPolygon(ringB[0], ringA)) return true;
-                    continue;
-                }
-
-                const isClosed = ringB.length > 2 && 
-                    Math.abs(ringB[0].x - ringB[ringB.length - 1].x) < 0.01 && 
-                    Math.abs(ringB[0].y - ringB[ringB.length - 1].y) < 0.01;
-
-                // 2. Линейное сооружение (LineString)
-                if (!isClosed || ringB.length < 4) {
-                    const lineB = turf.lineString(ringB.map(p => [p.x, p.y]));
-                    if (turf.booleanIntersects(polyA, lineB)) return true;
-                    continue;
-                }
-
-                // 3. Площадной объект (Polygon)
                 const polyB = turf.polygon([prepareRing(ringB)]);
+                
                 const intersection = turf.intersect(turf.featureCollection([polyA, polyB]));
+                
                 if (intersection) {
                     let totalOverlapArea = 0;
                     const geoms = intersection.geometry.type === 'Polygon' ? 
@@ -3615,18 +3600,26 @@ function isRealOverlap(contoursA, contoursB) {
                         (intersection.geometry.type === 'MultiPolygon' ? intersection.geometry.coordinates : []);
                     
                     for (const poly of geoms) {
-                        totalOverlapArea += calcPlanarArea(poly[0].map(c => ({x: c[0], y: c[1]})));
+                        const outerRing = poly[0].map(c => ({x: c[0], y: c[1]}));
+                        totalOverlapArea += calcPlanarArea(outerRing);
+                        
+                        
                         for (let i = 1; i < poly.length; i++) {
-                            totalOverlapArea -= calcPlanarArea(poly[i].map(c => ({x: c[0], y: c[1]})));
+                            const holeRing = poly[i].map(c => ({x: c[0], y: c[1]}));
+                            totalOverlapArea -= calcPlanarArea(holeRing);
                         }
                     }
-                    if (totalOverlapArea >= 0.001) return true;
+                    
+                    
+                    if (totalOverlapArea >= 0.001) {
+                        return true; 
+                    }
                 }
             }
         }
         return false;
     } catch(e) {
-        console.error('Ошибка в isRealOverlap:', e);
+        console.error('Ошибка при точном расчете площади пересечения:', e);
         return true; 
     }
 }

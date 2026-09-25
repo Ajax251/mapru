@@ -1793,29 +1793,59 @@ zipFilesMap.clear();
         return unsafe.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;").replace(/"/g, "&quot;").replace(/'/g, "&#039;");
     }
 
-    function detectMskSystem(cadNumber) {
-        if (typeof proj4 === 'undefined' || typeof COORDINATE_SYSTEMS === 'undefined' || typeof MskFinder === 'undefined') {
-            return null;
+  function detectMskSystem(cadNumber, spatialNode = null) {
+    if (typeof proj4 === 'undefined' || typeof COORDINATE_SYSTEMS === 'undefined') {
+        return null;
+    }
+
+    // Если передан условный номер вида ":ЗУ1" без квартала, берем квартал из документа
+    if (!cadNumber || !cadNumber.includes(':') || cadNumber.startsWith(':')) {
+        const block = lastXmlDoc?.querySelector('CadastralBlock')?.textContent?.trim();
+        cadNumber = block || cadNumber;
+    }
+
+    // 1. Попытка определить по CsCode в EntitySpatial (например, CsCode="16.2")
+    if (spatialNode) {
+        const csCode = spatialNode.getAttribute('CsCode') || '';
+        if (csCode && csCode.includes('.')) {
+            const [reg, zone] = csCode.split('.');
+            const match = COORDINATE_SYSTEMS.find(s => 
+                (s.text.includes(`МСК-${reg}`) || s.text.includes(`МСК ${reg}`)) && 
+                s.text.includes(`зона ${zone}`)
+            );
+            if (match) {
+                if (proj4.defs(match.value) === undefined) proj4.defs(match.value, match.def);
+                return match;
+            }
         }
+    }
+
+    let targetSystem = null;
+    if (typeof MskFinder !== 'undefined' && cadNumber && cadNumber.includes(':') && !cadNumber.startsWith(':')) {
         const mskCode = MskFinder.findMskCode(cadNumber);
-        let targetSystem = null;
         if (mskCode) {
             targetSystem = COORDINATE_SYSTEMS.find(s => s.text.includes(`МСК-${mskCode}`)) ||
                            COORDINATE_SYSTEMS.find(s => s.text.includes(`МСК ${mskCode}`)) ||
                            COORDINATE_SYSTEMS.find(s => s.text.includes(mskCode));
         }
-        if (!targetSystem) {
-            const regionCode = cadNumber.split(':')[0];
+    }
+
+    if (!targetSystem && cadNumber && cadNumber.includes(':')) {
+        const regionCode = cadNumber.split(':')[0].replace(/\D/g, '');
+        // Защита: ищем только если код региона не пустой и состоит минимум из 2 цифр
+        if (regionCode.length >= 2) {
             const candidates = COORDINATE_SYSTEMS.filter(s => 
                 s.text.includes(`МСК ${regionCode}`) || s.text.includes(`МСК-${regionCode}`)
             );
             if (candidates.length > 0) targetSystem = candidates[0];
         }
-        if (targetSystem && proj4.defs(targetSystem.value) === undefined) {
-            proj4.defs(targetSystem.value, targetSystem.def);
-        }
-        return targetSystem;
     }
+
+    if (targetSystem && proj4.defs(targetSystem.value) === undefined) {
+        proj4.defs(targetSystem.value, targetSystem.def);
+    }
+    return targetSystem;
+}
 
     function convertMskTo3857(point, mskSystem) {
         if (!mskSystem || typeof proj4 === 'undefined') return null;
@@ -2604,38 +2634,54 @@ async function checkZuForTechPlan(zuNumbers, button) {
         return;
     }
     
-    button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Поиск ЗУ...</span>';
-    
-    let nspdZuFeatures = [];
-    if (isLinear) {
-        nspdZuFeatures = await searchZuForLinearObject(contours, currentMskSystem);
-    } else {
-        nspdZuFeatures = await searchIntersectingObjects(contours, NSPD_CATEGORY_ZU, currentMskSystem);
-    }
-    
-    const nspdZuList = [];
-    for (const f of nspdZuFeatures) {
-        const cadNum = f.properties?.options?.cad_number || f.properties?.options?.cad_num || f.properties?.descr;
-        if (cadNum) {
-            let zuContours = [];
-            if (f.geometry && currentMskSystem) {
-                zuContours = await convertEgrnGeometryToMsk(f.geometry, currentMskSystem);
-            }
-            
-            if (zuContours.length > 0 && contours.length > 0) {
-                if (!isRealOverlap(contours, zuContours)) {
-                    continue; 
-                }
-            }
+   button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Поиск ОКС (здания и сооружения)...</span>';
 
-            nspdZuList.push({
-                cadNumber: cadNum,
-                address: f.properties?.options?.readable_address || f.properties?.options?.address_readable_address || '',
-                category: f.properties?.options?.category_name || '',
-                contours: zuContours,
-                hasCoords: zuContours.length > 0,
-                source: 'nspd'
-            });
+    const parcelContours = extractParcelContoursFromXml(targetParcelNode);
+    let nspdOks = [];
+
+    if (parcelContours.length > 0 && currentMskSystem) {
+        // Один пакетный запрос на обе категории сразу
+        const allOksFeatures = await searchIntersectingObjects(
+            parcelContours, 
+            [NSPD_CATEGORY_BUILDINGS, NSPD_CATEGORY_CONSTRUCTIONS], 
+            currentMskSystem
+        );
+
+        button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Обработка...</span>';
+
+        for (const f of allOksFeatures) {
+            const props = f.properties || {};
+            const opts = props.options || {};
+            const cadNum = opts.cad_number || opts.cad_num || props.descr || props.label;
+            
+            if (cadNum) {
+                const cat = props.category;
+                const catName = (props.categoryName || '').toLowerCase();
+                const isBuilding = cat === NSPD_CATEGORY_BUILDINGS || catName.includes('здани') || !!opts.build_record_area;
+
+                const oksItem = {
+                    cadNumber: cadNum,
+                    type: isBuilding ? 'Здание' : 'Сооружение',
+                    address: opts.readable_address || opts.address_readable_address || '',
+                    geometry: f.geometry,
+                    source: 'nspd',
+                    contours: [],
+                    hasCoords: false
+                };
+
+                if (f.geometry) {
+                    oksItem.contours = await convertEgrnGeometryToMsk(f.geometry, currentMskSystem);
+                    oksItem.hasCoords = oksItem.contours && oksItem.contours.length > 0;
+                }
+
+                if (oksItem.hasCoords && parcelContours.length > 0) {
+                    if (!isRealOverlap(parcelContours, oksItem.contours)) {
+                        continue;
+                    }
+                }
+
+                nspdOks.push(oksItem);
+            }
         }
     }
     
@@ -3190,29 +3236,41 @@ function extractParcelContoursFromXml(mainParcel = null) {
         return allOks;
     }
 
-    async function convertEgrnGeometryToMsk(geometry, mskSystem) {
-        if (!geometry || !mskSystem) return [];
-        const convertedContours = [];
-        const convertRing = ring => ring.map(coord => convert3857ToMsk(coord, mskSystem)).filter(p => p !== null);
-        const processGeom = (geom) => {
-            if (!geom) return;
-            if (geom.type === 'Polygon') {
-                geom.coordinates.forEach(ring => {
-                    const converted = convertRing(ring);
-                    if (converted.length > 0) convertedContours.push(converted);
-                });
-            } else if (geom.type === 'MultiPolygon') {
-                geom.coordinates.forEach(polygon => polygon.forEach(ring => {
-                    const converted = convertRing(ring);
-                    if (converted.length > 0) convertedContours.push(converted);
-                }));
-            } else if (geom.type === 'GeometryCollection') {
-                geom.geometries.forEach(processGeom);
-            }
-        };
-        processGeom(geometry);
-        return convertedContours;
-    }
+async function convertEgrnGeometryToMsk(geometry, mskSystem) {
+    if (!geometry || !mskSystem) return [];
+    const convertedContours = [];
+    const convertRing = ring => ring.map(coord => convert3857ToMsk(coord, mskSystem)).filter(p => p !== null);
+    
+    const processGeom = (geom) => {
+        if (!geom) return;
+        if (geom.type === 'Polygon') {
+            geom.coordinates.forEach(ring => {
+                const converted = convertRing(ring);
+                if (converted.length > 0) convertedContours.push(converted);
+            });
+        } else if (geom.type === 'MultiPolygon') {
+            geom.coordinates.forEach(polygon => polygon.forEach(ring => {
+                const converted = convertRing(ring);
+                if (converted.length > 0) convertedContours.push(converted);
+            }));
+        } else if (geom.type === 'LineString') {
+            const converted = convertRing(geom.coordinates);
+            if (converted.length > 0) convertedContours.push(converted);
+        } else if (geom.type === 'MultiLineString') {
+            geom.coordinates.forEach(line => {
+                const converted = convertRing(line);
+                if (converted.length > 0) convertedContours.push(converted);
+            });
+        } else if (geom.type === 'Point') {
+            const pt = convert3857ToMsk(geom.coordinates, mskSystem);
+            if (pt) convertedContours.push([pt]);
+        } else if (geom.type === 'GeometryCollection') {
+            geom.geometries.forEach(processGeom);
+        }
+    };
+    processGeom(geometry);
+    return convertedContours;
+}
 
 
 
@@ -3230,19 +3288,6 @@ async function cachedNspdFetch(url, options = {}) {
         return nspdMemoryCache.get(cacheKey);
     }
 
-    try {
-        const raw = localStorage.getItem('nspd_cache_' + cacheKey);
-        if (raw) {
-            const item = JSON.parse(raw);
-            if (Date.now() < item.expiry) {
-                nspdMemoryCache.set(cacheKey, item.data);
-                return item.data;
-            } else {
-                localStorage.removeItem('nspd_cache_' + cacheKey);
-            }
-        }
-    } catch (e) {}
-
     if (nspdInFlightPromises.has(cacheKey)) {
         return nspdInFlightPromises.get(cacheKey);
     }
@@ -3252,11 +3297,9 @@ async function cachedNspdFetch(url, options = {}) {
             const response = await fetchSync(url, options);
             if (response.status === 204) {
                 const emptyResult = { code: 204, features: [] };
-                nspdMemoryCache.set(cacheKey, emptyResult);
                 return emptyResult;
             }
             if (!response.ok) {
-             
                 if ([401, 402, 403, 429].includes(response.status)) {
                     const importBtn = document.getElementById('importKptBtn');
                     if (importBtn) importBtn.style.display = 'inline-flex';
@@ -3264,18 +3307,13 @@ async function cachedNspdFetch(url, options = {}) {
                 throw new Error(`Ошибка сервера: ${response.status}`);
             }
             const data = await response.json();
-
-            nspdMemoryCache.set(cacheKey, data);
-            try {
-                localStorage.setItem('nspd_cache_' + cacheKey, JSON.stringify({
-                    data,
-                    expiry: Date.now() + NSPD_CACHE_TTL
-                }));
-            } catch (e) {}
-
+            
+            // Сохраняем в кеш только непустые успешные ответы в оперативной памяти страницы
+            if (data && (Array.isArray(data.features) ? data.features.length > 0 : true)) {
+                nspdMemoryCache.set(cacheKey, data);
+            }
             return data;
         } catch (err) {
-         
             const importBtn = document.getElementById('importKptBtn');
             if (importBtn) importBtn.style.display = 'inline-flex';
             throw err;
@@ -3288,16 +3326,12 @@ async function cachedNspdFetch(url, options = {}) {
     return fetchPromise;
 }
 
-
-async function searchIntersectingObjects(parcelContours, categoryId, mskSystem) {
+async function searchIntersectingObjects(parcelContours, categoryIdOrIds, mskSystem) {
     if (!parcelContours || parcelContours.length === 0 || !mskSystem) return [];
+    const categoryIds = Array.isArray(categoryIdOrIds) ? categoryIdOrIds : [categoryIdOrIds];
 
-    
     if (window.offlineKptStore && window.offlineKptStore.active && window.offlineKptStore.allSpatial.length > 0) {
-        console.log(`[Offline KPT] Поиск пересечений в памяти (категория: ${categoryId})...`);
         const matchingFeatures = [];
-        
-        
         const requestWgsRings = parcelContours.map(ring => {
             const wgsRing = ring.map(pt => {
                 const pt3857 = convertMskTo3857(pt, mskSystem);
@@ -3312,68 +3346,60 @@ async function searchIntersectingObjects(parcelContours, categoryId, mskSystem) 
         });
 
         const requestTurfPoly = turf.polygon(requestWgsRings);
-
         window.offlineKptStore.allSpatial.forEach(item => {
-            if (categoryId && item.categoryId !== categoryId) return;
+            if (categoryIds.length > 0 && !categoryIds.includes(item.categoryId)) return;
             try {
                 if (turf.booleanIntersects(requestTurfPoly, item.turfGeom)) {
                     matchingFeatures.push(item.feature);
                 }
             } catch (e) {}
         });
-
         return matchingFeatures;
     }
 
-    
-    try {
-        const multiPolygonCoords = [];
-        parcelContours.forEach(ring => {
-            if (ring.length < 3) return;
-            const transformedRing = ring.map(point => convertMskTo3857(point, mskSystem)).filter(c => c !== null);
-            if (transformedRing.length >= 3) {
-                const first = transformedRing[0];
-                const last = transformedRing[transformedRing.length - 1];
-                if (Math.abs(first[0] - last[0]) > 0.001 || Math.abs(first[1] - last[1]) > 0.001) {
-                    transformedRing.push([...first]);
-                }
-                multiPolygonCoords.push([transformedRing]);
+    const multiPolygonCoords = [];
+    parcelContours.forEach(ring => {
+        if (ring.length < 3) return;
+        const transformedRing = ring.map(point => convertMskTo3857(point, mskSystem)).filter(c => c !== null);
+        if (transformedRing.length >= 3) {
+            const first = transformedRing[0];
+            const last = transformedRing[transformedRing.length - 1];
+            if (Math.abs(first[0] - last[0]) > 0.001 || Math.abs(first[1] - last[1]) > 0.001) {
+                transformedRing.push([...first]);
             }
-        });
+            multiPolygonCoords.push([transformedRing]);
+        }
+    });
 
-        if (multiPolygonCoords.length === 0) return [];
+    if (multiPolygonCoords.length === 0) return [];
 
-        let geometryForApi = multiPolygonCoords.length === 1 ? {
-            "crs": { "type": "name", "properties": { "name": "EPSG:3857" } },
-            "type": "Polygon",
-            "coordinates": multiPolygonCoords[0]
-        } : {
-            "crs": { "type": "name", "properties": { "name": "EPSG:3857" } },
-            "type": "MultiPolygon",
-            "coordinates": multiPolygonCoords
-        };
+    const geometryForApi = multiPolygonCoords.length === 1 ? {
+        "crs": { "type": "name", "properties": { "name": "EPSG:3857" } },
+        "type": "Polygon",
+        "coordinates": multiPolygonCoords[0]
+    } : {
+        "crs": { "type": "name", "properties": { "name": "EPSG:3857" } },
+        "type": "MultiPolygon",
+        "coordinates": multiPolygonCoords
+    };
 
-        const requestBody = {
-            "geom": {
-                "type": "FeatureCollection",
-                "features": [{ "type": "Feature", "geometry": geometryForApi, "properties": {} }]
-            },
-            "categories": [{ "id": categoryId }]
-        };
+    const requestBody = {
+        "geom": {
+            "type": "FeatureCollection",
+            "features": [{ "type": "Feature", "geometry": geometryForApi, "properties": {} }]
+        },
+        "categories": categoryIds.map(id => ({ id }))
+    };
 
-        const data = await cachedNspdFetch('https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject', {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(requestBody)
-        });
+    // Вызываем cachedNspdFetch напрямую без подавления ошибки
+    const data = await cachedNspdFetch('https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(requestBody)
+    });
 
-        return data.features || [];
-    } catch (error) {
-        console.error(`Ошибка при поиске пересечений (${categoryId}):`, error);
-        return [];
-    }
+    return data.features || [];
 }
-
 
 async function fetchEgrnCoordinates(cadNumber) {
     if (!cadNumber) throw new Error('Кадастровый номер не указан');
@@ -3564,64 +3590,40 @@ async function fetchLinkedOksFromRegistry(cadNumber, loadDetails = true) {
 function isRealOverlap(contoursA, contoursB) {
     if (!contoursA || !contoursA.length || !contoursB || !contoursB.length) return true;
 
-    
-    const calcPlanarArea = (pts) => {
-        let area = 0;
-        for (let i = 0; i < pts.length - 1; i++) {
-            area += pts[i].x * pts[i + 1].y - pts[i + 1].x * pts[i].y;
-        }
-        return Math.abs(area) / 2;
+    const doSegmentsIntersect = (p1, p2, p3, p4) => {
+        const ccw = (a, b, c) => (c.y - a.y) * (b.x - a.x) > (b.y - a.y) * (c.x - a.x);
+        return ccw(p1, p3, p4) !== ccw(p2, p3, p4) && ccw(p1, p2, p3) !== ccw(p1, p2, p4);
     };
 
-    
-    const prepareRing = (ring) => {
-        const arr = ring.map(p => [p.x, p.y]);
-        const first = arr[0];
-        const last = arr[arr.length - 1];
-        if (Math.abs(first[0] - last[0]) > 0.001 || Math.abs(first[1] - last[1]) > 0.001) {
-            arr.push([...first]);
-        }
-        return arr;
-    };
+    for (const ringA of contoursA) {
+        if (!ringA || ringA.length < 3) continue;
 
-    try {
-        for (const ringA of contoursA) {
-            const polyA = turf.polygon([prepareRing(ringA)]);
-            
-            for (const ringB of contoursB) {
-                const polyB = turf.polygon([prepareRing(ringB)]);
-                
-                const intersection = turf.intersect(turf.featureCollection([polyA, polyB]));
-                
-                if (intersection) {
-                    let totalOverlapArea = 0;
-                    const geoms = intersection.geometry.type === 'Polygon' ? 
-                        [intersection.geometry.coordinates] : 
-                        (intersection.geometry.type === 'MultiPolygon' ? intersection.geometry.coordinates : []);
-                    
-                    for (const poly of geoms) {
-                        const outerRing = poly[0].map(c => ({x: c[0], y: c[1]}));
-                        totalOverlapArea += calcPlanarArea(outerRing);
-                        
-                        
-                        for (let i = 1; i < poly.length; i++) {
-                            const holeRing = poly[i].map(c => ({x: c[0], y: c[1]}));
-                            totalOverlapArea -= calcPlanarArea(holeRing);
-                        }
-                    }
-                    
-                    
-                    if (totalOverlapArea >= 0.001) {
-                        return true; 
+        for (const ringB of contoursB) {
+            if (!ringB || ringB.length === 0) continue;
+
+            // 1. Попадание любой точки сооружения внутрь участка (актуально для тонких труб/линий)
+            for (const pt of ringB) {
+                if (isPointInPolygon(pt, ringA)) return true;
+            }
+
+            // 2. Попадание точки участка внутрь контура сооружения
+            if (ringB.length >= 3) {
+                for (const pt of ringA) {
+                    if (isPointInPolygon(pt, ringB)) return true;
+                }
+            }
+
+            // 3. Пересечение отрезков границ (даже если площадь полосы стремится к нулю)
+            for (let i = 0; i < ringA.length - 1; i++) {
+                for (let j = 0; j < ringB.length - 1; j++) {
+                    if (doSegmentsIntersect(ringA[i], ringA[i + 1], ringB[j], ringB[j + 1])) {
+                        return true;
                     }
                 }
             }
         }
-        return false;
-    } catch(e) {
-        console.error('Ошибка при точном расчете площади пересечения:', e);
-        return true; 
     }
+    return false;
 }
 
 
@@ -3637,7 +3639,6 @@ async function checkOksInEgrn(oksNumbers, button) {
     button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Подготовка...</span>';
     statusDiv.innerHTML = '';
 
-    
     const parcelType = button.dataset.parcelType;
     const parcelIndex = parseInt(button.dataset.parcelIndex, 10);
     let targetParcelNode = null;
@@ -3652,30 +3653,41 @@ async function checkOksInEgrn(oksNumbers, button) {
         targetParcelNode = All(lastXmlDoc, 'SpecifyParcel > ExistEZ')[parcelIndex];
     }
 
-    
     if (!targetParcelNode) {
         targetParcelNode = lastXmlDoc.querySelector('NewParcel, SpecifyParcel > ExistParcel, SpecifyParcel > ExistEZ');
     }
 
-    
     let mainParcelCadNumber = null;
+    const cadBlockEl = targetParcelNode ? targetParcelNode.querySelector('CadastralBlock') : lastXmlDoc.querySelector('CadastralBlock');
+    const cadBlockText = cadBlockEl ? cadBlockEl.textContent.trim() : '';
+
     if (targetParcelNode) {
         if (targetParcelNode.tagName === 'ExistEZ') {
             const ezParcels = targetParcelNode.querySelector('ExistEZParcels');
             mainParcelCadNumber = ezParcels ? ezParcels.getAttribute('CadastralNumber') : null;
         } else {
-            mainParcelCadNumber = targetParcelNode.getAttribute('CadastralNumber') || targetParcelNode.getAttribute('Definition');
-            if (!mainParcelCadNumber) {
-                const cadBlock = targetParcelNode.querySelector('CadastralBlock');
-                if (cadBlock) mainParcelCadNumber = cadBlock.textContent.trim();
+            const cadAttr = targetParcelNode.getAttribute('CadastralNumber');
+            if (cadAttr && cadAttr.includes(':') && !cadAttr.startsWith(':')) {
+                mainParcelCadNumber = cadAttr;
+            } else {
+                const defAttr = targetParcelNode.getAttribute('Definition') || '';
+                if (cadBlockText && defAttr) {
+                    mainParcelCadNumber = defAttr.startsWith(':') ? cadBlockText + defAttr : `${cadBlockText}:${defAttr}`;
+                } else if (cadBlockText) {
+                    mainParcelCadNumber = cadBlockText;
+                }
             }
         }
+    }
+    if (!mainParcelCadNumber && cadBlockText) {
+        mainParcelCadNumber = cadBlockText;
     }
 
     const isSpecifyParcel = !!lastXmlDoc?.querySelector('SpecifyParcel > ExistParcel');
 
     if (mainParcelCadNumber) {
-        currentMskSystem = detectMskSystem(mainParcelCadNumber);
+        const spatialNode = targetParcelNode ? targetParcelNode.querySelector('EntitySpatial') : null;
+        currentMskSystem = detectMskSystem(mainParcelCadNumber, spatialNode);
     }
 
     const hasXmlOks = oksNumbers && oksNumbers.length > 0;
@@ -3773,75 +3785,58 @@ async function checkOksInEgrn(oksNumbers, button) {
         await delay(1000);
     }
 
-    button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Поиск зданий...</span>';
-
-    
     const parcelContours = extractParcelContoursFromXml(targetParcelNode);
     let nspdOks = [];
+    let nspdSearchError = null;
 
     if (parcelContours.length > 0 && currentMskSystem) {
-        const buildings = await searchIntersectingObjects(parcelContours, NSPD_CATEGORY_BUILDINGS, currentMskSystem);
-        await delay(1000);
+        button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Поиск ОКС (в ЕГРН)...</span>';
+        try {
+            const oksFeatures = await searchIntersectingObjects(
+                parcelContours, 
+                [NSPD_CATEGORY_BUILDINGS, NSPD_CATEGORY_CONSTRUCTIONS], 
+                currentMskSystem
+            );
 
-        button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Поиск сооружений...</span>';
-        const constructions = await searchIntersectingObjects(parcelContours, NSPD_CATEGORY_CONSTRUCTIONS, currentMskSystem);
+            button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Обработка...</span>';
 
-        button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Обработка...</span>';
-
-      for (const f of buildings) {
-            const cadNum = f.properties?.options?.cad_number || f.properties?.options?.cad_num;
-            if (cadNum) {
-                const oksItem = {
-                    cadNumber: cadNum,
-                    type: 'Здание',
-                    address: f.properties?.options?.readable_address || f.properties?.options?.address_readable_address || '',
-                    geometry: f.geometry,
-                    source: 'nspd',
-                    contours: [],
-                    hasCoords: false
-                };
-                if (f.geometry) {
-                    oksItem.contours = await convertEgrnGeometryToMsk(f.geometry, currentMskSystem);
-                    oksItem.hasCoords = oksItem.contours && oksItem.contours.length > 0;
-                }
+            for (const f of oksFeatures) {
+                const props = f.properties || {};
+                const opts = props.options || {};
+                const cadNum = opts.cad_number || opts.cad_num || props.descr || props.label;
                 
-                
-                if (oksItem.hasCoords && parcelContours.length > 0) {
-                    if (!isRealOverlap(parcelContours, oksItem.contours)) {
-                        continue; 
+                if (cadNum) {
+                    const cat = props.category;
+                    const catName = (props.categoryName || '').toLowerCase();
+                    const isBuilding = cat === NSPD_CATEGORY_BUILDINGS || catName.includes('здани') || !!opts.build_record_area;
+
+                    const oksItem = {
+                        cadNumber: cadNum,
+                        type: isBuilding ? 'Здание' : 'Сооружение',
+                        address: opts.readable_address || opts.address_readable_address || '',
+                        geometry: f.geometry,
+                        source: 'nspd',
+                        contours: [],
+                        hasCoords: false
+                    };
+
+                    if (f.geometry) {
+                        oksItem.contours = await convertEgrnGeometryToMsk(f.geometry, currentMskSystem);
+                        oksItem.hasCoords = oksItem.contours && oksItem.contours.length > 0;
                     }
-                }
-                
-                nspdOks.push(oksItem);
-            }
-        }
 
-        for (const f of constructions) {
-            const cadNum = f.properties?.options?.cad_number || f.properties?.options?.cad_num;
-            if (cadNum) {
-                const oksItem = {
-                    cadNumber: cadNum,
-                    type: 'Сооружение',
-                    address: f.properties?.options?.readable_address || f.properties?.options?.address_readable_address || '',
-                    geometry: f.geometry,
-                    source: 'nspd',
-                    contours: [],
-                    hasCoords: false
-                };
-                if (f.geometry) {
-                    oksItem.contours = await convertEgrnGeometryToMsk(f.geometry, currentMskSystem);
-                    oksItem.hasCoords = oksItem.contours && oksItem.contours.length > 0;
-                }
-                
-                
-                if (oksItem.hasCoords && parcelContours.length > 0) {
-                    if (!isRealOverlap(parcelContours, oksItem.contours)) {
-                        continue; 
+                    if (oksItem.hasCoords && parcelContours.length > 0) {
+                        if (!isRealOverlap(parcelContours, oksItem.contours)) {
+                            continue;
+                        }
                     }
+
+                    nspdOks.push(oksItem);
                 }
-                
-                nspdOks.push(oksItem);
             }
+        } catch (err) {
+            console.error('Ошибка запроса ОКС в ЕГРН:', err);
+            nspdSearchError = err.message || 'Ошибка соединения с ЕГРН';
         }
     }
 
@@ -3926,8 +3921,8 @@ async function checkOksInEgrn(oksNumbers, button) {
                         <div style="display:flex; align-items:center; gap:8px; flex-wrap:wrap;">
                             <code style="background:var(--border-color); padding:3px 8px; border-radius:4px; font-weight:600; font-size:0.9em;">${oksInfo.cadNumber}</code>
                             ${isInXml
-                                ? '<span style="color:var(--success-color); font-size:0.85em; font-weight:500;">указан in XML</span>'
-                                : '<span style="color:var(--error-color); font-weight:600; font-size:0.85em;">НЕ указан in XML!</span>'}
+                                ? '<span style="color:var(--success-color); font-size:0.85em; font-weight:500;">указан в XML</span>'
+                                : '<span style="color:var(--error-color); font-weight:600; font-size:0.85em;">НЕ указан в XML!</span>'}
                             ${detailsText ? detailsText : (oksInfo.type ? `<span style="color:var(--text-secondary); font-size:0.85em;">(${oksInfo.type})</span>` : '')}
                         </div>
                     </div>
@@ -3938,19 +3933,19 @@ async function checkOksInEgrn(oksNumbers, button) {
 
             if (inRegistryNotXml.length > 0) {
                 statusHtml += `<div style="background:#fffbeb; border:1px solid #fcd34d; border-radius:6px; padding:10px 12px; color:#92400e; font-size:0.9em; margin-top:12px;">
-                    <i class="fas fa-exclamation-triangle"></i> <strong>Внимание:</strong> ${inRegistryNotXml.length} ОКС привязаны в реестре, но не указаны in XML
+                    <i class="fas fa-exclamation-triangle"></i> <strong>Внимание:</strong> ${inRegistryNotXml.length} ОКС привязаны в реестре, но не указаны в XML
                 </div>`;
             }
 
             if (inXmlNotRegistry.length > 0) {
                 statusHtml += `<div style="background:#fffbeb; border:1px solid #fcd34d; border-radius:6px; padding:10px 12px; color:#92400e; font-size:0.9em; margin-top:8px;">
-                    <i class="fas fa-info-circle"></i> ${inXmlNotRegistry.length} ОКС указаны in XML, но не числятся в реестре связей: <strong>${inXmlNotRegistry.join(', ')}</strong>
+                    <i class="fas fa-info-circle"></i> ${inXmlNotRegistry.length} ОКС указаны в XML, но не числятся в реестре связей: <strong>${inXmlNotRegistry.join(', ')}</strong>
                 </div>`;
             }
 
             if (inRegistryNotXml.length === 0 && inXmlNotRegistry.length === 0) {
                 statusHtml += `<div style="background:#ecfdf5; border:1px solid #6ee7b7; border-radius:6px; padding:10px 12px; color:#065f46; font-size:0.9em; margin-top:12px;">
-                    <i class="fas fa-check-circle"></i> Все ОКС из реестра указаны in XML
+                    <i class="fas fa-check-circle"></i> Все ОКС из реестра указаны в XML
                 </div>`;
             }
         } else {
@@ -3984,10 +3979,14 @@ async function checkOksInEgrn(oksNumbers, button) {
             <div style="display:flex; align-items:center; gap:10px; margin-bottom:14px; padding-bottom:10px; border-bottom: 1px solid var(--border-color);">
                 <i class="fas fa-map-marked-alt" style="color:var(--primary-color); font-size:1.1em;"></i>
                 <span style="font-weight:600; color:var(--text-primary); font-size:1em;">ОКС на ЗУ по координатам (геометрия)</span>
-                <span style="background:var(--primary-color); color:white; padding:2px 10px; border-radius:12px; font-size:0.85em; font-weight:600; margin-left:auto;">${nspdOks.length}</span>
+                <span style="background:${nspdSearchError ? '#ef4444' : 'var(--primary-color)'}; color:white; padding:2px 10px; border-radius:12px; font-size:0.85em; font-weight:600; margin-left:auto;">${nspdSearchError ? 'Ошибка' : nspdOks.length}</span>
             </div>`;
 
-        if (nspdOks.length > 0) {
+        if (nspdSearchError) {
+            statusHtml += `<div style="color:var(--error-color); padding:8px 0; font-size:0.9em;">
+                <i class="fas fa-exclamation-triangle"></i> Не удалось запросить геометрию ОКС: ${escapeHtml(nspdSearchError)} (доступ ограничен или сбой сервера)
+            </div>`;
+        } else if (nspdOks.length > 0) {
             statusHtml += `<div style="display:flex; flex-direction:column; gap:8px;">`;
 
             nspdOks.forEach(o => {
@@ -4010,8 +4009,8 @@ async function checkOksInEgrn(oksNumbers, button) {
                             <code style="background:var(--border-color); padding:3px 8px; border-radius:4px; font-weight:600; font-size:0.9em;">${o.cadNumber}</code>
                             ${typeAddressText ? `<span style="color:var(--text-secondary); font-size:0.85em;">${typeAddressText}</span>` : ''}
                             ${isInXml
-                                ? '<span style="color:var(--success-color); font-size:0.85em; font-weight:500;">указан in XML</span>'
-                                : '<span style="color:var(--error-color); font-weight:600; font-size:0.85em;">НЕ указан in XML!</span>'}
+                                ? '<span style="color:var(--success-color); font-size:0.85em; font-weight:500;">указан в XML</span>'
+                                : '<span style="color:var(--error-color); font-weight:600; font-size:0.85em;">НЕ указан в XML!</span>'}
                         </div>
                     </div>
                 </div>`;
@@ -4021,11 +4020,11 @@ async function checkOksInEgrn(oksNumbers, button) {
 
             if (missingOks.length > 0) {
                 statusHtml += `<div style="background:#fffbeb; border:1px solid #fcd34d; border-radius:6px; padding:10px 12px; color:#92400e; font-size:0.9em; margin-top:12px;">
-                    <i class="fas fa-exclamation-triangle"></i> <strong>Внимание:</strong> ${missingOks.length} ОКС найдены на участке, но не указаны in XML
+                    <i class="fas fa-exclamation-triangle"></i> <strong>Внимание:</strong> ${missingOks.length} ОКС найдены на участке, но не указаны в XML
                 </div>`;
             } else {
                 statusHtml += `<div style="background:#ecfdf5; border:1px solid #6ee7b7; border-radius:6px; padding:10px 12px; color:#065f46; font-size:0.9em; margin-top:12px;">
-                    <i class="fas fa-check-circle"></i> Все найденные ОКС указаны in XML
+                    <i class="fas fa-check-circle"></i> Все найденные ОКС указаны в XML
                 </div>`;
             }
         } else {
@@ -4060,7 +4059,7 @@ async function checkOksInEgrn(oksNumbers, button) {
         statusHtml += `<div class="validation-message validation-error" style="margin-top:8px; flex-direction:column; align-items:flex-start;">
             <div style="display:flex; align-items:center; gap:8px; margin-bottom:8px;">
                 <i class="fas fa-map-marker-alt" style="color:#ef4444;"></i>
-                <strong>Указаны in XML, но расположены на другом участке (${wrongLocationOks.length}):</strong>
+                <strong>Указаны в XML, но расположены на другом участке (${wrongLocationOks.length}):</strong>
             </div>
             <ul style="margin:8px 0 0 0; padding-left:0; list-style:none;">
                 ${wrongLocationOks.map(o => `<li style="padding:4px 0;">
@@ -4084,7 +4083,15 @@ async function checkOksInEgrn(oksNumbers, button) {
         </div>`;
     }
 
-    if (!hasXmlOks && nspdOks.length === 0 && registryOksList.length === 0) {
+    if (nspdSearchError) {
+        statusHtml += `<div class="validation-message validation-error" style="margin-top:8px;">
+            ${sectionIcons.errorIcon} 
+            <div>
+                <strong>Ошибка проверки ОКС в ЕГРН:</strong> ${escapeHtml(nspdSearchError)}.<br>
+                <span style="font-size: 0.85em;">Сервер временно недоступен или отклонил запрос (код 403). Проверка не выполнена! Попробуйте позже или используйте файл КПТ.</span>
+            </div>
+        </div>`;
+    } else if (!hasXmlOks && nspdOks.length === 0 && registryOksList.length === 0) {
         statusHtml += `<div class="validation-message validation-success" style="margin-top:8px;">
             ${sectionIcons.successIcon} ОКС на данном участке не обнаружено
         </div>`;
@@ -4112,7 +4119,6 @@ async function checkOksInEgrn(oksNumbers, button) {
         </div>`;
     }
 
- 
     const updateKnListIcon = (oksArray, color, iconTitle) => {
         oksArray.forEach(oks => {
             if (!oks.cadNumber) return;
@@ -4124,17 +4130,11 @@ async function checkOksInEgrn(oksNumbers, button) {
         });
     };
 
-    
     updateKnListIcon(correctOks, '#10b981', 'Данные из ЕГРН : Объект расположен в границах данного ЗУ');
-    
-    
     updateKnListIcon(conditionalOks, '#f59e0b', 'ЕГРН: Объект имеет условную привязку (только точка)');
-    
-    
     updateKnListIcon(wrongLocationOks, '#ef4444', 'ОШИБКА: По координатам ЕГРН объект НЕ располагается на данном ЗУ!');
-    
 
-    statusDiv.innerHTML = statusHtml; 
+    statusDiv.innerHTML = statusHtml;
 
     const schemaBtn = document.getElementById('openOksSchemaBtn');
     if (schemaBtn) {
@@ -4143,7 +4143,6 @@ async function checkOksInEgrn(oksNumbers, button) {
         });
     }
 }
-
 
 
 function openOksSchemaModal() {
@@ -4373,7 +4372,6 @@ function drawOksSchemaCanvas() {
     const xmlCadNumbers = (currentOksData || []).map(o => o.cadNumber.toLowerCase());
     const nspdOnlyOks = nspdOks.filter(o => !xmlCadNumbers.includes(o.cadNumber.toLowerCase()));
 
-    
     const pointsForScale = [];
     parcelContours.forEach(contour => contour.forEach(p => pointsForScale.push(p)));
 
@@ -4385,12 +4383,12 @@ function drawOksSchemaCanvas() {
     }
 
     if (pointsForScale.length === 0) {
-        infoDiv.innerHTML = '<div style="color:var(--error-color);">Нет данных для отображения</div>';
+        if (infoDiv) infoDiv.innerHTML = '<div style="color:var(--error-color);">Нет данных для отображения</div>';
         return;
     }
 
     const containerRect = container.getBoundingClientRect();
-    const padding = 16;
+    const padding = 20;
     const availableWidth = containerRect.width - padding * 2;
     const availableHeight = containerRect.height - padding * 2;
     const dpr = window.devicePixelRatio || 1;
@@ -4405,15 +4403,14 @@ function drawOksSchemaCanvas() {
     ctx.clearRect(0, 0, displayWidth, displayHeight);
 
     const transforms = calculateSchemaTransforms(pointsForScale, displayWidth, displayHeight);
-    const { scale, offsetX_canvas, offsetY_canvas, maxGeoX } = transforms;
+    const { scale, offsetX_canvas, offsetY_canvas, maxGeoX, minGeoY } = transforms;
     
     const toCanvas = (point) => ({
-        x: offsetX_canvas + (point.y - transforms.minGeoY) * scale,
+        x: offsetX_canvas + (point.y - minGeoY) * scale,
         y: offsetY_canvas + (maxGeoX - point.x) * scale
     });
     const baseLineWidth = Math.max(1, Math.min(3, displayWidth / 400));
 
-    
     const isOksFullyVisible = (contours) => {
         if (!contours || contours.length === 0) return false;
         for (const contour of contours) {
@@ -4427,30 +4424,14 @@ function drawOksSchemaCanvas() {
         return true;
     };
 
-    
-ctx.strokeStyle = '#2563eb';
-ctx.fillStyle = 'rgba(37, 99, 235, 0.15)';
-ctx.lineWidth = 3;
-
-ctx.beginPath();
-xmlRingsWgs.forEach(ring => {
-    ring.forEach((pt, i) => {
-        const cp = toCanvas(pt[0], pt[1]);
-        i === 0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y);
-    });
-    ctx.closePath();
-});
-ctx.fill('evenodd');
-ctx.stroke();
-
-    const drawOksObject = (contours, strokeColor, fillColor, lineDash = []) => {
-        if (!contours || contours.length === 0) return;
-        ctx.strokeStyle = strokeColor;
-        ctx.lineWidth = baseLineWidth;
-        ctx.fillStyle = fillColor;
-        ctx.setLineDash(lineDash);
+    // 1. Отрисовка земельного участка из межевого плана
+    if (parcelContours && parcelContours.length > 0) {
+        ctx.strokeStyle = '#2563eb';
+        ctx.fillStyle = 'rgba(37, 99, 235, 0.15)';
+        ctx.lineWidth = baseLineWidth + 1;
+        ctx.setLineDash([]);
         ctx.beginPath();
-        contours.forEach(contour => {
+        parcelContours.forEach(contour => {
             if (contour.length < 2) return;
             const canvasPoints = contour.map(toCanvas);
             canvasPoints.forEach((cp, i) => (i === 0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y)));
@@ -4458,6 +4439,43 @@ ctx.stroke();
         });
         ctx.fill('evenodd');
         ctx.stroke();
+    }
+
+    // Универсальная отрисовка ОКС (полигоны, тонкие полосы, полилинии и точки)
+    const drawOksObject = (contours, strokeColor, fillColor, lineDash = []) => {
+        if (!contours || contours.length === 0) return;
+        ctx.strokeStyle = strokeColor;
+        ctx.lineWidth = baseLineWidth;
+        ctx.setLineDash(lineDash);
+
+        contours.forEach(contour => {
+            if (!contour || contour.length === 0) return;
+
+            // Точечные объекты
+            if (contour.length === 1) {
+                const cp = toCanvas(contour[0]);
+                ctx.beginPath();
+                ctx.arc(cp.x, cp.y, 4, 0, Math.PI * 2);
+                ctx.fillStyle = strokeColor;
+                ctx.fill();
+                return;
+            }
+
+            const canvasPoints = contour.map(toCanvas);
+            const isClosed = contour.length > 2 && 
+                Math.abs(contour[0].x - contour[contour.length - 1].x) < 0.01 && 
+                Math.abs(contour[0].y - contour[contour.length - 1].y) < 0.01;
+
+            ctx.beginPath();
+            canvasPoints.forEach((cp, i) => (i === 0 ? ctx.moveTo(cp.x, cp.y) : ctx.lineTo(cp.x, cp.y)));
+            
+            if (isClosed) {
+                ctx.closePath();
+                ctx.fillStyle = fillColor;
+                ctx.fill('evenodd');
+            }
+            ctx.stroke();
+        });
         ctx.setLineDash([]);
     };
 
@@ -4469,38 +4487,33 @@ ctx.stroke();
     infoHtml = `<div class="oks-info-item"><div class="color-marker" style="background:#2563eb;"></div><strong>${parcelCadNum}</strong> — ЗУ из межевого плана</div>`;
     listedCadastralNumbers.add(parcelCadNum.toLowerCase());
 
-    
+    // 2. Отрисовка ОКС, указанных в XML
     const oksColors = ['#ef4444', '#f97316', '#ec4899', '#14b8a6', '#84cc16'];
     xmlOks.forEach((oks, index) => {
         const color = oksColors[index % oksColors.length];
         const r = parseInt(color.slice(1, 3), 16),
-            g = parseInt(color.slice(3, 5), 16),
-            b = parseInt(color.slice(5, 7), 16);
+              g = parseInt(color.slice(3, 5), 16),
+              b = parseInt(color.slice(5, 7), 16);
         drawOksObject(oks.contours, color, `rgba(${r}, ${g}, ${b}, 0.3)`);
         
         const isSimpleAndFullyVisible = (oks.contours.length === 1) && isOksFullyVisible(oks.contours);
 
         if (isSimpleAndFullyVisible) {
-            
             const centerGeo = getBboxCenter(oks.contours);
             if (centerGeo) {
                 const cp = toCanvas(centerGeo);
                 drawTextLabel(ctx, getShortCad(oks.cadNumber), cp.x, cp.y, color);
             }
         } else {
-            
             const targetPt = getClosestPointToCenter(oks.contours, parcelCenter);
             if (targetPt) {
                 const cp = toCanvas(targetPt);
                 const cpCenter = parcelCenter ? toCanvas(parcelCenter) : { x: displayWidth/2, y: displayHeight/2 };
-                
                 const dx = cp.x - cpCenter.x;
                 const dy = cp.y - cpCenter.y;
                 const dist = Math.sqrt(dx*dx + dy*dy) || 1;
-                
                 const offsetX = (dx / dist) * 45;
                 const offsetY = (dy / dist) * 45 - 5;
-                
                 drawLeaderLineAndText(ctx, getShortCad(oks.cadNumber), cp.x, cp.y, cp.x + offsetX, cp.y + offsetY, color);
             }
         }
@@ -4511,34 +4524,29 @@ ctx.stroke();
         }
     });
 
-    
+    // 3. Отрисовка найденных в ЕГРН ОКС (включая водопроводы, сети и сооружения)
     nspdOnlyOks.forEach((oks) => {
         const color = '#8b5cf6';
-        drawOksObject(oks.contours, color, 'rgba(139, 92, 246, 0.2)', [5, 5]);
+        drawOksObject(oks.contours, color, 'rgba(139, 92, 246, 0.25)', [5, 4]);
         
         const isSimpleAndFullyVisible = (oks.contours.length === 1) && isOksFullyVisible(oks.contours);
 
         if (isSimpleAndFullyVisible) {
-            
             const centerGeo = getBboxCenter(oks.contours);
             if (centerGeo) {
                 const cp = toCanvas(centerGeo);
                 drawTextLabel(ctx, getShortCad(oks.cadNumber), cp.x, cp.y, color);
             }
         } else {
-            
             const targetPt = getClosestPointToCenter(oks.contours, parcelCenter);
             if (targetPt) {
                 const cp = toCanvas(targetPt);
                 const cpCenter = parcelCenter ? toCanvas(parcelCenter) : { x: displayWidth/2, y: displayHeight/2 };
-                
                 const dx = cp.x - cpCenter.x;
                 const dy = cp.y - cpCenter.y;
                 const dist = Math.sqrt(dx*dx + dy*dy) || 1;
-                
                 const offsetX = (dx / dist) * 45;
                 const offsetY = (dy / dist) * 45 - 5;
-                
                 drawLeaderLineAndText(ctx, getShortCad(oks.cadNumber), cp.x, cp.y, cp.x + offsetX, cp.y + offsetY, color);
             }
         }
@@ -4546,13 +4554,13 @@ ctx.stroke();
         if (!listedCadastralNumbers.has(oks.cadNumber.toLowerCase())) {
             infoHtml += `<div class="oks-info-item">
                 <div class="color-marker" style="background:${color}; border: 2px dashed #6d28d9;"></div>
-                <strong>${oks.cadNumber}</strong> — ${oks.address || 'ОКС'} <span style="color:#ef4444; font-weight:600;">(НЕ в XML!)</span>
+                <strong>${oks.cadNumber}</strong> — ${oks.address || oks.type || 'ОКС'} <span style="color:#ef4444; font-weight:600;">(НЕ в XML!)</span>
             </div>`;
             listedCadastralNumbers.add(oks.cadNumber.toLowerCase());
         }
     });
 
-    infoDiv.innerHTML = infoHtml;
+    if (infoDiv) infoDiv.innerHTML = infoHtml;
 }
 
     function calculateSchemaTransforms(points, canvasWidth, canvasHeight) {
