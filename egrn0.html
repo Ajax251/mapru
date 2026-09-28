@@ -1833,7 +1833,6 @@ body {
                 <option value="kpt_soor">Запросить Сооружения из КПТ</option>
                 <option value="5">ЗОУИТ</option>
                 <option value="7">Территориальные зоны</option>
-                   <option value="ez_supabase">🔗 Проверить Единое Землепользование</option>
             </select>
         </div>
         <p>Введите кадастровые номера (до 100), каждый с новой строки</p>
@@ -3444,96 +3443,6 @@ async function fetchSingleTerritorialZoneData(zoneNum) {
 }
 
 
-/**
- * Порционный опрос Supabase через mapruapp.ru/api/sync
- * Поддерживает как ввод ЗУ (ищет родительский ЕЗ), так и ввод ЕЗ (ищет все входящие ЗУ).
- */
-async function processBatchEz(numbersList, progressCallback) {
-    if (!supabaseClient) {
-        throw new Error('Supabase клиент не инициализирован');
-    }
-
-    const CHUNK_SIZE = 150; // Оптимальный размер порции без риска ошибки URL Too Long (414)
-    const uniqueNumbers = Array.from(new Set(numbersList.map(n => n.trim()).filter(Boolean)));
-    
-    const chunks = [];
-    for (let i = 0; i < uniqueNumbers.length; i += CHUNK_SIZE) {
-        chunks.push(uniqueNumbers.slice(i, i + CHUNK_SIZE));
-    }
-
-    const zuToEzMap = new Map(); // ЗУ -> Родительский ЕЗ
-    const ezToZuMap = new Map(); // ЕЗ -> Массив входящих ЗУ
-
-    for (let i = 0; i < chunks.length; i++) {
-        const chunk = chunks[i];
-
-        try {
-            // Запрашиваем параллельно: ищем где номер выступает как ЗУ, и где как ЕЗ
-            const [resZU, resEZ] = await Promise.all([
-                supabaseClient.from('EZ').select('EZ, ZU').in('ZU', chunk),
-                supabaseClient.from('EZ').select('EZ, ZU').in('EZ', chunk)
-            ]);
-
-            if (resZU.data && resZU.data.length > 0) {
-                resZU.data.forEach(row => {
-                    if (row.ZU && row.EZ) zuToEzMap.set(row.ZU, row.EZ);
-                });
-            }
-
-            if (resEZ.data && resEZ.data.length > 0) {
-                resEZ.data.forEach(row => {
-                    if (row.EZ && row.ZU) {
-                        if (!ezToZuMap.has(row.EZ)) ezToZuMap.set(row.EZ, []);
-                        ezToZuMap.get(row.EZ).push(row.ZU);
-                    }
-                });
-            }
-        } catch (err) {
-            console.error(`Ошибка при загрузке порции ${i + 1}:`, err);
-        }
-
-        if (progressCallback) {
-            progressCallback(i + 1, chunks.length);
-        }
-    }
-
-    // Формируем результирующую плоскую таблицу для каждого номера из исходного списка
-    const finalResults = numbersList.map(rawNum => {
-        const num = rawNum.trim();
-        const parentEz = zuToEzMap.get(num);
-        const childZus = ezToZuMap.get(num);
-
-        if (parentEz) {
-            return {
-                'Кадастровый номер': num,
-                'Тип в ЕЗ': 'Обособленный (входит в ЕЗ)',
-                'Единое землепользование': parentEz,
-                'Входящие участки': '-',
-                'Кол-во обособленных в ЕЗ': 1
-            };
-        } else if (childZus && childZus.length > 0) {
-            return {
-                'Кадастровый номер': num,
-                'Тип в ЕЗ': 'Единое землепользование (головной)',
-                'Единое землепользование': num,
-                'Входящие участки': childZus.join(', '),
-                'Кол-во обособленных в ЕЗ': childZus.length
-            };
-        } else {
-            return {
-                'Кадастровый номер': num,
-                'Тип в ЕЗ': 'Не числится в БД ЕЗ',
-                'Единое землепользование': '-',
-                'Входящие участки': '-',
-                'Кол-во обособленных в ЕЗ': 0
-            };
-        }
-    });
-
-    return finalResults;
-}
-
-
 
 async function getOrFetchBatchData(numbersList, searchType, shouldFetchLinks, exportButton, spinnerIcon, typeIcon) {
     const numbersListStr = numbersList.join('|');
@@ -3558,27 +3467,6 @@ async function getOrFetchBatchData(numbersList, searchType, shouldFetchLinks, ex
     showNotification(`Начата обработка ${numbersList.length} объектов...`, 'info');
 
     try {
-  
-        if (searchType === 'ez_supabase') {
-            const allResults = await processBatchEz(numbersList, (current, total) => {
-                const progressPercent = Math.round((current / total) * 100);
-                progressBarFill.style.width = progressPercent + '%';
-                progressBarText.textContent = `${progressPercent}% (порция ${current}/${total})`;
-            });
-
-            lastBatchRequestState = {
-                numbersListStr,
-                searchType,
-                shouldFetchLinks: false,
-                results: allResults,
-                zouitCount: 0,
-                terZoneCount: 0
-            };
-            return lastBatchRequestState;
-        }
- 
-
-      
         const { allResults, zouitSuccessCount, terZoneSuccessCount } = await processBatchNumbersCore(
             numbersList, searchType, shouldFetchLinks, 
             (current, total) => {
@@ -3840,20 +3728,7 @@ document.addEventListener('DOMContentLoaded', () => {
         selector.addEventListener('change', function(e) {
             const val = e.target.value;
             const isCadastral = val === '1' || val.startsWith('kpt_');
-            const linkCheckbox = document.getElementById('linkOksCheckbox');
-            if (linkCheckbox) {
-                linkCheckbox.disabled = !isCadastral;
-                if (val === 'ez_supabase') {
-                    linkCheckbox.checked = false;
-                }
-            }
-            // Меняем подсказку лимита
-            const desc = selector.parentElement.nextElementSibling;
-            if (desc && desc.tagName === 'P') {
-                desc.textContent = (val === 'ez_supabase') 
-                    ? 'Введите кадастровые номера (до 5000), каждый с новой строки' 
-                    : 'Введите кадастровые номера (до 100), каждый с новой строки';
-            }
+            document.getElementById('linkOksCheckbox').disabled = !isCadastral;
         });
     }
 });
@@ -4122,10 +3997,7 @@ async function exportToCsv() {
     textarea.value = numbersList.join('\n');
     
     if (numbersList.length === 0) return showNotification('Список номеров пуст', 'warning');
-const maxLimit = (searchType === 'ez_supabase') ? 5000 : 100;
-if (numbersList.length > maxLimit) {
-    return showNotification(`Превышен лимит в ${maxLimit} номеров.`, 'error');
-}
+    if (numbersList.length > 100) return showNotification(`Превышен лимит в 100 номеров.`, 'error');
 
     const { results } = await getOrFetchBatchData(numbersList, searchType, shouldFetchLinks, exportButton, spinnerIcon, typeIcon);
     if (!results || results.length === 0) return showNotification('Нет данных для экспорта', 'warning');
@@ -4182,10 +4054,7 @@ async function exportToExcel() {
     textarea.value = numbersList.join('\n');
     
     if (numbersList.length === 0) return showNotification('Список номеров пуст', 'warning');
- const maxLimit = (searchType === 'ez_supabase') ? 5000 : 100;
-if (numbersList.length > maxLimit) {
-    return showNotification(`Превышен лимит в ${maxLimit} номеров.`, 'error');
-}
+    if (numbersList.length > 100) return showNotification(`Превышен лимит в 100 номеров.`, 'error');
 
     const { results } = await getOrFetchBatchData(numbersList, searchType, shouldFetchLinks, exportButton, spinnerIcon, typeIcon);
     if (!results || results.length === 0) return showNotification('Нет данных для экспорта', 'warning');
@@ -4234,10 +4103,7 @@ async function exportToHtml() {
     textarea.value = numbersList.join('\n');
     
     if (numbersList.length === 0) return showNotification('Список номеров пуст', 'warning');
-  const maxLimit = (searchType === 'ez_supabase') ? 5000 : 100;
-if (numbersList.length > maxLimit) {
-    return showNotification(`Превышен лимит в ${maxLimit} номеров.`, 'error');
-}
+    if (numbersList.length > 100) return showNotification(`Превышен лимит в 100 номеров.`, 'error');
 
     const { results } = await getOrFetchBatchData(numbersList, searchType, shouldFetchLinks, exportButton, spinnerIcon, typeIcon);
     if (!results || results.length === 0) return showNotification('Нет данных для экспорта', 'warning');
@@ -4280,10 +4146,7 @@ async function exportToJsonBatch() {
     textarea.value = numbersList.join('\n');
     
     if (numbersList.length === 0) return showNotification('Список номеров пуст', 'warning');
-const maxLimit = (searchType === 'ez_supabase') ? 5000 : 100;
-if (numbersList.length > maxLimit) {
-    return showNotification(`Превышен лимит в ${maxLimit} номеров.`, 'error');
-}
+    if (numbersList.length > 100) return showNotification(`Превышен лимит в 100 номеров.`, 'error');
 
     const { results } = await getOrFetchBatchData(numbersList, searchType, shouldFetchLinks, exportButton, spinnerIcon, typeIcon);
     if (!results || results.length === 0) return showNotification('Нет данных для экспорта', 'warning');
