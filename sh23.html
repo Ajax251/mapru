@@ -7293,166 +7293,131 @@ function promptDxfImportOptions(stats) {
 }
 
 
-// Универсальный парсер DXF сущностей (LWPOLYLINE, POLYLINE/VERTEX, LINE, POINT, CIRCLE)
-function parseDxfUniversal(dxfContent) {
-    const lines = dxfContent.split('\n').map(l => l.trim());
-    const finishedPolylines = [];
+async function extractCoordinatesFromDXF(dxfContent) {
+    const lines = dxfContent.split('\n');
     const rawSegments = [];
     const standalonePoints = [];
+    const finishedPolylines = [];
 
-    let currentContour = [];
+    let isReadingCoords = false;
+    let isPolyline = false;
+    let isPoint = false;
+    let isLine = false;
+    let isInsert = false;
     let isClosed = false;
+    let currentPolyPoints = [];
+    let x, y, x1, y1, x2, y2;
 
-    const saveEntity = (contour, closed, entityType) => {
-        if (!contour || contour.length === 0) return;
-        const valid = contour.filter(p => isFinite(p[0]) && isFinite(p[1]));
-        if (valid.length === 0) return;
-
-        // Нормализация геодезических координат X (меньшая) и Y (большая)
-        const normalized = valid.map(p => [Math.min(p[0], p[1]), Math.max(p[0], p[1])]);
-
-        if (entityType === 'POINT' || entityType === 'CIRCLE' || normalized.length === 1) {
-            standalonePoints.push(normalized[0]);
-            return;
-        }
-
-        const isGeomClosed = normalized.length > 2 &&
-            Math.hypot(normalized[0][0] - normalized[normalized.length - 1][0], normalized[0][1] - normalized[normalized.length - 1][1]) < 0.01;
-
-        if ((closed || isGeomClosed) && normalized.length > 2) {
-            const first = normalized[0];
-            const last = normalized[normalized.length - 1];
-            if (Math.hypot(first[0] - last[0], first[1] - last[1]) > 0.001) {
-                normalized.push([first[0], first[1]]);
+    const flushCurrentPoly = () => {
+        if (currentPolyPoints.length > 0) {
+            if (isClosed && currentPolyPoints.length > 1) {
+                const [fx, fy] = currentPolyPoints[0];
+                const [lx, ly] = currentPolyPoints[currentPolyPoints.length - 1];
+                if (Math.hypot(fx - lx, fy - ly) > 0.001) {
+                    currentPolyPoints.push([fx, fy]);
+                }
             }
+            finishedPolylines.push(currentPolyPoints);
+            currentPolyPoints = [];
         }
-
-        finishedPolylines.push(normalized);
+        isClosed = false;
     };
 
-    let currentEntityType = null;
-    let tempX = undefined, tempY = undefined;
-    let lineX1 = undefined, lineY1 = undefined, lineX2 = undefined, lineY2 = undefined;
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i].trim();
 
-    // Чтение строго парами: код группы и значение
-    for (let i = 0; i < lines.length - 1; i += 2) {
-        const code = parseInt(lines[i], 10);
-        const val = lines[i + 1];
-        if (isNaN(code)) {
-            i--; // Коррекция при пустых / сбитых строках
-            continue;
-        }
-
-        // Код 0 — завершение предыдущей сущности и начало новой
-        if (code === 0) {
-            if (currentEntityType === 'LINE') {
-                if (lineX1 !== undefined && lineY1 !== undefined && lineX2 !== undefined && lineY2 !== undefined) {
-                    rawSegments.push([
-                        [Math.min(lineX1, lineY1), Math.max(lineX1, lineY1)],
-                        [Math.min(lineX2, lineY2), Math.max(lineX2, lineY2)]
-                    ]);
+        if (line === 'POLYLINE' || line === 'LWPOLYLINE') {
+            flushCurrentPoly();
+            isReadingCoords = true;
+            isPolyline = (line === 'POLYLINE');
+            isPoint = false;
+            isLine = false;
+            isInsert = false;
+        } else if (line === 'POINT' || line === 'INSERT') {
+            flushCurrentPoly();
+            isReadingCoords = true;
+            isPolyline = false;
+            isPoint = (line === 'POINT');
+            isInsert = (line === 'INSERT');
+            isLine = false;
+            x = y = undefined;
+        } else if (line === 'LINE') {
+            flushCurrentPoly();
+            isReadingCoords = true;
+            isPolyline = false;
+            isPoint = false;
+            isInsert = false;
+            isLine = true;
+            x1 = y1 = x2 = y2 = undefined;
+        } else if (line === 'SEQEND') {
+            flushCurrentPoly();
+            isReadingCoords = false;
+            isPolyline = false;
+        } else if (isReadingCoords) {
+            if (line === '70' && !isPoint && !isLine && !isInsert) {
+                isClosed = (parseInt(lines[++i].trim(), 10) & 1) !== 0;
+            } else if (isPolyline) {
+                if (line === 'VERTEX') {
+                    x = y = undefined;
+                } else if (line === '10') {
+                    x = parseFloat(lines[++i].trim());
+                } else if (line === '20') {
+                    y = parseFloat(lines[++i].trim());
+                    if (x !== undefined && y !== undefined) {
+                        if (x !== 0 && y !== 0) {
+                            currentPolyPoints.push([Math.min(x, y), Math.max(x, y)]);
+                        }
+                        x = y = undefined;
+                    }
                 }
-                lineX1 = lineY1 = lineX2 = lineY2 = undefined;
-            } else if (['POLYLINE', 'LWPOLYLINE', 'POINT', 'CIRCLE'].includes(currentEntityType)) {
-                saveEntity(currentContour, isClosed, currentEntityType);
-                currentContour = [];
-                isClosed = false;
-            }
+            } else if (isLine) {
+                if (line === '10') x1 = parseFloat(lines[++i].trim());
+                else if (line === '20') y1 = parseFloat(lines[++i].trim());
+                else if (line === '11') x2 = parseFloat(lines[++i].trim());
+                else if (line === '21') y2 = parseFloat(lines[++i].trim());
 
-            currentEntityType = val.toUpperCase();
-            tempX = undefined;
-            tempY = undefined;
-            continue;
-        }
+                if (x1 !== undefined && y1 !== undefined && x2 !== undefined && y2 !== undefined) {
+                    if ((x1 !== 0 || y1 !== 0) && (x2 !== 0 || y2 !== 0)) {
+                        rawSegments.push([
+                            [Math.min(x1, y1), Math.max(x1, y1)],
+                            [Math.min(x2, y2), Math.max(x2, y2)]
+                        ]);
+                    }
+                    isReadingCoords = false;
+                    isLine = false;
+                }
+            } else if (isPoint || isInsert) {
+                if (line === '10') x = parseFloat(lines[++i].trim());
+                else if (line === '20') y = parseFloat(lines[++i].trim());
 
-        if (currentEntityType === 'LWPOLYLINE') {
-            if (code === 70) isClosed = (parseInt(val, 10) & 1) === 1;
-            else if (code === 10) tempX = parseFloat(val);
-            else if (code === 20) {
-                tempY = parseFloat(val);
-                if (tempX !== undefined && tempY !== undefined) {
-                    currentContour.push([tempX, tempY]);
-                    tempX = undefined;
-                    tempY = undefined;
+                if (x !== undefined && y !== undefined) {
+                    if (x !== 0 && y !== 0) {
+                        standalonePoints.push([Math.min(x, y), Math.max(x, y)]);
+                    }
+                    isReadingCoords = false;
+                    isPoint = false;
+                    isInsert = false;
                 }
-            }
-        } else if (currentEntityType === 'VERTEX') {
-            if (code === 10) tempX = parseFloat(val);
-            else if (code === 20) {
-                tempY = parseFloat(val);
-                if (tempX !== undefined && tempY !== undefined) {
-                    currentContour.push([tempX, tempY]);
-                    tempX = undefined;
-                    tempY = undefined;
-                }
-            }
-        } else if (currentEntityType === 'POLYLINE') {
-            if (code === 70) isClosed = (parseInt(val, 10) & 1) === 1;
-        } else if (currentEntityType === 'LINE') {
-            if (code === 10) lineX1 = parseFloat(val);
-            else if (code === 20) lineY1 = parseFloat(val);
-            else if (code === 11) lineX2 = parseFloat(val);
-            else if (code === 21) lineY2 = parseFloat(val);
-        } else if (currentEntityType === 'POINT' || currentEntityType === 'CIRCLE') {
-            if (code === 10) tempX = parseFloat(val);
-            else if (code === 20) {
-                tempY = parseFloat(val);
-                if (tempX !== undefined && tempY !== undefined) {
-                    currentContour.push([tempX, tempY]);
-                    tempX = undefined;
-                    tempY = undefined;
+            } else {
+                if (line === '10') x = parseFloat(lines[++i].trim());
+                else if (line === '20') y = parseFloat(lines[++i].trim());
+
+                if (x !== undefined && y !== undefined) {
+                    if (x !== 0 && y !== 0) {
+                        currentPolyPoints.push([Math.min(x, y), Math.max(x, y)]);
+                    }
+                    x = y = undefined;
                 }
             }
         }
     }
+    flushCurrentPoly();
 
-    // Сохранение последней сущности в файле
-    if (currentEntityType === 'LINE') {
-        if (lineX1 !== undefined && lineY1 !== undefined && lineX2 !== undefined && lineY2 !== undefined) {
-            rawSegments.push([
-                [Math.min(lineX1, lineY1), Math.max(lineX1, lineY1)],
-                [Math.min(lineX2, lineY2), Math.max(lineX2, lineY2)]
-            ]);
-        }
-    } else if (['POLYLINE', 'LWPOLYLINE', 'POINT', 'CIRCLE'].includes(currentEntityType)) {
-        saveEntity(currentContour, isClosed, currentEntityType);
-    }
-
-    // Сшивка разрозненных LINE в единые цепочки
+    // Топологическая сшивка связанных линий в непрерывные цепочки
     const connectedChains = stitchSegmentsToChains(rawSegments, 0.05);
     const allChains = [...finishedPolylines, ...connectedChains];
 
-    // Отсечение мусора и далеких выбросов чертежа (> 5000 м от медианы)
-    const allPoints = [];
-    allChains.forEach(c => c.forEach(p => allPoints.push(p)));
-    standalonePoints.forEach(p => allPoints.push(p));
-
-    if (allPoints.length > 0) {
-        const getMedian = (arr) => {
-            const sorted = [...arr].sort((a, b) => a - b);
-            const mid = Math.floor(sorted.length / 2);
-            return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
-        };
-
-        const medX = getMedian(allPoints.map(p => p[0]));
-        const medY = getMedian(allPoints.map(p => p[1]));
-        const maxDist = 5000;
-
-        const isNear = (p) => Math.hypot(p[0] - medX, p[1] - medY) <= maxDist;
-
-        for (let i = allChains.length - 1; i >= 0; i--) {
-            allChains[i] = allChains[i].filter(isNear);
-            if (allChains[i].length < 2) allChains.splice(i, 1);
-        }
-    }
-
-    return { allChains, standalonePoints };
-}
-
-// Главная функция импорта DXF
-async function extractCoordinatesFromDXF(dxfContent) {
-    const { allChains, standalonePoints } = parseDxfUniversal(dxfContent);
-
+    // Разделение на площадные (замкнутые) и линейные (разомкнутые)
     const areaObjects = [];
     const linearObjects = [];
 
@@ -7460,55 +7425,83 @@ async function extractCoordinatesFromDXF(dxfContent) {
         if (contour.length < 2) return;
         const first = contour[0];
         const last = contour[contour.length - 1];
-        const isClosed = (contour.length > 2 && Math.hypot(first[0] - last[0], first[1] - last[1]) <= 0.01);
+        const isClosedContour = (contour.length > 2 && Math.hypot(first[0] - last[0], first[1] - last[1]) <= 0.01);
 
-        if (isClosed) areaObjects.push(contour);
-        else linearObjects.push(contour);
+        if (isClosedContour) {
+            areaObjects.push(contour);
+        } else {
+            linearObjects.push(contour);
+        }
     });
 
-    // Определение совпадающих точек с контурами
+    // Быстрый поиск точек, совпадающих с узлами линий
     const tolSq = 0.05 * 0.05;
-    const isPointOnLine = (px, py) => {
-        return allChains.some(c => c.some(([vx, vy]) => ((px - vx) ** 2 + (py - vy) ** 2) <= tolSq));
+    const vertexGrid = new Map();
+    const gridKey = (gx, gy) => `${Math.floor(gx / 0.1)},${Math.floor(gy / 0.1)}`;
+
+    allChains.forEach(contour => {
+        contour.forEach(([vx, vy]) => {
+            const k = gridKey(vx, vy);
+            if (!vertexGrid.has(k)) vertexGrid.set(k, []);
+            vertexGrid.get(k).push([vx, vy]);
+        });
+    });
+
+    const isPointOnAnyLine = (px, py) => {
+        const cx = Math.floor(px / 0.1);
+        const cy = Math.floor(py / 0.1);
+        for (let ox = -1; ox <= 1; ox++) {
+            for (let oy = -1; oy <= 1; oy++) {
+                const bucket = vertexGrid.get(`${cx + ox},${cy + oy}`);
+                if (bucket) {
+                    for (let b = 0; b < bucket.length; b++) {
+                        const [vx, vy] = bucket[b];
+                        if (((px - vx) ** 2 + (py - vy) ** 2) <= tolSq) return true;
+                    }
+                }
+            }
+        }
+        return false;
     };
 
     let coincidingPointsCount = 0;
     standalonePoints.forEach(([px, py]) => {
-        if (isPointOnLine(px, py)) coincidingPointsCount++;
+        if (isPointOnAnyLine(px, py)) coincidingPointsCount++;
     });
 
-    const activeCategoriesCount = (areaObjects.length > 0 ? 1 : 0) +
-                                  (linearObjects.length > 0 ? 1 : 0) +
-                                  (standalonePoints.length > 0 ? 1 : 0);
+    // Вызов диалога выбора категорий
+    const userChoice = await promptDxfImportOptions({
+        areaCount: areaObjects.length,
+        linearCount: linearObjects.length,
+        pointsCount: standalonePoints.length,
+        coincidingPointsCount: coincidingPointsCount
+    });
 
-    let userChoice = { loadArea: true, loadLinear: true, loadPoints: true, filterDuplicates: true };
-
-    // Если в файле более 1 категории объектов — показываем окно выбора, иначе импортируем сразу
-    if (activeCategoriesCount > 1) {
-        userChoice = await promptDxfImportOptions({
-            areaCount: areaObjects.length,
-            linearCount: linearObjects.length,
-            pointsCount: standalonePoints.length,
-            coincidingPointsCount: coincidingPointsCount
-        });
-
-        if (!userChoice) return [];
+    if (!userChoice) {
+        return []; // Пользователь отменил импорт
     }
 
     const resultContours = [];
-    if (userChoice.loadArea) resultContours.push(...areaObjects);
-    if (userChoice.loadLinear) resultContours.push(...linearObjects);
+
+    if (userChoice.loadArea) {
+        resultContours.push(...areaObjects);
+    }
+    if (userChoice.loadLinear) {
+        resultContours.push(...linearObjects);
+    }
 
     let finalPoints = [];
     if (userChoice.loadPoints) {
         if (userChoice.filterDuplicates) {
-            finalPoints = standalonePoints.filter(([px, py]) => !isPointOnLine(px, py));
+            finalPoints = standalonePoints.filter(([px, py]) => !isPointOnAnyLine(px, py));
         } else {
             finalPoints = standalonePoints;
         }
     }
 
+    // Формирование текстового результата со стандартными разделителями
     const coordinates = [];
+
     resultContours.forEach(contour => {
         if (contour.length === 0) return;
         if (coordinates.length > 0) coordinates.push('');
