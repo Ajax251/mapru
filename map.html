@@ -5540,8 +5540,9 @@ class NspdQueueManager {
             await new Promise(r => setTimeout(r, this.MIN_INTERVAL_MS));
 
             let response;
-            const isIntersectUrl = task.url.includes('/intersects') || task.url.includes('/intersect') || task.url.includes('/spatial');
-            const shouldRouteViaProxy = (isMobileProxyMode === 1) || (isMobileProxyMode === 2 && isIntersectUrl);
+
+const isIntersectUrl = task.url.includes('/intersects') || task.url.includes('/intersect') || task.url.includes('/spatial');
+const shouldRouteViaProxy = isIntersectUrl || (isMobileProxyMode === 1) || (isMobileProxyMode === 2);
 
             if (shouldRouteViaProxy) {
                 const proxyController = new AbortController();
@@ -7061,30 +7062,72 @@ async function isAreaLimitExceeded(targetObject) {
         return true;
     }
 
-    // 3. ПРЕДУПРЕЖДЕНИЕ ТОЛЬКО 1 РАЗ
+  // 3. ПРЕДУПРЕЖДЕНИЕ С ВЫБОРОМ МЕТОДА (ОНЛАЙН ИЛИ ОБЛАЧНЫЙ АРХИВ КПТ)
     if (!isInsideSettlement && totalPerimeter > 8000) {
         hideLoader();
         const lenKm = (totalPerimeter / 1000).toFixed(1);
-        const proceed = await showStyledConfirm(
-            "Протяженный объект вне НП",
-            `Центр объекта находится вне черты поселений.<br>` +
-            `Протяженность: <b>${lenKm} км</b> (допустимо до 20 км).<br><br>` +
-            `Прямой онлайн-запрос к ЕГРН на таком расстоянии может занять некоторое время. Продолжить?`,
-            "Продолжить",
-            "Отмена"
-        );
 
-        if (!proceed) {
+        const choice = await new Promise((resolve) => {
+            const modal = document.createElement('div');
+            modal.style.cssText = `
+                position: fixed; inset: 0; background: rgba(15, 23, 42, 0.6);
+                backdrop-filter: blur(4px); z-index: 999999;
+                display: flex; align-items: center; justify-content: center;
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            `;
+
+            modal.innerHTML = `
+                <div style="background: #ffffff; width: 92%; max-width: 440px; border-radius: 16px; padding: 22px 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.25); text-align: center; border: 1px solid #e2e8f0;">
+                    <div style="width: 50px; height: 50px; margin: 0 auto 12px; background: #eff6ff; border-radius: 50%; display: flex; align-items: center; justify-content: center; color: #2563eb; font-size: 22px;">
+                        <i class="fas fa-route"></i>
+                    </div>
+                    <div style="font-size: 16px; font-weight: 700; color: #1e293b; margin-bottom: 8px;">Протяженный объект вне НП</div>
+                    <div style="font-size: 13.5px; color: #475569; line-height: 1.5; margin-bottom: 20px;">
+                        Центр объекта находится вне черты поселений.<br>
+                        Протяженность: <b style="color: #0f172a;">${lenKm} км</b> (допустимо до 20 км).<br><br>
+                        Выберите способ проверки наложений:
+                    </div>
+                    <div style="display: flex; flex-direction: column; gap: 8px;">
+                        <button id="btn-choice-archive" style="padding: 11px 16px; border-radius: 8px; font-size: 13.5px; font-weight: 600; cursor: pointer; border: none; background: linear-gradient(135deg, #10b981, #059669); color: white; display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 2px 6px rgba(16,185,129,0.3);">
+                            <i class="fas fa-database"></i> <span>Архив КПТ + Облако (Рекомендуется)</span>
+                        </button>
+                        <button id="btn-choice-online" style="padding: 10px 16px; border-radius: 8px; font-size: 13.5px; font-weight: 600; cursor: pointer; border: 1px solid #3b82f6; background: #eff6ff; color: #1d4ed8; display: flex; align-items: center; justify-content: center; gap: 8px;">
+                            <i class="fas fa-globe"></i> <span>ЕГРН</span>
+                        </button>
+                        <button id="btn-choice-cancel" style="padding: 9px 16px; border-radius: 8px; font-size: 13px; font-weight: 600; cursor: pointer; border: 1px solid #cbd5e1; background: #fff; color: #64748b; margin-top: 4px;">
+                            Отмена
+                        </button>
+                    </div>
+                </div>
+            `;
+            document.body.appendChild(modal);
+
+            const close = (val) => { modal.remove(); resolve(val); };
+            modal.querySelector('#btn-choice-archive').onclick = () => close('archive');
+            modal.querySelector('#btn-choice-online').onclick = () => close('online');
+            modal.querySelector('#btn-choice-cancel').onclick = () => close('cancel');
+        });
+
+        if (choice === 'cancel') {
             showNotification('Операция отменена пользователем', 'info');
             return true;
         }
 
-        // Запоминаем факт подтверждения для этого объекта, чтобы не спрашивать снова в этой же цепочке
+        // Если выбран архив КПТ — запускаем автосинхронизацию и локальный анализ
+     if (choice === 'archive') {
+            const now = Date.now();
+            objects.forEach(obj => { if (obj) obj._limitConfirmedTime = now; });
+            if (targetObject && typeof targetObject === 'object') targetObject._limitConfirmedTime = now;
+            
+            // Передаем useBuffer (если true — будет буфер 10 м для поиска "рядом")
+            executeLocalArchiveAnalysis(targetObject, useBuffer);
+            return true; 
+        }
+
+        // Если выбран прямой онлайн-запрос
         const now = Date.now();
         objects.forEach(obj => { if (obj) obj._limitConfirmedTime = now; });
-        if (targetObject && typeof targetObject === 'object') {
-            targetObject._limitConfirmedTime = now;
-        }
+        if (targetObject && typeof targetObject === 'object') targetObject._limitConfirmedTime = now;
 
         showLoader('Запуск анализа...');
     }
@@ -18070,7 +18113,7 @@ function generatePopoverContent(feature) {
         <div class="popover-pano-grid">
             <div id="popover-pano-google" class="popover-pano-box">
                 <div class="popover-pano-badge"><i class="fas fa-street-view" style="color:#fbbf24;"></i> Google</div>
-                <span><i class="fas fa-spinner fa-spin"></i> Поиск...</span>
+                <span><i class="fas fa-spinner fa-spin"></i> </span>
             </div>
             <div id="popover-pano-yandex" class="popover-pano-box">
                 <div class="popover-pano-badge"><i class="fas fa-map-marker-alt" style="color:#ef4444;"></i> Яндекс</div>
@@ -22390,25 +22433,149 @@ function deduplicateYmapsObjects(objects) {
 
 
 async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false) {
-    showLoader("Поиск кварталов в локальном архиве КПТ...");
+    const objects = Array.isArray(targetObjects) ? targetObjects : [targetObjects];
+    if (objects.length === 0) {
+        showNotification("Нет объектов для анализа", "warning");
+        return;
+    }
+
+    showLoader("Определение пересекаемых кварталов в облаке...");
+
     try {
-        const db = await openLocalDB();
-        const txQ = db.transaction('quarters_index', 'readonly');
-        const allQuarters = await new Promise((resolve) => {
-            const req = txQ.objectStore('quarters_index').getAll();
-            req.onsuccess = () => resolve(req.result || []);
-            req.onerror = () => resolve([]);
+        // --- 1. ПРЕОБРАЗОВАНИЕ ГЕОМЕТРИИ ТРАССЫ В EPSG:3857 ДЛЯ SUPABASE ---
+        const geometries3857 = [];
+        objects.forEach(obj => {
+            const coords = obj.geometry.getCoordinates();
+            if (obj instanceof ymaps.Polygon) {
+                const rings3857 = coords.map(ring => {
+                    const r = ring.map(c => {
+                        const [trueLat, trueLon] = getTrueWgs84Coords(c[0], c[1]);
+                        return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
+                    });
+                    if (r.length > 2 && (r[0][0] !== r[r.length - 1][0] || r[0][1] !== r[r.length - 1][1])) {
+                        r.push([...r[0]]);
+                    }
+                    return r;
+                }).filter(r => r.length >= 4);
+                if (rings3857.length > 0) geometries3857.push({ type: "Polygon", coordinates: rings3857 });
+            } else if (obj instanceof ymaps.Polyline) {
+                const line3857 = coords.map(c => {
+                    const [trueLat, trueLon] = getTrueWgs84Coords(c[0], c[1]);
+                    return proj4("EPSG:4326", "EPSG:3857", [trueLon, trueLat]);
+                });
+                if (line3857.length >= 2) geometries3857.push({ type: "LineString", coordinates: line3857 });
+            }
         });
 
-        if (!allQuarters || allQuarters.length === 0) {
-            showNotification("Локальный архив КПТ пуст. Сохраните или импортируйте кварталы в архив перед анализом.", "warning", "database", 7000);
+        if (geometries3857.length === 0) {
             hideLoader();
+            showNotification('Не удалось получить координаты трассы', 'warning');
             return;
         }
 
-        const objects = Array.isArray(targetObjects) ? targetObjects : [targetObjects];
+        const searchGeoJson = geometries3857.length === 1 
+            ? geometries3857[0] 
+            : { type: "GeometryCollection", geometries: geometries3857 };
 
-        
+        // --- 2. ПОИСК ВСЕХ ПЕРЕСЕКАЕМЫХ КВАРТАЛОВ В SUPABASE POSTGIS ---
+        let cloudQuarters = new Map();
+        try {
+            const sqlQuery = `SELECT quarter_number, ST_AsGeoJSON(geometry)::json as geometry FROM cadastral_quarters WHERE ST_Intersects(geometry, ST_SetSRID(ST_GeomFromGeoJSON('${JSON.stringify(searchGeoJson)}'), 3857))`;
+            const { data, error } = await supabaseClient.rpc('execute_sql', { query: sqlQuery });
+            if (!error && Array.isArray(data)) {
+                data.forEach(item => {
+                    if (item.quarter_number && !isZeroQuarterRequest(item.quarter_number)) {
+                        cloudQuarters.set(item.quarter_number, item.geometry);
+                    }
+                });
+            }
+        } catch (e) {
+            console.warn('[ArchiveAnalysis] Ошибка обращения к Supabase:', e);
+        }
+
+        // --- 3. СВЕРКА С ЛОКАЛЬНЫМ INDEXEDDB И ДОЗАГРУЗКА НЕДОСТАЮЩИХ КПТ ---
+        const db = await openLocalDB();
+        const txRead = db.transaction('quarters_index', 'readonly');
+        const localQuartersMap = new Map();
+        const allLocal = await new Promise(r => {
+            const req = txRead.objectStore('quarters_index').getAll();
+            req.onsuccess = () => r(req.result || []);
+            req.onerror = () => r([]);
+        });
+        allLocal.forEach(q => localQuartersMap.set(q.quarter_number, q));
+
+        const quartersToAnalyze = new Set();
+        const missingInLocal = [];
+
+        // Собираем кварталы из облака
+        cloudQuarters.forEach((geom, qNum) => {
+            quartersToAnalyze.add(qNum);
+            if (!localQuartersMap.has(qNum)) {
+                missingInLocal.push(qNum);
+            }
+        });
+
+        // Добавляем также те кварталы, которые уже есть локально и пересекают трассу
+        allLocal.forEach(q => {
+            if (q.quarter_number) quartersToAnalyze.add(q.quarter_number);
+        });
+
+        // Если в облаке нашлись недостающие КПТ — скачиваем их
+        if (missingInLocal.length > 0) {
+            showLoader(`Найдено ${cloudQuarters.size} КПТ. Скачивание недостающих из облака (${missingInLocal.length} шт.)...`);
+
+            for (let i = 0; i < missingInLocal.length; i++) {
+                const qNum = missingInLocal[i];
+                const filename = qNum.replace(/:/g, '_') + '.nspd';
+                const qGeom = cloudQuarters.get(qNum);
+
+                showLoader(`Загрузка КПТ [${i + 1}/${missingInLocal.length}]: ${qNum}...`);
+                const zipBlob = await fetchZipFromLocalServer('nspd', filename);
+
+                if (zipBlob) {
+                    try {
+                        const { features, date: cloudDate } = await loadAndParseZipBlob(zipBlob);
+                        const txWrite = db.transaction(['quarters_index', 'files_store'], 'readwrite');
+                        const qStore = txWrite.objectStore('quarters_index');
+                        const fStore = txWrite.objectStore('files_store');
+
+                        let bbox = null;
+                        if (qGeom) {
+                            try {
+                                const coords = qGeom.type === 'Polygon' ? qGeom.coordinates : qGeom.coordinates[0];
+                                bbox = calculateBBox(coords);
+                            } catch(e) {}
+                        }
+
+                        qStore.put({
+                            quarter_number: qNum,
+                            date: cloudDate || new Date().toISOString().slice(0, 10),
+                            source: 'cloud_sync',
+                            counts: { zu: features ? features.length : 0, oks: 0, str: 0 },
+                            geojson_geom: qGeom,
+                            bbox: bbox
+                        });
+
+                        fStore.put({
+                            file_key: `${qNum}_ZU`,
+                            quarter_number: qNum,
+                            type: 'ZU',
+                            blob: zipBlob,
+                            updated_at: cloudDate || new Date().toISOString().slice(0, 10),
+                            source: 'cloud_sync'
+                        });
+
+                        await new Promise(r => txWrite.oncomplete = r);
+                    } catch (err) {
+                        console.warn(`Не удалось обработать архив ${qNum}:`, err);
+                    }
+                }
+            }
+        }
+
+        // --- 4. ПОДГОТОВКА ГЕОМЕТРИИ ТРАССЫ ДЛЯ ЛОКАЛЬНОГО АНАЛИЗА ---
+        showLoader("Анализ пересечений с КПТ...");
+
         const targetTurfs = [];
         objects.forEach(obj => {
             const coords = obj.geometry.getCoordinates();
@@ -22433,64 +22600,11 @@ async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false) {
             }
         });
 
-        if (targetTurfs.length === 0) {
-            showNotification("Не удалось прочитать геометрию линий для анализа", "warning");
-            hideLoader();
-            return;
-        }
-
-        
-        showLoader("Сверка трассы с границами кварталов в БД...");
-        const intersectingQuarters = [];
-
-        for (const q of allQuarters) {
-            if (!q.geojson_geom || !q.geojson_geom.coordinates) continue;
-            try {
-                const geom = q.geojson_geom;
-                const isMulti = geom.type === 'MultiPolygon';
-
-                const mapRings = isMulti
-                    ? geom.coordinates.map(poly => poly.map(ring => ring.map(convertApi3857ToMapCoords)))
-                    : geom.coordinates.map(ring => ring.map(convertApi3857ToMapCoords));
-
-                const closeRings = (ringsList) => ringsList.map(r => {
-                    const copy = [...r];
-                    if (copy.length > 2 && (copy[0][0] !== copy[copy.length-1][0] || copy[0][1] !== copy[copy.length-1][1])) {
-                        copy.push([...copy[0]]);
-                    }
-                    return copy;
-                });
-
-                const turfPoly = isMulti 
-                    ? turf.multiPolygon(mapRings.map(closeRings)) 
-                    : turf.polygon(closeRings(mapRings));
-
-                let qIntersects = false;
-                for (const target of targetTurfs) {
-                    if (turf.booleanIntersects(target.geom, turfPoly)) {
-                        qIntersects = true;
-                        break;
-                    }
-                }
-
-                if (qIntersects) {
-                    intersectingQuarters.push(q);
-                }
-            } catch (e) {}
-        }
-
-        if (intersectingQuarters.length === 0) {
-            showNotification("В локальной БД нет кварталов, пересекающих выбранную трассу.", "warning", "database", 6000);
-            hideLoader();
-            return;
-        }
-
-        showLoader(`Найдено ${intersectingQuarters.length} КПТ в архиве. Распаковка ЗУ и ОКС...`);
-
-        
+        // Читаем данные только тех кварталов, которые пересекают объект
+        const qList = Array.from(quartersToAnalyze);
         const allCandidateFeatures = { zu: [], oks: [], structure: [] };
-        for (let i = 0; i < intersectingQuarters.length; i++) {
-            const qNum = intersectingQuarters[i].quarter_number;
+
+        for (const qNum of qList) {
             const [zuRes, oksRes, strRes] = await Promise.all([
                 loadFromLocalArchive(qNum, 'ZU'),
                 loadFromLocalArchive(qNum, 'OKS'),
@@ -22501,8 +22615,7 @@ async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false) {
             if (strRes && Array.isArray(strRes.data)) allCandidateFeatures.structure.push(...strRes.data);
         }
 
-        
-        showLoader("Анализ пересечений объектов...");
+        // --- 5. ФИЛЬТРАЦИЯ ОБЪЕКТОВ ПО ГЕОМЕТРИИ (TURF.JS) ---
         const results = { zu: [], oks: [], structure: [], zouit: [] };
         const seenCns = new Set();
 
@@ -22553,7 +22666,7 @@ async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false) {
         checkFeatures(allCandidateFeatures.oks, 'oks');
         checkFeatures(allCandidateFeatures.structure, 'structure');
 
-        
+        // Проверяем сохраненные зоны (ЗОУИТ, терр. зоны)
         if (db.objectStoreNames.contains('zones_store')) {
             try {
                 const txZ = db.transaction('zones_store', 'readonly');
@@ -22570,14 +22683,14 @@ async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false) {
         const totalFound = results.zu.length + results.oks.length + results.structure.length + results.zouit.length;
 
         if (totalFound === 0) {
-            showNotification(`В пересекаемых кварталах архива (${intersectingQuarters.length} шт.) наложений не найдено`, 'info');
+            showNotification(`Анализ завершен. Пересечений с объектами из ${qList.length} КПТ не обнаружено.`, 'info');
             hideLoader();
             return;
         }
 
-        
+        // --- 6. ОТРИСОВКА И ВЫВОД В ДАШБОРД ---
         showLoader(`Отрисовка ${totalFound} найденных объектов...`);
-        
+
         Object.values(quickReportLayers).flat().forEach(obj => {
             if (map.geoObjects.indexOf(obj) !== -1) map.geoObjects.remove(obj);
             polygons = polygons.filter(p => p !== obj);
@@ -22614,13 +22727,13 @@ async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false) {
             }
         });
 
-        const objName = `Архив БД (${objects.length} конт. / ${intersectingQuarters.length} КПТ)`;
+        const objName = `Архив КПТ (${objects.length} конт. / ${qList.length} КПТ)`;
         renderBottomDashboard(objName, results, targetBounds);
-        showNotification(`Анализ по архиву завершен! Найдено наложений: ${totalFound} (ЗУ: ${results.zu.length}, ОКС: ${results.oks.length})`, 'success', 'database', 8000);
+        showNotification(`Анализ по архиву завершен! Найдено: ${totalFound} (ЗУ: ${results.zu.length}, ОКС: ${results.oks.length})`, 'success', 'database', 7000);
 
     } catch (err) {
         console.error("Ошибка в executeLocalArchiveAnalysis:", err);
-        showNotification(`Ошибка анализа по локальному архиву: ${err.message}`, 'error');
+        showNotification(`Ошибка анализа по архиву: ${err.message}`, 'error');
     } finally {
         hideLoader();
     }
@@ -23585,10 +23698,13 @@ async function getParcelsNearby(lat, lon) {
     const thisSessionId = Date.now();
     nearbySearchSessionId = thisSessionId;
 
+    let targetPolygon = findPolygonAtPoint(lat, lon);
+    if (!targetPolygon) {
+        targetPolygon = findLineAtPoint(lat, lon);
+    }
+
     const loaderContainer = document.getElementById('loaderContainer');
     const isFreshCall = !loaderContainer || loaderContainer.style.display === 'none' || loaderContainer.style.display === '';
-
-    const targetPolygon = findPolygonAtPoint(lat, lon);
 
     if (isFreshCall) {
         if (targetPolygon) {
@@ -23598,20 +23714,27 @@ async function getParcelsNearby(lat, lon) {
         }
     }
 
+    if (currentSearchRadius === 'obj' && targetPolygon) {
+        if (await isAreaLimitExceeded(targetPolygon, true)) {
+            cleanUpLoaderButtons();
+            hideLoader();
+            return;
+        }
+    }
+
     const radTxt = currentSearchRadius === 'obj' ? 'Буфер 10м' : `R=${currentSearchRadius}м`;
 
     showLoader(`
         <div style="text-align:center;">
             <i class="fas fa-crosshairs fa-spin" style="font-size: 2.2rem; color: #3b82f6; margin-bottom: 10px;"></i>
             <br>
-            <span style="font-size: 1.1rem; color: #1e293b; font-weight: 600;"></span>
+            <span style="font-size: 1.1rem; color: #1e293b; font-weight: 600;">Поиск участков (${radTxt})...</span>
         </div>
     `);
 
     updateLoaderWithRadiusButtons(lat, lon); 
 
-    await new Promise(resolve => setTimeout(resolve, 2000));
-
+    await new Promise(resolve => setTimeout(resolve, 1500));
     if (thisSessionId !== nearbySearchSessionId) return;
 
     const loadingText = document.querySelector('.loading-text');
@@ -23621,24 +23744,33 @@ async function getParcelsNearby(lat, lon) {
 
         if (currentSearchRadius === 'obj') {
             if (!targetPolygon) {
-                showNotification('Полигон не найден. Используется радиус 50м.', 'warning');
+                showNotification('Объект не найден. Используется радиус 50м.', 'warning');
                 currentSearchRadius = 50;
             } else {
-                const coords = targetPolygon.geometry.getCoordinates()[0]; 
-                const turfCoords = coords.map(c => [
-                    c[1] + (mapOffsetX * 0.000008983), 
-                    c[0] + (mapOffsetY * 0.000008983)
-                ]);
-                
-                const first = turfCoords[0];
-                const last = turfCoords[turfCoords.length - 1];
-                if (Math.abs(first[0] - last[0]) > 1e-9 || Math.abs(first[1] - last[1]) > 1e-9) {
-                    turfCoords.push([...first]);
+                let bufferedPoly = null;
+
+                if (targetPolygon instanceof ymaps.Polygon) {
+                    const coords = targetPolygon.geometry.getCoordinates()[0]; 
+                    const turfCoords = coords.map(c => [
+                        c[1] + (mapOffsetX * 0.000008983), 
+                        c[0] + (mapOffsetY * 0.000008983)
+                    ]);
+                    const first = turfCoords[0], last = turfCoords[turfCoords.length - 1];
+                    if (Math.abs(first[0] - last[0]) > 1e-9 || Math.abs(first[1] - last[1]) > 1e-9) {
+                        turfCoords.push([...first]);
+                    }
+                    const turfPoly = turf.polygon([turfCoords]);
+                    bufferedPoly = turf.buffer(turfPoly, 10, { units: 'meters' });
+                } else if (targetPolygon instanceof ymaps.Polyline) {
+                    const coords = targetPolygon.geometry.getCoordinates();
+                    const turfCoords = coords.map(c => [
+                        c[1] + (mapOffsetX * 0.000008983), 
+                        c[0] + (mapOffsetY * 0.000008983)
+                    ]);
+                    const turfLine = turf.lineString(turfCoords);
+                    bufferedPoly = turf.buffer(turfLine, 10, { units: 'meters' });
                 }
 
-                const turfPoly = turf.polygon([turfCoords]);
-                const bufferedPoly = turf.buffer(turfPoly, 10, { units: 'meters' });
-                
                 let bufferedCoords = [];
                 if (bufferedPoly.geometry.type === 'Polygon') {
                     bufferedCoords = bufferedPoly.geometry.coordinates[0];
@@ -23665,40 +23797,26 @@ async function getParcelsNearby(lat, lon) {
             ];
         }
 
-        if (searchPolygonCoordsEPSG3857 && searchPolygonCoordsEPSG3857.length > 0) {
-            const wgsPolyCoords = searchPolygonCoordsEPSG3857.map(coord => proj4("EPSG:3857", "EPSG:4326", coord));
-            const area = turf.area(turf.polygon([wgsPolyCoords]));
-            
-            if (area > MAX_SEARCH_AREA_SQM) {
-                 showNotification(`Площадь области поиска (~${Math.round(area).toLocaleString('ru-RU')} м²) превышает допустимый лимит. Операция отменена.`, 'warning', 'exclamation-triangle', 7000);
-                 cleanUpLoaderButtons();
-                 hideLoader();
-                 return;
-            }
-        }
-        
         if (loadingText) {
             loadingText.innerHTML = `
                 <div style="text-align:center;">
                     <i class="fas fa-satellite-dish fa-spin" style="font-size: 2.2rem; color: #f59e0b; margin-bottom: 10px;"></i>
                     <br>
-                    <span style="font-size: 1.1rem; color: #f59e0b; font-weight: 600;"></span>
+                    <span style="font-size: 1.1rem; color: #f59e0b; font-weight: 600;">Поиск...</span>
                 </div>
             `;
         }
         
-       const foundFeatures = await searchParcelsByArea(searchPolygonCoordsEPSG3857);
+        const foundFeatures = await searchParcelsByArea(searchPolygonCoordsEPSG3857);
 
         if (thisSessionId !== nearbySearchSessionId) return;
 
-      
         if (foundFeatures === null) {
             cleanUpLoaderButtons();
             hideLoader();
             return;
         }
 
-     
         if (foundFeatures.length === 0) {
             const txt = currentSearchRadius === 'obj' ? 'буфере 10м от объекта' : `радиусе ${currentSearchRadius}м`;
             showNotification(`Земельные участки в ${txt} не найдены`, 'warning');
