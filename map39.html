@@ -6917,34 +6917,51 @@ async function validateNetworkCoverageAndLimit(targetObject) {
     let rawObjects = Array.isArray(targetObject) ? targetObject : [targetObject];
     let objects = deduplicateYmapsObjects(rawObjects);
 
+    
     if (objects.length > 30) {
         hideLoader();
         showNotification(`Выбрано слишком много объектов (${objects.length} шт., максимум: 30).`, 'error', 'ban', 6000);
         return null;
     }
 
-    // Проверка динамического лимита (с проверкой центра на населенный пункт)
-    if (await isAreaLimitExceeded(objects)) {
+    
+    if (isAreaLimitExceeded(objects)) {
         hideLoader();
         return null;
+    }
+
+    
+    let totalLen = 0;
+    objects.forEach(obj => {
+        totalLen += calculatePreciseGeometry(obj).perimeter;
+    });
+
+    if (totalLen > 6000) {
+        hideLoader();
+        const proceed = confirm(
+            `Внимание: общая протяженность выбранных контуров составляет ${(totalLen / 1000).toFixed(1)} км.\n\n` +
+            `Обработка может потребовать дополнительного времени. Продолжить?`
+        );
+        if (!proceed) {
+            showNotification('Операция отменена пользователем', 'info');
+            return null;
+        }
+        showLoader('Запуск анализа...');
     }
 
     return objects;
 }
 
-// Кэш проверки населенных пунктов, чтобы не спамить запросами к WMS
-window._settlementCheckCache = window._settlementCheckCache || {};
 
-async function isAreaLimitExceeded(targetObject) {
+function isAreaLimitExceeded(targetObject) {
     if (!targetObject) return false;
 
     const objects = Array.isArray(targetObject) ? targetObject : [targetObject];
     
-    // 1. ЕСЛИ ПОЛЬЗОВАТЕЛЬ УЖЕ НАЖАЛ «ПРОДОЛЖИТЬ» ДЛЯ ЭТОГО ОБЪЕКТА (в течение 60 сек) — НЕ СПРАШИВАТЬ ПОВТОРНО!
-    const isAlreadyConfirmed = objects.some(obj => obj && obj._limitConfirmedTime && (Date.now() - obj._limitConfirmedTime < 60000));
-    if (isAlreadyConfirmed) {
-        return false;
-    }
+    const MAX_PERIMETER_METERS = 8000;   
+    const MAX_POINTS_COUNT = 400;        
+    const MAX_BBOX_SPAN_METERS = 3500;   
+    const MAX_AREA = typeof MAX_SEARCH_AREA_SQM !== 'undefined' ? MAX_SEARCH_AREA_SQM : 5000000;
 
     let totalArea = 0;
     let totalPerimeter = 0;
@@ -6990,40 +7007,6 @@ async function isAreaLimitExceeded(targetObject) {
         }
     }
 
-    // 2. ОПРЕДЕЛЕНИЕ ЦЕНТРА ОБЪЕКТА (С КЭШЕМ WMS-ЗАПРОСА)
-    let isInsideSettlement = false;
-    let settlementName = '';
-
-    if (isFinite(minLat) && isFinite(maxLat)) {
-        const centerMapLat = (minLat + maxLat) / 2;
-        const centerMapLon = (minLon + maxLon) / 2;
-        const [trueLat, trueLon] = getTrueWgs84Coords(centerMapLat, centerMapLon);
-        const cacheKey = `${trueLat.toFixed(4)},${trueLon.toFixed(4)}`;
-
-        if (window._settlementCheckCache[cacheKey] !== undefined) {
-            isInsideSettlement = window._settlementCheckCache[cacheKey].isInside;
-            settlementName = window._settlementCheckCache[cacheKey].name;
-        } else {
-            try {
-                const settlementsData = await querySettlementsInfo(trueLat, trueLon);
-                if (settlementsData && settlementsData.features && settlementsData.features.length > 0) {
-                    const sf = settlementsData.features[0];
-                    settlementName = sf.properties?.options?.name || sf.properties?.descr || sf.properties?.label || 'Населенный пункт';
-                    isInsideSettlement = true;
-                }
-                window._settlementCheckCache[cacheKey] = { isInside: isInsideSettlement, name: settlementName };
-            } catch (err) {
-                console.warn('[CheckSettlement] Ошибка запроса НП по центру:', err);
-            }
-        }
-    }
-
-    // Динамические пороги
-    const MAX_PERIMETER_METERS = isInsideSettlement ? 8000 : 20000;
-    const MAX_BBOX_SPAN_METERS = isInsideSettlement ? 5000 : 22000;
-    const MAX_POINTS_COUNT = isInsideSettlement ? 800 : 1500;
-    const MAX_AREA = typeof MAX_SEARCH_AREA_SQM !== 'undefined' ? MAX_SEARCH_AREA_SQM : 5000000;
-
     let maxSpanMeters = 0;
     if (isFinite(minLat) && isFinite(maxLat)) {
         const heightM = ymaps.coordSystem.geo.getDistance([minLat, minLon], [maxLat, minLon]);
@@ -7038,13 +7021,9 @@ async function isAreaLimitExceeded(targetObject) {
     }
 
     if (totalPerimeter > MAX_PERIMETER_METERS) {
-        hideLoader();
+        hideLoader(); 
         const lenKm = (totalPerimeter / 1000).toFixed(1);
-        if (isInsideSettlement) {
-            showNotification(`Центр объекта находится в границах «${settlementName}». Превышена протяженность: ${lenKm} км (лимит в черте НП: 8 км). Анализ отменен.`, 'warning', 'ban', 7000);
-        } else {
-            showNotification(`Превышена протяженность границ: ${lenKm} км (максимальный лимит вне НП: 20 км). Анализ отменен.`, 'warning', 'ban', 7000);
-        }
+        showNotification(`Превышена протяженность границ: ${lenKm} км (лимит: ${MAX_PERIMETER_METERS / 1000} км). Анализ отменен.`, 'warning', 'ban', 6000);
         return true;
     }
 
@@ -7059,34 +7038,6 @@ async function isAreaLimitExceeded(targetObject) {
         hideLoader(); 
         showNotification(`Площадь (~${Math.round(totalArea).toLocaleString('ru-RU')} м²) превышает допустимый лимит. Анализ отменен.`, 'warning', 'ban', 6000);
         return true;
-    }
-
-    // 3. ПРЕДУПРЕЖДЕНИЕ ТОЛЬКО 1 РАЗ
-    if (!isInsideSettlement && totalPerimeter > 8000) {
-        hideLoader();
-        const lenKm = (totalPerimeter / 1000).toFixed(1);
-        const proceed = await showStyledConfirm(
-            "Протяженный объект вне НП",
-            `Центр объекта находится вне черты поселений.<br>` +
-            `Протяженность: <b>${lenKm} км</b> (допустимо до 20 км).<br><br>` +
-            `Прямой онлайн-запрос к ЕГРН на таком расстоянии может занять некоторое время. Продолжить?`,
-            "Продолжить",
-            "Отмена"
-        );
-
-        if (!proceed) {
-            showNotification('Операция отменена пользователем', 'info');
-            return true;
-        }
-
-        // Запоминаем факт подтверждения для этого объекта, чтобы не спрашивать снова в этой же цепочке
-        const now = Date.now();
-        objects.forEach(obj => { if (obj) obj._limitConfirmedTime = now; });
-        if (targetObject && typeof targetObject === 'object') {
-            targetObject._limitConfirmedTime = now;
-        }
-
-        showLoader('Запуск анализа...');
     }
 
     return false;
@@ -11365,15 +11316,15 @@ if (event.target.id === 'quick-report-menu-item') {
 
             let targetObject = selectedLine || findPolygonAtPoint(lat, lon) || findLineAtPoint(lat, lon);
 
-     if (targetObject) {
-    if (await isAreaLimitExceeded(targetObject)) {
-        showAnalysisSelectionModal([targetObject], (selectedObj, useBuffer) => {
-            if (selectedObj) executeQuickReport(selectedObj);
-        });
-        return;
-    }
-    executeQuickReport(targetObject);
-}  else {
+            if (targetObject) {
+                if (isAreaLimitExceeded(targetObject)) {
+                    showAnalysisSelectionModal([targetObject], (selectedObj, useBuffer) => {
+                        if (selectedObj) executeQuickReport(selectedObj);
+                    });
+                    return;
+                }
+                executeQuickReport(targetObject);
+            } else {
                 let candidateObjects = polygons.filter(obj => {
                     if (isCadastralMapLayer(obj)) return false;
                     return obj instanceof ymaps.Polygon || (obj instanceof ymaps.Polyline && obj.properties.get('isDrawableLine'));
@@ -15582,9 +15533,9 @@ function showLineSelectionModal(lines) {
 
 
 async function generateLinearObjectReport(targetObject) {
-      if (await isAreaLimitExceeded(targetObject)) return;
+      if (isAreaLimitExceeded(targetObject)) return; 
     showLoader(getSonarLoaderHtml());
-        
+       if (isAreaLimitExceeded(targetObject)) return; 
     const delay = ms => new Promise(res => setTimeout(res, ms));
     showLoader("Формирование отчета по линии...");
 
@@ -17608,10 +17559,10 @@ function filterFeaturesByTurfLogic(rawFeatures, targetTurfPolygons) {
 
 
 async function executeQuickReport(targetObject) {
-
+    if (isAreaLimitExceeded(targetObject)) return;
 
     
-     const validated = await validateNetworkCoverageAndLimit(targetObject);
+    const validated = await validateNetworkCoverageAndLimit(targetObject);
     if (!validated) {
         hideLoader();
         return;
@@ -23367,20 +23318,20 @@ async function getParcelsOnObject(lat, lon) {
     if (!targetObject) targetObject = findPolygonAtPoint(lat, lon);
     if (!targetObject) targetObject = findLineAtPoint(lat, lon);
 
-if (targetObject) {
-    if (await isAreaLimitExceeded(targetObject)) {
-        showAnalysisSelectionModal([targetObject], async (selectedObj, useBuffer) => {
-            if (selectedObj) {
-                let finalObjects = Array.isArray(selectedObj) ? selectedObj : [selectedObj];
-                if (useBuffer) finalObjects = createBufferedYmapsObjects(finalObjects, 10);
-                await executeParcelsOnObjectSearch(finalObjects);
-            }
-        });
+    if (targetObject) {
+        if (isAreaLimitExceeded(targetObject)) {
+            showAnalysisSelectionModal([targetObject], async (selectedObj, useBuffer) => {
+                if (selectedObj) {
+                    let finalObjects = Array.isArray(selectedObj) ? selectedObj : [selectedObj];
+                    if (useBuffer) finalObjects = createBufferedYmapsObjects(finalObjects, 10);
+                    await executeParcelsOnObjectSearch(finalObjects);
+                }
+            });
+            return;
+        }
+        await executeParcelsOnObjectSearch(targetObject);
         return;
     }
-    await executeParcelsOnObjectSearch(targetObject);
-    return;
-}
 
     let candidateObjects = polygons.filter(obj => {
         if (isCadastralMapLayer(obj)) return false;
@@ -23414,7 +23365,7 @@ if (targetObject) {
 
 
 async function executeParcelsOnObjectSearch(targetObject) {
-    if (await isAreaLimitExceeded(targetObject)) return;
+    if (isAreaLimitExceeded(targetObject)) return;
     
     
     const validated = await validateNetworkCoverageAndLimit(targetObject);
@@ -26680,7 +26631,7 @@ async function getAllZouitsInObject(lat, lon) {
 }
 
 async function executeZouitsOnObjectSearch(targetObject) {
-    if (await isAreaLimitExceeded(targetObject)) return;
+    if (isAreaLimitExceeded(targetObject)) return; 
     const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
     const objType = isMulti ? 'выбранных объектах' : ((objects[0] instanceof ymaps.Polyline) ? 'линейном объекте' : 'контуре объекта');
@@ -26874,7 +26825,7 @@ async function getAllOksInObject(lat, lon) {
 }
 
 async function executeOksOnObjectSearch(targetObject) {
-    if (await isAreaLimitExceeded(targetObject)) return;
+    if (isAreaLimitExceeded(targetObject)) return;
     const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
     const objType = isMulti ? 'выбранных объектах' : ((objects[0] instanceof ymaps.Polyline) ? 'линейном объекте' : 'контуре объекта');
@@ -27032,7 +26983,7 @@ if (candidateObjects.length === 0) {
 }
 
 async function executeStructuresOnObjectSearch(targetObject) {
-    if (await isAreaLimitExceeded(targetObject)) return;
+    if (isAreaLimitExceeded(targetObject)) return;
     const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
     const objType = isMulti ? 'выбранных объектах' : ((objects[0] instanceof ymaps.Polyline) ? 'линейном объекте' : 'контуре объекта');
@@ -28907,9 +28858,9 @@ function isBboxInsidePolygon(bbox, polygonFeature) {
 }
 
 async function generateConsolidatedReport(targetObject) {
-     if (await isAreaLimitExceeded(targetObject)) return;
+     if (isAreaLimitExceeded(targetObject)) return; 
     showLoader(getSonarLoaderHtml());
-    
+    if (isAreaLimitExceeded(targetObject)) return;
     const delay = ms => new Promise(res => setTimeout(res, ms));
     showLoader("Подготовка данных...");
 
@@ -36561,7 +36512,7 @@ function exportDataToInteractiveHtml(data, filename, title, defaultSortCol = nul
         '    <div class="trim-modal">\n' +
         '        <h3>Сократить адрес</h3>\n' +
         '        <p>Введите текст, с которого должен начинаться адрес в таблице. Все данные до этого текста будут скрыты.</p>\n' +
-        '        <input type="text" id="trimInput" placeholder="">\n' +
+        '        <input type="text" id="trimInput" placeholder="Например: с. Весна">\n' +
         '        <div class="btns">\n' +
         '            <button class="btn-cancel" id="trimCancel">Отмена</button>\n' +
         '            <button class="btn-ok" id="trimOk">Применить</button>\n' +
