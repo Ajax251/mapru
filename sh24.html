@@ -7295,23 +7295,10 @@ function promptDxfImportOptions(stats) {
 
 // Универсальный парсер DXF сущностей (LWPOLYLINE, POLYLINE/VERTEX, LINE, POINT, CIRCLE)
 function parseDxfUniversal(dxfContent) {
-    const rawLines = dxfContent.split(/\r?\n/);
+    const lines = dxfContent.split('\n').map(l => l.trim());
     const finishedPolylines = [];
     const rawSegments = [];
     const standalonePoints = [];
-
-    // Проверяем наличие секций в DXF
-    let hasSections = false;
-    for (let i = 0; i < rawLines.length - 1; i++) {
-        if (rawLines[i].trim() === '0' && rawLines[i + 1].trim().toUpperCase() === 'SECTION') {
-            hasSections = true;
-            break;
-        }
-    }
-
-    let inEntitiesSection = !hasSections; // Если секций нет, парсим весь файл
-    let isNextSectionName = false;
-    let isPaperSpace = false;
 
     let currentContour = [];
     let isClosed = false;
@@ -7347,101 +7334,34 @@ function parseDxfUniversal(dxfContent) {
     let tempX = undefined, tempY = undefined;
     let lineX1 = undefined, lineY1 = undefined, lineX2 = undefined, lineY2 = undefined;
 
-    const flushCurrentEntity = () => {
-        if (!inEntitiesSection || isPaperSpace) {
-            currentContour = [];
-            isClosed = false;
-            lineX1 = lineY1 = lineX2 = lineY2 = undefined;
-            tempX = tempY = undefined;
-            isPaperSpace = false;
-            return;
-        }
-
-        if (currentEntityType === 'LINE') {
-            if (lineX1 !== undefined && lineY1 !== undefined && lineX2 !== undefined && lineY2 !== undefined) {
-                rawSegments.push([
-                    [Math.min(lineX1, lineY1), Math.max(lineX1, lineY1)],
-                    [Math.min(lineX2, lineY2), Math.max(lineX2, lineY2)]
-                ]);
-            }
-        } else if (['POLYLINE', 'VERTEX', 'LWPOLYLINE', 'POINT', 'CIRCLE'].includes(currentEntityType)) {
-            saveEntity(currentContour, isClosed, currentEntityType === 'VERTEX' ? 'POLYLINE' : currentEntityType);
-        }
-
-        currentContour = [];
-        isClosed = false;
-        lineX1 = lineY1 = lineX2 = lineY2 = undefined;
-        tempX = tempY = undefined;
-        isPaperSpace = false;
-    };
-
-    // Чтение строго парами без потери синхронизации при пустых значениях
-    let i = 0;
-    while (i < rawLines.length) {
-        const line = rawLines[i].trim();
-        if (line === '') {
-            i++;
+    // Чтение строго парами: код группы и значение
+    for (let i = 0; i < lines.length - 1; i += 2) {
+        const code = parseInt(lines[i], 10);
+        const val = lines[i + 1];
+        if (isNaN(code)) {
+            i--; // Коррекция при пустых / сбитых строках
             continue;
         }
 
-        const code = parseInt(line, 10);
-        if (isNaN(code) || !/^-?\d+$/.test(line)) {
-            i++;
-            continue;
-        }
-
-        // Следующая строка — значение группы (даже если она пустая)
-        i++;
-        if (i >= rawLines.length) break;
-        const val = rawLines[i].trim();
-        i++;
-
+        // Код 0 — завершение предыдущей сущности и начало новой
         if (code === 0) {
-            const upperVal = val.toUpperCase();
-
-            // Сбор вершин составной полилинии POLYLINE -> VERTEX
-            if ((currentEntityType === 'POLYLINE' || currentEntityType === 'VERTEX') && upperVal === 'VERTEX') {
-                currentEntityType = 'VERTEX';
-                tempX = undefined;
-                tempY = undefined;
-                continue;
+            if (currentEntityType === 'LINE') {
+                if (lineX1 !== undefined && lineY1 !== undefined && lineX2 !== undefined && lineY2 !== undefined) {
+                    rawSegments.push([
+                        [Math.min(lineX1, lineY1), Math.max(lineX1, lineY1)],
+                        [Math.min(lineX2, lineY2), Math.max(lineX2, lineY2)]
+                    ]);
+                }
+                lineX1 = lineY1 = lineX2 = lineY2 = undefined;
+            } else if (['POLYLINE', 'LWPOLYLINE', 'POINT', 'CIRCLE'].includes(currentEntityType)) {
+                saveEntity(currentContour, isClosed, currentEntityType);
+                currentContour = [];
+                isClosed = false;
             }
 
-            flushCurrentEntity();
-
-            if (upperVal === 'SECTION') {
-                isNextSectionName = true;
-                inEntitiesSection = false;
-                currentEntityType = null;
-                continue;
-            }
-
-            if (upperVal === 'ENDSEC') {
-                inEntitiesSection = false;
-                isNextSectionName = false;
-                currentEntityType = null;
-                continue;
-            }
-
-            currentEntityType = upperVal;
-            continue;
-        }
-
-        // Вход в секцию ENTITIES
-        if (code === 2 && isNextSectionName) {
-            isNextSectionName = false;
-            if (val.toUpperCase() === 'ENTITIES') {
-                inEntitiesSection = true;
-            }
-            continue;
-        }
-
-        // Игнорируем блоки, таблицы и служебные объекты
-        if (!inEntitiesSection) continue;
-
-        // Код 67: 1 = пространство листа (Paper Space)
-        if (code === 67) {
-            if (parseInt(val, 10) === 1) isPaperSpace = true;
+            currentEntityType = val.toUpperCase();
+            tempX = undefined;
+            tempY = undefined;
             continue;
         }
 
@@ -7486,33 +7406,48 @@ function parseDxfUniversal(dxfContent) {
         }
     }
 
-    flushCurrentEntity();
+    // Сохранение последней сущности в файле
+    if (currentEntityType === 'LINE') {
+        if (lineX1 !== undefined && lineY1 !== undefined && lineX2 !== undefined && lineY2 !== undefined) {
+            rawSegments.push([
+                [Math.min(lineX1, lineY1), Math.max(lineX1, lineY1)],
+                [Math.min(lineX2, lineY2), Math.max(lineX2, lineY2)]
+            ]);
+        }
+    } else if (['POLYLINE', 'LWPOLYLINE', 'POINT', 'CIRCLE'].includes(currentEntityType)) {
+        saveEntity(currentContour, isClosed, currentEntityType);
+    }
 
-    // Сшивка разрозненных отрезков LINE в контуры
+    // Сшивка разрозненных LINE в единые цепочки
     const connectedChains = stitchSegmentsToChains(rawSegments, 0.05);
     const allChains = [...finishedPolylines, ...connectedChains];
 
-    // Очистка от случайного мусора в районе (0, 0), если есть реальные МСК координаты
-    const hasLargeCoords = allChains.some(c => c.some(p => p[0] > 1000 || p[1] > 1000)) ||
-                           standalonePoints.some(p => p[0] > 1000 || p[1] > 1000);
+    // Отсечение мусора и далеких выбросов чертежа (> 5000 м от медианы)
+    const allPoints = [];
+    allChains.forEach(c => c.forEach(p => allPoints.push(p)));
+    standalonePoints.forEach(p => allPoints.push(p));
 
-    if (hasLargeCoords) {
+    if (allPoints.length > 0) {
+        const getMedian = (arr) => {
+            const sorted = [...arr].sort((a, b) => a - b);
+            const mid = Math.floor(sorted.length / 2);
+            return sorted.length % 2 !== 0 ? sorted[mid] : (sorted[mid - 1] + sorted[mid]) / 2;
+        };
+
+        const medX = getMedian(allPoints.map(p => p[0]));
+        const medY = getMedian(allPoints.map(p => p[1]));
+        const maxDist = 5000;
+
+        const isNear = (p) => Math.hypot(p[0] - medX, p[1] - medY) <= maxDist;
+
         for (let i = allChains.length - 1; i >= 0; i--) {
-            if (allChains[i].every(p => Math.abs(p[0]) < 100 && Math.abs(p[1]) < 100)) {
-                allChains.splice(i, 1);
-            }
-        }
-        for (let i = standalonePoints.length - 1; i >= 0; i--) {
-            if (Math.abs(standalonePoints[i][0]) < 100 && Math.abs(standalonePoints[i][1]) < 100) {
-                standalonePoints.splice(i, 1);
-            }
+            allChains[i] = allChains[i].filter(isNear);
+            if (allChains[i].length < 2) allChains.splice(i, 1);
         }
     }
 
     return { allChains, standalonePoints };
 }
-
-
 
 // Главная функция импорта DXF
 async function extractCoordinatesFromDXF(dxfContent) {
