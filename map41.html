@@ -4649,12 +4649,6 @@ body:has(#parcel-results-sidebar.collapsed:not(.hidden)) #map-magnifier-quick-wr
             <i class="fas fa-tags" style="color: #2563eb; width: 18px; text-align: center;"></i>
             <span style="color: #1d4ed8;">Подписи</span>
         </label>
-        
-           <label class="offset-menu-item" style="justify-content: flex-start; gap: 10px; padding: 7px 10px; border-radius: 8px; font-weight: 600; color: #334155;">
-            <input type="checkbox" id="la-quick-analysis" style="width: 17px; height: 17px; cursor: pointer; accent-color: #059669;">
-            <i class="fas fa-search-location" style="color: #059669; width: 18px; text-align: center;"></i>
-            <span style="color: #047857;">Использовать для анализа</span>
-        </label>
 
         <div style="border-top: 1px solid #e2e8f0; margin: 6px 4px;"></div>
 
@@ -6944,10 +6938,6 @@ window._settlementCheckCache = window._settlementCheckCache || {};
 
 async function isAreaLimitExceeded(targetObject) {
     if (!targetObject) return false;
-    
-        if (localStorage.getItem('laQuick_analysis') === 'true') {
-        return false;
-    }
 
     const objects = Array.isArray(targetObject) ? targetObject : [targetObject];
     
@@ -7308,22 +7298,6 @@ document.addEventListener('DOMContentLoaded', () => {
     7000
 );
                 }
-            }
-        });
-    }
-    
-    
-    const analysisCb = document.getElementById('la-quick-analysis');
-    if (analysisCb) {
-        analysisCb.checked = localStorage.getItem('laQuick_analysis') === 'true';
-        analysisCb.addEventListener('change', (e) => {
-            const isEnabled = e.target.checked;
-            localStorage.setItem('laQuick_analysis', isEnabled);
-            if (isEnabled) {
-                ensureMasterEnabled();
-                showNotification('Режим «Анализ по архиву» включен', 'success', 'database');
-            } else {
-                showNotification('Режим «Анализ по архиву» выключен', 'info');
             }
         });
     }
@@ -17677,10 +17651,7 @@ function filterFeaturesByTurfLogic(rawFeatures, targetTurfPolygons) {
 
 
 async function executeQuickReport(targetObject) {
-  if (localStorage.getItem('laQuick_analysis') === 'true') {
-        await executeLocalArchiveAnalysis(targetObject, false, null);
-        return;
-    }
+
 
     
      const validated = await validateNetworkCoverageAndLimit(targetObject);
@@ -22461,24 +22432,17 @@ function deduplicateYmapsObjects(objects) {
 }
 
 
-async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false, targetCategoryFilter = null) {
+async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false) {
     const objects = Array.isArray(targetObjects) ? targetObjects : [targetObjects];
     if (objects.length === 0) {
         showNotification("Нет объектов для анализа", "warning");
         return;
     }
 
-    const categoryNames = {
-        'ZU': 'ЗУ',
-        'OKS': 'ОКС',
-        'STR': 'сооружений',
-        'ZOUIT': 'ЗОУИТ'
-    };
-    const filterTitle = targetCategoryFilter ? ` (${categoryNames[targetCategoryFilter] || targetCategoryFilter})` : '';
-    showLoader(`Определение кварталов в архиве${filterTitle}...`);
+    showLoader("Определение пересекаемых кварталов в облаке...");
 
     try {
-        // 1. ПРЕОБРАЗОВАНИЕ ГЕОМЕТРИИ ТРАССЫ В EPSG:3857 ДЛЯ SUPABASE
+        // --- 1. ПРЕОБРАЗОВАНИЕ ГЕОМЕТРИИ ТРАССЫ В EPSG:3857 ДЛЯ SUPABASE ---
         const geometries3857 = [];
         objects.forEach(obj => {
             const coords = obj.geometry.getCoordinates();
@@ -22505,7 +22469,7 @@ async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false, tar
 
         if (geometries3857.length === 0) {
             hideLoader();
-            showNotification('Не удалось получить координаты объекта', 'warning');
+            showNotification('Не удалось получить координаты трассы', 'warning');
             return;
         }
 
@@ -22513,7 +22477,7 @@ async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false, tar
             ? geometries3857[0] 
             : { type: "GeometryCollection", geometries: geometries3857 };
 
-        // 2. ПОИСК ПЕРЕСЕКАЕМЫХ КВАРТАЛОВ
+        // --- 2. ПОИСК ВСЕХ ПЕРЕСЕКАЕМЫХ КВАРТАЛОВ В SUPABASE POSTGIS ---
         let cloudQuarters = new Map();
         try {
             const sqlQuery = `SELECT quarter_number, ST_AsGeoJSON(geometry)::json as geometry FROM cadastral_quarters WHERE ST_Intersects(geometry, ST_SetSRID(ST_GeomFromGeoJSON('${JSON.stringify(searchGeoJson)}'), 3857))`;
@@ -22529,7 +22493,7 @@ async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false, tar
             console.warn('[ArchiveAnalysis] Ошибка обращения к Supabase:', e);
         }
 
-        // 3. СВЕРКА С ЛОКАЛЬНОЙ БАЗОЙ
+        // --- 3. СВЕРКА С ЛОКАЛЬНЫМ INDEXEDDB И ДОЗАГРУЗКА НЕДОСТАЮЩИХ КПТ ---
         const db = await openLocalDB();
         const txRead = db.transaction('quarters_index', 'readonly');
         const localQuartersMap = new Map();
@@ -22543,6 +22507,7 @@ async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false, tar
         const quartersToAnalyze = new Set();
         const missingInLocal = [];
 
+        // Собираем кварталы из облака
         cloudQuarters.forEach((geom, qNum) => {
             quartersToAnalyze.add(qNum);
             if (!localQuartersMap.has(qNum)) {
@@ -22550,13 +22515,14 @@ async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false, tar
             }
         });
 
+        // Добавляем также те кварталы, которые уже есть локально и пересекают трассу
         allLocal.forEach(q => {
             if (q.quarter_number) quartersToAnalyze.add(q.quarter_number);
         });
 
-        // Дозагрузка недостающих архивов КПТ
+        // Если в облаке нашлись недостающие КПТ — скачиваем их
         if (missingInLocal.length > 0) {
-            showLoader(`Найдено ${cloudQuarters.size} КПТ. Загрузка недостающих (${missingInLocal.length} шт.)...`);
+            showLoader(`Найдено ${cloudQuarters.size} КПТ. Скачивание недостающих из облака (${missingInLocal.length} шт.)...`);
 
             for (let i = 0; i < missingInLocal.length; i++) {
                 const qNum = missingInLocal[i];
@@ -22607,8 +22573,8 @@ async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false, tar
             }
         }
 
-        // 4. ГЕОМЕТРИЧЕСКИЙ АНАЛИЗ
-        showLoader(`Анализ пересечений${filterTitle}...`);
+        // --- 4. ПОДГОТОВКА ГЕОМЕТРИИ ТРАССЫ ДЛЯ ЛОКАЛЬНОГО АНАЛИЗА ---
+        showLoader("Анализ пересечений с КПТ...");
 
         const targetTurfs = [];
         objects.forEach(obj => {
@@ -22616,7 +22582,7 @@ async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false, tar
             if (obj instanceof ymaps.Polygon) {
                 const rings = coords.map(r => r.map(c => [c[1], c[0]]));
                 rings.forEach(ring => {
-                    if (ring.length > 2 && (ring[0][0] !== ring[ring.length - 1][0] || ring[0][1] !== ring[ring.length - 1][1])) {
+                    if (ring.length > 2 && (ring[0][0] !== ring[ring.length-1][0] || ring[0][1] !== ring[ring.length-1][1])) {
                         ring.push([...ring[0]]);
                     }
                 });
@@ -22634,23 +22600,22 @@ async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false, tar
             }
         });
 
+        // Читаем данные только тех кварталов, которые пересекают объект
         const qList = Array.from(quartersToAnalyze);
         const allCandidateFeatures = { zu: [], oks: [], structure: [] };
 
         for (const qNum of qList) {
-            const promises = [];
-            if (!targetCategoryFilter || targetCategoryFilter === 'ZU') {
-                promises.push(loadFromLocalArchive(qNum, 'ZU').then(r => { if (r?.data) allCandidateFeatures.zu.push(...r.data); }));
-            }
-            if (!targetCategoryFilter || targetCategoryFilter === 'OKS') {
-                promises.push(loadFromLocalArchive(qNum, 'OKS').then(r => { if (r?.data) allCandidateFeatures.oks.push(...r.data); }));
-            }
-            if (!targetCategoryFilter || targetCategoryFilter === 'STR') {
-                promises.push(loadFromLocalArchive(qNum, 'STR').then(r => { if (r?.data) allCandidateFeatures.structure.push(...r.data); }));
-            }
-            await Promise.all(promises);
+            const [zuRes, oksRes, strRes] = await Promise.all([
+                loadFromLocalArchive(qNum, 'ZU'),
+                loadFromLocalArchive(qNum, 'OKS'),
+                loadFromLocalArchive(qNum, 'STR')
+            ]);
+            if (zuRes && Array.isArray(zuRes.data)) allCandidateFeatures.zu.push(...zuRes.data);
+            if (oksRes && Array.isArray(oksRes.data)) allCandidateFeatures.oks.push(...oksRes.data);
+            if (strRes && Array.isArray(strRes.data)) allCandidateFeatures.structure.push(...strRes.data);
         }
 
+        // --- 5. ФИЛЬТРАЦИЯ ОБЪЕКТОВ ПО ГЕОМЕТРИИ (TURF.JS) ---
         const results = { zu: [], oks: [], structure: [], zouit: [] };
         const seenCns = new Set();
 
@@ -22697,120 +22662,33 @@ async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false, tar
             }
         };
 
-        if (!targetCategoryFilter || targetCategoryFilter === 'ZU') checkFeatures(allCandidateFeatures.zu, 'zu');
-        if (!targetCategoryFilter || targetCategoryFilter === 'OKS') checkFeatures(allCandidateFeatures.oks, 'oks');
-        if (!targetCategoryFilter || targetCategoryFilter === 'STR') checkFeatures(allCandidateFeatures.structure, 'structure');
+        checkFeatures(allCandidateFeatures.zu, 'zu');
+        checkFeatures(allCandidateFeatures.oks, 'oks');
+        checkFeatures(allCandidateFeatures.structure, 'structure');
 
-        if (!targetCategoryFilter || targetCategoryFilter === 'ZOUIT') {
-            if (db.objectStoreNames.contains('zones_store')) {
-                try {
-                    const txZ = db.transaction('zones_store', 'readonly');
-                    const allZones = await new Promise(r => {
-                        const req = txZ.objectStore('zones_store').getAll();
-                        req.onsuccess = () => r(req.result || []);
-                        req.onerror = () => r([]);
-                    });
-                    const zoneFeatures = allZones.map(z => z.feature).filter(Boolean);
-                    checkFeatures(zoneFeatures, 'zouit');
-                } catch(e) {}
-            }
+        // Проверяем сохраненные зоны (ЗОУИТ, терр. зоны)
+        if (db.objectStoreNames.contains('zones_store')) {
+            try {
+                const txZ = db.transaction('zones_store', 'readonly');
+                const allZones = await new Promise(r => {
+                    const req = txZ.objectStore('zones_store').getAll();
+                    req.onsuccess = () => r(req.result || []);
+                    req.onerror = () => r([]);
+                });
+                const zoneFeatures = allZones.map(z => z.feature).filter(Boolean);
+                checkFeatures(zoneFeatures, 'zouit');
+            } catch(e) {}
         }
 
-        // ==========================================
-        // 5. ВАРИАНТ 1: РАЗДЕЛЬНЫЙ ВЫВОД РЕЗУЛЬТАТОВ
-        // ==========================================
-
-        // --- ТОЛЬКО ЗУ (вывод в правую шторку) ---
-        if (targetCategoryFilter === 'ZU') {
-            if (results.zu.length === 0) {
-                showNotification(`Земельные участки на объекте (по архиву КПТ) не найдены`, 'warning');
-                hideLoader();
-                return;
-            }
-            showLoader(`Отрисовка ${results.zu.length} ЗУ...`);
-            await drawFoundParcels(results.zu, true);
-            parcelFeaturesData = results.zu;
-            window.parcelFeaturesData = parcelFeaturesData;
-
-            // Связывание с ЕЗ при необходимости
-            const firstCn = results.zu.find(f => f.properties?.descr?.includes(':'))?.properties?.descr || '';
-            if (firstCn.startsWith('16:')) {
-                const isolated = results.zu.filter(f => f.properties?.options?.subtype === "Обособленный участок").map(f => f.properties.descr).filter(Boolean);
-                if (isolated.length > 0) {
-                    zuToEzMapGlobal.clear();
-                    const uluRelations = await fetchUluRelations(isolated);
-                    if (uluRelations?.length > 0) {
-                        uluRelations.forEach(r => { if (r.ZU && r.EZ) zuToEzMapGlobal.set(r.ZU, r.EZ); });
-                        updateSidebarForUluTheme();
-                    }
-                }
-            }
-
-            await populateSidebarWithFoundObjects(results.zu, 'ЗУ (из архива)');
-            showNotification(`Найдено ЗУ в архиве: ${results.zu.length}`, 'success');
-            hideLoader();
-            return;
-        }
-
-        // --- ТОЛЬКО ОКС (вывод в правую шторку) ---
-        if (targetCategoryFilter === 'OKS') {
-            if (results.oks.length === 0) {
-                showNotification(`ОКС на объекте (по архиву КПТ) не найдены`, 'warning');
-                hideLoader();
-                return;
-            }
-            showLoader(`Отрисовка ${results.oks.length} ОКС...`);
-            await processAndDrawBuildings(results.oks);
-            buildingFeaturesData = results.oks;
-            window.buildingFeaturesData = buildingFeaturesData;
-            await populateSidebarWithFoundObjects(results.oks, 'Здания (из архива)');
-            showNotification(`Найдено ОКС в архиве: ${results.oks.length}`, 'success');
-            hideLoader();
-            return;
-        }
-
-        // --- ТОЛЬКО СООРУЖЕНИЯ (вывод в правую шторку) ---
-        if (targetCategoryFilter === 'STR') {
-            if (results.structure.length === 0) {
-                showNotification(`Сооружения на объекте (по архиву КПТ) не найдены`, 'warning');
-                hideLoader();
-                return;
-            }
-            showLoader(`Отрисовка ${results.structure.length} сооружений...`);
-            await processAndDrawStructures(results.structure);
-            structureFeaturesData = results.structure;
-            window.structureFeaturesData = structureFeaturesData;
-            await populateSidebarWithFoundObjects(results.structure, 'Сооружения (из архива)');
-            showNotification(`Найдено сооружений в архиве: ${results.structure.length}`, 'success');
-            hideLoader();
-            return;
-        }
-
-        // --- ТОЛЬКО ЗОУИТ (вывод в правую шторку) ---
-        if (targetCategoryFilter === 'ZOUIT') {
-            if (results.zouit.length === 0) {
-                showNotification(`ЗОУИТ на объекте (по архиву КПТ) не найдены`, 'warning');
-                hideLoader();
-                return;
-            }
-            showLoader(`Отрисовка ${results.zouit.length} ЗОУИТ...`);
-            await processAndDrawZouits(results.zouit);
-            zouitFeaturesData = results.zouit;
-            window.zouitFeaturesData = zouitFeaturesData;
-            await populateSidebarWithFoundObjects(results.zouit, 'ЗОУИТ (из архива)');
-            showNotification(`Найдено ЗОУИТ в архиве: ${results.zouit.length}`, 'success');
-            hideLoader();
-            return;
-        }
-
-        // --- БЫСТРЫЙ АНАЛИЗ (все объекты в нижний дашборд) ---
         const totalFound = results.zu.length + results.oks.length + results.structure.length + results.zouit.length;
+
         if (totalFound === 0) {
-            showNotification(`Анализ по архиву завершен. Пересечений с объектами из ${qList.length} КПТ не обнаружено.`, 'info');
+            showNotification(`Анализ завершен. Пересечений с объектами из ${qList.length} КПТ не обнаружено.`, 'info');
             hideLoader();
             return;
         }
 
+        // --- 6. ОТРИСОВКА И ВЫВОД В ДАШБОРД ---
         showLoader(`Отрисовка ${totalFound} найденных объектов...`);
 
         Object.values(quickReportLayers).flat().forEach(obj => {
@@ -22860,6 +22738,7 @@ async function executeLocalArchiveAnalysis(targetObjects, useBuffer = false, tar
         hideLoader();
     }
 }
+
 
 async function executeLocalMapAnalysis(targetObjects, useBuffer = false) {
     showLoader("Сверка с кадастровым слоем карты...");
@@ -23648,12 +23527,6 @@ if (targetObject) {
 
 
 async function executeParcelsOnObjectSearch(targetObject) {
-    
-      if (localStorage.getItem('laQuick_analysis') === 'true') {
-        await executeLocalArchiveAnalysis(targetObject, false, 'ZU');
-        return;
-    }
-    
     if (await isAreaLimitExceeded(targetObject)) return;
     
     
@@ -26925,12 +26798,6 @@ async function getAllZouitsInObject(lat, lon) {
 }
 
 async function executeZouitsOnObjectSearch(targetObject) {
-    
-     if (localStorage.getItem('laQuick_analysis') === 'true') {
-        await executeLocalArchiveAnalysis(targetObject, false, 'ZOUIT');
-        return;
-    }
-    
     if (await isAreaLimitExceeded(targetObject)) return;
     const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
@@ -27125,11 +26992,6 @@ async function getAllOksInObject(lat, lon) {
 }
 
 async function executeOksOnObjectSearch(targetObject) {
-    
-     if (localStorage.getItem('laQuick_analysis') === 'true') {
-        await executeLocalArchiveAnalysis(targetObject, false, 'OKS');
-        return;
-    }
     if (await isAreaLimitExceeded(targetObject)) return;
     const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
@@ -27288,12 +27150,6 @@ if (candidateObjects.length === 0) {
 }
 
 async function executeStructuresOnObjectSearch(targetObject) {
-    
-     if (localStorage.getItem('laQuick_analysis') === 'true') {
-        await executeLocalArchiveAnalysis(targetObject, false, 'STR');
-        return;
-    }
-    
     if (await isAreaLimitExceeded(targetObject)) return;
     const isMulti = Array.isArray(targetObject);
     const objects = isMulti ? targetObject : [targetObject];
