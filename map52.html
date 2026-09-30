@@ -4459,33 +4459,6 @@ body:has(#parcel-results-sidebar.collapsed:not(.hidden)) #map-magnifier-quick-wr
     100% { transform: scale(1.7); opacity: 0; }
 }
 
-#localArchiveModal.style-modal {
-    position: fixed !important;
-    inset: 0 !important;
-    top: 0 !important;
-    left: 0 !important;
-    width: 100vw !important;
-    height: 100vh !important;
-    transform: none !important;
-    background: rgba(15, 23, 42, 0.6) !important;
-    backdrop-filter: blur(5px) !important;
-    -webkit-backdrop-filter: blur(5px) !important;
-    z-index: 20050 !important;
-    display: none;
-    align-items: center !important;
-    justify-content: center !important;
-    margin: 0 !important;
-    padding: 0 !important;
-}
-
-#localArchiveModal .style-modal-content {
-    margin: auto !important;
-    position: relative !important;
-    transform: none !important;
-    max-height: 90vh;
-    overflow-y: auto;
-}
-
 
 .ring-scanner {
     width: 60px;
@@ -5099,7 +5072,7 @@ body:has(#parcel-results-sidebar.collapsed:not(.hidden)) #map-magnifier-quick-wr
                 </button>
             </div>
         </div>
-     </div>  
+    
 
 
 <div id="oksModal" class="style-modal">
@@ -11574,15 +11547,11 @@ if (event.target.id === 'export-map-json-menu-item') {
         }
 
 
-if (targetId === 'objects-nearby-menu-item' || event.target.id === 'objects-nearby-menu-item' || event.target.closest('#objects-nearby-menu-item')) {
+if (event.target.id === 'objects-nearby-menu-item' || event.target.closest('#objects-nearby-menu-item')) {
     contextMenu.style.display = 'none';
-    const lat = parseFloat(contextMenu.dataset.lat) || (currentMouseMapCoords ? currentMouseMapCoords[0] : (map ? map.getCenter()[0] : null));
-    const lon = parseFloat(contextMenu.dataset.lon) || (currentMouseMapCoords ? currentMouseMapCoords[1] : (map ? map.getCenter()[1] : null));
-    if (lat && lon) {
-        showObjectsNearbyDialog(lat, lon);
-    } else {
-        showNotification('Не удалось определить точку поиска', 'warning');
-    }
+    const lat = parseFloat(contextMenu.dataset.lat);
+    const lon = parseFloat(contextMenu.dataset.lon);
+    showObjectsNearbyDialog(lat, lon);
 }
 
 if (event.target.id === 'raster-menu-item') {
@@ -13091,9 +13060,56 @@ function copyPolygonWithMap(originalPolygon, strokeColor, opacityHex) {
 const LOCAL_DB_NAME = 'NspdLocalArchiveDB';
 const inFlightRequests = new Map();
 
-const LOCAL_DB_VERSION = 5;
+const LOCAL_DB_VERSION = 3.1;
 
+function openLocalDB() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open(LOCAL_DB_NAME, LOCAL_DB_VERSION);
 
+        req.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains('quarters_index')) {
+                db.createObjectStore('quarters_index', { keyPath: 'quarter_number' });
+            }
+            if (!db.objectStoreNames.contains('files_store')) {
+                db.createObjectStore('files_store', { keyPath: 'file_key' });
+            }
+            if (!db.objectStoreNames.contains('zones_store')) {
+                db.createObjectStore('zones_store', { keyPath: 'key' }); 
+            }
+            
+            if (!db.objectStoreNames.contains('fast_cache')) {
+                const cacheStore = db.createObjectStore('fast_cache', { keyPath: 'key' });
+                cacheStore.createIndex('expire_idx', 'expireAt');
+            }
+        };
+
+        req.onsuccess = (e) => {
+            const db = req.result;
+
+            
+            if (!db.objectStoreNames.contains('fast_cache')) {
+                const nextVersion = db.version + 1;
+                db.close();
+                const upgradeReq = indexedDB.open(LOCAL_DB_NAME, nextVersion);
+                upgradeReq.onupgradeneeded = (ue) => {
+                    const udb = ue.target.result;
+                    if (!udb.objectStoreNames.contains('fast_cache')) {
+                        const cacheStore = udb.createObjectStore('fast_cache', { keyPath: 'key' });
+                        cacheStore.createIndex('expire_idx', 'expireAt');
+                    }
+                };
+                upgradeReq.onsuccess = () => resolve(upgradeReq.result);
+                upgradeReq.onerror = () => resolve(db); 
+                return;
+            }
+
+            resolve(db);
+        };
+
+        req.onerror = () => reject(req.error);
+    });
+}
 
 
 const memoryCacheL1 = new Map();
@@ -13212,7 +13228,6 @@ let pendingLocalArchiveRender = false;
 function openLocalDB() {
     return new Promise((resolve, reject) => {
         const req = indexedDB.open(LOCAL_DB_NAME, LOCAL_DB_VERSION);
-
         req.onupgradeneeded = (e) => {
             const db = e.target.result;
             if (!db.objectStoreNames.contains('quarters_index')) {
@@ -13224,18 +13239,8 @@ function openLocalDB() {
             if (!db.objectStoreNames.contains('zones_store')) {
                 db.createObjectStore('zones_store', { keyPath: 'key' }); 
             }
-            if (!db.objectStoreNames.contains('fast_cache')) {
-                const cacheStore = db.createObjectStore('fast_cache', { keyPath: 'key' });
-                cacheStore.createIndex('expire_idx', 'expireAt');
-            }
-            // Хранилище связей ЗУ <-> ЕЗ
-            if (!db.objectStoreNames.contains('ez_relations')) {
-                const ezStore = db.createObjectStore('ez_relations', { keyPath: 'ZU' });
-                ezStore.createIndex('EZ_idx', 'EZ', { unique: false });
-            }
         };
-
-        req.onsuccess = (e) => resolve(req.result);
+        req.onsuccess = () => resolve(req.result);
         req.onerror = () => reject(req.error);
     });
 }
@@ -13893,16 +13898,10 @@ function openLocalArchiveModal() {
     const modal = document.getElementById('localArchiveModal');
     if (!modal) return;
     
-    if (modal.parentElement !== document.body) {
-        document.body.appendChild(modal);
-    }
-
     document.getElementById('localArchiveAutoSave').checked = localStorage.getItem('isLocalArchiveAutoSaveEnabled') === 'true';
 
-    syncAllKnownEzRelations().then(() => {
-        updateLocalArchiveStatsUI();
-    });
-    modal.style.display = 'flex';
+    updateLocalArchiveStatsUI();
+    modal.style.display = 'block';
 }
 
 function closeLocalArchiveModal() {
@@ -13930,9 +13929,11 @@ async function updateLocalArchiveStatsUI() {
         });
 
         let totalSizeBytes = 0;
-        files.forEach(f => { if (f.blob) totalSizeBytes += f.blob.size; });
+        files.forEach(f => {
+            if (f.blob) totalSizeBytes += f.blob.size;
+        });
+
         const sizeMB = (totalSizeBytes / (1024 * 1024)).toFixed(2);
-        
         let totalZU = 0, totalOKS = 0, totalSTR = 0;
         quarters.forEach(q => {
             if (q.counts) {
@@ -13942,6 +13943,7 @@ async function updateLocalArchiveStatsUI() {
             }
         });
 
+        
         let cntZouit = 0, cntTerr = 0, cntNP = 0, cntMO = 0;
         if (db.objectStoreNames.contains('zones_store')) {
             const txZ = db.transaction('zones_store', 'readonly');
@@ -13958,28 +13960,17 @@ async function updateLocalArchiveStatsUI() {
             });
         }
 
-        // Подсчет связей ЗУ <-> ЕЗ
-        let cntEz = 0;
-        if (db.objectStoreNames.contains('ez_relations')) {
-            const txEz = db.transaction('ez_relations', 'readonly');
-            cntEz = await new Promise(r => {
-                const reqEz = txEz.objectStore('ez_relations').count();
-                reqEz.onsuccess = () => r(reqEz.result || 0);
-                reqEz.onerror = () => r(0);
-            });
-        }
-
         statsEl.innerHTML = `
             <b>Сохранено кварталов:</b> ${quarters.length} шт.<br>
             <b>Объектов в базе:</b> ЗУ: ${totalZU} | ОКС: ${totalOKS} | Сооружений: ${totalSTR}<br>
             <b>Зон и территорий:</b> Террзоны: ${cntTerr} | ЗОУИТ: ${cntZouit} | НП: ${cntNP} | МО: ${cntMO}<br>
-            <b>Занято места на диске:</b> ${sizeMB} МБ<br>
-            <b>Связей ЗУ ↔ ЕЗП в базе:</b> ${cntEz} шт.
+            <b>Занято места на диске:</b> ${sizeMB} МБ
         `;
     } catch (e) {
         statsEl.textContent = 'Ошибка расчета статистики базы';
     }
 }
+
 
 async function backupFullLocalArchive() {
     showLoader('Создание полной резервной копии базы...');
@@ -14136,16 +14127,9 @@ async function promptClearLocalArchive() {
         showLoader('Очистка базы данных...');
         try {
             const db = await openLocalDB();
-            const storeNames = ['quarters_index', 'files_store'];
-if (db.objectStoreNames.contains('ez_relations')) storeNames.push('ez_relations');
-const tx = db.transaction(storeNames, 'readwrite');
-tx.objectStore('quarters_index').clear();
-tx.objectStore('files_store').clear();
-
-if (db.objectStoreNames.contains('ez_relations')) {
-    tx.objectStore('ez_relations').clear();
-}
-
+            const tx = db.transaction(['quarters_index', 'files_store'], 'readwrite');
+            tx.objectStore('quarters_index').clear();
+            tx.objectStore('files_store').clear();
             await new Promise(r => tx.oncomplete = r);
             showNotification('Локальная база КПТ полностью очищена', 'success');
             updateLocalArchiveStatsUI();
@@ -16826,24 +16810,24 @@ const laBtn = document.getElementById('local-archive-quick-btn');
 const laMenu = document.getElementById('local-archive-dropdown-menu');
 
 const toggleFilterMapBtn = document.getElementById('toggle-filter-map-btn');
-if (toggleFilterMapBtn) {
-    toggleFilterMapBtn.addEventListener('click', async (e) => {
-        e.stopPropagation();
-        const isActive = toggleFilterMapBtn.classList.toggle('active');
+    if (toggleFilterMapBtn) {
+        toggleFilterMapBtn.addEventListener('click', (e) => {
+            e.stopPropagation();
+            const isActive = toggleFilterMapBtn.classList.toggle('active');
 
-        if (isActive) {
-            toggleFilterMapBtn.style.backgroundColor = '#10b981';
-            toggleFilterMapBtn.style.boxShadow = '0 0 10px rgba(16, 185, 129, 0.6)';
-            syncMapWithSidebarFilter();
-        } else {
-            toggleFilterMapBtn.style.backgroundColor = '#64748b';
-            toggleFilterMapBtn.style.boxShadow = 'none';
-            syncMapWithSidebarFilter();
-        }
-        await syncAllKnownEzRelations();
-    });
-}
-
+            if (isActive) {
+                toggleFilterMapBtn.style.backgroundColor = '#10b981'; // Зелёный при активности
+                toggleFilterMapBtn.style.boxShadow = '0 0 10px rgba(16, 185, 129, 0.6)';
+                syncMapWithSidebarFilter();
+             //   showNotification('На карте показаны только отфильтрованные объекты', 'success', 'filter');
+            } else {
+                toggleFilterMapBtn.style.backgroundColor = '#64748b'; // Спокойный серый по умолчанию
+                toggleFilterMapBtn.style.boxShadow = 'none';
+                syncMapWithSidebarFilter();
+             //   showNotification('Отображение всех объектов на карте восстановлено', 'info', 'filter');
+            }
+        });
+    }
 
 const btnSyncCloudKpt = document.getElementById('btn-sync-cloud-kpt');
 if (btnSyncCloudKpt) {
@@ -25265,18 +25249,16 @@ async function loadAndProcessSupabaseData(loadedFeatures, loadedDate) {
         currentQuarterNumber = qNum; 
     }
 
-   if (qNum.startsWith('16:')) {
+    if (qNum.startsWith('16:')) {
         document.querySelector('.loading-text').textContent = 'Связывание участков с ЕЗ...';
         
-        // 1. Сначала извлекаем связи, если они уже были в свойствах объектов архива
-        await extractAndSaveEzFromFeatures(loadedFeatures);
-
+        
         const allParcelCNs = loadedFeatures
             .map(f => f.properties?.descr)
             .filter(Boolean);
 
         if (allParcelCNs.length > 0) {
-            // 2. Ищем недостающие связи через гибридный поиск (локальная база -> Supabase)
+            zuToEzMapGlobal.clear(); 
             const uluRelations = await fetchUluRelations(allParcelCNs);
             
             if (uluRelations && uluRelations.length > 0) {
@@ -25286,8 +25268,6 @@ async function loadAndProcessSupabaseData(loadedFeatures, loadedDate) {
                     }
                 });
                 
-                // 3. Сохраняем все найденные связи в локальный IndexedDB
-                await saveLocalUluRelations(uluRelations);
                 
                 polygons.forEach(polygon => {
                     if (polygon instanceof ymaps.Polygon) {
@@ -25296,10 +25276,12 @@ async function loadAndProcessSupabaseData(loadedFeatures, loadedDate) {
                             const ezParent = zuToEzMapGlobal.get(cn);
                             polygon.properties.set('uluParentCn', ezParent);
                             
+                            
                             let hint = polygon.properties.get('hintContent') || {};
                             hint.ezInfo = "ЕЗ: " + ezParent;
                             polygon.properties.set('hintContent', hint);
 
+                            
                             const matchingPlacemark = parcelPlacemarks.find(pm => pm.polygon === polygon);
                             if (matchingPlacemark) {
                                 matchingPlacemark.properties.set('hintContent', hint);
@@ -27850,146 +27832,57 @@ function showObjectsNearbyDialog(lat, lon) {
     const savedStr = localStorage.getItem('objectsNearby_Str') !== 'false';
     const savedZouit = localStorage.getItem('objectsNearby_Zouit') !== 'false';
 
-    const overlay = document.createElement('div');
-    overlay.id = 'objects-nearby-modal';
-    overlay.style.cssText = `
-        position: fixed;
-        inset: 0;
-        background: rgba(15, 23, 42, 0.55);
-        backdrop-filter: blur(4px);
-        -webkit-backdrop-filter: blur(4px);
-        z-index: 20005;
-        display: flex;
-        align-items: center;
-        justify-content: center;
-        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-    `;
+    const modal = document.createElement('div');
+    modal.id = 'objects-nearby-modal';
+    modal.className = 'color-modal';
+    modal.style.width = '420px';
+    modal.style.maxWidth = '95vw';
+    modal.style.display = 'block';
 
-    overlay.innerHTML = `
-        <div style="
-            background: #ffffff;
-            border-radius: 18px;
-            box-shadow: 0 20px 45px rgba(0, 0, 0, 0.25), 0 0 0 1px rgba(226, 232, 240, 0.8);
-            width: 430px;
-            max-width: 92vw;
-            padding: 24px 26px;
-            display: flex;
-            flex-direction: column;
-            gap: 16px;
-            box-sizing: border-box;
-            animation: zoomInPhoto 0.25s cubic-bezier(0.175, 0.885, 0.32, 1.275);
-        ">
-            <!-- Заголовок -->
-            <div style="display: flex; align-items: center; justify-content: space-between; border-bottom: 2px solid #eef2f6; padding-bottom: 12px;">
-                <div style="display: flex; align-items: center; gap: 10px;">
-                    <div style="width: 36px; height: 36px; border-radius: 10px; background: linear-gradient(135deg, #eff6ff, #dbeafe); display: flex; align-items: center; justify-content: center; color: #2563eb; font-size: 1.1rem; box-shadow: 0 2px 5px rgba(37,99,235,0.15);">
-                        <i class="fas fa-search-location"></i>
-                    </div>
-                    <h3 style="margin: 0; font-size: 1.25rem; color: #1e293b; font-weight: 700;">Объекты рядом</h3>
-                </div>
-                <button id="nearby-close-x" style="background: none; border: none; font-size: 22px; color: #94a3b8; cursor: pointer; padding: 2px 6px; line-height: 1; border-radius: 6px; transition: color 0.15s;" onmouseover="this.style.color='#ef4444'" onmouseout="this.style.color='#94a3b8'">&times;</button>
-            </div>
-
-            <!-- Список категорий -->
-            <div style="display: flex; flex-direction: column; gap: 8px;">
-                <span style="font-size: 0.8rem; font-weight: 700; color: #64748b; text-transform: uppercase; letter-spacing: 0.5px;">Типы объектов</span>
-                
-                <label style="display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 10px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='#f0fdf4'; this.style.borderColor='#86efac';" onmouseout="this.style.background='#f8fafc'; this.style.borderColor='#e2e8f0';">
-                    <div style="display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 0.92rem; color: #1e293b;">
-                        <i class="fas fa-vector-square" style="color: #16a34a; width: 18px; text-align: center; font-size: 1rem;"></i>
-                        <span>Земельные участки (ЗУ)</span>
-                    </div>
-                    <input type="checkbox" id="nearby-zu" style="width: 18px; height: 18px; cursor: pointer; accent-color: #16a34a;" ${savedZU ? 'checked' : ''}>
+    modal.innerHTML = `
+        <div class="color-modal-content" style="padding: 25px 30px; display: flex; flex-direction: column; align-items: center; gap: 15px;">
+            <h3 style="margin-top: 0; margin-bottom: 5px; font-size: 1.4rem; color: #1e293b; text-align: center; font-weight: 600;">
+                Объекты рядом
+            </h3>
+            <div style="width: 100%; display: flex; flex-direction: column; gap: 12px; background: #f8fafc; padding: 15px; border-radius: 8px; border: 1px solid #e2e8f0; text-align: left;">
+                <span style="font-weight: 600; color: #1e3a8a; font-size: 0.95rem;">Типы объектов:</span>
+                <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 0.9rem;">
+                    <input type="checkbox" id="nearby-zu" style="width: 18px; height: 18px;" ${savedZU ? 'checked' : ''}>
+                    <span>Земельные участки (ЗУ)</span>
                 </label>
-
-                <label style="display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 10px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='#f0f9ff'; this.style.borderColor='#7dd3fc';" onmouseout="this.style.background='#f8fafc'; this.style.borderColor='#e2e8f0';">
-                    <div style="display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 0.92rem; color: #1e293b;">
-                        <i class="fas fa-building" style="color: #0284c7; width: 18px; text-align: center; font-size: 1rem;"></i>
-                        <span>Здания (ОКС)</span>
-                    </div>
-                    <input type="checkbox" id="nearby-oks" style="width: 18px; height: 18px; cursor: pointer; accent-color: #0284c7;" ${savedOKS ? 'checked' : ''}>
+                <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 0.9rem;">
+                    <input type="checkbox" id="nearby-oks" style="width: 18px; height: 18px;" ${savedOKS ? 'checked' : ''}>
+                    <span>Здания (ОКС)</span>
                 </label>
-
-                <label style="display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 10px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='#fff7ed'; this.style.borderColor='#fdba74';" onmouseout="this.style.background='#f8fafc'; this.style.borderColor='#e2e8f0';">
-                    <div style="display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 0.92rem; color: #1e293b;">
-                        <i class="fas fa-project-diagram" style="color: #ea580c; width: 18px; text-align: center; font-size: 1rem;"></i>
-                        <span>Сооружения</span>
-                    </div>
-                    <input type="checkbox" id="nearby-str" style="width: 18px; height: 18px; cursor: pointer; accent-color: #ea580c;" ${savedStr ? 'checked' : ''}>
+                <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 0.9rem;">
+                    <input type="checkbox" id="nearby-str" style="width: 18px; height: 18px;" ${savedStr ? 'checked' : ''}>
+                    <span>Сооружения</span>
                 </label>
-
-                <label style="display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 10px; cursor: pointer; transition: all 0.2s;" onmouseover="this.style.background='#faf5ff'; this.style.borderColor='#d8b4fe';" onmouseout="this.style.background='#f8fafc'; this.style.borderColor='#e2e8f0';">
-                    <div style="display: flex; align-items: center; gap: 10px; font-weight: 600; font-size: 0.92rem; color: #1e293b;">
-                        <i class="fas fa-shield-alt" style="color: #9333ea; width: 18px; text-align: center; font-size: 1rem;"></i>
-                        <span>Зоны (ЗОУИТ)</span>
-                    </div>
-                    <input type="checkbox" id="nearby-zouit" style="width: 18px; height: 18px; cursor: pointer; accent-color: #9333ea;" ${savedZouit ? 'checked' : ''}>
+                <label style="display: flex; align-items: center; gap: 10px; cursor: pointer; font-size: 0.9rem;">
+                    <input type="checkbox" id="nearby-zouit" style="width: 18px; height: 18px;" ${savedZouit ? 'checked' : ''}>
+                    <span>Зоны (ЗОУИТ)</span>
                 </label>
             </div>
-
-            <!-- Радиус -->
-            <div style="display: flex; align-items: center; justify-content: space-between; background: #f8fafc; padding: 10px 14px; border-radius: 10px; border: 1px solid #e2e8f0;">
-                <span style="font-weight: 600; color: #334155; font-size: 0.9rem; display: flex; align-items: center; gap: 8px;">
-                    <i class="fas fa-bullseye" style="color: #3b82f6;"></i> Радиус поиска:
-                </span>
-                <select id="nearby-radius" style="padding: 7px 14px; border-radius: 8px; border: 1.5px solid #cbd5e1; font-size: 0.92rem; font-weight: 600; color: #1e293b; outline: none; background: #ffffff; cursor: pointer; box-shadow: 0 1px 2px rgba(0,0,0,0.05);">
+            <div style="width: 100%; display: flex; justify-content: space-between; align-items: center; margin-top: 5px;">
+                <label style="font-weight: 600; color: #1e3a8a; font-size: 0.95rem;">Радиус поиска:</label>
+                <select id="nearby-radius" style="padding: 8px 12px; border-radius: 8px; border: 1px solid #ccc; font-size: 0.95rem; outline: none;">
                     <option value="100" selected>100 м</option>
                     <option value="200">200 м</option>
                     <option value="500">500 м</option>
-                    <option value="1000">1 000 м</option>
+                    <option value="1000">1000 м</option>
                 </select>
             </div>
-
-            <!-- Кнопки -->
-            <div style="display: flex; gap: 12px; margin-top: 4px;">
-                <button id="nearby-submit-btn" style="
-                    flex: 1.2;
-                    height: 42px;
-                    border: none;
-                    border-radius: 10px;
-                    background: linear-gradient(135deg, #10b981 0%, #059669 100%);
-                    color: #ffffff;
-                    font-size: 0.95rem;
-                    font-weight: 700;
-                    cursor: pointer;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    gap: 8px;
-                    box-shadow: 0 4px 14px rgba(16, 185, 129, 0.35);
-                    transition: all 0.2s ease;
-                " onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 6px 18px rgba(16, 185, 129, 0.45)';" onmouseout="this.style.transform='none'; this.style.boxShadow='0 4px 14px rgba(16, 185, 129, 0.35)';">
-                    <i class="fas fa-search"></i> Найти
-                </button>
-
-                <button id="nearby-cancel-btn" style="
-                    flex: 1;
-                    height: 42px;
-                    border: none;
-                    border-radius: 10px;
-                    background: linear-gradient(135deg, #9333ea 0%, #7e22ce 100%);
-                    color: #ffffff;
-                    font-size: 0.95rem;
-                    font-weight: 700;
-                    cursor: pointer;
-                    display: flex;
-                    align-items: center;
-                    justify-content: center;
-                    gap: 8px;
-                    box-shadow: 0 4px 14px rgba(147, 51, 234, 0.35);
-                    transition: all 0.2s ease;
-                " onmouseover="this.style.transform='translateY(-2px)'; this.style.boxShadow='0 6px 18px rgba(147, 51, 234, 0.45)';" onmouseout="this.style.transform='none'; this.style.boxShadow='0 4px 14px rgba(147, 51, 234, 0.35)';">
-                    <i class="fas fa-times"></i> Отмена
-                </button>
+            <div class="buttons" style="width: 100%; display: flex; gap: 10px; margin-top: 15px;">
+                <button id="nearby-submit-btn" class="apply-btn" style="flex: 1; justify-content: center;"><i class="fas fa-search"></i> Найти</button>
+                <button id="nearby-cancel-btn" class="cancel-btn" style="flex: 1; justify-content: center;"><i class="fas fa-times"></i> Отмена</button>
             </div>
         </div>
     `;
 
-    document.body.appendChild(overlay);
+    document.body.appendChild(modal);
 
     const submitBtn = document.getElementById('nearby-submit-btn');
     const cancelBtn = document.getElementById('nearby-cancel-btn');
-    const closeXBtn = document.getElementById('nearby-close-x');
 
     submitBtn.onclick = () => {
         const zuChecked = document.getElementById('nearby-zu').checked;
@@ -28003,7 +27896,7 @@ function showObjectsNearbyDialog(lat, lon) {
         localStorage.setItem('objectsNearby_Str', strChecked);
         localStorage.setItem('objectsNearby_Zouit', zouitChecked);
 
-        overlay.remove();
+        document.body.removeChild(modal);
 
         if (!zuChecked && !oksChecked && !strChecked && !zouitChecked) {
             showNotification('Выберите хотя бы один тип объекта', 'warning');
@@ -28018,10 +27911,8 @@ function showObjectsNearbyDialog(lat, lon) {
         });
     };
 
-    const close = () => overlay.remove();
-    cancelBtn.onclick = close;
-    if (closeXBtn) closeXBtn.onclick = close;
-    overlay.onclick = (e) => { if (e.target === overlay) close(); };
+    cancelBtn.onclick = () => document.body.removeChild(modal);
+    modal.onclick = (e) => { if (e.target === modal) document.body.removeChild(modal); };
 }
 
 
@@ -28120,7 +28011,7 @@ function populateSidebarWithAllObjects(results) {
             html += '<p style="font-size: 0.85em; color: #666;">' + thirdDesc + '</p>';
         }
         itemDiv.innerHTML = html;
-        itemDiv._searchStr = `${cadNumber} ${primaryDesc} ${secondaryDesc} ${thirdDesc || ''}`.toLowerCase();
+        itemDiv._searchStr = `${cadNumber} ${address} ${areaText} ${vri || ''}`.toLowerCase();
 
         const correspondingPolygon = polygons.find(p => {
             if (!(p instanceof ymaps.Polygon)) return false;
@@ -28169,6 +28060,7 @@ function populateSidebarWithAllObjects(results) {
 }
 
 async function executeObjectsNearbySearch(lat, lon, radius, selectedTypes) {
+    
     showLoader(getScannerLoaderHtml());
 
     try {
@@ -28182,6 +28074,19 @@ async function executeObjectsNearbySearch(lat, lon, radius, selectedTypes) {
             [centerX - radius, centerY + radius], 
             [centerX - radius, centerY - radius]  
         ];
+        const visualCoords = box3857.map(coord => {
+            const wgs = proj4("EPSG:3857", "EPSG:4326", coord); 
+            return [
+                wgs[1] - (mapOffsetY * 0.000008983), 
+                wgs[0] - (mapOffsetX * 0.000008983)  
+            ];
+        });
+        const tempPolygon = new ymaps.Polygon([visualCoords], {}, {});
+
+        if (isAreaLimitExceeded(tempPolygon)) {
+            hideLoader();
+            return;
+        }
 
         const categoryIdsToQuery = [];
         if (selectedTypes.zu) categoryIdsToQuery.push(36368);
@@ -28189,8 +28094,7 @@ async function executeObjectsNearbySearch(lat, lon, radius, selectedTypes) {
         if (selectedTypes.structure) categoryIdsToQuery.push(36383);
         if (selectedTypes.zouit) categoryIdsToQuery.push(36940);
 
-        // Используем прямой поиск по полигону области
-        const rawFeatures = await searchObjectsByArea(box3857, categoryIdsToQuery) || [];
+        const rawFeatures = await searchFeaturesByGeometry(tempPolygon, categoryIdsToQuery) || [];
         const demuxed = demuxFeatures(rawFeatures);
 
         const results = {
@@ -28200,28 +28104,21 @@ async function executeObjectsNearbySearch(lat, lon, radius, selectedTypes) {
             zouit: selectedTypes.zouit ? demuxed.zouit : []
         };
 
+        
         if (results.zu.length > 0) {
             await drawFoundParcels(results.zu, true);
         }
         if (results.oks.length > 0) {
-            await processAndDrawBuildings(results.oks);
+            await processAndDrawBuildingsProxy(results.oks);
         }
         if (results.structure.length > 0) {
-            await processAndDrawStructures(results.structure);
+            const filteredStructures = filterFeaturesByTurfLogic(results.structure, [turf.polygon([visualCoords.map(c => [c[1], c[0]])])]);
+            await processAndDrawStructures(filteredStructures);
         }
         if (results.zouit.length > 0) {
-            await processAndDrawZouits(results.zouit);
+            const filteredZouits = filterFeaturesByTurfLogic(results.zouit, [turf.polygon([visualCoords.map(c => [c[1], c[0]])])]);
+            await processAndDrawZouits(filteredZouits);
         }
-
-        syncFeaturesDataFromMap();
-
-        const visualCoords = box3857.map(coord => {
-            const wgs = proj4("EPSG:3857", "EPSG:4326", coord); 
-            return [
-                wgs[1] - (mapOffsetY * 0.000008983), 
-                wgs[0] - (mapOffsetX * 0.000008983)  
-            ];
-        });
 
         const currentMapType = map.getType();
         const strokeColor = (currentMapType === 'yandex#satellite' || currentMapType === 'yandex#hybrid') ? '#FFFFFF' : '#FF0000';
@@ -28244,7 +28141,6 @@ async function executeObjectsNearbySearch(lat, lon, radius, selectedTypes) {
         showNotification('Поиск завершен. Найдено объектов: ' + totalFoundCount + ' (радиус: ' + radius + 'м)', 'success');
 
     } catch (err) {
-        console.error('Ошибка в executeObjectsNearbySearch:', err);
         showNotification('Ошибка при выполнении поиска объектов', 'error');
     } finally {
         hideLoader();
@@ -33641,208 +33537,69 @@ function applyRegistrationDateTheme() {
 
 
 
-async function getLocalUluRelations(parcelCNs) {
-    if (!parcelCNs || parcelCNs.length === 0) return [];
-    try {
-        const db = await openLocalDB();
-        if (!db.objectStoreNames.contains('ez_relations')) return [];
-        const tx = db.transaction('ez_relations', 'readonly');
-        const store = tx.objectStore('ez_relations');
-        const matched = [];
-
-        await Promise.all(parcelCNs.map(cn => new Promise(resolve => {
-            const req = store.get(String(cn).trim());
-            req.onsuccess = () => {
-                if (req.result && req.result.EZ) {
-                    matched.push({ ZU: req.result.ZU, EZ: req.result.EZ });
-                }
-                resolve();
-            };
-            req.onerror = () => resolve();
-        })));
-
-        return matched;
-    } catch (e) {
-        console.warn('[IndexedDB ЕЗ] Ошибка чтения:', e);
+async function fetchUluRelations(parcelCNs) {
+    if (!parcelCNs || parcelCNs.length === 0) {
         return [];
     }
-}
 
-async function saveLocalUluRelations(relations) {
-    if (!relations || relations.length === 0) return 0;
-    try {
-        const db = await openLocalDB();
-        if (!db.objectStoreNames.contains('ez_relations')) return 0;
-        const tx = db.transaction('ez_relations', 'readwrite');
-        const store = tx.objectStore('ez_relations');
-        const dateStr = new Date().toISOString().slice(0, 10);
-        let savedCount = 0;
-
-        relations.forEach(r => {
-            const zu = String(r.ZU || r.zu || '').trim();
-            const ez = String(r.EZ || r.ez || '').trim();
-            if (zu && ez) {
-                store.put({
-                    ZU: zu,
-                    EZ: ez,
-                    updated_at: dateStr
-                });
-                savedCount++;
-            }
-        });
-
-        await new Promise((resolve, reject) => {
-            tx.oncomplete = resolve;
-            tx.onerror = () => reject(tx.error);
-        });
-
-        if (savedCount > 0) {
-            console.log(`[IndexedDB ЕЗ] Сохранено в локальную базу: ${savedCount} связей`);
-            if (typeof updateLocalArchiveStatsUI === 'function') updateLocalArchiveStatsUI();
-        }
-        return savedCount;
-    } catch (e) {
-        console.warn('[IndexedDB ЕЗ] Ошибка сохранения связей:', e);
-        return 0;
-    }
-}
-
-// Сбор всех известных связей из памяти/карты/панели и запись в локальную базу
-async function syncAllKnownEzRelations() {
-    const relations = [];
-    const seen = new Set();
-
-    zuToEzMapGlobal.forEach((ez, zu) => {
-        if (zu && ez) {
-            const key = `${zu}_${ez}`;
-            if (!seen.has(key)) {
-                seen.add(key);
-                relations.push({ ZU: zu, EZ: ez });
-            }
-        }
-    });
-
-    polygons.forEach(obj => {
-        if (obj instanceof ymaps.Polygon) {
-            const cn = obj.properties.get('cadastralNumber');
-            const ez = obj.properties.get('uluParentCn') || 
-                       obj.properties.get('featureData')?.properties?.options?.uluParentCn;
-            if (cn && ez && isPotentialEzNumber(ez)) {
-                const key = `${cn}_${ez}`;
-                if (!seen.has(key)) {
-                    seen.add(key);
-                    relations.push({ ZU: cn, EZ: ez });
-                    zuToEzMapGlobal.set(cn, ez);
-                }
-            }
-        }
-    });
-
-    const contentDiv = document.getElementById('parcel-list-content');
-    if (contentDiv) {
-        contentDiv.querySelectorAll('.sidebar-item').forEach(item => {
-            const cn = item.dataset.cadnum;
-            const ez = item.dataset.ez;
-            if (cn && ez && isPotentialEzNumber(ez)) {
-                const key = `${cn}_${ez}`;
-                if (!seen.has(key)) {
-                    seen.add(key);
-                    relations.push({ ZU: cn, EZ: ez });
-                    zuToEzMapGlobal.set(cn, ez);
-                }
-            }
-        });
-    }
-
-    if (relations.length > 0) {
-        await saveLocalUluRelations(relations);
-    }
-    return relations.length;
-}
-
-async function extractAndSaveEzFromFeatures(features) {
-    if (!features || !Array.isArray(features)) return;
-    const relations = [];
-
-    features.forEach(f => {
-        const cn = f.properties?.descr || f.properties?.options?.cad_num;
-        const ez = f.properties?.options?.uluParentCn || f.properties?.uluParentCn;
-        if (cn && ez && isPotentialEzNumber(ez)) {
-            relations.push({ ZU: cn, EZ: ez });
-            zuToEzMapGlobal.set(cn, ez);
-        }
-    });
-
-    if (relations.length > 0) {
-        await saveLocalUluRelations(relations);
-    }
-}
-
-
-async function fetchUluRelations(parcelCNs) {
-    if (!parcelCNs || parcelCNs.length === 0) return [];
-
-    // Убираем возможные дубликаты номеров
-    const uniqueCNs = Array.from(new Set(parcelCNs.filter(Boolean)));
-    
-    // 1. Сначала читаем из локальной IndexedDB
-    const localMatches = await getLocalUluRelations(uniqueCNs);
-    const foundLocallyZUs = new Set(localMatches.map(m => m.ZU));
-    
-    // Номера участков, которых еще нет в локальной базе
-    const missingCNs = uniqueCNs.filter(cn => !foundLocallyZUs.has(cn));
-
-    if (localMatches.length > 0) {
-        console.log(`[ЕЗП Анализ] Найдено в локальной БД: ${localMatches.length} из ${uniqueCNs.length}`);
-    }
-
-    // Если всё найдено локально — не тратим сетевые запросы
-    if (missingCNs.length === 0) {
-        return localMatches;
-    }
-
-    // 2. Запрашиваем из облака только недостающие участки
-    const MAX_CNS_PER_REQUEST = 200;
-    let remoteMatches = [];
+    const MAX_CNS_PER_REQUEST = 200; 
+    let allFetchedRelations = [];
+    let totalFetchedCount = 0;
 
     try {
-        console.log(`[ЕЗП Анализ] Запрос в Supabase недостающих участков (${missingCNs.length} шт.)...`);
-
-        if (missingCNs.length <= MAX_CNS_PER_REQUEST) {
+        if (parcelCNs.length <= MAX_CNS_PER_REQUEST) {
+            
+            console.log(`Fetching ULU relations for ${parcelCNs.length} parcels (single request)...`);
             const { data, error } = await supabaseClient
-                .from('EZ')
-                .select('EZ, ZU')
-                .in('ZU', missingCNs);
+                .from('EZ') 
+                .select('EZ, ZU') 
+                .in('ZU', parcelCNs);
 
-            if (!error && data) {
-                remoteMatches = data;
+            if (error) {
+                console.error('Supabase error fetching ULU relations (single request):', error);
+                throw error; 
             }
+            allFetchedRelations = data || [];
+            totalFetchedCount = allFetchedRelations.length;
+            console.log(`Fetched ${totalFetchedCount} ULU relations (single request).`);
+
         } else {
-            for (let i = 0; i < missingCNs.length; i += MAX_CNS_PER_REQUEST) {
-                const chunk = missingCNs.slice(i, i + MAX_CNS_PER_REQUEST);
+            
+            console.log(`Fetching ULU relations for ${parcelCNs.length} parcels in chunks of ${MAX_CNS_PER_REQUEST}...`);
+            for (let i = 0; i < parcelCNs.length; i += MAX_CNS_PER_REQUEST) {
+                const chunk = parcelCNs.slice(i, i + MAX_CNS_PER_REQUEST);
+                console.log(`Fetching ULU relations for chunk ${Math.floor(i / MAX_CNS_PER_REQUEST) + 1}/${Math.ceil(parcelCNs.length / MAX_CNS_PER_REQUEST)}, size: ${chunk.length}`);
+
                 const { data, error } = await supabaseClient
                     .from('EZ')
                     .select('EZ, ZU')
                     .in('ZU', chunk);
 
-                if (!error && data) {
-                    remoteMatches.push(...data);
+                if (error) {
+                    console.error(`Supabase error fetching ULU relations for chunk ${Math.floor(i / MAX_CNS_PER_REQUEST) + 1}:`, error);
+                    
+                    
+                    
+                    
+                } else if (data) {
+                    allFetchedRelations.push(...data);
+                    totalFetchedCount += data.length;
                 }
+                 
+                 
             }
+            console.log(`Fetched a total of ${totalFetchedCount} ULU relations from all chunks.`);
         }
-
-        // 3. Сохраняем вновь полученные связи в локальный архив
-        if (remoteMatches.length > 0) {
-            await saveLocalUluRelations(remoteMatches);
-        }
+        return allFetchedRelations;
 
     } catch (e) {
-        console.error('Ошибка при запросе связей ЕЗ из облака:', e);
+        
+        console.error('Exception during ULU relation fetching process:', e);
+        showNotification('Ошибка получения данных о ЕЗП из архива КПТ', 'error');
+        return []; 
     }
-
-    // Объединяем локальные данные и данные из облака
-    return [...localMatches, ...remoteMatches];
 }
+
 
 
 async function applyUluTheme() {
@@ -34079,15 +33836,12 @@ async function handleUpdatePanelWorkflow() {
             try {
                 const relations = await fetchUluRelations(cadNumbersToCheckEz);
                 if (relations && relations.length > 0) {
-                   relations.forEach(r => {
+                    relations.forEach(r => {
                         if (r.ZU && r.EZ) {
                             zuToEzMapGlobal.set(r.ZU, r.EZ);
                             ezFoundCount++;
                         }
                     });
-
-                    // Сохраняем связи в локальную БД
-                    await saveLocalUluRelations(relations);
 
                     // Обновляем полигоны и подсказки на карте
                     polygons.forEach(polygon => {
@@ -34213,16 +33967,12 @@ async function syncSidebarParcelsWithEz() {
             return;
         }
 
-      // Заполняем глобальную карту соответствий ЗУ -> ЕЗ
+        // Заполняем глобальную карту соответствий ЗУ -> ЕЗ
         relations.forEach(r => {
             if (r.ZU && r.EZ) {
                 zuToEzMapGlobal.set(r.ZU, r.EZ);
             }
         });
-
-        // Записываем полученные связи в локальный IndexedDB
-        await saveLocalUluRelations(relations);
-        await syncAllKnownEzRelations();
 
         // Обновляем свойства и всплывающие подсказки полигонов на карте
         polygons.forEach(polygon => {
@@ -35390,7 +35140,7 @@ async function populateSidebarWithFoundObjects(features, objectType) {
                 html += `<p style="font-size: 0.85em; color: ${descColor}; line-height: 1.3;">${thirdDesc}</p>`;
             }
             itemDiv.innerHTML = html;
-            itemDiv._searchStr = `${cadNumber} ${primaryDesc} ${secondaryDesc} ${thirdDesc || ''}`.toLowerCase();
+            itemDiv._searchStr = `${cadNumber} ${address} ${areaText} ${vri || ''}`.toLowerCase();
 
             const correspondingPolygon = polygons.find(p => {
                 if (!(p instanceof ymaps.Polygon)) return false;
