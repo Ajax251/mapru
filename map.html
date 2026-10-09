@@ -8542,6 +8542,19 @@ if (landCategoryLegendList) {
                 
 
 
+[
+    'google#map', 'google#map_sv', 'google#satellite', 'google#satellite_sv', 
+    'google#hybrid', 'google#hybrid_sv', 'osm#map'
+].forEach(function(key) {
+    const origFactory = ymaps.layer.storage.get(key);
+    if (origFactory) {
+        ymaps.layer.storage.add(key, function() {
+            const layer = origFactory();
+            layer.getZoomRange = function() { return ymaps.vow.resolve([0, 23]); };
+            return layer;
+        });
+    }
+});
                 
 
 
@@ -10498,6 +10511,291 @@ function checkMoOffset(currentCenterGeo, forceCheck = false, showForceSuccess = 
 };
 
 
+
+
+
+function findObjectsUnderCursor(lat, lon) {
+    if (typeof turf === 'undefined' || !lat || !lon) return [];
+    const clickPt = turf.point([lon, lat]);
+    const matched = [];
+    const seen = new Set();
+    const toleranceMeters = 12; 
+
+    const allCandidateObjects = new Set([...polygons, ...areaObjects]);
+    if (map && map.geoObjects) {
+        map.geoObjects.each(obj => allCandidateObjects.add(obj));
+    }
+
+    allCandidateObjects.forEach(obj => {
+        if (!obj || !obj.geometry) return;
+        if (obj.options && obj.options.get('visible') === false) return;
+
+        const props = obj.properties;
+        if (!props) return;
+
+        
+        if (props.get('isQuarterBoundary') || props.get('isSearchShape') || props.get('isMeasureTool')) return;
+        if (props.get('isVertexPoint') || props.get('isCoordLabel') || props.get('isGeomStatLabel')) return;
+        if (props.get('isDistanceSegmentLabel') || props.get('isZoneLabel')) return;
+        if (obj === geocoderPinkMarker || obj === mainMapCrosshair || obj === distanceLabel || obj === areaLabel) return;
+        if (typeof rectSelectionState !== 'undefined' && (obj === rectSelectionState.rectObject || obj === rectSelectionState.previewObject)) return;
+
+        if (obj instanceof ymaps.Placemark) {
+            if (obj.polygon) return;
+            const c = obj.geometry.getCoordinates();
+            if (c && ymaps.coordSystem.geo.getDistance([lat, lon], c) <= toleranceMeters) {
+                if (!seen.has(obj)) { seen.add(obj); matched.push(obj); }
+            }
+            return;
+        }
+
+        if (obj instanceof ymaps.Polygon) {
+            let isInside = false;
+            try {
+                const rawCoords = obj.geometry.getCoordinates();
+                
+                const polys = (rawCoords && Array.isArray(rawCoords[0]) && Array.isArray(rawCoords[0][0]) && typeof rawCoords[0][0][0] === 'number') 
+                    ? [rawCoords] 
+                    : (Array.isArray(rawCoords[0]) && typeof rawCoords[0][0] === 'number' ? [[rawCoords]] : rawCoords);
+
+                for (const polyRings of polys) {
+                    if (!polyRings || !polyRings[0] || polyRings[0].length < 3) continue;
+                    const turfRings = polyRings.map(ring => {
+                        const r = ring.map(c => [c[1], c[0]]);
+                        const f = r[0], l = r[r.length - 1];
+                        if (Math.abs(f[0] - l[0]) > 1e-9 || Math.abs(f[1] - l[1]) > 1e-9) r.push([...f]);
+                        return r;
+                    }).filter(r => r.length >= 4);
+
+                    if (turfRings.length > 0 && turf.booleanPointInPolygon(clickPt, turf.polygon(turfRings))) {
+                        isInside = true;
+                        break;
+                    }
+                }
+            } catch (err) {}
+
+            if (isInside && !seen.has(obj)) {
+                seen.add(obj);
+                matched.push(obj);
+            }
+        } else if (obj instanceof ymaps.Polyline) {
+            try {
+                const coords = obj.geometry.getCoordinates();
+                if (coords && coords.length >= 2) {
+                    const tLine = turf.lineString(coords.map(c => [c[1], c[0]]));
+                    if (turf.pointToLineDistance(clickPt, tLine, { units: 'meters' }) <= toleranceMeters) {
+                        if (!seen.has(obj)) { seen.add(obj); matched.push(obj); }
+                    }
+                }
+            } catch (err) {}
+        }
+    });
+
+    return matched;
+}
+
+
+function getObjectMetaForPicker(obj, index) {
+    const p = obj.properties || new ymaps.data.Manager();
+    const f = p.get('featureData') || {};
+    const opts = f.properties?.options || {};
+
+    let type = 'Земельный участок';
+    let badgeColor = '#10b981';
+    let iconClass = 'fa-vector-square';
+
+    const isManual = p.get('isManuallyDrawn') || p.get('isFromCoordInput') || p.get('isAreaMeasurement') || p.get('isDrawableLine');
+    const isBuilding = p.get('isBuilding') || f.properties?.category === 36369 || f.properties?.categoryName === 'Здания';
+    const isStructure = p.get('isStructure') || f.properties?.category === 36383 || f.properties?.categoryName === 'Сооружения';
+    const isZouit = p.get('isZouit') || [36940, 36315, 36281, 36278, 36314].includes(f.properties?.category) || p.get('zoneType');
+
+    if (isBuilding) {
+        type = 'Здание (ОКС)';
+        badgeColor = '#0284c7';
+        iconClass = 'fa-building';
+    } else if (isStructure) {
+        type = 'Сооружение';
+        badgeColor = '#ea580c';
+        iconClass = 'fa-project-diagram';
+    } else if (isZouit) {
+        type = 'ЗОУИТ / Зона';
+        badgeColor = '#9333ea';
+        iconClass = 'fa-shield-alt';
+    } else if (obj instanceof ymaps.Polyline) {
+        type = 'Линейный объект';
+        badgeColor = '#d946ef';
+        iconClass = 'fa-ruler';
+    } else if (isManual) {
+        type = 'Нанесенный контур';
+        badgeColor = '#6366f1';
+        iconClass = 'fa-pencil-alt';
+    }
+
+    let title = p.get('cadastralNumber') || opts.cad_num || opts.cad_number || opts.reg_numb_border || f.properties?.descr;
+    if (!title) {
+        const hint = p.get('hintContent');
+        if (typeof hint === 'object' && hint?.cadastralNumber) title = hint.cadastralNumber;
+        else if (typeof hint === 'string') title = hint.replace(/<[^>]*>?/gm, '').trim();
+    }
+    if (!title) {
+        title = (obj instanceof ymaps.Polygon) ? `Полигон ${index + 1}` : `Линия ${index + 1}`;
+    }
+
+    let subtitle = opts.readable_address || opts.address_readable_address || opts.name_by_doc || opts.purpose || opts.name || '';
+    if (!subtitle && (obj instanceof ymaps.Polygon || obj instanceof ymaps.Polyline)) {
+        const stats = calculatePreciseGeometry(obj);
+        if (obj instanceof ymaps.Polygon && stats.area > 0) {
+            subtitle = `Площадь: ~${Math.round(stats.area).toLocaleString('ru-RU')} м²`;
+        } else if (stats.perimeter > 0) {
+            subtitle = `Длина: ~${Math.round(stats.perimeter).toLocaleString('ru-RU')} м`;
+        }
+    }
+
+    return { title, subtitle, type, badgeColor, iconClass, isManual, featureData: f };
+}
+
+
+function handleObjectSelectionAction(obj, clientX, clientY) {
+    const p = obj.properties || new ymaps.data.Manager();
+    const featureData = p.get('featureData');
+    const isManual = p.get('isManuallyDrawn') || p.get('isFromCoordInput') || p.get('isAreaMeasurement') || p.get('isDrawableLine');
+
+    if (featureData && !isManual) {
+        showDashboardPopover(featureData, clientX, clientY);
+    } else {
+        openColorEditorModal(obj);
+    }
+}
+
+
+function showObjectPickerModal(candidates, clientX, clientY) {
+    const existing = document.getElementById('object-picker-modal');
+    if (existing) existing.remove();
+
+    const overlay = document.createElement('div');
+    overlay.id = 'object-picker-modal';
+    
+    overlay.style.cssText = `
+        position: fixed; inset: 0; background: rgba(15, 23, 42, 0.35);
+        backdrop-filter: none; -webkit-backdrop-filter: none;
+        z-index: 20050; display: flex; align-items: center; justify-content: center;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    `;
+
+    const itemsHtml = candidates.map((obj, i) => {
+        const meta = getObjectMetaForPicker(obj, i);
+        return `
+         <div class="obj-picker-item" data-index="${i}" style="
+                display: flex; align-items: center; justify-content: space-between; gap: 12px;
+                padding: 10px 14px; background: #f8fafc; border: 1.5px solid #e2e8f0;
+                border-radius: 10px; cursor: pointer; transition: all 0.2s ease; box-sizing: border-box;
+            ">
+                <div style="display: flex; flex-direction: column; gap: 3px; overflow: hidden; text-align: left; flex: 1; min-width: 0;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span style="font-size: 0.75rem; font-weight: 700; color: ${meta.badgeColor}; background: ${meta.badgeColor}18; border: 1px solid ${meta.badgeColor}35; padding: 2px 7px; border-radius: 5px; white-space: nowrap;">
+                            <i class="fas ${meta.iconClass}"></i> ${meta.type}
+                        </span>
+                        <strong style="color: #1e293b; font-size: 0.95rem; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;">${meta.title}</strong>
+                    </div>
+                    ${meta.subtitle ? `<span style="font-size: 0.8rem; color: #64748b; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; padding-left: 2px;">${meta.subtitle}</span>` : ''}
+                </div>
+                <i class="fas fa-chevron-right" style="color: #94a3b8; font-size: 0.85rem; flex-shrink: 0;"></i>
+            </div>
+        `;
+    }).join('');
+
+    overlay.innerHTML = `
+        <div style="
+            background: #ffffff; border-radius: 16px; box-shadow: 0 20px 45px rgba(0,0,0,0.25);
+            width: 440px; max-width: 92vw; padding: 20px 22px; display: flex; flex-direction: column; gap: 14px;
+            animation: zoomInPhoto 0.2s cubic-bezier(0.175, 0.885, 0.32, 1.275);
+        ">
+            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #f1f5f9; padding-bottom: 10px;">
+                <h3 style="margin: 0; color: #1e3a8a; font-size: 1.15rem; font-weight: 700;">
+                    <i class="fas fa-layer-group" style="color: #3b82f6; margin-right: 6px;"></i> Объекты в точке (${candidates.length})
+                </h3>
+                <button id="close-picker-btn" style="background: none; border: none; font-size: 22px; color: #94a3b8; cursor: pointer; line-height: 1;" onmouseover="this.style.color='#ef4444'" onmouseout="this.style.color='#94a3b8'">&times;</button>
+            </div>
+         <div style="display: flex; flex-direction: column; gap: 8px; max-height: 55vh; overflow-y: auto; overflow-x: hidden; padding-right: 2px; box-sizing: border-box;">
+                ${itemsHtml}
+            </div>
+        </div>
+    `;
+
+    document.body.appendChild(overlay);
+
+    let activeHoveredObj = null;
+    let savedObjStyle = null;
+
+    const restoreHighlight = () => {
+        if (activeHoveredObj && savedObjStyle) {
+            activeHoveredObj.options.set(savedObjStyle);
+            activeHoveredObj = null;
+            savedObjStyle = null;
+        }
+    };
+
+    const closeModal = () => {
+        restoreHighlight();
+        overlay.remove();
+    };
+
+    overlay.querySelector('#close-picker-btn').onclick = (e) => {
+        e.stopPropagation();
+        closeModal();
+    };
+    overlay.onclick = (e) => {
+        if (e.target === overlay) {
+            e.stopPropagation();
+            closeModal();
+        }
+    };
+
+    overlay.querySelectorAll('.obj-picker-item').forEach(el => {
+        const idx = parseInt(el.dataset.index, 10);
+        const targetObj = candidates[idx];
+
+        el.onmouseenter = () => {
+          el.style.background = '#eff6ff';
+            el.style.borderColor = '#93c5fd';
+
+            restoreHighlight();
+            activeHoveredObj = targetObj;
+            savedObjStyle = {
+                strokeColor: targetObj.options.get('strokeColor'),
+                strokeWidth: targetObj.options.get('strokeWidth'),
+                fillColor: targetObj.options.get('fillColor'),
+                zIndex: targetObj.options.get('zIndex')
+            };
+
+            targetObj.options.set({
+                strokeColor: '#ff0000',
+                strokeWidth: (savedObjStyle.strokeWidth || 2) + 3,
+                fillColor: '#ff000044',
+                zIndex: 9999
+            });
+        };
+
+        el.onmouseleave = () => {
+            el.style.background = '#f8fafc';
+            el.style.borderColor = '#e2e8f0';
+            el.style.transform = 'none';
+            restoreHighlight();
+        };
+
+        el.onclick = (e) => {
+            e.stopPropagation(); 
+            e.preventDefault();
+            closeModal();
+
+            
+            setTimeout(() => {
+                handleObjectSelectionAction(targetObj, clientX, clientY);
+            }, 50);
+        };
+    });
+}
+
 function initMap() {
     
     const savedCenterStr = localStorage.getItem('mapCenter');
@@ -10515,6 +10813,19 @@ function initMap() {
         
     });
     
+    
+    map.options.set({
+    maxZoom: 23,
+    minZoom: 0
+});
+
+if (map.behaviors.get('scrollZoom')) {
+    map.behaviors.get('scrollZoom').options.set({
+        maximumZoom: 23,
+        smooth: false 
+    });
+}
+
        map.behaviors.enable('rightMouseButtonMagnifier'); 
 
     
@@ -10820,8 +11131,11 @@ map.events.add('click', function (e) {
         if (selectedPlacemark) {
             selectedPlacemark = null;
         }
-        hideDashboardPopover(); 
+        hideDashboardPopover();
+        
     });
+
+
 
     map.geoObjects.events.add('dragstart', function (e) {
         const target = e.get('target');
@@ -10842,38 +11156,97 @@ map.events.add('click', function (e) {
 
  
 
+ 
     map.geoObjects.events.add('dblclick', function(e) {
-        const target = e.get('target');
+        if (measureState.mode || lineDrawingActive || (typeof rectSelectionState !== 'undefined' && rectSelectionState.active) || bindingState !== 0) return;
+
         
+        let coords = e.get('coords');
+        const domEvent = e.get('domEvent') ? (e.get('domEvent').originalEvent || e.get('domEvent')) : {};
+        const pageX = domEvent.clientX || domEvent.pageX || (window.innerWidth / 2);
+        const pageY = domEvent.clientY || domEvent.pageY || (window.innerHeight / 2);
+
+        if (!coords && map && domEvent.pageX !== undefined) {
+            try {
+                const globalPx = map.converter.pageToGlobal([domEvent.pageX, domEvent.pageY]);
+                coords = map.options.get('projection').fromGlobalPixels(globalPx, map.getZoom());
+            } catch (err) {}
+        }
+        if (!coords && currentMouseMapCoords) {
+            coords = currentMouseMapCoords;
+        }
+
+        
+        if (coords) {
+            const candidates = findObjectsUnderCursor(coords[0], coords[1]);
+            if (candidates.length > 1) {
+                e.preventDefault();
+                if (map.balloon) map.balloon.close();
+                if (map.hint) map.hint.close(true);
+                showObjectPickerModal(candidates, pageX, pageY);
+                return;
+            }
+        }
+
+        
+        const target = e.get('target');
         if (!target) {
             hideDashboardPopover();
             return;
         }
 
-        
         let targetObject = target;
         if (target instanceof ymaps.Placemark && target.polygon) {
             targetObject = target.polygon;
         }
 
-        const featureData = targetObject.properties.get('featureData');
-
+        const featureData = targetObject.properties?.get('featureData');
         if (featureData) {
-            e.preventDefault(); 
-            
-            
+            e.preventDefault();
             if (map.balloon) map.balloon.close();
-            if (map.hint) map.hint.close(true); 
-            
-            
-            const domEvent = e.get('domEvent').originalEvent;
-            const pageX = domEvent.clientX;
-            const pageY = domEvent.clientY;
-            
+            if (map.hint) map.hint.close(true);
             showDashboardPopover(featureData, pageX, pageY);
         }
     });
 
+    
+    map.events.add('dblclick', function (e) {
+        if (measureState.mode || lineDrawingActive || (typeof rectSelectionState !== 'undefined' && rectSelectionState.active) || bindingState !== 0) return;
+
+        const coords = e.get('coords');
+        if (!coords) return;
+
+        const domEvent = e.get('domEvent') ? (e.get('domEvent').originalEvent || e.get('domEvent')) : {};
+        const pageX = domEvent.clientX || (window.innerWidth / 2);
+        const pageY = domEvent.clientY || (window.innerHeight / 2);
+
+        
+        const candidates = findObjectsUnderCursor(coords[0], coords[1]);
+        if (candidates.length > 1) {
+            e.preventDefault();
+            if (map.balloon) map.balloon.close();
+            if (map.hint) map.hint.close(true);
+            showObjectPickerModal(candidates, pageX, pageY);
+            return;
+        } else if (candidates.length === 1) {
+            e.preventDefault();
+            if (map.balloon) map.balloon.close();
+            if (map.hint) map.hint.close(true);
+            handleObjectSelectionAction(candidates[0], pageX, pageY);
+            return;
+        }
+
+        
+        ymaps.geocode(coords).then(function (result) { 
+            const firstGeoObject = result.geoObjects.get(0);
+            if (firstGeoObject) {
+                const address = firstGeoObject.getAddressLine();
+                document.getElementById('city-name-display').innerHTML = address;
+            } else {
+                document.getElementById('city-name-display').innerHTML = 'Адрес не найден';
+            }
+        });
+    });
   
 
     map.geoObjects.events.add('click', function(e) {
@@ -10942,18 +11315,6 @@ map.events.add('click', function (e) {
         }
     });
 
-map.events.add('dblclick', function (e) {
-        const coords = e.get('coords');
-        ymaps.geocode(coords).then(function (result) { 
-            const firstGeoObject = result.geoObjects.get(0);
-            if (firstGeoObject) {
-                const address = firstGeoObject.getAddressLine();
-                document.getElementById('city-name-display').innerHTML = address;
-            } else {
-                document.getElementById('city-name-display').innerHTML = 'Адрес не найден';
-            }
-        });
-    });
 
     
     const contextMenu = document.createElement('div');
@@ -18228,12 +18589,13 @@ function initDashboardPopover() {
 
     document.body.addEventListener('click', (e) => {
         
+        if (e.target.closest('#object-picker-modal')) return;
+
         if (!e.target.closest('.bd-item') && !e.target.closest('#dashboard-popover') && !e.target.closest('#map')) {
             hideDashboardPopover();
         }
     });
 }
-
 function determineFeatureType(feature) {
     if (!feature || !feature.properties) return null;
     const p = feature.properties;
@@ -19961,26 +20323,68 @@ if (filterMapBtn && filterMapBtn.classList.contains('active')) {
     itemDiv.dataset.ez = parentEz.toLowerCase();
     itemDiv._searchStr = `${cadNumber} ${address} ${areaText} ${vri || ''} ${parentEz ? 'единое землепользование ' + parentEz : ''}`.toLowerCase();
 
-             const correspondingPolygon = polygons.find(p =>
-                 p instanceof ymaps.Polygon &&
-                 p.properties?.get('cadastralNumber') === cadNumber &&
-                 (p.properties?.get('isParcelInQuarter') === true || p.properties?.get('isFoundInArea') === true)
-             );
+           
+             const targetCn = cadNumber.trim().toLowerCase();
+             const correspondingPolygon = polygons.find(p => {
+                 if (!(p instanceof ymaps.Polygon)) return false;
+                 const pCn = String(p.properties?.get('cadastralNumber') || '').trim().toLowerCase();
+                 const fCn = String(p.properties?.get('featureData')?.properties?.descr || p.properties?.get('featureData')?.properties?.options?.cad_num || '').trim().toLowerCase();
+                 return (pCn && pCn === targetCn) || (fCn && fCn === targetCn);
+             });
 
-             if (correspondingPolygon) {
-                 itemDiv.addEventListener('dblclick', () => {
-                      if (map) {
-                         try {
-                             const bounds = correspondingPolygon.geometry.getBounds();
-                             if (bounds) map.setBounds(bounds, { checkZoomRange: true, duration: 500 });
-                             
-                             const oldFill = correspondingPolygon.options.get('fillColor');
-                             correspondingPolygon.options.set('fillColor', '#FFFF0080');
-                             setTimeout(() => correspondingPolygon.options.set('fillColor', oldFill), 1500);
-                         } catch (e) {}
+             const focusOnPolygon = (zoomToBounds = false) => {
+                 if (!correspondingPolygon || !map) return;
+                 try {
+                     const bounds = correspondingPolygon.geometry.getBounds();
+                     if (bounds && bounds[0] && bounds[1]) {
+                         const latPadding = Math.max((bounds[1][0] - bounds[0][0]) * 0.25, 0.0005);
+                         const lonPadding = Math.max((bounds[1][1] - bounds[0][1]) * 0.25, 0.0005);
+                         const paddedBounds = [
+                             [bounds[0][0] - latPadding, bounds[0][1] - lonPadding],
+                             [bounds[1][0] + latPadding, bounds[1][1] + lonPadding]
+                         ];
+
+                         if (zoomToBounds) {
+                             map.setBounds(paddedBounds, { checkZoomRange: true, duration: 400 });
+                         } else {
+                             const center = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
+                             map.panTo(center, { duration: 300 });
+                         }
+
+                         const oldFill = correspondingPolygon.options.get('fillColor');
+                         const oldStroke = correspondingPolygon.options.get('strokeColor');
+                         const oldZIndex = correspondingPolygon.options.get('zIndex') || 0;
+
+                         correspondingPolygon.options.set({
+                             fillColor: '#FFFF0080',
+                             strokeColor: '#FF0000',
+                             zIndex: 2000
+                         });
+
+                         setTimeout(() => {
+                             correspondingPolygon.options.set({
+                                 fillColor: oldFill,
+                                 strokeColor: oldStroke,
+                                 zIndex: oldZIndex
+                             });
+                         }, 1400);
                      }
-                 });
-             }
+                 } catch (e) {
+                     console.error("Ошибка при фокусировке на объекте:", e);
+                 }
+             };
+
+             
+             itemDiv.addEventListener('click', () => {
+                 contentDiv.querySelectorAll('.sidebar-item').forEach(el => el.style.borderLeft = '1px solid #f1f5f9');
+                 itemDiv.style.borderLeft = '4px solid #3b82f6';
+                 focusOnPolygon(false);
+             });
+
+             
+             itemDiv.addEventListener('dblclick', () => {
+                 focusOnPolygon(true);
+             });
              contentDiv.appendChild(itemDiv);
          });
 
@@ -25057,8 +25461,18 @@ function handleMapJsonImport(event) {
                         
                         ymapsObj.properties.set('isImported', true);
                         ymapsObj.options.set('visible', true);
+                        
+                   
+                 
 
                         map.geoObjects.add(ymapsObj);
+                        
+                        
+                           const importedCn = props.cadastralNumber || props.descr || props.options?.cad_num || props.options?.cad_number || f.properties?.descr;
+                    if (importedCn) {
+                        ymapsObj.properties.set('cadastralNumber', importedCn);
+                    }
+                    
                         if (flags.isAreaMeasurement) areaObjects.push(ymapsObj);
                         else polygons.push(ymapsObj);
 
