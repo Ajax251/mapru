@@ -1004,7 +1004,7 @@ input:checked + .slider:before {
 .table-container.manual-width table {
     table-layout: fixed;
     width: max-content;
-    min-width: 100%;
+    min-width: auto; 
 }
 
 .table-container.manual-width th:not(.row-number),
@@ -1841,7 +1841,7 @@ input:checked + .slider:before {
             
         </div>
         
-        <input type="file" id="file-input" accept=".csv,.txt,.xlsx">
+        <input type="file" id="file-input" accept=".csv,.txt,.xls,.xlsx">
         
         <div class="table-wrapper">
             <div class="empty-state" id="empty-state">
@@ -2105,6 +2105,63 @@ input:checked + .slider:before {
         </div>
     </div>
     
+    
+    
+<div class="dialog" id="limit-dialog" style="display: none; width: 340px;">
+    <div class="dialog-header">📏 Лимит ширины столбцов</div>
+    <div class="dialog-body">
+        <div class="form-group">
+            <label>Максимум символов для столбца:</label>
+            <input type="number" id="limit-input" min="5" max="300" step="1" value="50">
+            <small style="color: var(--text-secondary); display: block; margin-top: 6px; font-size: 11px; line-height: 1.4;">
+                Столбцы ужимаются под реальный размер текста и не будут шире указанного максимума.
+            </small>
+        </div>
+    </div>
+    <div class="dialog-footer">
+        <button class="dialog-btn dialog-btn-secondary" id="limit-cancel">Отмена</button>
+        <button class="dialog-btn dialog-btn-primary" id="limit-confirm">Применить</button>
+    </div>
+</div>
+    
+    
+<div class="dialog" id="multifilter-dialog" style="display: none; width: 440px;">
+    <div class="dialog-header">🔍 Мультифильтр</div>
+    <div class="dialog-body">
+        <div class="form-group">
+            <label>Столбцы для фильтрации:</label>
+            <div id="multifilter-cols-list" style="max-height: 130px; overflow-y: auto; border: 1px solid var(--border-color); border-radius: 8px; padding: 8px; display: flex; flex-direction: column; gap: 6px; background: var(--bg-secondary);"></div>
+        </div>
+ <div class="form-group" style="display: flex; gap: 16px; align-items: center; flex-wrap: wrap;">
+    <div>
+        <label>Тип фильтрации:</label>
+        <div style="display: flex; gap: 10px; margin-top: 4px; flex-wrap: wrap;">
+            <label class="form-radio"><input type="radio" name="multifilter-type" value="include" checked> Содержит</label>
+            <label class="form-radio"><input type="radio" name="multifilter-type" value="exclude"> Исключить</label>
+            <label class="form-radio"><input type="radio" name="multifilter-type" value="greater"> Больше (&gt;)</label>
+            <label class="form-radio"><input type="radio" name="multifilter-type" value="less"> Меньше (&lt;)</label>
+        </div>
+    </div>
+    <div style="margin-top: 18px;" id="multifilter-substring-wrapper">
+        <label class="form-checkbox">
+            <input type="checkbox" id="multifilter-substring" checked>
+            Часть текста
+        </label>
+    </div>
+</div>
+        <div class="form-group">
+            <label>Список значений (каждое значение с новой строки):</label>
+            <textarea id="multifilter-values" class="ai-textarea" style="min-height: 120px;" placeholder="текст1&#10;текст2&#10;текст3..."></textarea>
+        </div>
+    </div>
+    <div class="dialog-footer">
+        <button class="dialog-btn dialog-btn-secondary" id="multifilter-reset">Сбросить</button>
+        <button class="dialog-btn dialog-btn-secondary" id="multifilter-cancel">Отмена</button>
+        <button class="dialog-btn dialog-btn-primary" id="multifilter-apply">Применить</button>
+    </div>
+</div>
+
+    
     <div class="resize-line" id="resize-line"></div>
     
     <div class="context-menu" id="context-menu"></div>
@@ -2221,7 +2278,12 @@ input:checked + .slider:before {
         var currentFileSize = null;
         var workbook = null;
         var modified = false;
-        var autoSizeEnabled = true;
+       
+       var autoSizeMode = localStorage.getItem('autoSizeMode') || 'auto';
+var maxCharsLimit = parseInt(localStorage.getItem('maxCharsLimit')) || 50;
+
+var activeMultiFilter = null; 
+
         var columnWidths = {};
         var isResizing = false;
         var resizingColumn = null;
@@ -2259,6 +2321,168 @@ input:checked + .slider:before {
         
         
         
+function excelSerialToDateStr(serial) {
+    var n = parseFloat(serial);
+    if (isNaN(n)) return serial;
+    
+    var epoch = new Date(Date.UTC(1899, 11, 30));
+    var targetDate = new Date(epoch.getTime() + Math.round(n * 86400000));
+    if (isNaN(targetDate.getTime())) return serial;
+    
+    var day = String(targetDate.getUTCDate()).padStart(2, '0');
+    var month = String(targetDate.getUTCMonth() + 1).padStart(2, '0');
+    var year = targetDate.getUTCFullYear();
+    return day + '.' + month + '.' + year;
+}
+
+
+
+
+function parseComparable(val) {
+    if (val === null || val === undefined) return null;
+    var s = String(val).trim();
+    if (s === '') return null;
+
+    
+    var dMatch = s.match(/^(\d{1,2})[\.\/](\d{1,2})[\.\/](\d{2,4})$/);
+    if (dMatch) {
+        var day = parseInt(dMatch[1], 10);
+        var month = parseInt(dMatch[2], 10);
+        var year = parseInt(dMatch[3], 10);
+        if (year < 100) year += (year < 50 ? 2000 : 1900);
+        if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+            return { type: 'date', val: Date.UTC(year, month - 1, day) };
+        }
+    }
+
+    
+    var isoMatch = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+    if (isoMatch) {
+        var y = parseInt(isoMatch[1], 10);
+        var m = parseInt(isoMatch[2], 10);
+        var d = parseInt(isoMatch[3], 10);
+        return { type: 'date', val: Date.UTC(y, m - 1, d) };
+    }
+
+    
+    var numStr = s.replace(/\s+/g, '').replace(',', '.');
+    if (/^-?\d+(\.\d+)?$/.test(numStr)) {
+        return { type: 'number', val: parseFloat(numStr) };
+    }
+
+    return { type: 'string', val: s.toLowerCase() };
+}
+
+
+function compareValues(cellComp, targetComp, op) {
+    if (!cellComp || !targetComp) return false;
+    if (cellComp.type !== targetComp.type) return false; 
+
+    var v1 = cellComp.val;
+    var v2 = targetComp.val;
+
+    if (op === '>') return v1 > v2;
+    if (op === '<') return v1 < v2;
+    if (op === '>=') return v1 >= v2;
+    if (op === '<=') return v1 <= v2;
+    if (op === '=') return v1 === v2;
+    return false;
+}
+
+
+
+function formatDateString(str) {
+    if (!str || typeof str !== 'string') return str;
+    var s = str.trim();
+
+    
+    var jsDateMatch = s.match(/^[A-Za-z]{3}\s+([A-Za-z]{3})\s+(\d{1,2})\s+(\d{4})/);
+    if (jsDateMatch) {
+        var months = {
+            jan: '01', feb: '02', mar: '03', apr: '04', may: '05', jun: '06',
+            jul: '07', aug: '08', sep: '09', oct: '10', nov: '11', dec: '12'
+        };
+        var mStr = jsDateMatch[1].toLowerCase();
+        if (months[mStr]) {
+            var day = String(jsDateMatch[2]).padStart(2, '0');
+            var month = months[mStr];
+            var year = jsDateMatch[3];
+            return day + '.' + month + '.' + year;
+        }
+    }
+
+    
+    var isoMatch = s.match(/^(\d{4})[\/\-](\d{1,2})[\/\-](\d{1,2})/);
+    if (isoMatch) {
+        var y = isoMatch[1];
+        var m = String(isoMatch[2]).padStart(2, '0');
+        var d = String(isoMatch[3]).padStart(2, '0');
+        return d + '.' + m + '.' + y;
+    }
+
+    
+    var match = s.match(/^(\d{1,2})[\/\-\.](\d{1,2})[\/\-\.](\d{2,4})/);
+    if (match) {
+        var p1 = parseInt(match[1], 10);
+        var p2 = parseInt(match[2], 10);
+        var y = parseInt(match[3], 10);
+
+        if (y < 100) {
+            y += (y < 50 ? 2000 : 1900);
+        }
+
+        var day, month;
+        if (p2 > 12) {
+            month = p1;
+            day = p2;
+        } else if (p1 > 12) {
+            day = p1;
+            month = p2;
+        } else {
+            day = p1;
+            month = p2;
+        }
+
+        if (month >= 1 && month <= 12 && day >= 1 && day <= 31) {
+            return String(day).padStart(2, '0') + '.' + String(month).padStart(2, '0') + '.' + y;
+        }
+    }
+
+    return str;
+}
+
+function normalizeCellValue(val, colHeader) {
+    if (val === null || val === undefined) return '';
+
+    
+    if (val instanceof Date) {
+        if (isNaN(val.getTime())) return '';
+        var d = String(val.getDate()).padStart(2, '0');
+        var m = String(val.getMonth() + 1).padStart(2, '0');
+        return d + '.' + m + '.' + val.getFullYear();
+    }
+
+    var str = String(val).trim();
+    var isDateCol = colHeader && /дата|date/i.test(colHeader);
+
+    
+    if (isDateCol && /^-?\d+(\.\d+)?$/.test(str)) {
+        var num = parseFloat(str);
+        if (num >= -50000 && num <= 80000) {
+            return excelSerialToDateStr(num);
+        }
+    }
+
+    
+    if (isDateCol || /^[A-Za-z]{3}\s+[A-Za-z]{3}/.test(str) || /^(\d{1,2})[\/\-](\d{1,2})[\/\-](\d{2,4})/.test(str)) {
+        return formatDateString(str);
+    }
+
+    return str;
+}
+        
+        
+        
 (function() {
     var filter = document.getElementById('filter-input');
     
@@ -2293,10 +2517,7 @@ input:checked + .slider:before {
 
         
         
-        if (!autoSizeEnabled && Object.keys(columnWidths).length === 0) {
-            autoSizeEnabled = true;
-            localStorage.setItem('autoSizeEnabled', 'true');
-        }
+     
 
         function showLoader(text, details) {
             loaderText.textContent = text || 'Загрузка...';
@@ -2714,7 +2935,17 @@ input:checked + .slider:before {
             reader.onload = function(e) {
                 try {
                     updateLoader('Парсинг данных...', 30);
-                    workbook = XLSX.read(e.target.result, { type: 'array' });
+                    
+                    
+if (window.XLSX && XLSX.SSF) {
+    XLSX.SSF._table[14] = 'dd.mm.yyyy';
+    XLSX.SSF._table[15] = 'dd.mm.yyyy';
+    XLSX.SSF._table[16] = 'dd.mm.yyyy';
+    XLSX.SSF._table[17] = 'dd.mm.yyyy';
+    XLSX.SSF._table[22] = 'dd.mm.yyyy hh:mm';
+}
+
+                 workbook = XLSX.read(e.target.result, { type: 'array', cellDates: true });
                     
                     sheetSelector.innerHTML = '';
                     for (var i = 0; i < workbook.SheetNames.length; i++) {
@@ -2842,7 +3073,7 @@ input:checked + .slider:before {
             updateLoader('Загрузка листа: ' + sheetName, 50);
             
             var worksheet = workbook.Sheets[sheetName];
-            var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '' });
+            var jsonData = XLSX.utils.sheet_to_json(worksheet, { header: 1, defval: '', raw: false, dateNF: 'dd.mm.yyyy' });
             
             if (jsonData.length === 0) {
                 hideLoader();
@@ -2894,14 +3125,15 @@ input:checked + .slider:before {
             function processChunk() {
                 var end = Math.min(index + CHUNK_SIZE, rows.length);
                 
-                for (var i = index; i < end; i++) {
-                    var row = rows[i];
-                    var filledRow = [];
-                    for (var j = 0; j < headers.length; j++) {
-                        filledRow.push(row[j] !== undefined ? String(row[j]) : '');
-                    }
-                    allData.push(filledRow);
-                }
+              for (var i = index; i < end; i++) {
+    var row = rows[i];
+    var filledRow = [];
+    for (var j = 0; j < headers.length; j++) {
+        var rawVal = row[j] !== undefined ? row[j] : '';
+        filledRow.push(normalizeCellValue(rawVal, headers[j]));
+    }
+    allData.push(filledRow);
+}
                 
                 index = end;
                 var progress = Math.round((index / total) * 100);
@@ -3157,6 +3389,11 @@ input:checked + .slider:before {
                 for (var i = index; i < end; i++) {
                     if (!lines[i].trim()) continue;
                     var row = parseCSVLine(lines[i], separator);
+                    
+                    for (var colIdx = 0; colIdx < headers.length; colIdx++) {
+    row[colIdx] = normalizeCellValue(row[colIdx], headers[colIdx]);
+}
+                    
                     while (row.length < headers.length) row.push('');
                     allData.push(row);
                 }
@@ -3177,6 +3414,9 @@ input:checked + .slider:before {
 
         function resetFiltersAndSort() {
             activeFilters = {};
+            
+            activeMultiFilter = null;
+            
             sortState = { column: null, direction: null };
             hiddenColumns.clear();
             filteredIndices = [];
@@ -3203,25 +3443,117 @@ input:checked + .slider:before {
                 var row = allData[i];
                 var visible = true;
                 
-                for (var colIndex in activeFilters) {
-                    var allowedValues = activeFilters[colIndex];
-                    if (allowedValues.length === 0) {
-                        visible = false;
-                        break;
-                    }
-                    var found = false;
-                    for (var v = 0; v < allowedValues.length; v++) {
-                        if (allowedValues[v] === row[colIndex]) {
-                            found = true;
-                            break;
-                        }
-                    }
-                    if (!found) {
-                        visible = false;
-                        break;
-                    }
-                }
+              for (var colIndex in activeFilters) {
+    var filterDef = activeFilters[colIndex];
+
+    
+    if (filterDef && filterDef.type === 'condition') {
+        var cellComp = parseComparable(row[colIndex]);
+        if (!cellComp) {
+            visible = false;
+            break;
+        }
+
+        if (filterDef.op === 'between') {
+            var ok1 = filterDef.comp1 ? compareValues(cellComp, filterDef.comp1, '>=') : true;
+            var ok2 = filterDef.comp2 ? compareValues(cellComp, filterDef.comp2, '<=') : true;
+            if (!ok1 || !ok2) {
+                visible = false;
+                break;
+            }
+        } else {
+            if (!compareValues(cellComp, filterDef.comp, filterDef.op)) {
+                visible = false;
+                break;
+            }
+        }
+    } 
+    
+    else if (Array.isArray(filterDef)) {
+        if (filterDef.length === 0) {
+            visible = false;
+            break;
+        }
+        var found = false;
+        for (var v = 0; v < filterDef.length; v++) {
+            if (filterDef[v] === row[colIndex]) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            visible = false;
+            break;
+        }
+    }
+}
                 
+                
+            
+if (visible && activeMultiFilter && activeMultiFilter.values.length > 0 && activeMultiFilter.cols.length > 0) {
+    var hasMatch = false;
+
+    
+    var parsedConditions = [];
+    for (var vi = 0; vi < activeMultiFilter.values.length; vi++) {
+        var rawLine = activeMultiFilter.values[vi];
+        var op = null;
+        var cleanVal = rawLine;
+
+        
+        if (/^>=/.test(rawLine)) { op = '>='; cleanVal = rawLine.substring(2).trim(); }
+        else if (/^<=/.test(rawLine)) { op = '<='; cleanVal = rawLine.substring(2).trim(); }
+        else if (/^>/.test(rawLine)) { op = '>'; cleanVal = rawLine.substring(1).trim(); }
+        else if (/^</.test(rawLine)) { op = '<'; cleanVal = rawLine.substring(1).trim(); }
+        else if (activeMultiFilter.type === 'greater') { op = '>'; }
+        else if (activeMultiFilter.type === 'less') { op = '<'; }
+
+        parsedConditions.push({
+            op: op,
+            comp: parseComparable(cleanVal),
+            text: cleanVal.toLowerCase()
+        });
+    }
+
+    for (var mci = 0; mci < activeMultiFilter.cols.length; mci++) {
+        var colIndexToCheck = activeMultiFilter.cols[mci];
+        var cellRaw = row[colIndexToCheck];
+        var cellComp = parseComparable(cellRaw);
+        var cellStr = String(cellRaw || '').toLowerCase();
+
+        
+        for (var ci = 0; ci < parsedConditions.length; ci++) {
+            var cond = parsedConditions[ci];
+            var matchThis = false;
+
+            if (cond.op) {
+                
+                matchThis = compareValues(cellComp, cond.comp, cond.op);
+            } else {
+                
+                if (activeMultiFilter.substring) {
+                    matchThis = cellStr.indexOf(cond.text) !== -1;
+                } else {
+                    matchThis = (cellStr === cond.text);
+                }
+            }
+
+            if (matchThis) {
+                hasMatch = true;
+                break;
+            }
+        }
+        if (hasMatch) break;
+    }
+
+    if (activeMultiFilter.type === 'exclude') {
+        if (hasMatch) visible = false;
+    } else {
+        if (!hasMatch) visible = false;
+    }
+}
+
+
                 if (visible && globalTerms.length > 0) {
                     if (globalMode === 'cell') {
                         var matchInCell = false;
@@ -3459,38 +3791,120 @@ input:checked + .slider:before {
             createColGroup('data-table');
         }
 
-        function toggleAutoSize() {
-            autoSizeEnabled = !autoSizeEnabled;
-            var btn = document.getElementById('autosize-btn');
-            var container = document.querySelector('.table-container');
+     function updateAutoSizeButtonUI() {
+    var btn = document.getElementById('autosize-btn');
+    var span = btn.querySelector('span');
+    if (autoSizeMode === 'auto') {
+        btn.classList.add('active');
+        span.textContent = 'Авторазмер';
+        btn.title = 'Режим: Авторазмер по ширине окна (Клик для переключения)';
+    } else if (autoSizeMode === 'limit') {
+        btn.classList.add('active');
+        span.textContent = 'Лимит (' + maxCharsLimit + ')';
+        btn.title = 'Режим: По содержимому (макс. ' + maxCharsLimit + ' симв.). ПКМ для смены лимита';
+    } else {
+        btn.classList.remove('active');
+        span.textContent = 'Ручной';
+        btn.title = 'Режим: Ручной размер столбцов (перетаскивание)';
+    }
+}
+
+function applySizeMode() {
+    var container = document.querySelector('.table-container');
+    var headerTable = document.getElementById('header-table');
+    var dataTable = document.getElementById('data-table');
+
+    var resizers = document.querySelectorAll('.column-resizer');
+    for (var r = 0; r < resizers.length; r++) resizers[r].remove();
+    var colgroups = document.querySelectorAll('colgroup');
+    for (var c = 0; c < colgroups.length; c++) colgroups[c].remove();
+
+    if (autoSizeMode === 'auto') {
+        container.classList.remove('manual-width');
+        headerTable.style.minWidth = '100%';
+        dataTable.style.minWidth = '100%';
+        columnWidths = {};
+        updateStatus('Авторазмер: адаптивно по ширине экрана');
+    } else if (autoSizeMode === 'limit') {
+        container.classList.add('manual-width');
+        headerTable.style.minWidth = 'auto';
+        dataTable.style.minWidth = 'auto';
+        columnWidths = {};
+
+        var sampleCount = Math.min(allData.length, 400);
+
+        for (var c = 0; c < headers.length; c++) {
+            if (hiddenColumns.has(c)) continue;
+
             
-            if (autoSizeEnabled) {
-                btn.classList.add('active');
-                container.classList.remove('manual-width');
-                
-                var resizers = document.querySelectorAll('.column-resizer');
-                for (var r = 0; r < resizers.length; r++) {
-                    resizers[r].remove();
-                }
-                var colgroups = document.querySelectorAll('colgroup');
-                for (var c = 0; c < colgroups.length; c++) {
-                    colgroups[c].remove();
-                }
-                
-                updateStatus('Авторазмер включен');
-            } else {
-                btn.classList.remove('active');
-                container.classList.add('manual-width');
-                
-                setTimeout(function() {
-                    addColumnResizers();
-                }, 50);
-                
-                updateStatus('Ручное изменение ширины столбцов');
+            var headerText = headers[c] || ('Столбец ' + (c + 1));
+            var headerLen = headerText.length;
+            var headerWidth = Math.round(headerLen * 8.2) + 58;
+
+            
+            var maxDataLen = 0;
+            for (var r = 0; r < sampleCount; r++) {
+                var cellLen = String(allData[r][c] || '').length;
+                if (cellLen > maxDataLen) maxDataLen = cellLen;
             }
+
             
-            localStorage.setItem('autoSizeEnabled', autoSizeEnabled);
+            
+            
+            var effectiveChars = Math.min(maxCharsLimit, Math.max(headerLen, maxDataLen));
+            var contentWidth = Math.round(effectiveChars * 8.0) + 28;
+
+            
+            var maxCapPx = Math.round(maxCharsLimit * 8.2) + 58;
+            var finalWidth = Math.min(maxCapPx, Math.max(headerWidth, contentWidth));
+
+            columnWidths[c] = Math.max(60, finalWidth);
         }
+
+        applyColumnWidths();
+        updateStatus('Ширина по содержимому (максимум ' + maxCharsLimit + ' симв.)');
+    } else { 
+        container.classList.add('manual-width');
+        headerTable.style.minWidth = 'auto';
+        dataTable.style.minWidth = 'auto';
+        setTimeout(addColumnResizers, 50);
+        updateStatus('Ручной режим ширины столбцов');
+    }
+
+    updateAutoSizeButtonUI();
+    localStorage.setItem('autoSizeMode', autoSizeMode);
+    syncHeaderWidth();
+}
+
+function toggleAutoSize() {
+    if (autoSizeMode === 'auto') {
+        autoSizeMode = 'limit';
+    } else if (autoSizeMode === 'limit') {
+        autoSizeMode = 'manual';
+    } else {
+        autoSizeMode = 'auto';
+    }
+    applySizeMode();
+}
+
+
+var autosizeBtn = document.getElementById('autosize-btn');
+autosizeBtn.onclick = toggleAutoSize;
+autosizeBtn.oncontextmenu = function(e) {
+    e.preventDefault();
+    var val = prompt('Введите максимальное количество символов для столбцов:', maxCharsLimit);
+    if (val !== null) {
+        var parsed = parseInt(val);
+        if (!isNaN(parsed) && parsed > 3 && parsed <= 500) {
+            maxCharsLimit = parsed;
+            localStorage.setItem('maxCharsLimit', maxCharsLimit);
+            autoSizeMode = 'limit';
+            applySizeMode();
+        } else {
+            alert('Введите корректное число от 4 до 500');
+        }
+    }
+};
 
         function initializeTable() {
             applyFiltersAndSort();
@@ -3508,21 +3922,7 @@ input:checked + .slider:before {
             var container = document.querySelector('.table-container');
             var autosizeBtn = document.getElementById('autosize-btn');
             
-            if (!autoSizeEnabled) {
-                container.classList.add('manual-width');
-                if (autosizeBtn) autosizeBtn.classList.remove('active');
-                setTimeout(function() {
-                    addColumnResizers();
-                }, 50);
-            } else {
-                container.classList.remove('manual-width');
-                if (autosizeBtn) autosizeBtn.classList.add('active');
-                
-                var colgroups = document.querySelectorAll('colgroup');
-                for (var i = 0; i < colgroups.length; i++) {
-                    colgroups[i].remove();
-                }
-            }
+          applySizeMode();
         }
         
         function renderHeader() {
@@ -3586,13 +3986,69 @@ input:checked + .slider:before {
             syncHeaderWidth();
         }
         
-        function syncHeaderWidth() {
-            var headerTable = document.getElementById('header-table');
-            var dataTable = document.getElementById('data-table');
-            var totalWidth = Math.max(virtualScrollContainer.scrollWidth, virtualScrollContainer.clientWidth);
-            headerTable.style.width = totalWidth + 'px';
-            dataTable.style.width = totalWidth + 'px';
+      function syncHeaderWidth() {
+    var headerTable = document.getElementById('header-table');
+    var dataTable = document.getElementById('data-table');
+    
+    if (autoSizeMode === 'auto') {
+        var totalWidth = Math.max(virtualScrollContainer.scrollWidth, virtualScrollContainer.clientWidth);
+        headerTable.style.width = totalWidth + 'px';
+        dataTable.style.width = totalWidth + 'px';
+    } else {
+        var totalWidth = 50; 
+        for (var i = 0; i < headers.length; i++) {
+            if (!hiddenColumns.has(i)) {
+                totalWidth += (columnWidths[i] || 100);
+            }
         }
+        headerTable.style.width = totalWidth + 'px';
+        dataTable.style.width = totalWidth + 'px';
+    }
+}
+
+function openLimitDialog() {
+    var input = document.getElementById('limit-input');
+    input.value = maxCharsLimit;
+    showDialog('limit-dialog');
+    input.focus();
+    input.select();
+}
+
+document.getElementById('limit-cancel').onclick = function() {
+    hideDialog('limit-dialog');
+};
+
+document.getElementById('limit-confirm').onclick = function() {
+    var val = parseInt(document.getElementById('limit-input').value, 10);
+    if (!isNaN(val) && val >= 5 && val <= 300) {
+        maxCharsLimit = val;
+        localStorage.setItem('maxCharsLimit', maxCharsLimit);
+        autoSizeMode = 'limit';
+        applySizeMode();
+        hideDialog('limit-dialog');
+    } else {
+        alert('Введите значение от 5 до 300');
+    }
+};
+
+document.getElementById('limit-input').onkeydown = function(e) {
+    if (e.key === 'Enter') {
+        document.getElementById('limit-confirm').click();
+    } else if (e.key === 'Escape') {
+        hideDialog('limit-dialog');
+    }
+};
+
+
+autosizeBtn.onclick = toggleAutoSize;
+
+
+autosizeBtn.oncontextmenu = function(e) {
+    e.preventDefault();
+    e.stopPropagation(); 
+    hideContextMenu();
+    openLimitDialog();
+};
         
         function setupVirtualScroll() {
             var totalHeight = filteredIndices.length * ROW_HEIGHT;
@@ -3763,211 +4219,302 @@ input:checked + .slider:before {
     }
 }
         
-        function showColumnFilterDropdown(colIndex, iconElement) {
-            closeFilterDropdown();
-            
-            var valuesSet = new Set();
-            var maxValues = Math.min(allData.length, 10000);
-            
-            for (var i = 0; i < maxValues; i++) {
-                valuesSet.add(allData[i][colIndex]);
+      function showColumnFilterDropdown(colIndex, iconElement) {
+    closeFilterDropdown();
+    
+    var valuesSet = new Set();
+    var maxValues = Math.min(allData.length, 10000);
+    
+    for (var i = 0; i < maxValues; i++) {
+        valuesSet.add(allData[i][colIndex]);
+    }
+    
+    var uniqueValues = Array.from(valuesSet).sort(function(a, b) {
+        if (a === '') return 1;
+        if (b === '') return -1;
+        return String(a).localeCompare(String(b), 'ru');
+    });
+    
+    var currentFilter = activeFilters[colIndex];
+    var isCondFilter = currentFilter && currentFilter.type === 'condition';
+    
+    var dropdown = document.createElement('div');
+    dropdown.className = 'filter-dropdown';
+    dropdown.onclick = function(e) { e.stopPropagation(); };
+    
+    var header = document.createElement('div');
+    header.className = 'filter-dropdown-header';
+    header.style.display = 'flex';
+    header.style.flexDirection = 'column';
+    header.style.gap = '6px';
+    
+    
+    var modeSelect = document.createElement('select');
+    modeSelect.style.padding = '6px 8px';
+    modeSelect.style.borderRadius = '6px';
+    modeSelect.style.border = '1px solid var(--border-color)';
+    modeSelect.style.fontSize = '12px';
+    modeSelect.style.background = 'var(--bg-secondary)';
+    modeSelect.innerHTML = 
+        '<option value="list">Выбор из списка (галочки)</option>' +
+        '<option value=">">Больше (&gt;)</option>' +
+        '<option value="<">Меньше (&lt;)</option>' +
+        '<option value=">=">Больше или равно (&gt;=)</option>' +
+        '<option value="<=">Меньше или равно (&lt;=)</option>' +
+        '<option value="between">Диапазон (от ... до ...)</option>';
+
+    
+    var searchInput = document.createElement('input');
+    searchInput.type = 'text';
+    searchInput.className = 'filter-dropdown-search';
+    searchInput.placeholder = 'Поиск...';
+
+    
+    var condBox = document.createElement('div');
+    condBox.style.display = 'none';
+    condBox.style.flexDirection = 'column';
+    condBox.style.gap = '6px';
+
+    var condInput1 = document.createElement('input');
+    condInput1.type = 'text';
+    condInput1.style.padding = '8px 10px';
+    condInput1.style.border = '1px solid var(--border-color)';
+    condInput1.style.borderRadius = '6px';
+    condInput1.style.fontSize = '12px';
+    condInput1.placeholder = 'Значение (дата или число)...';
+
+    var condInput2 = document.createElement('input');
+    condInput2.type = 'text';
+    condInput2.style.padding = '8px 10px';
+    condInput2.style.border = '1px solid var(--border-color)';
+    condInput2.style.borderRadius = '6px';
+    condInput2.style.fontSize = '12px';
+    condInput2.placeholder = 'До (дата или число)...';
+    condInput2.style.display = 'none';
+
+    condBox.appendChild(condInput1);
+    condBox.appendChild(condInput2);
+
+    header.appendChild(modeSelect);
+    header.appendChild(searchInput);
+    header.appendChild(condBox);
+    dropdown.appendChild(header);
+    
+    var list = document.createElement('div');
+    list.className = 'filter-dropdown-list';
+    
+    var selectAllItem = document.createElement('label');
+    selectAllItem.className = 'filter-dropdown-item select-all';
+    var selectAllCheckbox = document.createElement('input');
+    selectAllCheckbox.type = 'checkbox';
+    selectAllCheckbox.checked = !currentFilter || isCondFilter;
+    selectAllItem.appendChild(selectAllCheckbox);
+    selectAllItem.appendChild(document.createTextNode('(Выбрать все)'));
+    list.appendChild(selectAllItem);
+    
+    var valueCheckboxes = [];
+    for (var v = 0; v < uniqueValues.length; v++) {
+        var value = uniqueValues[v];
+        var item = document.createElement('label');
+        item.className = 'filter-dropdown-item';
+        item.dataset.value = value;
+        
+        var checkbox = document.createElement('input');
+        checkbox.type = 'checkbox';
+        var isChecked = !currentFilter || isCondFilter;
+        if (currentFilter && Array.isArray(currentFilter)) {
+            isChecked = currentFilter.indexOf(value) !== -1;
+        }
+        checkbox.checked = isChecked;
+        checkbox.dataset.value = value;
+        valueCheckboxes.push(checkbox);
+        
+        item.appendChild(checkbox);
+        item.appendChild(document.createTextNode(value === '' ? '(Пустые)' : value));
+        list.appendChild(item);
+    }
+    
+    dropdown.appendChild(list);
+    
+    var footer = document.createElement('div');
+    footer.className = 'filter-dropdown-footer';
+    
+    var resetBtn = document.createElement('button');
+    resetBtn.className = 'btn-reset';
+    resetBtn.textContent = 'Сбросить';
+    
+    var applyBtn = document.createElement('button');
+    applyBtn.className = 'btn-apply';
+    applyBtn.textContent = 'Применить';
+    
+    footer.appendChild(resetBtn);
+    footer.appendChild(applyBtn);
+    dropdown.appendChild(footer);
+    
+    document.body.appendChild(dropdown);
+    var rect = iconElement.getBoundingClientRect();
+    dropdown.style.left = Math.min(rect.left, window.innerWidth - 290) + 'px';
+    dropdown.style.top = (rect.bottom + 5) + 'px';
+    
+    currentFilterDropdown = dropdown;
+
+    
+    function updateDropdownView() {
+        var mode = modeSelect.value;
+        if (mode === 'list') {
+            searchInput.style.display = 'block';
+            condBox.style.display = 'none';
+            list.style.display = 'block';
+        } else if (mode === 'between') {
+            searchInput.style.display = 'none';
+            condBox.style.display = 'flex';
+            condInput1.placeholder = 'От (дата или число)...';
+            condInput2.style.display = 'block';
+            list.style.display = 'none';
+        } else {
+            searchInput.style.display = 'none';
+            condBox.style.display = 'flex';
+            condInput1.placeholder = 'Значение (дата или число)...';
+            condInput2.style.display = 'none';
+            list.style.display = 'none';
+        }
+    }
+
+    modeSelect.onchange = updateDropdownView;
+
+    
+    if (isCondFilter) {
+        modeSelect.value = currentFilter.op;
+        condInput1.value = currentFilter.val1 || '';
+        condInput2.value = currentFilter.val2 || '';
+        updateDropdownView();
+    }
+    
+    function updateSelectAll() {
+        var visibleCheckboxes = [];
+        for (var i = 0; i < valueCheckboxes.length; i++) {
+            var cb = valueCheckboxes[i];
+            if (cb.closest('.filter-dropdown-item').style.display !== 'none') {
+                visibleCheckboxes.push(cb);
             }
-            
-            var uniqueValues = Array.from(valuesSet).sort(function(a, b) {
-                if (a === '') return 1;
-                if (b === '') return -1;
-                return String(a).localeCompare(String(b), 'ru');
-            });
-            
-            var currentFilter = activeFilters[colIndex];
-            
-            var dropdown = document.createElement('div');
-            dropdown.className = 'filter-dropdown';
-            dropdown.onclick = function(e) { e.stopPropagation(); };
-            
-            var header = document.createElement('div');
-            header.className = 'filter-dropdown-header';
-            var searchInput = document.createElement('input');
-            searchInput.type = 'text';
-            searchInput.className = 'filter-dropdown-search';
-            searchInput.placeholder = 'Поиск...';
-            header.appendChild(searchInput);
-            dropdown.appendChild(header);
-            
-            var list = document.createElement('div');
-            list.className = 'filter-dropdown-list';
-            
-            var selectAllItem = document.createElement('label');
-            selectAllItem.className = 'filter-dropdown-item select-all';
-            var selectAllCheckbox = document.createElement('input');
-            selectAllCheckbox.type = 'checkbox';
-            selectAllCheckbox.checked = !currentFilter;
-            selectAllItem.appendChild(selectAllCheckbox);
-            selectAllItem.appendChild(document.createTextNode('(Выбрать все)'));
-            list.appendChild(selectAllItem);
-            
-            var valueCheckboxes = [];
-            for (var v = 0; v < uniqueValues.length; v++) {
-                var value = uniqueValues[v];
-                var item = document.createElement('label');
-                item.className = 'filter-dropdown-item';
-                item.dataset.value = value;
-                
-                var checkbox = document.createElement('input');
-                checkbox.type = 'checkbox';
-                var isChecked = !currentFilter;
-                if (currentFilter) {
-                    for (var f = 0; f < currentFilter.length; f++) {
-                        if (currentFilter[f] === value) {
-                            isChecked = true;
-                            break;
-                        }
-                    }
-                }
-                checkbox.checked = isChecked;
-                checkbox.dataset.value = value;
-                valueCheckboxes.push(checkbox);
-                
-                item.appendChild(checkbox);
-                item.appendChild(document.createTextNode(value === '' ? '(Пустые)' : value));
-                list.appendChild(item);
+        }
+        var checkedCount = 0;
+        for (var i = 0; i < visibleCheckboxes.length; i++) {
+            if (visibleCheckboxes[i].checked) checkedCount++;
+        }
+        
+        if (checkedCount === 0) {
+            selectAllCheckbox.checked = false;
+            selectAllCheckbox.indeterminate = false;
+        } else if (checkedCount === visibleCheckboxes.length) {
+            selectAllCheckbox.checked = true;
+            selectAllCheckbox.indeterminate = false;
+        } else {
+            selectAllCheckbox.checked = false;
+            selectAllCheckbox.indeterminate = true;
+        }
+    }
+    
+    selectAllCheckbox.onchange = function() {
+        for (var i = 0; i < valueCheckboxes.length; i++) {
+            var cb = valueCheckboxes[i];
+            if (cb.closest('.filter-dropdown-item').style.display !== 'none') {
+                cb.checked = selectAllCheckbox.checked;
             }
-            
-            dropdown.appendChild(list);
-            
-            var footer = document.createElement('div');
-            footer.className = 'filter-dropdown-footer';
-            
-            var resetBtn = document.createElement('button');
-            resetBtn.className = 'btn-reset';
-            resetBtn.textContent = 'Сбросить';
-            
-            var applyBtn = document.createElement('button');
-            applyBtn.className = 'btn-apply';
-            applyBtn.textContent = 'Применить';
-            
-            footer.appendChild(resetBtn);
-            footer.appendChild(applyBtn);
-            dropdown.appendChild(footer);
-            
-            document.body.appendChild(dropdown);
-            var rect = iconElement.getBoundingClientRect();
-            dropdown.style.left = Math.min(rect.left, window.innerWidth - 290) + 'px';
-            dropdown.style.top = (rect.bottom + 5) + 'px';
-            
-            currentFilterDropdown = dropdown;
-            
-            function updateSelectAll() {
-                var visibleCheckboxes = [];
-                for (var i = 0; i < valueCheckboxes.length; i++) {
-                    var cb = valueCheckboxes[i];
-                    if (cb.closest('.filter-dropdown-item').style.display !== 'none') {
-                        visibleCheckboxes.push(cb);
-                    }
-                }
-                var checkedCount = 0;
-                for (var i = 0; i < visibleCheckboxes.length; i++) {
-                    if (visibleCheckboxes[i].checked) checkedCount++;
-                }
-                
-                if (checkedCount === 0) {
-                    selectAllCheckbox.checked = false;
-                    selectAllCheckbox.indeterminate = false;
-                } else if (checkedCount === visibleCheckboxes.length) {
-                    selectAllCheckbox.checked = true;
-                    selectAllCheckbox.indeterminate = false;
-                } else {
-                    selectAllCheckbox.checked = false;
-                    selectAllCheckbox.indeterminate = true;
-                }
-            }
-            
-            selectAllCheckbox.onchange = function() {
-                var visibleCheckboxes = [];
-                for (var i = 0; i < valueCheckboxes.length; i++) {
-                    var cb = valueCheckboxes[i];
-                    if (cb.closest('.filter-dropdown-item').style.display !== 'none') {
-                        visibleCheckboxes.push(cb);
-                    }
-                }
-                for (var i = 0; i < visibleCheckboxes.length; i++) {
-                    visibleCheckboxes[i].checked = selectAllCheckbox.checked;
-                }
-            };
-            
+        }
+    };
+    
+    for (var i = 0; i < valueCheckboxes.length; i++) {
+        valueCheckboxes[i].onchange = updateSelectAll;
+    }
+    
+    searchInput.oninput = function() {
+        var searchText = searchInput.value.toLowerCase();
+        for (var i = 0; i < valueCheckboxes.length; i++) {
+            var cb = valueCheckboxes[i];
+            var item = cb.closest('.filter-dropdown-item');
+            var text = item.textContent.toLowerCase();
+            item.style.display = text.indexOf(searchText) !== -1 ? '' : 'none';
+        }
+        updateSelectAll();
+    };
+
+    condInput1.onkeydown = function(e) { if (e.key === 'Enter') applyBtn.click(); };
+    condInput2.onkeydown = function(e) { if (e.key === 'Enter') applyBtn.click(); };
+    
+    
+    resetBtn.onclick = function() {
+        delete activeFilters[colIndex];
+        iconElement.classList.remove('active');
+        closeFilterDropdown();
+        applyFiltersAndSort();
+        renderVisibleRows();
+        updateStatus();
+    };
+    
+    
+    applyBtn.onclick = function() {
+        var mode = modeSelect.value;
+
+        if (mode === 'list') {
+            var selectedValues = [];
             for (var i = 0; i < valueCheckboxes.length; i++) {
-                valueCheckboxes[i].onchange = updateSelectAll;
+                if (valueCheckboxes[i].checked) {
+                    selectedValues.push(valueCheckboxes[i].dataset.value);
+                }
             }
             
-            searchInput.oninput = function() {
-                var searchText = searchInput.value.toLowerCase();
-                for (var i = 0; i < valueCheckboxes.length; i++) {
-                    var cb = valueCheckboxes[i];
-                    var item = cb.closest('.filter-dropdown-item');
-                    var text = item.textContent.toLowerCase();
-                    item.style.display = text.indexOf(searchText) !== -1 ? '' : 'none';
-                }
-                updateSelectAll();
-            };
-            
-            resetBtn.onclick = function() {
+            if (selectedValues.length === 0) {
+                activeFilters[colIndex] = [];
+                iconElement.classList.add('active');
+            } else if (selectedValues.length === uniqueValues.length) {
                 delete activeFilters[colIndex];
                 iconElement.classList.remove('active');
-                closeFilterDropdown();
-                
-                if (allData.length > 10000) {
-                    showLoader('Применение фильтра...', '');
-                    requestAnimationFrame(function() {
-                        applyFiltersAndSort();
-                        renderVisibleRows();
-                        updateStatus();
-                        hideLoader();
-                    });
-                } else {
-                    applyFiltersAndSort();
-                    renderVisibleRows();
-                    updateStatus();
-                }
-            };
-            
-            applyBtn.onclick = function() {
-                var selectedValues = [];
-                for (var i = 0; i < valueCheckboxes.length; i++) {
-                    if (valueCheckboxes[i].checked) {
-                        selectedValues.push(valueCheckboxes[i].dataset.value);
-                    }
-                }
-                
-                if (selectedValues.length === 0) {
-                    activeFilters[colIndex] = [];
-                    iconElement.classList.add('active');
-                } else if (selectedValues.length === uniqueValues.length) {
-                    delete activeFilters[colIndex];
-                    iconElement.classList.remove('active');
-                } else {
-                    activeFilters[colIndex] = selectedValues;
-                    iconElement.classList.add('active');
-                }
-                
-                closeFilterDropdown();
-                
-                if (allData.length > 10000) {
-                    showLoader('Применение фильтра...', '');
-                    requestAnimationFrame(function() {
-                        applyFiltersAndSort();
-                        renderVisibleRows();
-                        updateStatus();
-                        hideLoader();
-                    });
-                } else {
-                    applyFiltersAndSort();
-                    renderVisibleRows();
-                    updateStatus();
-                }
-            };
-            
-            updateSelectAll();
+            } else {
+                activeFilters[colIndex] = selectedValues;
+                iconElement.classList.add('active');
+            }
+        } else if (mode === 'between') {
+            var v1 = condInput1.value.trim();
+            var v2 = condInput2.value.trim();
+            if (!v1 && !v2) {
+                delete activeFilters[colIndex];
+                iconElement.classList.remove('active');
+            } else {
+                activeFilters[colIndex] = {
+                    type: 'condition',
+                    op: 'between',
+                    val1: v1,
+                    val2: v2,
+                    comp1: parseComparable(v1),
+                    comp2: parseComparable(v2)
+                };
+                iconElement.classList.add('active');
+            }
+        } else {
+            var val = condInput1.value.trim();
+            if (!val) {
+                delete activeFilters[colIndex];
+                iconElement.classList.remove('active');
+            } else {
+                activeFilters[colIndex] = {
+                    type: 'condition',
+                    op: mode,
+                    val1: val,
+                    comp: parseComparable(val)
+                };
+                iconElement.classList.add('active');
+            }
         }
+        
+        closeFilterDropdown();
+        applyFiltersAndSort();
+        renderVisibleRows();
+        updateStatus();
+    };
+    
+    updateSelectAll();
+}
 
         function showColumnsDialog() {
             var list = document.getElementById('column-list');
@@ -3991,14 +4538,69 @@ input:checked + .slider:before {
             showDialog('columns-dialog');
         }
         
-        function updateHiddenColumnsIndicator() {
-            if (hiddenColumns.size > 0) {
-                hiddenColumnsIndicator.style.display = 'inline';
-                hiddenColumnsCount.textContent = hiddenColumns.size + ' скрыто';
-            } else {
-                hiddenColumnsIndicator.style.display = 'none';
-            }
+ 
+function unhideColumn(index) {
+    hiddenColumns.delete(index);
+    renderTable();
+    updateHiddenColumnsIndicator();
+    updateStatus('Столбец "' + (headers[index] || ('Столбец ' + (index + 1))) + '" восстановлен');
+}
+
+
+function updateHiddenColumnsIndicator() {
+    var container = document.getElementById('hidden-columns-indicator');
+    if (!container) return;
+    container.innerHTML = '';
+    
+    if (hiddenColumns.size > 0) {
+        container.style.display = 'inline-flex';
+        container.style.gap = '6px';
+        container.style.alignItems = 'center';
+        container.style.flexWrap = 'wrap';
+        
+        hiddenColumns.forEach(function(colIdx) {
+            var colName = headers[colIdx] || ('Столбец ' + (colIdx + 1));
+            var chip = document.createElement('span');
+            chip.className = 'hidden-columns-badge';
+            chip.style.cursor = 'pointer';
+            chip.style.display = 'inline-flex';
+            chip.style.alignItems = 'center';
+            chip.style.gap = '5px';
+            chip.style.transition = 'all 0.15s ease';
+            chip.title = 'Нажмите, чтобы вернуть столбец "' + colName + '"';
+            chip.innerHTML = '👁 ' + colName + ' <span style="font-size: 10px; opacity: 0.8; font-weight: bold;">✕</span>';
+            
+            chip.onmouseenter = function() { chip.style.transform = 'scale(1.04)'; chip.style.boxShadow = '0 2px 6px rgba(0,0,0,0.15)'; };
+            chip.onmouseleave = function() { chip.style.transform = 'none'; chip.style.boxShadow = 'none'; };
+
+            chip.onclick = function(e) {
+                e.stopPropagation();
+                unhideColumn(colIdx);
+            };
+            container.appendChild(chip);
+        });
+
+        
+        if (hiddenColumns.size > 1) {
+            var restoreAll = document.createElement('span');
+            restoreAll.style.cursor = 'pointer';
+            restoreAll.style.fontSize = '11px';
+            restoreAll.style.color = 'var(--accent-blue)';
+            restoreAll.style.textDecoration = 'underline';
+            restoreAll.textContent = 'Вернуть все';
+            restoreAll.onclick = function(e) {
+                e.stopPropagation();
+                hiddenColumns.clear();
+                renderTable();
+                updateHiddenColumnsIndicator();
+                updateStatus('Все столбцы восстановлены');
+            };
+            container.appendChild(restoreAll);
         }
+    } else {
+        container.style.display = 'none';
+    }
+}
         
         var cyrillicToLatinMap = {
             'а': 'a', 'б': 'b', 'в': 'v', 'г': 'g', 'д': 'd', 'е': 'e', 'ё': 'yo',
@@ -4047,27 +4649,27 @@ input:checked + .slider:before {
             }
         }
 
-        function showContextMenu(e) {
-            e.preventDefault();
-            hideContextMenu();
-            closeFilterDropdown();
-            
-            contextMenu.innerHTML = '';
-            
-            var target = e.target.closest('th, td');
-            
-            if (!target) {
-                if (currentFilename || allData.length > 0) {
-                    addContextMenuItem('Сохранить', 'Ctrl+S', function() { saveFile(); });
-                    addContextMenuItem('Сохранить как...', '', function() { showDialog('save-dialog'); });
-                } else {
-                    addContextMenuItem('Открыть файл', 'Ctrl+O', function() { fileInput.click(); });
-                }
-            } else if (target.tagName === 'TH' && !target.classList.contains('row-number')) {
+      function showContextMenu(e) {
+    var target = e.target.closest('th, td');
+    
+    
+    if (!target) {
+        hideContextMenu();
+        return;
+    }
+
+    e.preventDefault();
+    hideContextMenu();
+    closeFilterDropdown();
+    
+    contextMenu.innerHTML = '';
+    
+    if (target.tagName === 'TH' && !target.classList.contains('row-number')) {
                 var colIndex = parseInt(target.dataset.colIndex);
                 contextTarget = { type: 'header', colIndex: colIndex };
                 
                 addContextMenuItem('Переименовать столбец', '', function() { showRenameDialog(colIndex); });
+                addContextMenuItem('Мультифильтр...', '', function() { showMultiFilterDialog(colIndex); });
                 addContextMenuItem('Скрыть столбец', '', function() { hideColumn(colIndex); });
                 addContextMenuSeparator();
                 addContextMenuItem('Вставить столбец слева', '', function() { insertColumn(colIndex); });
@@ -4483,6 +5085,116 @@ var visibleOnly = saveVisibleOnly ? saveVisibleOnly.checked : true;
                 fallbackCopy(text);
             }
         }
+        
+       
+function updateMultiFilterSubstringVisibility() {
+    var checkedRadio = document.querySelector('input[name="multifilter-type"]:checked');
+    var currentType = checkedRadio ? checkedRadio.value : 'include';
+    var subWrap = document.getElementById('multifilter-substring-wrapper');
+    if (subWrap) {
+        
+        subWrap.style.display = (currentType === 'greater' || currentType === 'less') ? 'none' : 'block';
+    }
+}
+
+
+function showMultiFilterDialog(defaultColIndex) {
+    var container = document.getElementById('multifilter-cols-list');
+    container.innerHTML = '';
+    
+    for (var i = 0; i < headers.length; i++) {
+        if (hiddenColumns.has(i)) continue;
+        var label = document.createElement('label');
+        label.className = 'form-checkbox';
+        label.style.fontSize = '13px';
+        
+        var cb = document.createElement('input');
+        cb.type = 'checkbox';
+        cb.value = i;
+        if (activeMultiFilter && activeMultiFilter.cols.indexOf(i) !== -1) {
+            cb.checked = true;
+        } else if (!activeMultiFilter && i === defaultColIndex) {
+            cb.checked = true;
+        }
+        
+        label.appendChild(cb);
+        label.appendChild(document.createTextNode((i + 1) + '. ' + (headers[i] || 'Столбец ' + (i + 1))));
+        container.appendChild(label);
+    }
+    
+    
+    if (activeMultiFilter) {
+        var rad = document.querySelector('input[name="multifilter-type"][value="' + activeMultiFilter.type + '"]');
+        if (rad) rad.checked = true;
+        document.getElementById('multifilter-substring').checked = activeMultiFilter.substring;
+        document.getElementById('multifilter-values').value = activeMultiFilter.values.join('\n');
+    } else {
+        var defaultRad = document.querySelector('input[name="multifilter-type"][value="include"]');
+        if (defaultRad) defaultRad.checked = true;
+    }
+    
+    
+    updateMultiFilterSubstringVisibility();
+    
+    showDialog('multifilter-dialog');
+}
+
+
+var multiFilterRadios = document.querySelectorAll('input[name="multifilter-type"]');
+for (var r = 0; r < multiFilterRadios.length; r++) {
+    multiFilterRadios[r].onchange = updateMultiFilterSubstringVisibility;
+}
+
+document.getElementById('multifilter-cancel').onclick = function() {
+    hideDialog('multifilter-dialog');
+};
+
+document.getElementById('multifilter-reset').onclick = function() {
+    activeMultiFilter = null;
+    document.getElementById('multifilter-values').value = '';
+    var defRad = document.querySelector('input[name="multifilter-type"][value="include"]');
+    if (defRad) defRad.checked = true;
+    updateMultiFilterSubstringVisibility();
+    
+    hideDialog('multifilter-dialog');
+    applyFiltersAndSort();
+    renderVisibleRows();
+    updateStatus('Мультифильтр сброшен');
+};
+
+document.getElementById('multifilter-apply').onclick = function() {
+    var selectedCols = [];
+    var cbs = document.querySelectorAll('#multifilter-cols-list input:checked');
+    for (var i = 0; i < cbs.length; i++) {
+        selectedCols.push(parseInt(cbs[i].value));
+    }
+    
+    if (selectedCols.length === 0) {
+        alert('Выберите хотя бы один столбец для фильтрации');
+        return;
+    }
+    
+    var rawText = document.getElementById('multifilter-values').value;
+    var lines = rawText.split(/\r?\n/).map(function(l) { return l.trim(); }).filter(function(l) { return l.length > 0; });
+    
+    if (lines.length === 0) {
+        activeMultiFilter = null;
+    } else {
+        var type = document.querySelector('input[name="multifilter-type"]:checked').value;
+        var substring = document.getElementById('multifilter-substring').checked;
+        activeMultiFilter = {
+            cols: selectedCols,
+            type: type,
+            substring: substring,
+            values: lines
+        };
+    }
+    
+    hideDialog('multifilter-dialog');
+    applyFiltersAndSort();
+    renderVisibleRows();
+    updateStatus(activeMultiFilter ? 'Мультифильтр применен (' + lines.length + ' условий)' : 'Мультифильтр очищен');
+};
         
         function fallbackCopy(text) {
             var textarea = document.createElement('textarea');
