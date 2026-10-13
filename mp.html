@@ -10371,12 +10371,18 @@ let category = categoryNode ? (categoryNode.getAttribute('Category') || '') : ''
 const noteNode = parcel.querySelector('Note, Address');
 let address = noteNode ? noteNode.textContent.trim() : '';
 
+const prevCadNodes = parcel.querySelectorAll('Prev_CadastralNumbers CadastralNumber, PrevCadastralNumbers CadastralNumber');
+const prevCadastralNumbers = Array.from(prevCadNodes)
+    .map(n => n.textContent.trim())
+    .filter(Boolean);
+
 if (contours.length > 0) {
     parcels.push({
         contours: contours,
         utilization: utilization,
         category: category,
-        address: address
+        address: address,
+        prevCadastralNumbers: prevCadastralNumbers // <-- добавлено поле
     });
 } else {
     console.warn(`В участке схемы №${idx + 1} не найдены координаты.`);
@@ -11539,7 +11545,7 @@ function runValidation(xmlDoc, xmlText) {
                 return text.toLowerCase().replace(/[\s.,;:"'«»\-]/g, '');
             };
 
-            newParcelsNodes.forEach((node, index) => {
+           newParcelsNodes.forEach((node, index) => {
                 const defNode = node.querySelector('Definition');
                 const blockNode = node.querySelector('CadastralBlock');
                 const def = node.getAttribute('Definition') || (defNode ? defNode.textContent : null) || (blockNode ? blockNode.textContent : `ЗУ${index + 1}`);
@@ -11551,6 +11557,10 @@ function runValidation(xmlDoc, xmlText) {
                 const mainCategoryNode = node.querySelector('Category');
                 const mainCategoryCode = mainCategoryNode ? mainCategoryNode.getAttribute('Category') : null;
                 const mainCategoryName = landCategories[mainCategoryCode] || 'Не установлена';
+
+                // Извлечение исходных ЗУ из межевого плана
+                const mainPrevCadNodes = node.querySelectorAll('PrevCadastralNumbers CadastralNumber, Prev_CadastralNumbers CadastralNumber');
+                const mainPrevCadNumbers = Array.from(mainPrevCadNodes).map(n => n.textContent.trim()).filter(Boolean);
 
                 let matchedSchemaParcel = null;
 
@@ -11567,6 +11577,7 @@ function runValidation(xmlDoc, xmlText) {
                     allMatch = false;
                     errorDetails.push(`Координаты участка <b>${def}</b> не совпадают с координатами в Схеме расположения.`);
                 } else if (matchedSchemaParcel) {
+                    // 1. Проверка ВРИ
                     const normMainVri = normalizeText(mainVri);
                     const normSchemaVri = normalizeText(matchedSchemaParcel.utilization);
 
@@ -11575,6 +11586,7 @@ function runValidation(xmlDoc, xmlText) {
                         errorDetails.push(`Разрешенное использование участка <b>${def}</b> различается!<br>В МП: <i>"${mainVri}"</i><br>В Схеме: <i>"${matchedSchemaParcel.utilization}"</i>`);
                     }
 
+                    // 2. Проверка категории
                     const schemaCatCode = matchedSchemaParcel.category || '';
                     const schemaCatName = landCategories[schemaCatCode] || 'Не установлена';
 
@@ -11583,6 +11595,30 @@ function runValidation(xmlDoc, xmlText) {
                         errorDetails.push(`Категория земель участка <b>${def}</b> различается!<br>В МП: <i>"${mainCategoryName}"</i> (<code>${mainCategoryCode}</code>)<br>В Схеме: <i>"${schemaCatName}"</i> (<code>${schemaCatCode}</code>)`);
                     } else {
                         matchedDetails.push(`Участок <b>${def}</b>: категория совпадает — <span style="background-color: #ecfdf5; color: #047857; border: 1px solid #a7f3d0; padding: 2px 6px; border-radius: 4px; font-weight: bold;">"${mainCategoryName}"</span>`);
+                    }
+
+                    // 3. Проверка исходных земельных участков (PrevCadastralNumbers)
+                    const schemaPrevCadNumbers = matchedSchemaParcel.prevCadastralNumbers || [];
+
+                    if (mainPrevCadNumbers.length === 0 && schemaPrevCadNumbers.length > 0) {
+                        allMatch = false;
+                        errorDetails.push(`Несоответствие исходного участка <b>${def}</b>!<br>В Схеме указан исходный ЗУ: <code>${schemaPrevCadNumbers.join(', ')}</code>, а в межевом плане исходные участки <b>отсутствуют</b> (участок образуется из земель).`);
+                    } else if (mainPrevCadNumbers.length > 0 && schemaPrevCadNumbers.length === 0) {
+                        allMatch = false;
+                        errorDetails.push(`Несоответствие исходного участка <b>${def}</b>!<br>В межевом плане указан исходный ЗУ: <code>${mainPrevCadNumbers.join(', ')}</code>, а в Схеме исходные участки <b>не указаны</b> (образование из земель).`);
+                    } else if (mainPrevCadNumbers.length > 0 && schemaPrevCadNumbers.length > 0) {
+                        const setMain = new Set(mainPrevCadNumbers.map(s => s.toLowerCase()));
+                        const setSchema = new Set(schemaPrevCadNumbers.map(s => s.toLowerCase()));
+                        const areEqual = setMain.size === setSchema.size && [...setMain].every(x => setSchema.has(x));
+
+                        if (!areEqual) {
+                            allMatch = false;
+                            errorDetails.push(`Исходные земельные участки для <b>${def}</b> не совпадают!<br>В МП: <code>${mainPrevCadNumbers.join(', ')}</code><br>В Схеме: <code>${schemaPrevCadNumbers.join(', ')}</code>`);
+                        } else {
+                            matchedDetails.push(`Участок <b>${def}</b>: исходный(е) ЗУ совпадает(ют) — <code>${mainPrevCadNumbers.join(', ')}</code>`);
+                        }
+                    } else {
+                        matchedDetails.push(`Участок <b>${def}</b>: исходные ЗУ отсутствуют и в МП, и в Схеме (образование из земель)`);
                     }
                 }
             });
@@ -13538,19 +13574,31 @@ async function checkConclusionWithAI(conclusionText) {
     function extractDataDigest(xmlDoc) {
     let digestParts = [];
     const mainParcel = E(xmlDoc, 'NewParcel, SpecifyParcel > ExistParcel');
- if (mainParcel) {
-        const parcelType = mainParcel.tagName === 'NewParcel' ? `ОБРАЗУЕМЫЙ УЧАСТОК (${A(mainParcel, 'Definition') || ''})` : `УТОЧНЯЕМЫЙ УЧАСТОК (${A(mainParcel, 'CadastralNumber') || ''})`;
+    if (mainParcel) {
+        const parcelType = mainParcel.tagName === 'NewParcel' 
+            ? `ОБРАЗУЕМЫЙ УЧАСТОК (${A(mainParcel, 'Definition') || ''})` 
+            : `УТОЧНЯЕМЫЙ УЧАСТОК (${A(mainParcel, 'CadastralNumber') || ''})`;
+        
         let parcelInfo = `[${parcelType}]\n`;
         parcelInfo += `Квартал: ${T(mainParcel, 'CadastralBlock')}\n`;
         parcelInfo += `Площадь: ${T(mainParcel, 'Area > Area')} (±${T(mainParcel, 'Area > Inaccuracy')})\n`;
         parcelInfo += `Адрес: ${getFullAddress(E(mainParcel, 'Address'))}\n`;
         parcelInfo += `Формула погрешности: ${T(mainParcel, 'Area > Formula')}\n`;
-      parcelInfo += `Обеспечение доступа: ${getAccessInfo(mainParcel)}\n`;
+        parcelInfo += `Обеспечение доступа: ${getAccessInfo(mainParcel)}\n`;
+
+        // Исходные земельные участки в МП
+        if (mainParcel.tagName === 'NewParcel') {
+            const prevNodes = All(mainParcel, 'PrevCadastralNumbers > CadastralNumber, Prev_CadastralNumbers > CadastralNumber');
+            const prevNumbers = Array.from(prevNodes).map(n => n.textContent.trim()).filter(Boolean).join(', ');
+            parcelInfo += `Исходные ЗУ: ${prevNumbers || 'отсутствуют (образование из земель)'}\n`;
+        }
+
         const addFormation = T(mainParcel, 'AdditionalFormation');
         if (addFormation && addFormation !== '—') {
             parcelInfo += `Иные сведения / Примечание: ${addFormation}\n`;
         }
         digestParts.push(parcelInfo);
+
         const oksNodes = All(mainParcel, 'ObjectsRealty CadastralNumber');
         if (oksNodes.length > 0) {
             let oksInfo = '[ОКС НА УЧАСТКЕ]\n';
@@ -13558,6 +13606,7 @@ async function checkConclusionWithAI(conclusionText) {
             digestParts.push(oksInfo);
         }
     }
+
     const agreementCadWork = E(xmlDoc, 'AgreementCadWork');
     if (agreementCadWork) {
         const contractName = T(agreementCadWork, 'Name');
@@ -13565,33 +13614,37 @@ async function checkConclusionWithAI(conclusionText) {
         const contractDate = T(agreementCadWork, 'DateAgreement');
         digestParts.push(`[ДОГОВОР НА ВЫПОЛНЕНИЕ КАДАСТРОВЫХ РАБОТ]\nНаименование: ${contractName}\nНомер договора: ${contractNumber}\nДата договора: ${contractDate}\n`);
     }
+
     const reasonText = T(xmlDoc, 'GeneralCadastralWorks > Reason');
     if (reasonText !== '—') {
         digestParts.push(`[ОСНОВАНИЕ ДЛЯ РАБОТ]\nТекст: ${reasonText}\n`);
     }
+
     const conclusionText = T(xmlDoc, 'Conclusion');
     if (conclusionText !== '—') {
         digestParts.push(`[ЗАКЛЮЧЕНИЕ ИНЖЕНЕРА]\nТекст: ${clean(conclusionText, xmlDoc)}\n`);
     }
+
     const inputDocs = All(xmlDoc, 'InputData Documents Document');
     if (inputDocs.length > 0) {
         let docsInfo = '[ИСХОДНЫЕ ДОКУМЕНТЫ]\n';
         inputDocs.forEach(doc => {
-             const name = T(doc, 'Name');
-             const docNum = T(doc, 'Number');
-             const fileAttr = doc.querySelector('AppliedFile')?.getAttribute('Name') || '';
-             const fileNote = fileAttr ? `, Файл: ${fileAttr}` : ' (реквизитный документ ЕГРН/НПА/ГСО без файла вложения)';
-             docsInfo += `- Наименование: ${clean(name, xmlDoc)}, Номер: ${docNum}, Дата: ${T(doc, 'Date')}${fileNote}\n`;
+            const name = T(doc, 'Name');
+            const docNum = T(doc, 'Number');
+            const fileAttr = doc.querySelector('AppliedFile')?.getAttribute('Name') || '';
+            const fileNote = fileAttr ? `, Файл: ${fileAttr}` : ' (реквизитный документ ЕГРН/НПА/ГСО без файла вложения)';
+            docsInfo += `- Наименование: ${clean(name, xmlDoc)}, Номер: ${docNum}, Дата: ${T(doc, 'Date')}${fileNote}\n`;
         });
         digestParts.push(docsInfo);
     }
- const appendixDocs = All(xmlDoc, 'Appendix > AppliedFiles');
+
+    const appendixDocs = All(xmlDoc, 'Appendix > AppliedFiles');
     if (appendixDocs.length > 0) {
         let appendixInfo = '[ПРИЛОЖЕНИЯ]\n';
         appendixDocs.forEach(doc => {
-             const name = T(doc, 'NameAppendix');
-             const fileName = A(E(doc, 'AppliedFile'), 'Name');
-             appendixInfo += `- Наименование: ${clean(name, xmlDoc)}, Имя файла: ${fileName}\n`;
+            const name = T(doc, 'NameAppendix');
+            const fileName = A(E(doc, 'AppliedFile'), 'Name');
+            appendixInfo += `- Наименование: ${clean(name, xmlDoc)}, Имя файла: ${fileName}\n`;
         });
         digestParts.push(appendixInfo);
     }
@@ -13611,6 +13664,7 @@ async function checkConclusionWithAI(conclusionText) {
         digestParts.push(graphicsInfo);
     }
 
+    // Сведения из приложенной схемы расположения (SchemaParcels)
     if (parsedSchemaParcels && parsedSchemaParcels.length > 0) {
         let schemaInfo = '[ДАННЫЕ ИЗ СХЕМЫ РАСПОЛОЖЕНИЯ (SchemaParcels)]\n';
         parsedSchemaParcels.forEach((sp, idx) => {
@@ -13618,6 +13672,11 @@ async function checkConclusionWithAI(conclusionText) {
             if (sp.address) schemaInfo += `  Адрес/Местоположение в схеме: ${sp.address}\n`;
             if (sp.utilization) schemaInfo += `  ВРИ в схеме: ${sp.utilization}\n`;
             if (sp.category) schemaInfo += `  Код категории в схеме: ${sp.category}\n`;
+            if (sp.prevCadastralNumbers && sp.prevCadastralNumbers.length > 0) {
+                schemaInfo += `  Исходные ЗУ в схеме: ${sp.prevCadastralNumbers.join(', ')}\n`;
+            } else {
+                schemaInfo += `  Исходные ЗУ в схеме: отсутствуют (из земель)\n`;
+            }
         });
         digestParts.push(schemaInfo);
     }
