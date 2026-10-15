@@ -3234,6 +3234,28 @@ function extractParcelContoursFromXml(mainParcel = null) {
         return contours;
     }
 
+
+function getMainParcelIdentifier(doc = lastXmlDoc) {
+    if (!doc) return '';
+    const specifyParcel = doc.querySelector('SpecifyParcel > ExistParcel');
+    if (specifyParcel) return specifyParcel.getAttribute('CadastralNumber') || 'Уточняемый ЗУ';
+
+    const existEZ = doc.querySelector('SpecifyParcel > ExistEZ > ExistEZParcels');
+    if (existEZ) return existEZ.getAttribute('CadastralNumber') || 'ЕЗ';
+
+    const newParcel = doc.querySelector('NewParcel');
+    if (newParcel) {
+        const def = newParcel.getAttribute('Definition') || '';
+        const block = newParcel.querySelector('CadastralBlock')?.textContent.trim() || '';
+        if (block && def) {
+            return def.startsWith(':') ? (block + def) : `${block}:${def}`;
+        }
+        return def || block || 'Образуемый ЗУ';
+    }
+    return '';
+}
+
+
     function getParcelCadastralNumber() {
         if (!lastXmlDoc) return null;
         
@@ -5457,6 +5479,11 @@ async function checkAllRelatedParcels(mainParcelCadNumber) {
     const modal = document.getElementById('relatedParcelModal');
     const infoDiv = document.getElementById('relatedParcelInfo');
     
+    // Нормализуем номер основного ЗУ
+    if (!mainParcelCadNumber || (mainParcelCadNumber.split(':').length === 3 && !mainParcelCadNumber.includes('ЗУ'))) {
+        mainParcelCadNumber = getMainParcelIdentifier(lastXmlDoc) || mainParcelCadNumber;
+    }
+    
     modal.style.display = 'flex';
     infoDiv.innerHTML = `<div style="display:flex; align-items:center; justify-content:center; gap:12px; padding:20px; color:var(--text-secondary);"><div class="loader"></div><span>Загрузка данных по всем смежным участкам...</span></div>`;
     
@@ -5478,7 +5505,6 @@ async function checkAllRelatedParcels(mainParcelCadNumber) {
         );
         if (mainParcelCadNumber) xmlParcelsCadSet.add(mainParcelCadNumber.toLowerCase());
 
-        
         for (let i = 0; i < allRelatedNodes.length; i++) {
             const node = allRelatedNodes[i];
             const xmlData = extractSpecifyRelatedParcelData(node);
@@ -5518,9 +5544,18 @@ async function checkAllRelatedParcels(mainParcelCadNumber) {
             });
         }
 
-        
+        // ПРОВЕРКА НАЛОЖЕНИЙ С ОСНОВНЫМ ЗУ
         parsedParcels.forEach(p => {
             if (!p.resultContour || mainContoursXml.length === 0) return;
+
+            // Проверка: выгружен <AllBorder>, но контур 1 в 1 совпадает с образуемым ЗУ
+            if (p.xmlData.isAllBorder && doContoursMatch(p.resultContour, mainContoursXml)) {
+                const err = `<b>ВНИМАНИЕ: Забыт признак «ф» (Фрагмент)!</b> Смежный ЗУ <b>${p.cadNumber}</b> выгружен через <code>&lt;AllBorder&gt;</code>, но его контур на 100% повторяет образуемый ЗУ <b>${mainParcelCadNumber}</b>. Укажите букву «ф» в ТехноКаде в колонке «Новый/Фрагмент».`;
+                p.errors.push(err);
+                internalXmlErrors.push(err);
+                return;
+            }
+
             const overlap = checkPlanarOverlap(mainContoursXml, p.resultContour);
             if (overlap > 0.0001) {
                 const areaStr = overlap < 0.01 ? `${(overlap * 10000).toFixed(1)} кв.см.` : `${overlap.toFixed(2)} кв.м.`;
@@ -5701,6 +5736,25 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
     try {
         const xmlData = extractSpecifyRelatedParcelData(specifyRelatedParcel);
         if (!xmlData.cadNumber) throw new Error('Нет кадастрового номера смежного ЗУ');
+
+        // Нормализация обозначения основного ЗУ (чтобы не отображался просто квартал без :ЗУ1)
+        if (!mainParcelCadNumber || (mainParcelCadNumber.split(':').length === 3 && !mainParcelCadNumber.includes('ЗУ'))) {
+            const newParcel = lastXmlDoc?.querySelector('NewParcel');
+            if (newParcel) {
+                const def = newParcel.getAttribute('Definition') || '';
+                const block = newParcel.querySelector('CadastralBlock')?.textContent.trim() || '';
+                if (block && def) {
+                    mainParcelCadNumber = def.startsWith(':') ? (block + def) : `${block}:${def}`;
+                } else {
+                    mainParcelCadNumber = def || block || mainParcelCadNumber;
+                }
+            } else {
+                const specParcel = lastXmlDoc?.querySelector('SpecifyParcel > ExistParcel');
+                if (specParcel) {
+                    mainParcelCadNumber = specParcel.getAttribute('CadastralNumber') || mainParcelCadNumber;
+                }
+            }
+        }
         
         const mskSystem = detectMskSystem(xmlData.cadNumber);
         if (!mskSystem) throw new Error('Не определена система координат');
@@ -5737,15 +5791,15 @@ async function checkRelatedParcelBoundary(specifyRelatedParcel, mainParcelCadNum
         let comparisonResults = null;
         let neighboringOverlaps = [];
         const problemPoints = [];
-    let isMainInsideHole = false;
-let isExactCoordsMatch = false;
+        let isMainInsideHole = false;
+        let isExactCoordsMatch = false;
+        let isSuspectedMissingFragmentFlag = false;
 
-        
+        // ВАРИАНТ 1: Внутренний контур (вырезка под ЗУ)
         if (xmlData.isInnerContour) {
             const newHole = xmlData.contours[0];
             const polys = classifyRingsToPolygons(egrnContours);
 
-            
             let targetPolygon = null;
             for (const poly of polys) {
                 let ptsIn = 0;
@@ -5762,7 +5816,6 @@ let isExactCoordsMatch = false;
                 hasOverlap = true;
                 errors.push(`КРИТИЧЕСКАЯ ОШИБКА: Новая вырезка находится ВНЕ границ смежного ЗУ ${xmlData.cadNumber}!`);
             } else {
-                
                 let pointsOutside = 0;
                 newHole.forEach(pt => {
                     let onBound = false;
@@ -5778,15 +5831,12 @@ let isExactCoordsMatch = false;
                     errors.push(`ВНИМАНИЕ: Часть точек новой вырезки (${pointsOutside} шт.) выходит за внешнюю границу смежного ЗУ!`);
                 }
 
-                
                 if (targetPolygon.holes && targetPolygon.holes.length > 0) {
                     targetPolygon.holes.forEach((existingHole, hIdx) => {
-                        
                         if (xmlData.oldContour && doContoursMatch([existingHole], xmlData.oldContour)) {
                             return;
                         }
 
-                        
                         const overlapHoleArea = checkPlanarOverlap([newHole], [existingHole]);
                         if (overlapHoleArea > 0.0001) {
                             hasOverlap = true;
@@ -5795,7 +5845,6 @@ let isExactCoordsMatch = false;
                             problemPoints.push(...findProblematicOverlappingPoints(newHole, existingHole));
                         }
 
-                        
                         let touchCount = 0;
                         newHole.forEach(pt => {
                             if (existingHole.some(ep => Math.abs(pt.x - ep.x) < 0.01 && Math.abs(pt.y - ep.y) < 0.01)) {
@@ -5809,8 +5858,7 @@ let isExactCoordsMatch = false;
                 }
             }
 
-          
-      isExactCoordsMatch = false;
+            isExactCoordsMatch = false;
             if (mainContoursXml.length > 0 && newHole) {
                 isExactCoordsMatch = doContoursMatch([newHole], mainContoursXml);
                 
@@ -5822,7 +5870,6 @@ let isExactCoordsMatch = false;
                     
                     errors.push(`КРИТИЧЕСКАЯ ОШИБКА: Координаты новой вырезки смежного ЗУ НЕ совпадают с координатами образуемого ЗУ ${mainParcelCadNumber}! (Площадь вырезки: ${holeArea.toFixed(2)} кв.м, площадь ЗУ: ${mainArea.toFixed(2)} кв.м, разница: ${diff.toFixed(2)} кв.м). Координаты вырезки должны быть идентичны образуемому участку.`);
                     
-                    
                     newHole.forEach(pt => {
                         const exists = mainContoursXml[0].some(mp => Math.abs(pt.x - mp.x) <= 0.01 && Math.abs(pt.y - mp.y) <= 0.01);
                         if (!exists) problemPoints.push(pt);
@@ -5830,7 +5877,6 @@ let isExactCoordsMatch = false;
                 }
             }
 
-            
             const combinedResultRings = [];
             polys.forEach(p => {
                 combinedResultRings.push(p.outer);
@@ -5845,17 +5891,40 @@ let isExactCoordsMatch = false;
             resultContour = combinedResultRings.length > 0 ? combinedResultRings : [newHole];
         }
         
+        // ВАРИАНТ 2: AllBorder (полное описание границы)
         else if (xmlData.isAllBorder) {
             const comp = compareFullBoundaries(xmlData.contours, egrnContours);
             comparisonResults = comp.comparisonResults;
             resultContour = xmlData.contours;
 
             if (mainContoursXml.length > 0) {
-                const overlapArea = checkPlanarOverlap(mainContoursXml, xmlData.contours);
-                if (overlapArea > 0.0001) {
+                // Проверяем, не совпадает ли контур AllBorder с образуемым участком (забыта буква «ф»)
+                const isExactDuplicateOfMain = doContoursMatch(xmlData.contours, mainContoursXml);
+
+                if (isExactDuplicateOfMain) {
                     hasOverlap = true;
-                    const areaStr = overlapArea < 0.01 ? `${(overlapArea * 10000).toFixed(1)} кв.см.` : `${overlapArea.toFixed(2)} кв.м.`;
-                    errors.push(`НАЛОЖЕНИЕ НА ПРОЕКТНЫЙ ЗУ: Новые границы смежного ЗУ ${xmlData.cadNumber} накладываются на границы основного ЗУ <b>${mainParcelCadNumber}</b>! Площадь: <b>${areaStr}</b>`);
+                    isSuspectedMissingFragmentFlag = true;
+                    errors.push(`
+                        <div style="background:#fee2e2; border-left:4px solid #ef4444; padding:10px 14px; border-radius:6px; margin:4px 0;">
+                            <div style="font-weight:700; color:#991b1b; display:flex; align-items:center; gap:8px;">
+                                <i class="fas fa-exclamation-triangle" style="font-size:1.1em;"></i>
+                                ВНИМАНИЕ: Забыт признак «ф» (Фрагмент) для смежного ЗУ!
+                            </div>
+                            <div style="font-size:0.9rem; color:#7f1d1d; margin-top:6px; line-height:1.5;">
+                                Границы смежного ЗУ <b>${xmlData.cadNumber}</b> выгружены в XML через тег <code>&lt;AllBorder&gt;</code> (полная внешняя граница), 
+                                но их координаты на 100% совпадают с образуемым участком <b>${mainParcelCadNumber}</b>.<br>
+                                Из-за отсутствия признака «ф» смежный ЗУ целиком подменился контуром образуемого ЗУ вместо того, чтобы образовать в нем вырезку.<br>
+                                <b>Как исправить:</b> В ТехноКад-Экспресс откройте вкладку <i>«Границы»</i> смежного участка и в таблице контуров в столбце <b>«Новый/Фрагмент»</b> поставьте букву <b>«ф»</b> (тогда в XML сформируется правильный тег <code>&lt;ChangeBorder&gt;</code>).
+                            </div>
+                        </div>
+                    `);
+                } else {
+                    const overlapArea = checkPlanarOverlap(mainContoursXml, xmlData.contours);
+                    if (overlapArea > 0.0001) {
+                        hasOverlap = true;
+                        const areaStr = overlapArea < 0.01 ? `${(overlapArea * 10000).toFixed(1)} кв.см.` : `${overlapArea.toFixed(2)} кв.м.`;
+                        errors.push(`НАЛОЖЕНИЕ НА ПРОЕКТНЫЙ ЗУ: Новые границы смежного ЗУ ${xmlData.cadNumber} накладываются на границы основного ЗУ <b>${mainParcelCadNumber}</b>! Площадь: <b>${areaStr}</b>`);
+                    }
                 }
                 
                 xmlData.contours.forEach(subContour => {
@@ -5866,6 +5935,7 @@ let isExactCoordsMatch = false;
             }
         } 
         
+        // ВАРИАНТ 3: ChangeBorder (изменение части границы смежника)
         else {
             if (!egrnContours?.length) throw new Error(`Смежный ЗУ ${xmlData.cadNumber} не найден в ЕГРН`);
             const egrnContour = egrnContours[0];
@@ -5889,7 +5959,7 @@ let isExactCoordsMatch = false;
             if (resultContour) resultContour = [resultContour];
         }
 
-        
+        // Проверка взаимных наложений с другими смежниками межевого плана
         if (resultContour && otherCorrectedParcels.length > 0) {
             otherCorrectedParcels.forEach(other => {
                 const overlapWithOther = checkPlanarOverlap(resultContour, other.contours);
@@ -5910,8 +5980,8 @@ let isExactCoordsMatch = false;
             });
         }
 
-        
-        if (resultContour && resultContour.length > 0 && !xmlData.isInnerContour) {
+        // Поиск наложений на сторонние ЗУ из ЕГРН
+        if (resultContour && resultContour.length > 0 && !xmlData.isInnerContour && !isSuspectedMissingFragmentFlag) {
             try {
                 const intersectedFeatures = await searchIntersectingObjects(resultContour, NSPD_CATEGORY_ZU, mskSystem);
                 
@@ -5949,9 +6019,10 @@ let isExactCoordsMatch = false;
             ? (hasOverlap || hasCriticalErrors ? 'error' : 'warning') 
             : 'success';
 
-      
         let statusText = '';
-        if (xmlData.isInnerContour) {
+        if (isSuspectedMissingFragmentFlag) {
+            statusText = `ОШИБКА: Забыт признак «ф» (Фрагмент) для смежного ЗУ ${xmlData.cadNumber}! Границы выгружены через <AllBorder>.`;
+        } else if (xmlData.isInnerContour) {
             if (xmlData.isNewInnerHole) {
                 if (errors.length === 0 && isMainInsideHole) {
                     statusText = `Корректное формирование нового внутреннего контура (вырезки ЗУ) в смежном участке: границы новой вырезки полностью совпадают с образуемым ЗУ ${mainParcelCadNumber}.`;
@@ -5975,9 +6046,14 @@ let isExactCoordsMatch = false;
             statusText = 'Проектные границы смежного участка успешно изменены относительно ЕГРН (наложений нет)';
         }
         
-        const methodDescription = xmlData.isInnerContour 
-            ? '<span style="color:#0284c7; font-weight:bold;"><i class="fas fa-vector-square"></i> Замена внутреннего контура (вырезки / дырки под ЗУ)</span>' 
-            : (xmlData.isAllBorder ? 'Полное описание границы (AllBorder)' : 'Частичное изменение границы (ChangeBorder)');
+        let methodDescription = '';
+        if (isSuspectedMissingFragmentFlag) {
+            methodDescription = '<span style="color:#ef4444; font-weight:bold;"><i class="fas fa-exclamation-triangle"></i> Ошибочный AllBorder (забыт признак «ф»)</span>';
+        } else if (xmlData.isInnerContour) {
+            methodDescription = '<span style="color:#0284c7; font-weight:bold;"><i class="fas fa-vector-square"></i> Замена внутреннего контура (вырезки / дырки под ЗУ)</span>';
+        } else {
+            methodDescription = xmlData.isAllBorder ? 'Полное описание границы (AllBorder)' : 'Частичное изменение границы (ChangeBorder)';
+        }
 
         let html = `
             <div class="related-parcel-status ${statusClass}">
@@ -5987,13 +6063,13 @@ let isExactCoordsMatch = false;
             <div class="related-parcel-details">
                 <div class="related-parcel-detail-item"><div class="label">Смежный ЗУ</div><div class="value">${xmlData.cadNumber}</div></div>
                 <div class="related-parcel-detail-item"><div class="label">Метод описания</div><div class="value">${methodDescription}</div></div>
-              ${xmlData.isInnerContour ? `
+                ${(xmlData.isInnerContour || isSuspectedMissingFragmentFlag) ? `
                 <div class="related-parcel-detail-item" style="grid-column: 1 / -1; background: #f0f9ff; border-color: #bae6fd;">
                     <div class="label" style="color:#0369a1;">Соответствие координат образуемого ЗУ (${mainParcelCadNumber})</div>
-                    <div class="value" style="color: ${isExactCoordsMatch ? '#059669' : '#dc2626'};">
-                        <i class="fas ${isExactCoordsMatch ? 'fa-check-double' : 'fa-times-circle'}"></i>
-                        ${isExactCoordsMatch 
-                            ? 'Координаты образуемого ЗУ и вырезки смежного ЗУ полностью совпадают' 
+                    <div class="value" style="color: ${(isExactCoordsMatch || isSuspectedMissingFragmentFlag) ? '#059669' : '#dc2626'};">
+                        <i class="fas ${(isExactCoordsMatch || isSuspectedMissingFragmentFlag) ? 'fa-check-double' : 'fa-times-circle'}"></i>
+                        ${(isExactCoordsMatch || isSuspectedMissingFragmentFlag)
+                            ? 'Координаты образуемого ЗУ и контура смежного ЗУ полностью совпадают' 
                             : 'Координаты НЕ совпадают! Контур вырезки отличается от границ образуемого ЗУ'}
                     </div>
                 </div>` : ''}
@@ -6037,7 +6113,7 @@ let isExactCoordsMatch = false;
                     <div class="error-title" style="color:#991b1b;">
                         <i class="fas fa-exclamation-triangle"></i> НАЛОЖЕНИЕ НА СТОРОННИЕ УЧАСТКИ ЕГРН:
                     </div>
-                    <ul style="margin: 0; padding-left: 20px;">
+                    <ul style="margin: 0 0 10px 0; padding-left: 20px;">
                         ${egrnOverlaps.map(no => {
                             const areaStr = no.area < 0.01 ? `${(no.area * 10000).toFixed(1)} кв.см.` : `${no.area.toFixed(2)} кв.м.`;
                             return `<li style="color:#991b1b; padding: 2px 0;">
@@ -11472,11 +11548,37 @@ function runValidation(xmlDoc, xmlText) {
         relatedCadMap.get(cn).push(node);
     });
 
+  const mainContoursXmlForVal = extractMainParcelContoursFromXml();
+    const mainParcelIdentForVal = getMainParcelIdentifier(xmlDoc);
+
     relatedCadMap.forEach((nodes, cadNum) => {
         const hasAllBorder = nodes.some(n => n.querySelector('AllBorder'));
         const hasChangeBorder = nodes.some(n => n.querySelector('ChangeBorder'));
 
-        
+        // Проверка: выгружен <AllBorder>, но контур совпадает с образуемым ЗУ (забыта буква «ф»)
+        if (hasAllBorder && mainContoursXmlForVal.length > 0) {
+            for (const n of nodes) {
+                const rData = extractSpecifyRelatedParcelData(n);
+                if (rData.isAllBorder && rData.contours && doContoursMatch(rData.contours, mainContoursXmlForVal)) {
+                    messages.push(`
+                        <div class="validation-message validation-error" style="align-items:flex-start; flex-direction:column;">
+                            <div style="display:flex; align-items:center; gap:8px;">
+                                ${sectionIcons.errorIcon}
+                                <strong>[${cadNum}] КРИТИЧЕСКАЯ ОШИБКА: Не указан признак фрагмента (буква «ф»)!</strong>
+                            </div>
+                            <div style="font-size:0.9em; margin-top:6px; line-height:1.5; padding-left:32px;">
+                                Смежный участок выгружен через тег <code>&lt;AllBorder&gt;</code> (полная внешняя граница), но его координаты полностью дублируют образуемый ЗУ <b>${mainParcelIdentForVal}</b>.<br>
+                                Из-за этого смежный участок ошибочно схлопывается до размеров образуемого ЗУ.<br>
+                                <b style="color:#b91c1c;">Как исправить:</b> В ТехноКад-Экспресс во вкладке <i>«Границы»</i> смежного ЗУ в таблице контуров в столбце <b>«Новый/Фрагмент»</b> укажите букву <b>«ф»</b> (тогда в XML сформируется правильный тег <code>&lt;ChangeBorder&gt;</code>).
+                            </div>
+                        </div>
+                    `);
+                    break;
+                }
+            }
+        }
+
+        // Проверка на случай, если одновременно выгружены и старый, и новый AllBorder
         if (nodes.length >= 2 && hasAllBorder) {
             const hasOldAllBorder = nodes.some(n => n.querySelector('AllBorder OldOrdinate'));
             const hasNewAllBorder = nodes.some(n => n.querySelector('AllBorder NewOrdinate'));
@@ -11486,27 +11588,10 @@ function runValidation(xmlDoc, xmlText) {
                     <div class="validation-message validation-error" style="align-items:flex-start; flex-direction:column;">
                         <div style="display:flex; align-items:center; gap:8px;">
                             ${sectionIcons.errorIcon}
-                            <strong>[${cadNum}] КРИТИЧЕСКАЯ ОШИБКА ОПИСАНИЯ ВНУТРЕННЕГО КОНТУРА: Не указан признак фрагмента (буква «ф»)!</strong>
+                            <strong>[${cadNum}] Ошибка описания границы смежного ЗУ:</strong>
                         </div>
                         <div style="font-size:0.9em; margin-top:6px; line-height:1.5; padding-left:32px;">
-                            Внутренний контур (вырезка) смежного участка ошибочно выгружен через тег <code>&lt;AllBorder&gt;</code> (полная граница участка).<br>
-                            Это означает попытку заменить <b>весь смежный участок целиком</b> на маленькое кольцо вырезки<br>
-                            <span style="color:#b91c1c; font-weight:600;">Решение:</span> В ТехноКад-Экспресс во вкладке <i>«Границы»</i> смежного ЗУ в таблице контуров в колонке <b>«Новый/Фрагмент»</b> необходимо указать букву <b>«ф»</b> (чтобы сформировались теги <code>&lt;ChangeBorder&gt;</code>).
-                        </div>
-                    </div>
-                `);
-            }
-        } else if (nodes.length >= 2 && hasChangeBorder) {
-            const hasOldChange = nodes.some(n => n.querySelector('ChangeBorder OldOrdinate') && !n.querySelector('ChangeBorder NewOrdinate'));
-            const hasNewChange = nodes.some(n => n.querySelector('ChangeBorder NewOrdinate') && !n.querySelector('ChangeBorder OldOrdinate'));
-
-            if (hasOldChange && hasNewChange) {
-                messages.push(`
-                    <div class="validation-message validation-success">
-                        <i class="fas fa-check-circle" style="color:#10b981; font-size:1.2rem;"></i>
-                        <div>
-                            <strong>[${cadNum}] Корректное оформление вырезки (признак «ф» задан):</strong> 
-                            Внутренний контур смежного ЗУ правильно оформлен через теги <code>&lt;ChangeBorder&gt;</code> (удаление старого контура и добавление нового контура). Ошибки <code>&lt;AllBorder&gt;</code> нет.
+                            Контур выгружен через <code>&lt;AllBorder&gt;</code> вместо фрагмента границы (<code>&lt;ChangeBorder&gt;</code>). Укажите признак <b>«ф»</b> в ТехноКаде.
                         </div>
                     </div>
                 `);
@@ -12991,8 +13076,7 @@ function runValidation(xmlDoc, xmlText) {
             }
         }
 
-        const mainParcelCadNum = E(xmlDoc, 'SpecifyParcel > ExistParcel')?.getAttribute('CadastralNumber') || 
-                                 E(xmlDoc, 'NewParcel')?.querySelector('CadastralBlock')?.textContent?.trim() || '';
+       const mainParcelCadNum = getMainParcelIdentifier(xmlDoc);
 
         mainHtml += `<div class="section">
             <div class="section-header">
@@ -13018,8 +13102,7 @@ function runValidation(xmlDoc, xmlText) {
 
     
     const totalRelatedCount = All(xmlDoc, 'SpecifyRelatedParcel, SpecifyParcelApproximal > ExistParcel').length;
-    const targetMainCadNumber = E(xmlDoc, 'SpecifyParcel > ExistParcel')?.getAttribute('CadastralNumber') || 
-                                E(xmlDoc, 'NewParcel')?.querySelector('CadastralBlock')?.textContent?.trim() || '';
+   const targetMainCadNumber = getMainParcelIdentifier(xmlDoc);
 
     if (totalRelatedCount > 1) {
         mainHtml += `
@@ -13105,18 +13188,23 @@ function runValidation(xmlDoc, xmlText) {
         }
 
         const randomId = 'rel_' + Math.floor(Math.random() * 1000000);
-        const mainParcelCadNum = E(xmlDoc, 'SpecifyParcel > ExistParcel')?.getAttribute('CadastralNumber') || 
-                                 E(xmlDoc, 'NewParcel')?.querySelector('CadastralBlock')?.textContent?.trim() || '';
+        const mainParcelCadNum = getMainParcelIdentifier(xmlDoc);
                                  
-                                 const hasAllBorderError = specifyRelatedParcel.querySelector('AllBorder') && 
+
+        const isDuplicateAllBorder = checkInnerData.isAllBorder && checkInnerData.contours && 
+                                     mainContoursForInnerCheck.length > 0 && 
+                                     doContoursMatch(checkInnerData.contours, mainContoursForInnerCheck);
+        const hasMultipleAllBorder = specifyRelatedParcel.querySelector('AllBorder') && 
             xmlDoc.querySelectorAll(`SpecifyRelatedParcel[CadastralNumber="${relatedCadNum}"]`).length >= 2;
 
         let fragmentWarningBadge = '';
-        if (hasAllBorderError) {
+        if (isDuplicateAllBorder || hasMultipleAllBorder) {
             fragmentWarningBadge = `
-            <div style="background:#fef2f2; border:1px solid #fca5a5; border-radius:8px; padding:10px 14px; margin-bottom:12px; color:#991b1b; font-size:0.9rem;">
+            <div style="background:#fef2f2; border:1px solid #fca5a5; border-left:4px solid #ef4444; border-radius:8px; padding:10px 14px; margin-bottom:12px; color:#991b1b; font-size:0.9rem;">
                 <i class="fas fa-exclamation-triangle" style="color:#ef4444;"></i>
-                <b>Внимание:</b> участок выгружен через <code>&lt;AllBorder&gt;</code>. Если вы уточняете внутренний контур (вырезку), в ТехноКаде обязательно поставьте букву <b>«ф»</b> в колонке «Новый/Фрагмент»!
+                <b>Критическая ошибка:</b> границы смежного ЗУ выгружены через <code>&lt;AllBorder&gt;</code> (полная внешняя граница).
+                ${isDuplicateAllBorder ? `Координаты смежника полностью дублируют образуемый ЗУ <b>${mainParcelCadNum}</b>!` : ''}<br>
+                Если вы вырезаете контур под ЗУ, в ТехноКад-Экспресс обязательно поставьте букву <b>«ф»</b> в колонке «Новый/Фрагмент»!
             </div>`;
         }
 
@@ -13135,10 +13223,12 @@ function runValidation(xmlDoc, xmlText) {
                 ${hasEntitySpatial ? `<button class="header-button copy-coords-btn" title="Скопировать координаты">${sectionIcons.copyXY}</button>` : ''}
             </div>
             <div class="section-content" style="padding:16px">
+                ${fragmentWarningBadge} <!-- ВОТ СЮДА ДОБАВЛЕН ВЫВОД ПРЕДУПРЕЖДЕНИЯ -->
                 ${innerContourBadge}
                 <div class="info-card" style="margin-bottom: 12px; background: #fff8e1; border-color: #ffe0b2;">
                     <div class="info-value">Координаты смежного земельного участка</div>
                 </div>
+              
                 <button class="print-btn" style="padding: 8px 16px; font-size: 0.9rem;" onclick="document.getElementById('${randomId}').classList.toggle('hidden'); this.textContent = this.textContent.includes('Раскрыть') ? 'Скрыть координаты' : 'Раскрыть список координат';">
                     Раскрыть список координат
                 </button>
