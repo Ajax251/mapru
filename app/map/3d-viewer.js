@@ -1897,18 +1897,18 @@ try {
         if (mData.isProcedural) extra += "<div style='color:#60a5fa; font-size:11px; margin-top:4px;'><b>Объект без координат</b> (условная 3D-проекция)</div>";
         if (mData.parent1 && mData.parent2) extra += "<div style='margin-top:6px; font-size:11px; border-top:1px solid var(--border-color); padding-top:4px;'>Пересечение объектов:<br>• " + mData.parent1 + "<br>• " + mData.parent2 + "</div>";
 
-        return "<span class=\"tt-title\">" + category + "</span>" +
-            (mData.id ? "<span class=\"tt-id\">" + mData.id + "</span>" : "") +
+        return "<span class='tt-title'>" + category + "</span>" +
+            (mData.id ? "<span class='tt-id'>" + mData.id + "</span>" : "") +
             (mData.name && mData.name !== "Объект" && mData.name !== mData.id ? "<div style='margin-bottom:6px; line-height:1.25; font-weight:600;'><span style='color: var(--text-muted); font-size: 11px; display: block; font-weight: normal; margin-bottom: 2px;'>Наименование / Назначение:</span>" + mData.name + "</div>" : "") +
             extra +
-            (mData.area ? "<div class=\"tt-area\">" + mData.area + "</div>" : "");
+            (mData.area ? "<div class='tt-area'>" + mData.area + "</div>" : "");
     };
 
     const addLabel = function (pos3D, priority, categoryName, shortId, meta, colorHex, meshRef = null) {
         const el = document.createElement("div");
         el.className = "poi-label";
         const labelTitle = (categoryName + " " + shortId).trim() || meta.id || "Объект";
-        el.innerHTML = "<div class=\"poi-dot\" style=\"background-color: " + colorHex + "; color: " + colorHex + "\"></div><div class=\"poi-text\">" + labelTitle + "</div>";
+        el.innerHTML = "<div class='poi-dot' style='background-color: " + colorHex + "; color: " + colorHex + "'></div><div class='poi-text'>" + labelTitle + "</div>";
 
         el.addEventListener("mouseenter", (e) => {
             tooltip.innerHTML = buildTooltipHTML(categoryName || "Целевой объект", meta);
