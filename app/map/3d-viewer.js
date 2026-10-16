@@ -1,4 +1,3 @@
-// 3d-viewer.js (ЧАСТЬ 1 из 2)
 
 window.open3DVisualization = function () {
     setTimeout(() => {
@@ -522,7 +521,7 @@ window.open3DVisualization = function () {
                 fontWeight: '600', fontSize: '15px', fontFamily: 'system-ui, -apple-system, sans-serif',
                 borderBottom: '1px solid rgba(128,128,128,0.12)'
             });
-            header.innerHTML = '<span style="display:flex;align-items:center;"><i class="fas fa-cubes" style="color:#3b82f6;font-size:18px;margin-right:10px;"></i> Кадастровая Карта 3D Pro</span>';
+            header.innerHTML = '<span style="display:flex;align-items:center;"><i class="fas fa-cubes" style="color:#3b82f6;font-size:18px;margin-right:10px;"></i> Кадастровая Карта 3D</span>';
 
             const btnContainer = document.createElement('div');
             btnContainer.style.display = 'flex'; btnContainer.style.gap = '8px';
