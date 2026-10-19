@@ -1,3 +1,19 @@
+const ANALYTICS_CENTER_VERSION = "1.05";
+console.log(`[Analytics Center] Загружена версия ${ANALYTICS_CENTER_VERSION}`);
+
+// Безопасное получение инстанса карты в обход DOM-элемента <div id="map">
+function getActiveMap() {
+    if (window.yandexMap && typeof window.yandexMap.getBounds === 'function') {
+        return window.yandexMap;
+    }
+    try {
+        if (typeof map !== 'undefined' && map && typeof map.getBounds === 'function') {
+            return map;
+        }
+    } catch (e) {}
+    return null;
+}
+
 /**
  * Модуль: Аналитический центр базы данных недвижимости
  * Включает:
@@ -11,7 +27,7 @@
 
 (function () {
     const MAPRUAPP_AI_URL = "https://mapruapp.ru/ai/api/v1/chat/completions";
-    const AI_MODEL_NAME = "gemini-2.5-flash-lite";
+    const AI_MODEL_NAME = "gemini-3.5-flash-lite";
     const BACKEND_QUERY_URL = "https://mapruapp.ru/api/analytics/query";
     const SAFE_MAP_OBJECT_LIMIT = 200;
 
@@ -395,14 +411,22 @@
         if (document.getElementById('ac-type-str').checked) payload.tables.push('structure');
         if (document.getElementById('ac-type-zones').checked) payload.tables.push('zones');
 
-        if (spatialType === 'viewport' && window.map) {
-            const bounds = window.map.getBounds();
+       if (spatialType === 'viewport') {
+    const activeMap = getActiveMap();
+    if (activeMap) {
+        const bounds = activeMap.getBounds();
+        if (bounds && bounds[0] && bounds[1]) {
             payload.spatial = {
                 type: 'bbox',
                 min_lat: bounds[0][0], min_lon: bounds[0][1],
                 max_lat: bounds[1][0], max_lon: bounds[1][1]
             };
-        } else if (spatialType === 'radius' && clickLat && clickLon) {
+        }
+    } else {
+        alert('Карта еще не инициализирована');
+        return null;
+    }
+} else if (spatialType === 'radius' && clickLat && clickLon) {
             payload.spatial = {
                 type: 'circle',
                 lat: clickLat,
@@ -765,8 +789,8 @@
 
     // Фокус на конкретном одном объекте из таблицы
     function focusSingleFeatureOnMainMap(feature) {
-        if (!feature || !window.map) return;
-
+    const activeMap = getActiveMap();
+    if (!feature || !activeMap) return;
         if (analyticsModal) {
             analyticsModal.remove();
             analyticsModal = null;
@@ -784,11 +808,12 @@
     }
 
     // Отрисовка выборки объектов на главной карте с модальным подтверждением при > 200 объектов
-    function showResultsOnMainMap() {
-        if (!lastQueryResults?.features?.length || !window.map) {
-            alert('Нет объектов для переноса на карту');
-            return;
-        }
+   function showResultsOnMainMap() {
+    const activeMap = getActiveMap();
+    if (!lastQueryResults?.features?.length || !activeMap) {
+        alert('Нет объектов для переноса на карту или карта не готова');
+        return;
+    }
 
         const allFeatures = lastQueryResults.features;
         const totalCount = allFeatures.length;
