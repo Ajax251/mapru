@@ -8,7 +8,7 @@
     console.log(`[Analytics Center] Загружена версия ${ANALYTICS_CENTER_VERSION}`);
 
     const MAPRUAPP_AI_URL = "https://mapruapp.ru/ai/api/v1/chat/completions";
-    const AI_MODEL_NAME = "gemini-2.5-flash-lite";
+    const AI_MODEL_NAME = "gemini-3.5-flash-lite";
     const BACKEND_QUERY_URL = "https://mapruapp.ru/api/analytics/query";
     const SAFE_MAP_OBJECT_LIMIT = 200;
 
@@ -388,7 +388,7 @@
                 <div class="ac-header">
                     <div class="ac-header-title">
                         <i class="fas fa-chart-line"></i>
-                        <span>Аналитический центр базы данных</span>
+                        <span>Аналитический центр </span>
                     </div>
                     <button class="ac-close-btn" id="ac-close-btn">&times;</button>
                 </div>
