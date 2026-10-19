@@ -3,7 +3,8 @@
  * Включает:
  *  - Диалоговое окно размером 98% экрана
  *  - ИИ-ассистент формирования поисковых запросов через https://mapruapp.ru
- *  - Пространственный и атрибутивный поиск по всей локальной БД SQLite
+ *  - Защита от перегрузки карты: подтверждение и выбор режима при выборке > 200 объектов
+ *  - Пространственный и атрибутивный поиск по локальной БД SQLite
  *  - Интерактивную аналитику и графики ECharts
  *  - Экспорт в Excel (XLSX), GeoJSON и графический снимок (PNG)
  */
@@ -12,6 +13,7 @@
     const MAPRUAPP_AI_URL = "https://mapruapp.ru/ai/api/v1/chat/completions";
     const AI_MODEL_NAME = "gemini-2.5-flash-lite";
     const BACKEND_QUERY_URL = "https://mapruapp.ru/api/analytics/query";
+    const SAFE_MAP_OBJECT_LIMIT = 200;
 
     let analyticsModal = null;
     let currentChartInstances = [];
@@ -141,7 +143,7 @@
             }
             .ac-table th {
                 position: sticky; top: 0; background: #f1f5f9; padding: 8px 10px; border-bottom: 2px solid #cbd5e1;
-                color: #334155; font-weight: 700;
+                color: #334155; font-weight: 700; z-index: 2;
             }
             .ac-table td {
                 padding: 8px 10px; border-bottom: 1px solid #f1f5f9; color: #1e293b;
@@ -151,6 +153,26 @@
                 background: none; border: none; font-size: 1.5rem; color: #94a3b8; cursor: pointer; line-height: 1;
             }
             .ac-close-btn:hover { color: #ef4444; }
+            .ac-zoom-btn {
+                padding: 3px 8px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 4px;
+                color: #1d4ed8; font-weight: 600; cursor: pointer; font-size: 0.75rem;
+            }
+            .ac-zoom-btn:hover { background: #2563eb; color: #ffffff; }
+
+            /* Модальное окно подтверждения большого объема */
+            .ac-confirm-dialog-overlay {
+                position: fixed; inset: 0; background: rgba(15, 23, 42, 0.6);
+                z-index: 1000000; display: flex; align-items: center; justify-content: center;
+                backdrop-filter: blur(4px);
+            }
+            .ac-confirm-dialog {
+                background: #ffffff; width: 440px; max-width: 90vw; border-radius: 14px; padding: 22px;
+                box-shadow: 0 20px 40px rgba(0,0,0,0.25); border: 1px solid #e2e8f0; text-align: center;
+            }
+            .ac-confirm-icon {
+                width: 48px; height: 48px; border-radius: 50%; background: #fef3c7; color: #d97706;
+                display: flex; align-items: center; justify-content: center; font-size: 1.4rem; margin: 0 auto 12px auto;
+            }
         `;
         document.head.appendChild(style);
     }
@@ -168,7 +190,7 @@
         }
     }
 
-    // Экспорт таблицы в Excel
+    // Загрузка библиотеки XLSX
     async function ensureXlsx() {
         if (typeof XLSX === 'undefined') {
             await new Promise((resolve, reject) => {
@@ -219,9 +241,9 @@
                             <div class="ac-form-row">
                                 <label>Гео-зона:</label>
                                 <select id="ac-spatial-type" class="ac-select">
-                                    <option value="all">Вся накопленная база</option>
-                                    <option value="viewport">Текущий экран карты</option>
+                                    <option value="viewport" selected>Текущий экран карты</option>
                                     <option value="radius" ${lat && lon ? 'selected' : ''}>В радиусе от точки клика</option>
+                                    <option value="all">По всей базе (требуется фильтр)</option>
                                 </select>
                             </div>
                             <div class="ac-form-row" id="ac-radius-wrap" style="${lat && lon ? '' : 'display: none;'}">
@@ -238,7 +260,7 @@
                             </div>
                             <div class="ac-form-row">
                                 <label>Кадастровый номер или маска:</label>
-                                <input type="text" id="ac-cadnum-search" class="ac-input-text" placeholder="16:03:010101 или конкретный номер...">
+                                <input type="text" id="ac-cadnum-search" class="ac-input-text" placeholder="Квартал или конкретный номер...">
                             </div>
                         </div>
 
@@ -325,7 +347,6 @@
 
         document.body.appendChild(analyticsModal);
 
-        // Обработчик закрытия
         const close = () => {
             currentChartInstances.forEach(c => c.dispose());
             currentChartInstances = [];
@@ -336,14 +357,12 @@
         analyticsModal.querySelector('#ac-close-btn').onclick = close;
         analyticsModal.onclick = (e) => { if (e.target === analyticsModal) close(); };
 
-        // Управление селектором радиуса
         const spatialSelect = document.getElementById('ac-spatial-type');
         const radiusWrap = document.getElementById('ac-radius-wrap');
         spatialSelect.onchange = () => {
             radiusWrap.style.display = spatialSelect.value === 'radius' ? 'flex' : 'none';
         };
 
-        // Переключение вкладок
         analyticsModal.querySelectorAll('.ac-tab-btn').forEach(btn => {
             btn.onclick = () => {
                 analyticsModal.querySelectorAll('.ac-tab-btn').forEach(b => b.classList.remove('active'));
@@ -353,28 +372,17 @@
             };
         });
 
-        // Запуск запроса по кнопке
         document.getElementById('ac-btn-execute').onclick = () => runAnalyticsQuery(lat, lon);
-
-        // Запуск формирования запроса через ИИ
         document.getElementById('ac-ai-submit').onclick = processAiQuery;
-
-        // Кнопка показа на карте
         document.getElementById('ac-btn-map').onclick = showResultsOnMainMap;
-
-        // Экспорт в XLSX
         document.getElementById('ac-btn-xlsx').onclick = exportToExcel;
-
-        // Экспорт в GeoJSON
         document.getElementById('ac-btn-geojson').onclick = exportToGeoJSON;
 
-        // Если переданы координаты — автоматически запускаем первоначальный поиск в радиусе 1000м
-        if (lat && lon) {
-            runAnalyticsQuery(lat, lon);
-        }
+        // Автозапуск первичного анализа
+        runAnalyticsQuery(lat, lon);
     };
 
-    // Формирование параметров запроса из формы
+    // Сбор параметров запроса с валидацией безопасности
     function collectFilterPayload(clickLat, clickLon) {
         const spatialType = document.getElementById('ac-spatial-type').value;
         const payload = {
@@ -387,7 +395,6 @@
         if (document.getElementById('ac-type-str').checked) payload.tables.push('structure');
         if (document.getElementById('ac-type-zones').checked) payload.tables.push('zones');
 
-        // Пространственные ограничения
         if (spatialType === 'viewport' && window.map) {
             const bounds = window.map.getBounds();
             payload.spatial = {
@@ -404,7 +411,6 @@
             };
         }
 
-        // Атрибуты
         const addr = document.getElementById('ac-address-search').value.trim();
         if (addr) payload.filters.address = addr;
 
@@ -432,12 +438,20 @@
         const purp = document.getElementById('ac-purpose').value.trim();
         if (purp) payload.filters.purpose = purp;
 
+        // Защита: если выбрана «вся база», требуем хотя бы один конкретный фильтр
+        if (spatialType === 'all' && Object.keys(payload.filters).length === 0) {
+            alert('Для выборки по всей базе задайте хотя бы один фильтр (адрес, квартал, этажность или цену), чтобы избежать избыточной нагрузки.');
+            return null;
+        }
+
         return payload;
     }
 
-    // Выполнение запроса к серверу
+    // Выполнение запроса
     async function runAnalyticsQuery(lat, lon) {
         const payload = collectFilterPayload(lat, lon);
+        if (!payload) return;
+
         const container = document.getElementById('ac-content-view');
         container.innerHTML = `
             <div style="text-align: center; padding-top: 100px; color: #2563eb;">
@@ -490,7 +504,7 @@
   "area_max": число или null,
   "cost_min": число или null,
   "cost_max": число или null,
-  "materials": "материал стен (кирпич, дерево и т.д.) или пусто",
+  "materials": "материал стен или пусто",
   "purpose": "назначение или вид использования или пусто",
   "types": ["zu", "oks", "structure", "zones"]
 }
@@ -516,7 +530,6 @@
             const cleanJson = textResponse.replace(/^```json\s*|\s*```$/g, '').trim();
             const parsed = JSON.parse(cleanJson);
 
-            // Заполнение полей формы из ответа ИИ
             if (parsed.address) document.getElementById('ac-address-search').value = parsed.address;
             if (parsed.cad_num) document.getElementById('ac-cadnum-search').value = parsed.cad_num;
             if (parsed.floors_min) document.getElementById('ac-floors-min').value = parsed.floors_min;
@@ -535,9 +548,7 @@
                 document.getElementById('ac-type-zones').checked = parsed.types.includes('zones');
             }
 
-            // Мгновенный запуск анализа
             runAnalyticsQuery();
-
         } catch (err) {
             alert("ИИ не смог распознать критерии: " + err.message);
         } finally {
@@ -546,7 +557,7 @@
         }
     }
 
-    // Отображение активной вкладки
+    // Рендеринг активной вкладки
     function renderActiveTabContent() {
         const container = document.getElementById('ac-content-view');
         if (!container) return;
@@ -589,7 +600,6 @@
                 </div>
             `;
 
-            // График категорий / типов
             const chart1 = echarts.init(document.getElementById('ac-chart-types'));
             chart1.setOption({
                 title: { text: 'Состав выборки по типам', left: 'center', textStyle: { fontSize: 13, color: '#334155' } },
@@ -606,15 +616,12 @@
             });
             currentChartInstances.push(chart1);
 
-            // График форм собственности
             const ownData = Object.entries(s.ownership_dist || {}).map(([name, value]) => ({ name, value }));
             const chart2 = echarts.init(document.getElementById('ac-chart-ownership'));
             chart2.setOption({
                 title: { text: 'Формы собственности', left: 'center', textStyle: { fontSize: 13, color: '#334155' } },
                 tooltip: { trigger: 'item' },
-                series: [{
-                    type: 'pie', radius: '65%', data: ownData
-                }]
+                series: [{ type: 'pie', radius: '65%', data: ownData }]
             });
             currentChartInstances.push(chart2);
 
@@ -628,7 +635,6 @@
                 </div>
             `;
 
-            // Этажность
             const cFloors = echarts.init(document.getElementById('ac-chart-floors'));
             const floorsEntries = Object.entries(s.floors_dist || {});
             cFloors.setOption({
@@ -640,7 +646,6 @@
             });
             currentChartInstances.push(cFloors);
 
-            // Диапазоны стоимости
             const cCost = echarts.init(document.getElementById('ac-chart-cost-brackets'));
             const costEntries = Object.entries(s.cost_brackets || {});
             cCost.setOption({
@@ -652,7 +657,6 @@
             });
             currentChartInstances.push(cCost);
 
-            // Материалы стен
             const cMat = echarts.init(document.getElementById('ac-chart-materials'));
             const matEntries = Object.entries(s.materials_dist || {}).slice(0, 6);
             cMat.setOption({
@@ -662,7 +666,6 @@
             });
             currentChartInstances.push(cMat);
 
-            // Года постройки
             const cYears = echarts.init(document.getElementById('ac-chart-years'));
             const yearEntries = Object.entries(s.years_dist || {});
             cYears.setOption({
@@ -719,7 +722,14 @@
                 return `
                     <tr>
                         <td>${i + 1}</td>
-                        <td style="font-weight: 700; color: #0284c7;">${f.id}</td>
+                        <td style="font-weight: 700; color: #0284c7;">
+                            <div style="display:flex; align-items:center; gap:6px;">
+                                <span>${f.id}</span>
+                                <button class="ac-zoom-btn" data-fid="${f.id}" title="Перейти к объекту на карте">
+                                    <i class="fas fa-crosshairs"></i>
+                                </button>
+                            </div>
+                        </td>
                         <td>${typeName}</td>
                         <td>${addr}</td>
                         <td>${area}</td>
@@ -739,6 +749,128 @@
                     </table>
                 </div>
             `;
+
+            // Нажатие на кнопку прицела в таблице
+            container.querySelectorAll('.ac-zoom-btn').forEach(btn => {
+                btn.onclick = () => {
+                    const fid = btn.dataset.fid;
+                    const targetFeature = features.find(f => f.id === fid);
+                    if (targetFeature) {
+                        focusSingleFeatureOnMainMap(targetFeature);
+                    }
+                };
+            });
+        }
+    }
+
+    // Фокус на конкретном одном объекте из таблицы
+    function focusSingleFeatureOnMainMap(feature) {
+        if (!feature || !window.map) return;
+
+        if (analyticsModal) {
+            analyticsModal.remove();
+            analyticsModal = null;
+        }
+
+        if (feature._layer_type === 'zu' && typeof processAndDrawParcels === 'function') {
+            processAndDrawParcels([feature], 'areaSearch', false);
+        } else if (typeof processAndDrawBuildings === 'function') {
+            processAndDrawBuildings([feature]);
+        }
+
+        if (typeof showNotification === 'function') {
+            showNotification(`Фокус на объекте: ${feature.id}`, 'success');
+        }
+    }
+
+    // Отрисовка выборки объектов на главной карте с модальным подтверждением при > 200 объектов
+    function showResultsOnMainMap() {
+        if (!lastQueryResults?.features?.length || !window.map) {
+            alert('Нет объектов для переноса на карту');
+            return;
+        }
+
+        const allFeatures = lastQueryResults.features;
+        const totalCount = allFeatures.length;
+
+        // Если объектов больше 200 — спрашиваем подтверждение
+        if (totalCount > SAFE_MAP_OBJECT_LIMIT) {
+            promptLargeVolumeConfirmation(totalCount, (choice) => {
+                if (choice === 'cancel') return;
+
+                const featuresToRender = (choice === 'all') 
+                    ? allFeatures 
+                    : allFeatures.slice(0, SAFE_MAP_OBJECT_LIMIT);
+
+                executeDrawOnMap(featuresToRender, choice === 'limit' ? SAFE_MAP_OBJECT_LIMIT : totalCount);
+            });
+        } else {
+            executeDrawOnMap(allFeatures, totalCount);
+        }
+    }
+
+    // Диалог подтверждения большого объема
+    function promptLargeVolumeConfirmation(totalCount, callback) {
+        const dialogOverlay = document.createElement('div');
+        dialogOverlay.className = 'ac-confirm-dialog-overlay';
+
+        dialogOverlay.innerHTML = `
+            <div class="ac-confirm-dialog">
+                <div class="ac-confirm-icon">
+                    <i class="fas fa-exclamation-triangle"></i>
+                </div>
+                <h3 style="margin: 0 0 8px 0; color: #1e293b; font-size: 1.2rem;">Большой объем данных</h3>
+                <div style="font-size: 0.95rem; font-weight: 700; color: #0284c7; margin-bottom: 8px;">
+                    Найдено объектов: ${totalCount.toLocaleString('ru-RU')} шт.
+                </div>
+                <p style="font-size: 0.85rem; color: #64748b; margin: 0 0 18px 0; line-height: 1.4;">
+                    Отображение более 200 сложных контуров одновременно может существенно снизить скорость работы браузера. Выберите вариант:
+                </p>
+                <div style="display: flex; flex-direction: column; gap: 8px;">
+                    <button id="ac-confirm-first" style="padding: 10px; border-radius: 8px; border: none; background: #2563eb; color: #fff; font-weight: 700; cursor: pointer;">
+                        Нанести первые 200 объектов (Рекомендуется)
+                    </button>
+                    <button id="ac-confirm-all" style="padding: 10px; border-radius: 8px; border: 1px solid #cbd5e1; background: #f8fafc; color: #334155; font-weight: 600; cursor: pointer;">
+                        Нанести весь объем (${totalCount} шт.)
+                    </button>
+                    <button id="ac-confirm-cancel" style="padding: 8px; border-radius: 8px; border: none; background: transparent; color: #ef4444; font-weight: 600; cursor: pointer;">
+                        Отмена
+                    </button>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(dialogOverlay);
+
+        const closeDialog = (choice) => {
+            dialogOverlay.remove();
+            callback(choice);
+        };
+
+        dialogOverlay.querySelector('#ac-confirm-first').onclick = () => closeDialog('limit');
+        dialogOverlay.querySelector('#ac-confirm-all').onclick = () => closeDialog('all');
+        dialogOverlay.querySelector('#ac-confirm-cancel').onclick = () => closeDialog('cancel');
+    }
+
+    // Выполнение фактической отрисовки
+    function executeDrawOnMap(features, countDrawn) {
+        if (typeof processAndDrawParcels === 'function') {
+            const zu = features.filter(f => f._layer_type === 'zu');
+            const oks = features.filter(f => f._layer_type === 'oks');
+            const str = features.filter(f => f._layer_type === 'structure');
+
+            if (zu.length > 0) processAndDrawParcels(zu, 'areaSearch', false);
+            if (oks.length > 0 && typeof processAndDrawBuildings === 'function') processAndDrawBuildings(oks);
+            if (str.length > 0 && typeof processAndDrawStructures === 'function') processAndDrawStructures(str);
+        }
+
+        if (analyticsModal) {
+            analyticsModal.remove();
+            analyticsModal = null;
+        }
+
+        if (typeof showNotification === 'function') {
+            showNotification(`На карту нанесено объектов: ${countDrawn}`, 'success');
         }
     }
 
@@ -789,34 +921,5 @@
         a.href = URL.createObjectURL(blob);
         a.download = `Аналитические_объекты_${new Date().toISOString().slice(0, 10)}.geojson`;
         a.click();
-    }
-
-    // Перенос найденных объектов на основную карту
-    function showResultsOnMainMap() {
-        if (!lastQueryResults?.features?.length || !window.map) {
-            alert('Нет геометрии для переноса на карту');
-            return;
-        }
-
-        const features = lastQueryResults.features;
-
-        // Если на главной карте есть функция отрисовки полигонов
-        if (typeof processAndDrawParcels === 'function') {
-            const zu = features.filter(f => f._layer_type === 'zu');
-            const oks = features.filter(f => f._layer_type === 'oks');
-
-            if (zu.length > 0) processAndDrawParcels(zu, 'areaSearch', false);
-            if (oks.length > 0 && typeof processAndDrawBuildings === 'function') processAndDrawBuildings(oks);
-        }
-
-        // Закрываем окно аналитики
-        if (analyticsModal) {
-            analyticsModal.remove();
-            analyticsModal = null;
-        }
-
-        if (typeof showNotification === 'function') {
-            showNotification(`На карту перенесено объектов: ${features.length}`, 'success');
-        }
     }
 })();
