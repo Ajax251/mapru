@@ -1,4 +1,4 @@
-const ANALYTICS_CENTER_VERSION = "1.05";
+const ANALYTICS_CENTER_VERSION = "1.06";
 console.log(`[Analytics Center] Загружена версия ${ANALYTICS_CENTER_VERSION}`);
 
 // Безопасное получение инстанса карты в обход DOM-элемента <div id="map">
@@ -12,6 +12,24 @@ function getActiveMap() {
         }
     } catch (e) {}
     return null;
+}
+
+// Автоопределение префикса региона и района по выбранной МСК или текущему кварталу карты
+function getDefaultCadastralPrefix() {
+    try {
+        if (typeof currentQuarterNumber !== 'undefined' && currentQuarterNumber) {
+            const parts = currentQuarterNumber.split(':');
+            if (parts.length >= 2) return `${parts[0]}:${parts[1]}:`;
+        }
+        const mskVal = localStorage.getItem('savedDefaultMskSystem') || '';
+        const m = mskVal.match(/633(\d{2})/);
+        if (m) return `${m[1]}:`;
+        const mskText = (typeof COORDINATE_SYSTEMS !== 'undefined')
+            ? (COORDINATE_SYSTEMS.find(s => s.value === mskVal)?.text || '') : '';
+        const m2 = mskText.match(/МСК[ -]?(\d{2})/i);
+        if (m2) return `${m2[1]}:`;
+    } catch (e) {}
+    return '16:';
 }
 
 /**
@@ -276,7 +294,7 @@ function getActiveMap() {
                             </div>
                             <div class="ac-form-row">
                                 <label>Кадастровый номер или маска:</label>
-                                <input type="text" id="ac-cadnum-search" class="ac-input-text" placeholder="Квартал или конкретный номер...">
+                                <input type="text" id="ac-cadnum-search" class="ac-input-text" value="${getDefaultCadastralPrefix()}">
                             </div>
                         </div>
 
@@ -463,10 +481,19 @@ function getActiveMap() {
         if (purp) payload.filters.purpose = purp;
 
         // Защита: если выбрана «вся база», требуем хотя бы один конкретный фильтр
-        if (spatialType === 'all' && Object.keys(payload.filters).length === 0) {
-            alert('Для выборки по всей базе задайте хотя бы один фильтр (адрес, квартал, этажность или цену), чтобы избежать избыточной нагрузки.');
-            return null;
-        }
+     // Проверка корректности параметров для режима «По всей базе»
+if (spatialType === 'all') {
+    const cad = payload.filters.cad_num || '';
+    // Проверяем наличие префикса региона и района (например: 16:56 или 16:56:)
+    const hasValidCadPrefix = /^\d{2}:\d{1,2}:?/.test(cad);
+    const hasOtherFilters = addr || fMin || fMax || aMin || aMax || cMin || cMax || mat || purp;
+
+    if (!hasValidCadPrefix && !hasOtherFilters) {
+        const suggested = getDefaultCadastralPrefix();
+        alert(`Для выборки по всей базе необходимо указать как минимум префикс региона и района (например: ${suggested} или ${suggested}010101) либо задать адрес/параметры.`);
+        return null;
+    }
+}
 
         return payload;
     }
@@ -735,17 +762,51 @@ function getActiveMap() {
             currentChartInstances.push(cTree);
 
         } else if (activeTab === 'table') {
-            let rowsHtml = features.slice(0, 500).map((f, i) => {
-                const p = f.properties || {};
-                const o = p.options || {};
-                const addr = o.readable_address || o.address_readable_address || 'Адрес не указан';
-                const area = o.specified_area || o.build_record_area || o.params_extension || f.area || '-';
-                const cost = o.cost_value ? Number(o.cost_value).toLocaleString('ru-RU') + ' ₽' : '-';
-                const typeName = f._layer_type === 'zu' ? 'ЗУ' : (f._layer_type === 'oks' ? 'Здание' : 'Сооружение');
+            const BATCH_SIZE = 100;
+            let renderedCount = 0;
 
-                return `
-                    <tr>
-                        <td>${i + 1}</td>
+            container.innerHTML = `
+                <div style="margin-bottom: 8px; font-weight: 600; color: #475569; display: flex; justify-content: space-between; align-items: center;">
+                    <span>Показано: <b id="ac-table-rendered-count" style="color: #0284c7;">0</b> из ${features.length.toLocaleString('ru-RU')}</span>
+                    <span style="font-size: 0.78rem; color: #94a3b8; font-weight: normal;">Прокручивайте вниз для отображения всех объектов</span>
+                </div>
+                <div id="ac-table-scroll-wrap" style="overflow-x: auto; overflow-y: auto; max-height: calc(100% - 35px);">
+                    <table class="ac-table">
+                        <thead>
+                            <tr>
+                                <th style="width: 45px;">№</th>
+                                <th style="width: 220px;">Кадастровый номер</th>
+                                <th style="width: 80px;">Тип</th>
+                                <th>Адрес / Местоположение</th>
+                                <th style="width: 120px;">Параметр</th>
+                                <th style="width: 130px;">Стоимость</th>
+                            </tr>
+                        </thead>
+                        <tbody id="ac-table-body"></tbody>
+                    </table>
+                </div>
+            `;
+
+            const tbody = document.getElementById('ac-table-body');
+            const countEl = document.getElementById('ac-table-rendered-count');
+            const scrollWrap = document.getElementById('ac-table-scroll-wrap');
+
+            function renderRowsBatch() {
+                const nextLimit = Math.min(renderedCount + BATCH_SIZE, features.length);
+                const fragment = document.createDocumentFragment();
+
+                for (let i = renderedCount; i < nextLimit; i++) {
+                    const f = features[i];
+                    const p = f.properties || {};
+                    const o = p.options || {};
+                    const addr = o.readable_address || o.address_readable_address || 'Адрес не указан';
+                    const area = o.specified_area || o.build_record_area || o.params_extension || f.area || '-';
+                    const cost = o.cost_value ? Number(o.cost_value).toLocaleString('ru-RU') + ' ₽' : '-';
+                    const typeName = f._layer_type === 'zu' ? 'ЗУ' : (f._layer_type === 'oks' ? 'Здание' : 'Сооружение');
+
+                    const tr = document.createElement('tr');
+                    tr.innerHTML = `
+                        <td style="color: #64748b;">${i + 1}</td>
                         <td style="font-weight: 700; color: #0284c7;">
                             <div style="display:flex; align-items:center; gap:6px;">
                                 <span>${f.id}</span>
@@ -758,31 +819,30 @@ function getActiveMap() {
                         <td>${addr}</td>
                         <td>${area}</td>
                         <td>${cost}</td>
-                    </tr>
-                `;
-            }).join('');
+                    `;
 
-            container.innerHTML = `
-                <div style="margin-bottom: 8px; font-weight: 600; color: #475569;">Показано первых объектов: ${Math.min(500, features.length)} из ${features.length}</div>
-                <div style="overflow-x: auto; max-height: calc(100% - 30px);">
-                    <table class="ac-table">
-                        <thead>
-                            <tr><th>№</th><th>Кадастровый номер</th><th>Тип</th><th>Адрес</th><th>Параметр (м²/м)</th><th>Стоимость</th></tr>
-                        </thead>
-                        <tbody>${rowsHtml}</tbody>
-                    </table>
-                </div>
-            `;
+                    tr.querySelector('.ac-zoom-btn').onclick = () => {
+                        focusSingleFeatureOnMainMap(f);
+                    };
 
-            // Нажатие на кнопку прицела в таблице
-            container.querySelectorAll('.ac-zoom-btn').forEach(btn => {
-                btn.onclick = () => {
-                    const fid = btn.dataset.fid;
-                    const targetFeature = features.find(f => f.id === fid);
-                    if (targetFeature) {
-                        focusSingleFeatureOnMainMap(targetFeature);
+                    fragment.appendChild(tr);
+                }
+
+                tbody.appendChild(fragment);
+                renderedCount = nextLimit;
+                countEl.textContent = renderedCount.toLocaleString('ru-RU');
+            }
+
+            // Первая порция строк
+            renderRowsBatch();
+
+            // Динамическая подгрузка при скролле вниз
+            scrollWrap.addEventListener('scroll', () => {
+                if (renderedCount < features.length) {
+                    if (scrollWrap.scrollTop + scrollWrap.clientHeight >= scrollWrap.scrollHeight - 120) {
+                        renderRowsBatch();
                     }
-                };
+                }
             });
         }
     }
