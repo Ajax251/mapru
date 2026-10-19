@@ -22536,6 +22536,16 @@ document.getElementById('add-text-button').addEventListener('click', function ()
 
 function formatCadastralNumber(input) {
     let value = input.value;
+
+  
+    if (/[a-zA-Zа-яА-Я\s]/.test(value)) {
+      
+        if (/[a-zA-Z]/.test(value) && !/[а-яА-Я]/.test(value)) {
+            input.value = replaceEnglishWithRussian(value);
+        }
+        return;
+    }
+
     if (/^\d/.test(value)) { 
         value = value.replace(/\D/g, ''); 
         const firstTwoDigits = value.slice(0, 2);
@@ -22554,12 +22564,8 @@ function formatCadastralNumber(input) {
             }
         }
         input.value = formatted;
-    } else {
-        
-        input.value = replaceEnglishWithRussian(value);
     }
 }
-
 
 
 function createOksMarkerOnZu(oksFeature, zuPolygon) {
@@ -27966,24 +27972,71 @@ function showHistoryModal() {
                     historyModal.style.display = 'none';
                 }
             });
-
-
-        function updateCity(address) {
-    ymaps.geocode(address, {
-        results: 1
-    }).then(function (result) {
-        const firstGeoObject = result.geoObjects.get(0);
-        if (firstGeoObject) {
-            const coords = firstGeoObject.geometry.getCoordinates();
-
             
+            
+            async function geocodeAddress(query) {
+  
+    if (typeof ymaps !== 'undefined' && ymaps.geocode) {
+        try {
+            const res = await ymaps.geocode(query, { results: 1 });
+            const firstGeoObject = res.geoObjects.get(0);
+            if (firstGeoObject) {
+                const coords = firstGeoObject.geometry.getCoordinates();
+                const addressLine = (typeof firstGeoObject.getAddressLine === 'function') 
+                    ? firstGeoObject.getAddressLine() 
+                    : (firstGeoObject.properties.get('text') || query);
+                const bounds = firstGeoObject.properties.get('boundedBy');
+                return { coords, addressLine, bounds };
+            }
+        } catch (e) {
+            console.warn('Yandex geocode error, fallback to Nominatim:', e);
+        }
+    }
+
+    
+    try {
+        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1&accept-language=ru`;
+        const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+        if (resp.ok) {
+            const data = await resp.json();
+            if (data && data.length > 0) {
+                const item = data[0];
+                const lat = parseFloat(item.lat);
+                const lon = parseFloat(item.lon);
+                let bounds = null;
+                if (item.boundingbox) {
+                    bounds = [
+                        [parseFloat(item.boundingbox[0]), parseFloat(item.boundingbox[2])],
+                        [parseFloat(item.boundingbox[1]), parseFloat(item.boundingbox[3])]
+                    ];
+                }
+                return { coords: [lat, lon], addressLine: item.display_name, bounds };
+            }
+        }
+    } catch (err) {
+        console.warn('Nominatim fallback geocode error:', err);
+    }
+
+    return null;
+}
+
+
+        async function updateCity(address) {
+    showLoader('Поиск адреса...');
+    try {
+        const result = await geocodeAddress(address);
+        if (result && result.coords) {
+            const coords = result.coords;
+
             animateMapZoom();
 
-            
-            map.setCenter(coords, 19);
+            if (result.bounds) {
+                map.setBounds(result.bounds, { checkZoomRange: true, duration: 300 });
+            } else {
+                map.setCenter(coords, 16);
+            }
 
-            
-            const addressComponents = firstGeoObject.getAddressLine().split(', ');
+            const addressComponents = (result.addressLine || address).split(', ');
             let formattedAddress = '';
             for (let i = 0; i < addressComponents.length; i++) {
                 formattedAddress += addressComponents[i] + '<br>';
@@ -27991,28 +28044,25 @@ function showHistoryModal() {
             document.getElementById('city-name-display').innerHTML = formattedAddress;
             localStorage.setItem('city', formattedAddress); 
 
-            
-            
-            
-
-            
             const placemark = new ymaps.Placemark(coords, {
-                hintContent: firstGeoObject.getAddressLine()
+                hintContent: result.addressLine || address
             }, {
-                 preset: 'islands#violetDotIcon' 
+                preset: 'islands#violetDotIcon' 
             });
             map.geoObjects.add(placemark);
             polygons.push(placemark); 
 
-            
-            
-
+            showNotification(`Адрес найден: ${result.addressLine}`, 'success');
         } else {
-            
             document.getElementById('city-name-display').textContent = 'Адрес не найден';
-           
+            showNotification('Адрес не найден', 'error');
         }
-    });
+    } catch (e) {
+        console.error('Ошибка при поиске адреса:', e);
+        showNotification('Ошибка при поиске адреса', 'error');
+    } finally {
+        hideLoader();
+    }
 }
 
 
@@ -33113,20 +33163,13 @@ document.getElementById('city-input').addEventListener('keydown', async function
                 }
                 await drawFeatureFromNspd(feature);
             }
-            else {
-                
+         else {
                 if (inputText.length > 200) {
                     showNotification('Текст слишком длинный', 'error');
                     return;
                 }
-                ymaps.geocode(inputText, { results: 1 }).then(function (result) {
-                    if (!result.geoObjects.get(0)) {
-                        showNotification('Адрес не найден', 'error');
-                        return;
-                    }
-                    addToHistory(inputText);
-                    updateCity(inputText);
-                });
+                addToHistory(inputText);
+                await updateCity(inputText);
             }
         } catch (error) {
             showNotification('Произошла ошибка при поиске', 'error');
