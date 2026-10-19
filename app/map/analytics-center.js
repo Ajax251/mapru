@@ -1,51 +1,14 @@
-const ANALYTICS_CENTER_VERSION = "1.06";
-console.log(`[Analytics Center] Загружена версия ${ANALYTICS_CENTER_VERSION}`);
-
-// Безопасное получение инстанса карты в обход DOM-элемента <div id="map">
-function getActiveMap() {
-    if (window.yandexMap && typeof window.yandexMap.getBounds === 'function') {
-        return window.yandexMap;
-    }
-    try {
-        if (typeof map !== 'undefined' && map && typeof map.getBounds === 'function') {
-            return map;
-        }
-    } catch (e) {}
-    return null;
-}
-
-// Автоопределение префикса региона и района по выбранной МСК или текущему кварталу карты
-function getDefaultCadastralPrefix() {
-    try {
-        if (typeof currentQuarterNumber !== 'undefined' && currentQuarterNumber) {
-            const parts = currentQuarterNumber.split(':');
-            if (parts.length >= 2) return `${parts[0]}:${parts[1]}:`;
-        }
-        const mskVal = localStorage.getItem('savedDefaultMskSystem') || '';
-        const m = mskVal.match(/633(\d{2})/);
-        if (m) return `${m[1]}:`;
-        const mskText = (typeof COORDINATE_SYSTEMS !== 'undefined')
-            ? (COORDINATE_SYSTEMS.find(s => s.value === mskVal)?.text || '') : '';
-        const m2 = mskText.match(/МСК[ -]?(\d{2})/i);
-        if (m2) return `${m2[1]}:`;
-    } catch (e) {}
-    return '16:';
-}
-
 /**
- * Модуль: Аналитический центр базы данных недвижимости
- * Включает:
- *  - Диалоговое окно размером 98% экрана
- *  - ИИ-ассистент формирования поисковых запросов через https://mapruapp.ru
- *  - Защита от перегрузки карты: подтверждение и выбор режима при выборке > 200 объектов
- *  - Пространственный и атрибутивный поиск по локальной БД SQLite
- *  - Интерактивную аналитику и графики ECharts
- *  - Экспорт в Excel (XLSX), GeoJSON и графический снимок (PNG)
+ * Модуль: Аналитический центр базы данных
+ * Версия: 2.01
  */
 
 (function () {
+    const ANALYTICS_CENTER_VERSION = "2.01";
+    console.log(`[Analytics Center] Загружена версия ${ANALYTICS_CENTER_VERSION}`);
+
     const MAPRUAPP_AI_URL = "https://mapruapp.ru/ai/api/v1/chat/completions";
-    const AI_MODEL_NAME = "gemini-3.5-flash-lite";
+    const AI_MODEL_NAME = "gemini-2.5-flash-lite";
     const BACKEND_QUERY_URL = "https://mapruapp.ru/api/analytics/query";
     const SAFE_MAP_OBJECT_LIMIT = 200;
 
@@ -61,7 +24,7 @@ function getDefaultCadastralPrefix() {
         style.id = 'analytics-center-inline-styles';
         style.textContent = `
             #analytics-center-overlay {
-                position: fixed; inset: 0; background: rgba(15, 23, 42, 0.75);
+                position: fixed; inset: 0; background: rgba(15, 23, 42, 0.78);
                 backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
                 z-index: 999999; display: flex; align-items: center; justify-content: center;
                 font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
@@ -83,11 +46,11 @@ function getDefaultCadastralPrefix() {
                 color: #fff; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 1.1rem;
             }
             .ac-body {
-                flex: 1; display: grid; grid-template-columns: 360px 1fr; overflow: hidden; background: #f1f5f9;
+                flex: 1; display: grid; grid-template-columns: 380px 1fr; overflow: hidden; background: #f1f5f9;
             }
             .ac-sidebar {
                 background: #ffffff; border-right: 1px solid #e2e8f0; display: flex; flex-direction: column;
-                overflow-y: auto; padding: 16px; gap: 14px; box-sizing: border-box;
+                overflow-y: auto; padding: 16px; gap: 12px; box-sizing: border-box;
             }
             .ac-ai-box {
                 background: linear-gradient(135deg, #eff6ff 0%, #f0fdf4 100%);
@@ -97,7 +60,7 @@ function getDefaultCadastralPrefix() {
                 margin: 0; color: #1e40af; font-size: 0.88rem; display: flex; align-items: center; gap: 6px;
             }
             .ac-ai-input {
-                width: 100%; height: 60px; padding: 8px 10px; border-radius: 8px; border: 1px solid #cbd5e1;
+                width: 100%; height: 55px; padding: 8px 10px; border-radius: 8px; border: 1px solid #cbd5e1;
                 font-size: 0.85rem; resize: none; box-sizing: border-box; outline: none; font-family: inherit;
             }
             .ac-ai-input:focus { border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15); }
@@ -108,10 +71,10 @@ function getDefaultCadastralPrefix() {
             }
             .ac-btn-ai:hover { filter: brightness(1.08); }
             .ac-filter-group {
-                background: #ffffff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 10px;
+                background: #ffffff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 9px;
             }
             .ac-filter-title {
-                font-size: 0.8rem; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.5px;
+                font-size: 0.78rem; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.5px;
             }
             .ac-form-row {
                 display: flex; flex-direction: column; gap: 4px; font-size: 0.82rem; color: #334155;
@@ -182,7 +145,8 @@ function getDefaultCadastralPrefix() {
             .ac-table td {
                 padding: 8px 10px; border-bottom: 1px solid #f1f5f9; color: #1e293b;
             }
-            .ac-table tr:hover td { background: #f8fafc; }
+            .ac-table-row-clickable { cursor: pointer; }
+            .ac-table-row-clickable:hover td { background: #eff6ff !important; }
             .ac-close-btn {
                 background: none; border: none; font-size: 1.5rem; color: #94a3b8; cursor: pointer; line-height: 1;
             }
@@ -192,6 +156,54 @@ function getDefaultCadastralPrefix() {
                 color: #1d4ed8; font-weight: 600; cursor: pointer; font-size: 0.75rem;
             }
             .ac-zoom-btn:hover { background: #2563eb; color: #ffffff; }
+
+            /* Карточка выбранного объекта */
+            .ac-card-overlay {
+                position: fixed; inset: 0; background: rgba(15, 23, 42, 0.65);
+                z-index: 1000005; display: flex; align-items: center; justify-content: center;
+                backdrop-filter: blur(4px);
+            }
+            .ac-card-window {
+                background: #ffffff; width: 920px; max-width: 95vw; max-height: 90vh;
+                border-radius: 16px; box-shadow: 0 25px 60px rgba(0, 0, 0, 0.35);
+                display: flex; flex-direction: column; overflow: hidden; border: 1px solid #cbd5e1;
+            }
+            .ac-card-header {
+                padding: 14px 20px; background: #f8fafc; border-bottom: 1px solid #e2e8f0;
+                display: flex; align-items: center; justify-content: space-between;
+            }
+            .ac-card-body {
+                display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; padding: 18px;
+                overflow-y: auto;
+            }
+            .ac-card-prop-table {
+                width: 100%; border-collapse: collapse; font-size: 0.85rem;
+            }
+            .ac-card-prop-table td {
+                padding: 6px 8px; border-bottom: 1px solid #f1f5f9; vertical-align: top;
+            }
+            .ac-card-prop-table td:first-child {
+                color: #64748b; font-weight: 600; width: 38%;
+            }
+            .ac-card-prop-table td:last-child {
+                color: #0f172a; font-weight: 600; word-break: break-word;
+            }
+            .ac-card-right-panel {
+                display: flex; flex-direction: column; gap: 12px;
+            }
+            .ac-streetview-box {
+                width: 100%; height: 260px; background: #0f172a; border-radius: 10px;
+                overflow: hidden; border: 1px solid #cbd5e1; position: relative;
+            }
+            .ac-card-btn {
+                padding: 9px 14px; border-radius: 8px; font-size: 0.85rem; font-weight: 700;
+                cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
+                border: none; transition: 0.2s;
+            }
+            .ac-btn-egrn {
+                background: linear-gradient(135deg, #10b981, #059669); color: #fff;
+            }
+            .ac-btn-egrn:hover { filter: brightness(1.08); }
 
             /* Модальное окно подтверждения большого объема */
             .ac-confirm-dialog-overlay {
@@ -211,7 +223,58 @@ function getDefaultCadastralPrefix() {
         document.head.appendChild(style);
     }
 
-    // Загрузка библиотеки ECharts
+    // Безопасное получение карты
+    function getActiveMap() {
+        if (window.yandexMap && typeof window.yandexMap.getBounds === 'function') {
+            return window.yandexMap;
+        }
+        try {
+            if (typeof map !== 'undefined' && map && typeof map.getBounds === 'function') {
+                return map;
+            }
+        } catch (e) {}
+        return null;
+    }
+
+    // Определение префикса по МСК или активному кварталу
+    function getDefaultCadastralPrefix() {
+        try {
+            if (typeof currentQuarterNumber !== 'undefined' && currentQuarterNumber) {
+                const parts = currentQuarterNumber.split(':');
+                if (parts.length >= 2) return `${parts[0]}:${parts[1]}:`;
+            }
+            const mskVal = localStorage.getItem('savedDefaultMskSystem') || '';
+            const m = mskVal.match(/633(\d{2})/);
+            if (m) return `${m[1]}:`;
+            const mskText = (typeof COORDINATE_SYSTEMS !== 'undefined')
+                ? (COORDINATE_SYSTEMS.find(s => s.value === mskVal)?.text || '') : '';
+            const m2 = mskText.match(/МСК[ -]?(\d{2})/i);
+            if (m2) return `${m2[1]}:`;
+        } catch (e) {}
+        return '16:';
+    }
+
+    // Преобразование координат центра объекта из 3857 в WGS84
+    function getFeatureCenterWgs(feature) {
+        if (!feature || !feature.geometry) return null;
+        let x = 0, y = 0, count = 0;
+        const extractPoints = (coords) => {
+            if (typeof coords[0] === 'number') {
+                x += coords[0]; y += coords[1]; count++;
+            } else {
+                coords.forEach(extractPoints);
+            }
+        };
+        extractPoints(feature.geometry.coordinates);
+        if (count === 0) return null;
+        x /= count; y /= count;
+
+        const lon = (x / 6378137.0) * (180.0 / Math.PI);
+        const lat = (Math.atan(Math.exp(y / 6378137.0)) * 2 - Math.PI / 2) * (180.0 / Math.PI);
+        return { lat, lon };
+    }
+
+    // Загрузка библиотек ECharts и XLSX
     async function ensureEcharts() {
         if (typeof echarts === 'undefined') {
             await new Promise((resolve, reject) => {
@@ -224,7 +287,6 @@ function getDefaultCadastralPrefix() {
         }
     }
 
-    // Загрузка библиотеки XLSX
     async function ensureXlsx() {
         if (typeof XLSX === 'undefined') {
             await new Promise((resolve, reject) => {
@@ -237,7 +299,7 @@ function getDefaultCadastralPrefix() {
         }
     }
 
-    // Открытие основного окна
+    // Открытие Аналитического центра
     window.openAnalyticsCenter = async function (lat, lon) {
         injectAnalyticsStyles();
         await ensureEcharts();
@@ -258,9 +320,9 @@ function getDefaultCadastralPrefix() {
                 </div>
                 
                 <div class="ac-body">
-                    <!-- Панель управления и фильтров -->
+                    <!-- Сайдбар параметров -->
                     <div class="ac-sidebar">
-                        <!-- Блок ИИ-Ассистента -->
+                        <!-- Блок ИИ -->
                         <div class="ac-ai-box">
                             <h4><i class="fas fa-robot" style="color: #2563eb;"></i> ИИ-Аналитик (Запрос на русском)</h4>
                             <textarea id="ac-ai-text" class="ac-ai-input" placeholder="Опишите нужные объекты естественным языком..."></textarea>
@@ -269,7 +331,7 @@ function getDefaultCadastralPrefix() {
                             </button>
                         </div>
 
-                        <!-- Основные фильтры -->
+                        <!-- Пространственный охват -->
                         <div class="ac-filter-group">
                             <span class="ac-filter-title">Пространственный охват</span>
                             <div class="ac-form-row">
@@ -277,7 +339,7 @@ function getDefaultCadastralPrefix() {
                                 <select id="ac-spatial-type" class="ac-select">
                                     <option value="viewport" selected>Текущий экран карты</option>
                                     <option value="radius" ${lat && lon ? 'selected' : ''}>В радиусе от точки клика</option>
-                                    <option value="all">По всей базе (требуется фильтр)</option>
+                                    <option value="all">По всей базе (требуется район)</option>
                                 </select>
                             </div>
                             <div class="ac-form-row" id="ac-radius-wrap" style="${lat && lon ? '' : 'display: none;'}">
@@ -286,18 +348,26 @@ function getDefaultCadastralPrefix() {
                             </div>
                         </div>
 
+                        <!-- Кадастровый номер и текстовый поиск -->
                         <div class="ac-filter-group">
-                            <span class="ac-filter-title">Поиск по атрибутам</span>
+                            <span class="ac-filter-title">Кадастровый номер и текст</span>
+                            <div class="ac-form-row">
+                                <label>Кадастровый номер или маска (мин. 4 цифры):</label>
+                                <input type="text" id="ac-cadnum-search" class="ac-input-text" value="${getDefaultCadastralPrefix()}" placeholder="16:56: или 16:56:010101">
+                            </div>
                             <div class="ac-form-row">
                                 <label>Поиск по адресу / тексту:</label>
                                 <input type="text" id="ac-address-search" class="ac-input-text" placeholder="Улица, поселок или ориентир...">
                             </div>
-                            <div class="ac-form-row">
-                                <label>Кадастровый номер или маска:</label>
-                                <input type="text" id="ac-cadnum-search" class="ac-input-text" value="${getDefaultCadastralPrefix()}">
+                            <div style="font-size: 0.8rem; margin-top: 4px;">
+                                <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; color: #475569;">
+                                    <input type="checkbox" id="ac-exact-match">
+                                    <span>Точное совпадение (иначе по части слова)</span>
+                                </label>
                             </div>
                         </div>
 
+                        <!-- Типы объектов -->
                         <div class="ac-filter-group">
                             <span class="ac-filter-title">Типы объектов</span>
                             <div class="ac-checkbox-grid">
@@ -308,15 +378,97 @@ function getDefaultCadastralPrefix() {
                             </div>
                         </div>
 
+                        <!-- Общие права и статус -->
                         <div class="ac-filter-group">
-                            <span class="ac-filter-title">Параметры зданий и участков</span>
+                            <span class="ac-filter-title">Права и статус объекта</span>
                             <div class="ac-form-row">
-                                <label>Этажность (ОКС):</label>
+                                <label>Форма собственности:</label>
+                                <select id="ac-ownership-type" class="ac-select">
+                                    <option value="">(Любая)</option>
+                                    <option value="Частная">Частная</option>
+                                    <option value="Муниципальная">Муниципальная</option>
+                                    <option value="Государственная">Государственная</option>
+                                </select>
+                            </div>
+                            <div class="ac-form-row">
+                                <label>Тип права:</label>
+                                <input type="text" id="ac-right-type" class="ac-input-text" placeholder="Собственность, Аренда, Бессрочное...">
+                            </div>
+                            <div class="ac-form-row">
+                                <label>Статус записи:</label>
+                                <select id="ac-status-val" class="ac-select">
+                                    <option value="">(Любой)</option>
+                                    <option value="Ранее учтенный">Ранее учтенный</option>
+                                    <option value="Учтенный">Учтенный</option>
+                                    <option value="Временный">Временный</option>
+                                </select>
+                            </div>
+                        </div>
+
+                        <!-- Параметры Участков (ЗУ) -->
+                        <div class="ac-filter-group">
+                            <span class="ac-filter-title">Параметры участков (ЗУ)</span>
+                            <div class="ac-form-row">
+                                <label>Характер площади (межевание):</label>
+                                <select id="ac-zu-area-type" class="ac-select">
+                                    <option value="">(Все участки)</option>
+                                    <option value="specified">Уточненная (границы определены)</option>
+                                    <option value="declared">Декларированная (без границ)</option>
+                                </select>
+                            </div>
+                            <div class="ac-form-row">
+                                <label>Категория земель:</label>
+                                <select id="ac-zu-category" class="ac-select">
+                                    <option value="">(Любая категория)</option>
+                                    <option value="Земли населенных пунктов">Земли населенных пунктов</option>
+                                    <option value="Земли сельскохозяйственного назначения">Земли сельхозназначения</option>
+                                    <option value="Земли промышленности">Земли промышленности и транспорта</option>
+                                    <option value="Земли лесного фонда">Земли лесного фонда</option>
+                                    <option value="Земли водного фонда">Земли водного фонда</option>
+                                </select>
+                            </div>
+                            <div class="ac-form-row">
+                                <label>Разрешенное использование (ВРИ):</label>
+                                <input type="text" id="ac-zu-vri" class="ac-input-text" placeholder="ИЖС, ЛПХ, торговля...">
+                            </div>
+                        </div>
+
+                        <!-- Параметры Зданий (ОКС) -->
+                        <div class="ac-filter-group">
+                            <span class="ac-filter-title">Параметры зданий (ОКС)</span>
+                            <div class="ac-form-row">
+                                <label>Вид объекта:</label>
+                                <select id="ac-oks-kind" class="ac-select">
+                                    <option value="">(Любой)</option>
+                                    <option value="Здание">Здание</option>
+                                    <option value="Помещение">Помещение</option>
+                                    <option value="Сооружение">Сооружение</option>
+                                </select>
+                            </div>
+                            <div class="ac-form-row">
+                                <label>Назначение здания:</label>
+                                <input type="text" id="ac-oks-purpose" class="ac-input-text" placeholder="Жилой дом, Нежилое, МКД...">
+                            </div>
+                            <div class="ac-form-row">
+                                <label>Наименование:</label>
+                                <input type="text" id="ac-oks-name" class="ac-input-text" placeholder="Жилой дом, склад, магазин...">
+                            </div>
+                            <div class="ac-form-row">
+                                <label>Этажность:</label>
                                 <div class="ac-range-row">
                                     <input type="number" id="ac-floors-min" class="ac-input-text" placeholder="От этажей" min="1">
                                     <input type="number" id="ac-floors-max" class="ac-input-text" placeholder="До этажей" min="1">
                                 </div>
                             </div>
+                            <div class="ac-form-row">
+                                <label>Материал стен:</label>
+                                <input type="text" id="ac-materials" class="ac-input-text" placeholder="Кирпич, дерево, бетон...">
+                            </div>
+                        </div>
+
+                        <!-- Площадь и стоимость -->
+                        <div class="ac-filter-group">
+                            <span class="ac-filter-title">Площадь и стоимость</span>
                             <div class="ac-form-row">
                                 <label>Площадь (м²):</label>
                                 <div class="ac-range-row">
@@ -331,14 +483,6 @@ function getDefaultCadastralPrefix() {
                                     <input type="number" id="ac-cost-max" class="ac-input-text" placeholder="До руб.">
                                 </div>
                             </div>
-                            <div class="ac-form-row">
-                                <label>Материал стен (для зданий):</label>
-                                <input type="text" id="ac-materials" class="ac-input-text" placeholder="Кирпич, дерево, бетон...">
-                            </div>
-                            <div class="ac-form-row">
-                                <label>Назначение / ВРИ:</label>
-                                <input type="text" id="ac-purpose" class="ac-input-text" placeholder="Жилое, торговое, ИЖС...">
-                            </div>
                         </div>
 
                         <button id="ac-btn-execute" class="ac-btn-run">
@@ -346,7 +490,7 @@ function getDefaultCadastralPrefix() {
                         </button>
                     </div>
 
-                    <!-- Рабочая область отображения результатов -->
+                    <!-- Рабочая область -->
                     <div class="ac-main">
                         <div class="ac-tabs-bar">
                             <div class="ac-tabs">
@@ -416,12 +560,26 @@ function getDefaultCadastralPrefix() {
         runAnalyticsQuery(lat, lon);
     };
 
-    // Сбор параметров запроса с валидацией безопасности
+    // Сбор параметров с проверкой обязательных 4 цифр кадастрового номера
     function collectFilterPayload(clickLat, clickLon) {
         const spatialType = document.getElementById('ac-spatial-type').value;
+        const cad = document.getElementById('ac-cadnum-search').value.trim();
+
+        // Проверка: минимум 4 цифры района (например: 16:56 или 16:56:)
+        const hasValidCadPrefix = /^\d{2}:\d{2}/.test(cad);
+
+        if (!hasValidCadPrefix && spatialType === 'all') {
+            const defPrefix = getDefaultCadastralPrefix();
+            alert(`Для выборки по базе необходимо указать как минимум код региона и района (например: ${defPrefix}56: или ${defPrefix}01:).`);
+            document.getElementById('ac-cadnum-search').focus();
+            return null;
+        }
+
         const payload = {
             tables: [],
-            filters: {}
+            filters: {
+                exact_match: document.getElementById('ac-exact-match').checked
+            }
         };
 
         if (document.getElementById('ac-type-zu').checked) payload.tables.push('zu');
@@ -429,22 +587,22 @@ function getDefaultCadastralPrefix() {
         if (document.getElementById('ac-type-str').checked) payload.tables.push('structure');
         if (document.getElementById('ac-type-zones').checked) payload.tables.push('zones');
 
-       if (spatialType === 'viewport') {
-    const activeMap = getActiveMap();
-    if (activeMap) {
-        const bounds = activeMap.getBounds();
-        if (bounds && bounds[0] && bounds[1]) {
-            payload.spatial = {
-                type: 'bbox',
-                min_lat: bounds[0][0], min_lon: bounds[0][1],
-                max_lat: bounds[1][0], max_lon: bounds[1][1]
-            };
-        }
-    } else {
-        alert('Карта еще не инициализирована');
-        return null;
-    }
-} else if (spatialType === 'radius' && clickLat && clickLon) {
+        if (spatialType === 'viewport') {
+            const activeMap = getActiveMap();
+            if (activeMap) {
+                const bounds = activeMap.getBounds();
+                if (bounds && bounds[0] && bounds[1]) {
+                    payload.spatial = {
+                        type: 'bbox',
+                        min_lat: bounds[0][0], min_lon: bounds[0][1],
+                        max_lat: bounds[1][0], max_lon: bounds[1][1]
+                    };
+                }
+            } else {
+                alert('Карта еще не инициализирована');
+                return null;
+            }
+        } else if (spatialType === 'radius' && clickLat && clickLon) {
             payload.spatial = {
                 type: 'circle',
                 lat: clickLat,
@@ -453,11 +611,37 @@ function getDefaultCadastralPrefix() {
             };
         }
 
+        if (cad) payload.filters.cad_num = cad;
+
         const addr = document.getElementById('ac-address-search').value.trim();
         if (addr) payload.filters.address = addr;
 
-        const cad = document.getElementById('ac-cadnum-search').value.trim();
-        if (cad) payload.filters.cad_num = cad;
+        const own = document.getElementById('ac-ownership-type').value;
+        if (own) payload.filters.ownership = own;
+
+        const right = document.getElementById('ac-right-type').value.trim();
+        if (right) payload.filters.right_type = right;
+
+        const status = document.getElementById('ac-status-val').value;
+        if (status) payload.filters.status = status;
+
+        const zuAreaType = document.getElementById('ac-zu-area-type').value;
+        if (zuAreaType) payload.filters.zu_area_type = zuAreaType;
+
+        const zuCat = document.getElementById('ac-zu-category').value;
+        if (zuCat) payload.filters.zu_category = zuCat;
+
+        const zuVri = document.getElementById('ac-zu-vri').value.trim();
+        if (zuVri) payload.filters.zu_vri = zuVri;
+
+        const oksKind = document.getElementById('ac-oks-kind').value;
+        if (oksKind) payload.filters.oks_kind = oksKind;
+
+        const oksPurpose = document.getElementById('ac-oks-purpose').value.trim();
+        if (oksPurpose) payload.filters.oks_purpose = oksPurpose;
+
+        const oksName = document.getElementById('ac-oks-name').value.trim();
+        if (oksName) payload.filters.oks_name = oksName;
 
         const fMin = document.getElementById('ac-floors-min').value;
         if (fMin) payload.filters.floors_min = parseInt(fMin, 10);
@@ -477,28 +661,10 @@ function getDefaultCadastralPrefix() {
         const mat = document.getElementById('ac-materials').value.trim();
         if (mat) payload.filters.materials = mat;
 
-        const purp = document.getElementById('ac-purpose').value.trim();
-        if (purp) payload.filters.purpose = purp;
-
-        // Защита: если выбрана «вся база», требуем хотя бы один конкретный фильтр
-     // Проверка корректности параметров для режима «По всей базе»
-if (spatialType === 'all') {
-    const cad = payload.filters.cad_num || '';
-    // Проверяем наличие префикса региона и района (например: 16:56 или 16:56:)
-    const hasValidCadPrefix = /^\d{2}:\d{1,2}:?/.test(cad);
-    const hasOtherFilters = addr || fMin || fMax || aMin || aMax || cMin || cMax || mat || purp;
-
-    if (!hasValidCadPrefix && !hasOtherFilters) {
-        const suggested = getDefaultCadastralPrefix();
-        alert(`Для выборки по всей базе необходимо указать как минимум префикс региона и района (например: ${suggested} или ${suggested}010101) либо задать адрес/параметры.`);
-        return null;
-    }
-}
-
         return payload;
     }
 
-    // Выполнение запроса
+    // Запрос к серверу
     async function runAnalyticsQuery(lat, lon) {
         const payload = collectFilterPayload(lat, lon);
         if (!payload) return;
@@ -533,7 +699,7 @@ if (spatialType === 'all') {
         }
     }
 
-    // Запрос к ИИ для распознавания естественного языка
+    // ИИ-парсер запроса
     async function processAiQuery() {
         const inputEl = document.getElementById('ac-ai-text');
         const queryText = inputEl.value.trim();
@@ -545,18 +711,19 @@ if (spatialType === 'all') {
 
         const systemPrompt = `
 Ты — аналитический транслятор естественного языка в структурированный фильтр базы данных объектов недвижимости.
-Пользователь передаст запрос на русском языке. Верни ТОЛЬКО валидный JSON без комментариев и markdown-тегов со следующими ключами:
+Пользователь передаст запрос на русском языке. Верни ТОЛЬКО валидный JSON без комментариев и markdown-тегов:
 {
-  "address": "строка для поиска по адресу или пусто",
-  "cad_num": "кадастровый номер или маска или пусто",
+  "address": "строка адреса или пусто",
+  "cad_num": "кадастровый номер или маска (мин. 4 цифры) или пусто",
   "floors_min": число или null,
   "floors_max": число или null,
   "area_min": число или null,
   "area_max": число или null,
   "cost_min": число или null,
   "cost_max": число или null,
-  "materials": "материал стен или пусто",
-  "purpose": "назначение или вид использования или пусто",
+  "materials": "материал стен (кирпич, дерево и т.д.) или пусто",
+  "purpose": "назначение (жилой дом, магазин и т.д.) или пусто",
+  "ownership": "Частная, Муниципальная или пусто",
   "types": ["zu", "oks", "structure", "zones"]
 }
 `;
@@ -590,7 +757,8 @@ if (spatialType === 'all') {
             if (parsed.cost_min) document.getElementById('ac-cost-min').value = parsed.cost_min;
             if (parsed.cost_max) document.getElementById('ac-cost-max').value = parsed.cost_max;
             if (parsed.materials) document.getElementById('ac-materials').value = parsed.materials;
-            if (parsed.purpose) document.getElementById('ac-purpose').value = parsed.purpose;
+            if (parsed.purpose) document.getElementById('ac-oks-purpose').value = parsed.purpose;
+            if (parsed.ownership) document.getElementById('ac-ownership-type').value = parsed.ownership;
 
             if (Array.isArray(parsed.types)) {
                 document.getElementById('ac-type-zu').checked = parsed.types.includes('zu');
@@ -608,7 +776,7 @@ if (spatialType === 'all') {
         }
     }
 
-    // Рендеринг активной вкладки
+    // Отображение активной вкладки
     function renderActiveTabContent() {
         const container = document.getElementById('ac-content-view');
         if (!container) return;
@@ -762,24 +930,25 @@ if (spatialType === 'all') {
             currentChartInstances.push(cTree);
 
         } else if (activeTab === 'table') {
-            const BATCH_SIZE = 100;
+            const BATCH_SIZE = 120;
             let renderedCount = 0;
 
             container.innerHTML = `
                 <div style="margin-bottom: 8px; font-weight: 600; color: #475569; display: flex; justify-content: space-between; align-items: center;">
                     <span>Показано: <b id="ac-table-rendered-count" style="color: #0284c7;">0</b> из ${features.length.toLocaleString('ru-RU')}</span>
-                    <span style="font-size: 0.78rem; color: #94a3b8; font-weight: normal;">Прокручивайте вниз для отображения всех объектов</span>
+                    <span style="font-size: 0.78rem; color: #94a3b8; font-weight: normal;">Клик по строке открывает паспорт и панораму; скроллинг подгружает все объекты</span>
                 </div>
                 <div id="ac-table-scroll-wrap" style="overflow-x: auto; overflow-y: auto; max-height: calc(100% - 35px);">
                     <table class="ac-table">
                         <thead>
                             <tr>
                                 <th style="width: 45px;">№</th>
-                                <th style="width: 220px;">Кадастровый номер</th>
-                                <th style="width: 80px;">Тип</th>
+                                <th style="width: 210px;">Кадастровый номер</th>
+                                <th style="width: 75px;">Тип</th>
                                 <th>Адрес / Местоположение</th>
-                                <th style="width: 120px;">Параметр</th>
+                                <th style="width: 110px;">Параметр</th>
                                 <th style="width: 130px;">Стоимость</th>
+                                <th style="width: 50px;"></th>
                             </tr>
                         </thead>
                         <tbody id="ac-table-body"></tbody>
@@ -805,23 +974,29 @@ if (spatialType === 'all') {
                     const typeName = f._layer_type === 'zu' ? 'ЗУ' : (f._layer_type === 'oks' ? 'Здание' : 'Сооружение');
 
                     const tr = document.createElement('tr');
+                    tr.className = 'ac-table-row-clickable';
                     tr.innerHTML = `
                         <td style="color: #64748b;">${i + 1}</td>
-                        <td style="font-weight: 700; color: #0284c7;">
-                            <div style="display:flex; align-items:center; gap:6px;">
-                                <span>${f.id}</span>
-                                <button class="ac-zoom-btn" data-fid="${f.id}" title="Перейти к объекту на карте">
-                                    <i class="fas fa-crosshairs"></i>
-                                </button>
-                            </div>
-                        </td>
+                        <td style="font-weight: 700; color: #0284c7;">${f.id}</td>
                         <td>${typeName}</td>
                         <td>${addr}</td>
                         <td>${area}</td>
                         <td>${cost}</td>
+                        <td>
+                            <button class="ac-zoom-btn" data-fid="${f.id}" title="Перейти на карте">
+                                <i class="fas fa-crosshairs"></i>
+                            </button>
+                        </td>
                     `;
 
-                    tr.querySelector('.ac-zoom-btn').onclick = () => {
+                    // Клик по строке — открытие подробного паспорта с Google панорамой
+                    tr.onclick = (e) => {
+                        if (e.target.closest('.ac-zoom-btn')) return;
+                        openObjectDetailCard(f);
+                    };
+
+                    tr.querySelector('.ac-zoom-btn').onclick = (e) => {
+                        e.stopPropagation();
                         focusSingleFeatureOnMainMap(f);
                     };
 
@@ -833,13 +1008,11 @@ if (spatialType === 'all') {
                 countEl.textContent = renderedCount.toLocaleString('ru-RU');
             }
 
-            // Первая порция строк
             renderRowsBatch();
 
-            // Динамическая подгрузка при скролле вниз
             scrollWrap.addEventListener('scroll', () => {
                 if (renderedCount < features.length) {
-                    if (scrollWrap.scrollTop + scrollWrap.clientHeight >= scrollWrap.scrollHeight - 120) {
+                    if (scrollWrap.scrollTop + scrollWrap.clientHeight >= scrollWrap.scrollHeight - 140) {
                         renderRowsBatch();
                     }
                 }
@@ -847,10 +1020,111 @@ if (spatialType === 'all') {
         }
     }
 
+    // Открытие детальной карточки объекта с панорамой Google Улиц и кнопкой выписки
+    function openObjectDetailCard(feature) {
+        const existingCard = document.getElementById('ac-object-card-overlay');
+        if (existingCard) existingCard.remove();
+
+        const p = feature.properties || {};
+        const o = p.options || {};
+        const cn = feature.id || p.descr || 'Без номера';
+        const typeName = feature._layer_type === 'zu' ? 'Земельный участок' : (feature._layer_type === 'oks' ? 'Здание' : 'Сооружение');
+
+        const center = getFeatureCenterWgs(feature);
+        const streetViewUrl = center 
+            ? `https://maps.google.com/maps?layer=c&cbll=${center.lat},${center.lon}&cbp=12,0,0,0,0&output=svembed`
+            : null;
+
+        const cardOverlay = document.createElement('div');
+        cardOverlay.id = 'ac-object-card-overlay';
+        cardOverlay.className = 'ac-card-overlay';
+
+        let propRows = '';
+        const addRow = (label, val) => {
+            if (val && String(val).trim() !== '-' && String(val).trim() !== 'null') {
+                propRows += `<tr><td>${label}:</td><td>${val}</td></tr>`;
+            }
+        };
+
+        addRow('Кадастровый номер', cn);
+        addRow('Тип объекта', typeName);
+        addRow('Адрес', o.readable_address || o.address_readable_address);
+        addRow('Площадь / Длина', o.specified_area || o.build_record_area || o.params_extension || feature.area);
+        addRow('Кадастровая стоимость', o.cost_value ? `${Number(o.cost_value).toLocaleString('ru-RU')} ₽` : null);
+        addRow('УПКС', o.cost_index ? `${o.cost_index} ₽/м²` : null);
+        addRow('Форма собственности', o.ownership_type);
+        addRow('Тип права', o.right_type);
+        addRow('Статус записи', o.status);
+        addRow('Назначение', o.purpose || o.params_purpose);
+        addRow('Наименование', o.name || o.building_name || o.params_name);
+        addRow('Этажность', o.floors);
+        addRow('Материал стен', o.materials);
+        addRow('Год постройки', o.year_built || o.params_year_built);
+        addRow('Категория земель', o.land_record_category_type);
+        addRow('Разрешенное использование', o.permitted_use_established_by_document);
+
+        cardOverlay.innerHTML = `
+            <div class="ac-card-window">
+                <div class="ac-card-header">
+                    <div style="display:flex; align-items:center; gap:8px;">
+                        <span style="font-weight:800; font-size:1.1rem; color:#0f172a;">${cn}</span>
+                        <span style="background:#e0f2fe; color:#0369a1; font-size:0.75rem; font-weight:700; padding:2px 8px; border-radius:4px;">${typeName}</span>
+                    </div>
+                    <button class="ac-close-btn" id="ac-card-close">&times;</button>
+                </div>
+                <div class="ac-card-body">
+                    <!-- Таблица параметров -->
+                    <div style="overflow-y:auto; max-height:480px; padding-right:8px;">
+                        <table class="ac-card-prop-table">
+                            <tbody>${propRows}</tbody>
+                        </table>
+                    </div>
+
+                    <!-- Панорама и действия -->
+                    <div class="ac-card-right-panel">
+                        <div class="ac-streetview-box">
+                            ${streetViewUrl 
+                                ? `<iframe src="${streetViewUrl}" style="width:100%;height:100%;border:none;" allowfullscreen></iframe>`
+                                : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#94a3b8;font-size:0.85rem;">Координаты для панорамы не определены</div>`
+                            }
+                        </div>
+                        <button class="ac-card-btn ac-btn-egrn" id="ac-card-btn-egrn" title="Посмотреть актуальные данные">
+                            <i class="fas fa-file-alt"></i> Посмотреть актуальные данные
+                        </button>
+                        <button class="ac-card-btn" id="ac-card-btn-zoom" style="background:#0284c7; color:#fff;" title="Показать на главной карте">
+                            <i class="fas fa-crosshairs"></i> Показать на карте
+                        </button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(cardOverlay);
+
+        const closeCard = () => cardOverlay.remove();
+        cardOverlay.querySelector('#ac-card-close').onclick = closeCard;
+        cardOverlay.onclick = (e) => { if (e.target === cardOverlay) closeCard(); };
+
+        // Кнопка: копирует номер и открывает egrn.html
+        cardOverlay.querySelector('#ac-card-btn-egrn').onclick = async () => {
+            try {
+                await navigator.clipboard.writeText(cn);
+            } catch (err) {}
+            window.open('egrn.html', '_blank');
+        };
+
+        // Кнопка: фокус на карте
+        cardOverlay.querySelector('#ac-card-btn-zoom').onclick = () => {
+            closeCard();
+            focusSingleFeatureOnMainMap(feature);
+        };
+    }
+
     // Фокус на конкретном одном объекте из таблицы
     function focusSingleFeatureOnMainMap(feature) {
-    const activeMap = getActiveMap();
-    if (!feature || !activeMap) return;
+        const activeMap = getActiveMap();
+        if (!feature || !activeMap) return;
+
         if (analyticsModal) {
             analyticsModal.remove();
             analyticsModal = null;
@@ -867,18 +1141,17 @@ if (spatialType === 'all') {
         }
     }
 
-    // Отрисовка выборки объектов на главной карте с модальным подтверждением при > 200 объектов
-   function showResultsOnMainMap() {
-    const activeMap = getActiveMap();
-    if (!lastQueryResults?.features?.length || !activeMap) {
-        alert('Нет объектов для переноса на карту или карта не готова');
-        return;
-    }
+    // Перенос выборки на главную карту с модальным подтверждением при > 200 объектов
+    function showResultsOnMainMap() {
+        const activeMap = getActiveMap();
+        if (!lastQueryResults?.features?.length || !activeMap) {
+            alert('Нет объектов для переноса на карту или карта не готова');
+            return;
+        }
 
         const allFeatures = lastQueryResults.features;
         const totalCount = allFeatures.length;
 
-        // Если объектов больше 200 — спрашиваем подтверждение
         if (totalCount > SAFE_MAP_OBJECT_LIMIT) {
             promptLargeVolumeConfirmation(totalCount, (choice) => {
                 if (choice === 'cancel') return;
@@ -894,7 +1167,7 @@ if (spatialType === 'all') {
         }
     }
 
-    // Диалог подтверждения большого объема
+    // Диалог подтверждения объема
     function promptLargeVolumeConfirmation(totalCount, callback) {
         const dialogOverlay = document.createElement('div');
         dialogOverlay.className = 'ac-confirm-dialog-overlay';
@@ -904,12 +1177,12 @@ if (spatialType === 'all') {
                 <div class="ac-confirm-icon">
                     <i class="fas fa-exclamation-triangle"></i>
                 </div>
-                <h3 style="margin: 0 0 8px 0; color: #1e293b; font-size: 1.2rem;">Большой объем данных</h3>
+                <h3 style="margin: 0 0 8px 0; color: #1e3a8a; font-size: 1.2rem;">Большой объем данных</h3>
                 <div style="font-size: 0.95rem; font-weight: 700; color: #0284c7; margin-bottom: 8px;">
                     Найдено объектов: ${totalCount.toLocaleString('ru-RU')} шт.
                 </div>
                 <p style="font-size: 0.85rem; color: #64748b; margin: 0 0 18px 0; line-height: 1.4;">
-                    Отображение более 200 сложных контуров одновременно может существенно снизить скорость работы браузера. Выберите вариант:
+                    Отображение более 200 сложных контуров одновременно может замедлить работу карты. Выберите действие:
                 </p>
                 <div style="display: flex; flex-direction: column; gap: 8px;">
                     <button id="ac-confirm-first" style="padding: 10px; border-radius: 8px; border: none; background: #2563eb; color: #fff; font-weight: 700; cursor: pointer;">
@@ -937,7 +1210,7 @@ if (spatialType === 'all') {
         dialogOverlay.querySelector('#ac-confirm-cancel').onclick = () => closeDialog('cancel');
     }
 
-    // Выполнение фактической отрисовки
+    // Выполнение отрисовки
     function executeDrawOnMap(features, countDrawn) {
         if (typeof processAndDrawParcels === 'function') {
             const zu = features.filter(f => f._layer_type === 'zu');
@@ -967,7 +1240,7 @@ if (spatialType === 'all') {
         }
         await ensureXlsx();
 
-        const headers = ["Кадастровый / Учетный номер", "Тип", "Адрес", "Площадь/Длина", "Кадастровая стоимость", "ВРИ / Назначение", "Собственность", "Этажность", "Материал стен"];
+        const headers = ["Кадастровый / Учетный номер", "Тип", "Адрес", "Площадь/Длина", "Кадастровая стоимость", "ВРИ / Назначение", "Собственность", "Тип права", "Статус", "Этажность", "Материал стен"];
         const rows = [headers];
 
         lastQueryResults.features.forEach(f => {
@@ -980,6 +1253,8 @@ if (spatialType === 'all') {
                 o.cost_value || '',
                 o.permitted_use_established_by_document || o.purpose || '',
                 o.ownership_type || '',
+                o.right_type || '',
+                o.status || '',
                 o.floors || '',
                 o.materials || ''
             ]);
