@@ -1,14 +1,14 @@
 /**
  * Модуль: Аналитический центр базы данных
- * Версия: 2.03
+ * Версия: 2.05
  */
 
 (function () {
-    const ANALYTICS_CENTER_VERSION = "2.03";
+    const ANALYTICS_CENTER_VERSION = "2.05";
     console.log(`[Analytics Center] Загружена версия ${ANALYTICS_CENTER_VERSION}`);
 
     const MAPRUAPP_AI_URL = "https://mapruapp.ru/ai/api/v1/chat/completions";
-    const AI_MODEL_NAME = "gemini-3.5-flash-lite";
+    const AI_MODEL_NAME = "gemini-2.5-flash-lite";
     const BACKEND_QUERY_URL = "https://mapruapp.ru/api/analytics/query";
     const SAFE_MAP_OBJECT_LIMIT = 200;
 
@@ -272,19 +272,26 @@
     }
 
     // Получение даты сведений
-    function getFeatureDate(f) {
-        if (!f) return '-';
+  function getFeatureDate(f) {
+        if (!f) return { regDate: null, dbDate: null };
         const p = f.properties || {};
         const o = p.options || {};
-        const rawDate = o.land_record_reg_date ||
-                        o.build_record_registration_date ||
-                        o.registration_date ||
-                        p.updated_date ||
-                        f.updated_date;
-        if (!rawDate) return '-';
-        const m = String(rawDate).match(/^(\d{4})-(\d{2})-(\d{2})/);
-        if (m) return `${m[3]}.${m[2]}.${m[1]}`;
-        return rawDate;
+        const regDateRaw = o.land_record_reg_date ||
+                           o.build_record_registration_date ||
+                           o.registration_date ||
+                           p.updated_date;
+        const dbDateRaw = f.db_date || f.updated_date;
+
+        const format = (d) => {
+            if (!d || d === '-') return null;
+            const m = String(d).match(/^(\d{4})-(\d{2})-(\d{2})/);
+            return m ? `${m[3]}.${m[2]}.${m[1]}` : d;
+        };
+
+        return {
+            regDate: format(regDateRaw),
+            dbDate: format(dbDateRaw)
+        };
     }
 
     // Преобразование координат центра объекта из 3857 в WGS84
@@ -305,6 +312,34 @@
         const lon = (x / 6378137.0) * (180.0 / Math.PI);
         const lat = (Math.atan(Math.exp(y / 6378137.0)) * 2 - Math.PI / 2) * (180.0 / Math.PI);
         return { lat, lon };
+    }
+
+    // Преобразование геометрии в координаты Яндекс Карт
+    function convertFeatureToYandexCoords(feature) {
+        if (!feature || !feature.geometry || !feature.geometry.coordinates) return [];
+        const mapOffsetY = parseFloat(localStorage.getItem('mapOffsetY')) || -1;
+        const mapOffsetX = parseFloat(localStorage.getItem('mapOffsetX')) || -4.5;
+
+        const toYandexPoint = (c) => {
+            const is3857 = Math.abs(c[0]) > 200 || Math.abs(c[1]) > 200;
+            let wgs = c;
+            if (is3857 && typeof proj4 !== 'undefined') {
+                wgs = proj4('EPSG:3857', 'EPSG:4326', c);
+            }
+            const lat = wgs[1] - (mapOffsetY * 0.000008983);
+            const lon = wgs[0] - (mapOffsetX * 0.000008983);
+            return [lat, lon];
+        };
+
+        const geom = feature.geometry;
+        if (geom.type === 'Polygon') {
+            return geom.coordinates.map(ring => ring.map(toYandexPoint));
+        } else if (geom.type === 'MultiPolygon') {
+            return geom.coordinates.flatMap(poly => poly.map(ring => ring.map(toYandexPoint)));
+        } else if (geom.type === 'LineString') {
+            return [geom.coordinates.map(toYandexPoint)];
+        }
+        return [];
     }
 
     // Загрузка библиотек
@@ -332,12 +367,11 @@
         }
     }
 
-    // Открытие Аналитического центра (сохраняет состояние между закрытием и повторным вызовом)
+    // Открытие Аналитического центра
     window.openAnalyticsCenter = async function (lat, lon) {
         injectAnalyticsStyles();
         await ensureEcharts();
 
-        // Если окно уже было открыто ранее — просто показываем его снова
         if (analyticsModal) {
             analyticsModal.style.display = 'flex';
             currentChartInstances.forEach(c => c.resize());
@@ -591,16 +625,14 @@
         document.getElementById('ac-btn-xlsx').onclick = exportToExcel;
         document.getElementById('ac-btn-geojson').onclick = exportToGeoJSON;
 
-        // Автозапуск первого поиска
         runAnalyticsQuery(lat, lon);
     };
 
-    // Сбор параметров с проверкой 4 обязательных цифр
+    // Сбор параметров
     function collectFilterPayload(clickLat, clickLon) {
         const spatialType = document.getElementById('ac-spatial-type').value;
         const cad = document.getElementById('ac-cadnum-search').value.trim();
 
-        // Проверка: минимум 4 цифры района (например: 01:01 или 16:01:)
         const hasValidCadPrefix = /^\d{2}:\d{2}/.test(cad);
 
         if (!hasValidCadPrefix && spatialType === 'all') {
@@ -699,7 +731,7 @@
         return payload;
     }
 
-    // Выполнение запроса
+    // Запрос к серверу
     async function runAnalyticsQuery(lat, lon) {
         const payload = collectFilterPayload(lat, lon);
         if (!payload) return;
@@ -889,28 +921,31 @@
                 </div>
             `;
 
+            // Этажность
             const cFloors = echarts.init(document.getElementById('ac-chart-floors'));
-            const floorsEntries = Object.entries(s.floors_dist || {});
+            const floorsEntries = Object.entries(s.floors_dist || {}).sort((a,b) => parseInt(a[0])-parseInt(b[0]));
             cFloors.setOption({
                 title: { text: 'Распределение зданий по этажности', textStyle: { fontSize: 13 } },
                 tooltip: { trigger: 'axis' },
                 xAxis: { type: 'category', data: floorsEntries.map(e => e[0] + ' эт.') },
-                yAxis: { type: 'value' },
+                yAxis: { type: 'value', minInterval: 1 },
                 series: [{ type: 'bar', data: floorsEntries.map(e => e[1]), itemStyle: { color: '#0284c7', borderRadius: [4, 4, 0, 0] } }]
             });
             currentChartInstances.push(cFloors);
 
+            // Ценовые диапазоны
             const cCost = echarts.init(document.getElementById('ac-chart-cost-brackets'));
             const costEntries = Object.entries(s.cost_brackets || {});
             cCost.setOption({
                 title: { text: 'Ценовые диапазоны (кадастровая стоимость)', textStyle: { fontSize: 13 } },
                 tooltip: { trigger: 'axis' },
                 xAxis: { type: 'category', data: costEntries.map(e => e[0]), axisLabel: { interval: 0, rotate: 15 } },
-                yAxis: { type: 'value' },
+                yAxis: { type: 'value', minInterval: 1 },
                 series: [{ type: 'bar', data: costEntries.map(e => e[1]), itemStyle: { color: '#10b981', borderRadius: [4, 4, 0, 0] } }]
             });
             currentChartInstances.push(cCost);
 
+            // Материалы стен
             const cMat = echarts.init(document.getElementById('ac-chart-materials'));
             const matEntries = Object.entries(s.materials_dist || {}).slice(0, 6);
             cMat.setOption({
@@ -920,14 +955,73 @@
             });
             currentChartInstances.push(cMat);
 
+            // Года постройки: ХРОНОЛОГИЧЕСКИЙ РЯД С ДИНАМИЧЕСКИМ ЗУМОМ
             const cYears = echarts.init(document.getElementById('ac-chart-years'));
-            const yearEntries = Object.entries(s.years_dist || {});
+            const yearCounts = {};
+            features.forEach(f => {
+                const y = parseInt(f.properties?.options?.year_built || f.properties?.options?.params_year_built, 10);
+                if (y && y >= 1850 && y <= 2035) {
+                    yearCounts[y] = (yearCounts[y] || 0) + 1;
+                }
+            });
+
+            const uniqueYears = Object.keys(yearCounts).map(Number).sort((a,b) => a - b);
+            let xYears = [];
+            let yYearsCount = [];
+
+            if (uniqueYears.length > 0) {
+                const minYear = uniqueYears[0];
+                const maxYear = uniqueYears[uniqueYears.length - 1];
+                for (let y = minYear; y <= maxYear; y++) {
+                    xYears.push(y);
+                    yYearsCount.push(yearCounts[y] || 0);
+                }
+            }
+
             cYears.setOption({
-                title: { text: 'Периоды постройки зданий', textStyle: { fontSize: 13 } },
-                tooltip: { trigger: 'axis' },
-                xAxis: { type: 'category', data: yearEntries.map(e => e[0]) },
-                yAxis: { type: 'value' },
-                series: [{ type: 'line', smooth: true, data: yearEntries.map(e => e[1]), areaStyle: { color: 'rgba(139, 92, 246, 0.2)' }, itemStyle: { color: '#8b5cf6' } }]
+                title: { text: 'Периоды постройки зданий (хронология)', textStyle: { fontSize: 13 } },
+                tooltip: { 
+                    trigger: 'axis',
+                    formatter: (params) => {
+                        const item = params[0];
+                        return `<b>${item.name} год</b><br>Построено зданий: <b>${item.value} шт.</b>`;
+                    }
+                },
+                grid: { left: '8%', right: '5%', bottom: '22%', top: '20%' },
+                xAxis: { 
+                    type: 'category', 
+                    data: xYears,
+                    axisLabel: { color: '#64748b', fontSize: 10 }
+                },
+                yAxis: { 
+                    type: 'value', 
+                    minInterval: 1,
+                    splitLine: { lineStyle: { color: '#f1f5f9' } }
+                },
+                dataZoom: [
+                    { type: 'inside', xAxisIndex: 0 },
+                    { 
+                        type: 'slider', 
+                        xAxisIndex: 0, 
+                        bottom: 4, 
+                        height: 18, 
+                        borderColor: '#cbd5e1', 
+                        fillerColor: 'rgba(99, 102, 241, 0.2)',
+                        handleSize: '80%'
+                    }
+                ],
+                series: [{ 
+                    type: 'bar', 
+                    data: yYearsCount,
+                    barMaxWidth: 14,
+                    itemStyle: { 
+                        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                            { offset: 0, color: '#8b5cf6' },
+                            { offset: 1, color: '#6366f1' }
+                        ]),
+                        borderRadius: [3, 3, 0, 0] 
+                    }
+                }]
             });
             currentChartInstances.push(cYears);
 
@@ -935,55 +1029,122 @@
             container.innerHTML = `<div id="ac-chart-treemap" style="width: 100%; height: 100%;"></div>`;
             const cTree = echarts.init(document.getElementById('ac-chart-treemap'));
 
-            const treeData = features.map(f => {
+            const palette = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#06b6d4', '#ec4899', '#6366f1', '#14b8a6', '#f97316'];
+            const treeData = features.map((f, idx) => {
                 const p = f.properties || {};
                 const o = p.options || {};
                 const area = parseFloat(o.specified_area || o.build_record_area || o.declared_area || f.area || 1);
                 return {
                     name: f.id,
                     value: Math.round(area),
-                    raw: f
+                    raw: f,
+                    itemStyle: {
+                        color: palette[idx % palette.length]
+                    }
                 };
             }).filter(i => i.value > 0);
 
             cTree.setOption({
-                title: { text: 'Плиточная структура объектов (размер = площадь, м²)', textStyle: { fontSize: 14 } },
                 tooltip: {
+                    trigger: 'item',
+                    confine: true,
+                    padding: 10,
+                    backgroundColor: 'rgba(255, 255, 255, 0.98)',
+                    borderColor: '#cbd5e1',
+                    borderWidth: 1,
+                    extraCssText: 'box-shadow: 0 10px 30px rgba(15,23,42,0.25); border-radius: 8px; max-width: 320px; white-space: normal; line-height: 1.4;',
                     formatter: (info) => {
                         const raw = info.data?.raw;
                         if (!raw) return '';
                         const o = raw.properties?.options || {};
-                        return `<b>${raw.id}</b><br>Адрес: ${o.readable_address || 'Не указан'}<br>Площадь: ${info.value} м²`;
+                        const addr = o.readable_address || o.address_readable_address || 'Адрес не указан';
+                        const cost = o.cost_value ? `${Number(o.cost_value).toLocaleString('ru-RU')} ₽` : '-';
+                        return `
+                            <div style="font-size: 12px; color: #0f172a;">
+                                <div style="font-weight: 800; font-size: 13px; color: #0284c7; margin-bottom: 4px;">${raw.id}</div>
+                                <div style="color: #64748b; font-size: 11px; margin-bottom: 6px;">${addr}</div>
+                                <div style="display: flex; justify-content: space-between; gap: 8px; font-size: 11px; border-top: 1px solid #e2e8f0; padding-top: 4px;">
+                                    <span>Площадь: <b>${info.value.toLocaleString('ru-RU')} м²</b></span>
+                                    <span>Стоимость: <b>${cost}</b></span>
+                                </div>
+                                <div style="font-size: 10px; color: #10b981; font-weight: 700; margin-top: 6px; text-align: center;">Кликните для открытия паспорта</div>
+                            </div>
+                        `;
                     }
                 },
                 series: [{
-                    type: 'treemap', width: '100%', height: '90%', top: 35,
-                    data: treeData,
-                    breadcrumb: { show: false }
+                    type: 'treemap',
+                    width: '100%',
+                    height: '100%',
+                    top: 0,
+                    bottom: 0,
+                    left: 0,
+                    right: 0,
+                    roam: false,
+                    nodeClick: false,
+                    breadcrumb: { show: false },
+                    itemStyle: {
+                        borderColor: 'rgba(255,255,255,0.95)',
+                        borderWidth: 1.5,
+                        gapWidth: 1.5,
+                        borderRadius: 3
+                    },
+                    label: {
+                        show: true,
+                        formatter: '{b}\n{c} м²',
+                        fontSize: 10,
+                        color: '#ffffff'
+                    },
+                    data: treeData
                 }]
             });
+
+            // Клик и дабл-клик по плитке открывает карточку
+            cTree.off('click');
+            cTree.on('click', (params) => {
+                if (params.data?.raw) {
+                    openObjectDetailCard(params.data.raw);
+                }
+            });
+            cTree.off('dblclick');
+            cTree.on('dblclick', (params) => {
+                if (params.data?.raw) {
+                    openObjectDetailCard(params.data.raw);
+                }
+            });
+
             currentChartInstances.push(cTree);
 
-        } else if (activeTab === 'table') {
+       } else if (activeTab === 'table') {
             const BATCH_SIZE = 120;
             let renderedCount = 0;
+            const isLimit = s.is_limit_reached || features.length >= 3000;
+
+            const limitWarningBadge = isLimit
+                ? `<span style="background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; padding: 2px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: bold; display: inline-flex; align-items: center; gap: 4px;">
+                       <i class="fas fa-exclamation-triangle"></i> Достигнут лимит (3 000 объектов). Уточните фильтр.
+                   </span>`
+                : '';
 
             container.innerHTML = `
-                <div style="margin-bottom: 8px; font-weight: 600; color: #475569; display: flex; justify-content: space-between; align-items: center;">
-                    <span>Показано: <b id="ac-table-rendered-count" style="color: #0284c7;">0</b> из ${features.length.toLocaleString('ru-RU')}</span>
-                    <span style="font-size: 0.78rem; color: #94a3b8; font-weight: normal;">Клик по строке открывает паспорт и панораму; скроллинг подгружает все объекты</span>
+                <div style="margin-bottom: 8px; font-weight: 600; color: #475569; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
+                    <div style="display: flex; align-items: center; gap: 8px;">
+                        <span>Показано: <b id="ac-table-rendered-count" style="color: #0284c7;">0</b> из ${features.length.toLocaleString('ru-RU')}</span>
+                        ${limitWarningBadge}
+                    </div>
+                    <span style="font-size: 0.78rem; color: #94a3b8; font-weight: normal;">Прокручивайте вниз для отображения объектов</span>
                 </div>
                 <div id="ac-table-scroll-wrap" style="overflow-x: auto; overflow-y: auto; max-height: calc(100% - 35px);">
                     <table class="ac-table">
                         <thead>
                             <tr>
                                 <th style="width: 45px;">№</th>
-                                <th style="width: 220px;">Кадастровый номер</th>
+                                <th style="width: 210px;">Кадастровый номер</th>
                                 <th style="width: 75px;">Тип</th>
                                 <th>Адрес / Местоположение</th>
                                 <th style="width: 110px;">Параметр</th>
                                 <th style="width: 130px;">Стоимость</th>
-                                <th style="width: 110px;">Дата сведений</th>
+                                <th style="width: 140px;">Дата сведений</th>
                                 <th style="width: 50px;"></th>
                             </tr>
                         </thead>
@@ -1010,14 +1171,22 @@
                     const typeName = f._layer_type === 'zu' ? 'ЗУ' : (f._layer_type === 'oks' ? 'Здание' : 'Сооружение');
                     const hasGeom = hasRealBoundaries(f);
                     const isDecl = isDeclaredParcel(f);
-                    const dateStr = getFeatureDate(f);
 
-                    // Если ЗУ декларированный — подсвечиваем площадь красным цветом
+                    // Сборка дат: официальная дата + дата записи в базу данных
+                    const dateObj = getFeatureDate(f);
+                    let dateHtml = '-';
+                    if (dateObj.regDate && dateObj.dbDate) {
+                        dateHtml = `<div>${dateObj.regDate}</div><div style="font-size:0.73rem; color:#64748b;" title="Дата внесения в базу данных">БД: ${dateObj.dbDate}</div>`;
+                    } else if (dateObj.dbDate) {
+                        dateHtml = `<div style="font-size:0.75rem; color:#64748b;" title="Дата внесения в базу данных">БД: ${dateObj.dbDate}</div>`;
+                    } else if (dateObj.regDate) {
+                        dateHtml = `<div>${dateObj.regDate}</div>`;
+                    }
+
                     const areaHtml = isDecl
                         ? `<span style="color: #dc2626; font-weight: 700;" title="Декларированная площадь (границы не установлены)">${rawArea}</span>`
                         : `<span>${rawArea}</span>`;
 
-                    // Кнопка перехода на карте показывается ТОЛЬКО если есть реальные границы
                     const actionHtml = hasGeom
                         ? `<button class="ac-zoom-btn" data-fid="${f.id}" title="Перейти к объекту на карте">
                                 <i class="fas fa-crosshairs"></i>
@@ -1038,11 +1207,10 @@
                         <td>${addr}</td>
                         <td>${areaHtml}</td>
                         <td>${cost}</td>
-                        <td style="color: #64748b; font-size: 0.8rem;">${dateStr}</td>
+                        <td style="color: #1e293b; line-height: 1.25;">${dateHtml}</td>
                         <td>${actionHtml}</td>
                     `;
 
-                    // Клик по строке — открытие подробного паспорта с Google панорамой
                     tr.onclick = (e) => {
                         if (e.target.closest('.ac-zoom-btn')) return;
                         openObjectDetailCard(f);
@@ -1105,7 +1273,9 @@
 
         addRow('Кадастровый номер', cn);
         addRow('Тип объекта', typeName);
-        addRow('Дата сведений', getFeatureDate(feature));
+        const dateInfo = getFeatureDate(feature);
+        if (dateInfo.regDate) addRow('Дата внесения сведений', dateInfo.regDate);
+        if (dateInfo.dbDate) addRow('Дата записи в базу данных', dateInfo.dbDate);
         addRow('Адрес', o.readable_address || o.address_readable_address);
         addRow('Площадь / Длина', o.specified_area || o.build_record_area || o.params_extension || feature.area);
         addRow('Кадастровая стоимость', o.cost_value ? `${Number(o.cost_value).toLocaleString('ru-RU')} ₽` : null);
@@ -1121,14 +1291,12 @@
         addRow('Категория земель', o.land_record_category_type);
         addRow('Разрешенное использование', o.permitted_use_established_by_document);
 
-        // Если у объекта нет границ на карте — кнопка блокируется
+        // Если у объекта нет границ на карте — кнопка полностью скрывается
         const zoomBtnHtml = hasGeom
             ? `<button class="ac-card-btn" id="ac-card-btn-zoom" style="background:#0284c7; color:#fff;" title="Показать на главной карте">
                     <i class="fas fa-crosshairs"></i> Показать на карте
                </button>`
-            : `<button class="ac-card-btn" id="ac-card-btn-zoom" disabled style="background:#f1f5f9; color:#94a3b8; cursor:not-allowed;" title="Границы объекта отсутствуют в базе">
-                    <i class="fas fa-crosshairs"></i> Без границ на карте
-               </button>`;
+            : '';
 
         cardOverlay.innerHTML = `
             <div class="ac-card-window">
@@ -1179,7 +1347,7 @@
 
         // Фокус на карте
         const zoomBtn = cardOverlay.querySelector('#ac-card-btn-zoom');
-        if (zoomBtn && !zoomBtn.disabled) {
+        if (zoomBtn) {
             zoomBtn.onclick = () => {
                 closeCard();
                 focusSingleFeatureOnMainMap(feature);
@@ -1187,21 +1355,74 @@
         }
     }
 
-    // Фокус на конкретном одном объекте из таблицы
+    // Фокус на конкретном одном объекте из таблицы с точным расчетом границ
     function focusSingleFeatureOnMainMap(feature) {
         const activeMap = getActiveMap();
         if (!feature || !activeMap) return;
 
-        // Просто скрываем окно, не разрушая его состояние
+        // Скрываем окно, сохраняя его состояние
         if (analyticsModal) {
             analyticsModal.style.display = 'none';
         }
 
+        // Отрисовываем объект, если его еще нет на карте
         if (feature._layer_type === 'zu' && typeof processAndDrawParcels === 'function') {
-            processAndDrawParcels([feature], 'areaSearch', false);
-        } else if (typeof processAndDrawBuildings === 'function') {
+            processAndDrawParcels([feature], 'areaSearch', true);
+        } else if (feature._layer_type === 'oks' && typeof processAndDrawBuildings === 'function') {
             processAndDrawBuildings([feature]);
+        } else if (feature._layer_type === 'structure' && typeof processAndDrawStructures === 'function') {
+            processAndDrawStructures([feature]);
         }
+
+        // Расчет границ для точного центрирования
+        const yandexRings = convertFeatureToYandexCoords(feature);
+        if (yandexRings && yandexRings.length > 0) {
+            let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
+            yandexRings.forEach(ring => {
+                ring.forEach(pt => {
+                    minLat = Math.min(minLat, pt[0]);
+                    maxLat = Math.max(maxLat, pt[0]);
+                    minLon = Math.min(minLon, pt[1]);
+                    maxLon = Math.max(maxLon, pt[1]);
+                });
+            });
+
+            if (isFinite(minLat)) {
+                const latPad = Math.max((maxLat - minLat) * 0.35, 0.0008);
+                const lonPad = Math.max((maxLon - minLon) * 0.35, 0.0008);
+                const viewBounds = [
+                    [minLat - latPad, minLon - lonPad],
+                    [maxLat + latPad, maxLon + lonPad]
+                ];
+                activeMap.setBounds(viewBounds, { checkZoomRange: true, duration: 400 });
+            }
+        }
+
+        // Подсветка контура на карте
+        setTimeout(() => {
+            const targetPolygon = (typeof polygons !== 'undefined' ? polygons : []).find(p =>
+                p.properties && (p.properties.get('cadastralNumber') === feature.id || p.properties.get('descr') === feature.id)
+            );
+            if (targetPolygon && targetPolygon.options) {
+                const oldFill = targetPolygon.options.get('fillColor');
+                const oldStroke = targetPolygon.options.get('strokeColor');
+                const oldWidth = targetPolygon.options.get('strokeWidth');
+
+                targetPolygon.options.set({
+                    fillColor: '#FFFF00A6',
+                    strokeColor: '#FF0000',
+                    strokeWidth: 4
+                });
+
+                setTimeout(() => {
+                    targetPolygon.options.set({
+                        fillColor: oldFill,
+                        strokeColor: oldStroke,
+                        strokeWidth: oldWidth
+                    });
+                }, 2000);
+            }
+        }, 200);
 
         if (typeof showNotification === 'function') {
             showNotification(`Фокус на объекте: ${feature.id}`, 'success');
@@ -1277,7 +1498,7 @@
         dialogOverlay.querySelector('#ac-confirm-cancel').onclick = () => closeDialog('cancel');
     }
 
-    // Выполнение отрисовки
+    // Выполнение отрисовки выборки
     function executeDrawOnMap(features, countDrawn) {
         if (typeof processAndDrawParcels === 'function') {
             const zu = features.filter(f => f._layer_type === 'zu');
@@ -1289,7 +1510,6 @@
             if (str.length > 0 && typeof processAndDrawStructures === 'function') processAndDrawStructures(str);
         }
 
-        // При переходе на карту скрываем окно, чтобы сохранить состояние
         if (analyticsModal) {
             analyticsModal.style.display = 'none';
         }
