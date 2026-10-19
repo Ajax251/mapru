@@ -1,14 +1,14 @@
 /**
  * Модуль: Аналитический центр базы данных
- * Версия: 2.01
+ * Версия: 2.03
  */
 
 (function () {
-    const ANALYTICS_CENTER_VERSION = "2.01";
+    const ANALYTICS_CENTER_VERSION = "2.03";
     console.log(`[Analytics Center] Загружена версия ${ANALYTICS_CENTER_VERSION}`);
 
     const MAPRUAPP_AI_URL = "https://mapruapp.ru/ai/api/v1/chat/completions";
-    const AI_MODEL_NAME = "gemini-2.5-flash-lite";
+    const AI_MODEL_NAME = "gemini-3.5-flash-lite";
     const BACKEND_QUERY_URL = "https://mapruapp.ru/api/analytics/query";
     const SAFE_MAP_OBJECT_LIMIT = 200;
 
@@ -236,13 +236,9 @@
         return null;
     }
 
-    // Определение префикса по МСК или активному кварталу
+    // Автоопределение префикса региона из МСК
     function getDefaultCadastralPrefix() {
         try {
-            if (typeof currentQuarterNumber !== 'undefined' && currentQuarterNumber) {
-                const parts = currentQuarterNumber.split(':');
-                if (parts.length >= 2) return `${parts[0]}:${parts[1]}:`;
-            }
             const mskVal = localStorage.getItem('savedDefaultMskSystem') || '';
             const m = mskVal.match(/633(\d{2})/);
             if (m) return `${m[1]}:`;
@@ -251,7 +247,44 @@
             const m2 = mskText.match(/МСК[ -]?(\d{2})/i);
             if (m2) return `${m2[1]}:`;
         } catch (e) {}
-        return '16:';
+        return '01:';
+    }
+
+    // Проверка наличия контура у объекта
+    function hasRealBoundaries(f) {
+        if (!f || !f.geometry || !f.geometry.coordinates) return false;
+        const c = f.geometry.coordinates;
+        if (!Array.isArray(c) || c.length === 0) return false;
+        if (f.geometry.type === 'Point') return false;
+        if (f.geometry.type === 'Polygon') return Array.isArray(c[0]) && c[0].length >= 3;
+        if (f.geometry.type === 'MultiPolygon') return Array.isArray(c[0]) && Array.isArray(c[0][0]) && c[0][0].length >= 3;
+        if (f.geometry.type === 'LineString') return c.length >= 2;
+        return true;
+    }
+
+    // Проверка: является ли участок декларированным
+    function isDeclaredParcel(f) {
+        if (!f || f._layer_type !== 'zu') return false;
+        const o = f.properties?.options || {};
+        const isVerified = o.specified_area || o.land_record_area_verified;
+        const hasDeclaredField = o.declared_area || o.land_record_area_declaration || o.land_record_area;
+        return !isVerified && !!hasDeclaredField;
+    }
+
+    // Получение даты сведений
+    function getFeatureDate(f) {
+        if (!f) return '-';
+        const p = f.properties || {};
+        const o = p.options || {};
+        const rawDate = o.land_record_reg_date ||
+                        o.build_record_registration_date ||
+                        o.registration_date ||
+                        p.updated_date ||
+                        f.updated_date;
+        if (!rawDate) return '-';
+        const m = String(rawDate).match(/^(\d{4})-(\d{2})-(\d{2})/);
+        if (m) return `${m[3]}.${m[2]}.${m[1]}`;
+        return rawDate;
     }
 
     // Преобразование координат центра объекта из 3857 в WGS84
@@ -274,7 +307,7 @@
         return { lat, lon };
     }
 
-    // Загрузка библиотек ECharts и XLSX
+    // Загрузка библиотек
     async function ensureEcharts() {
         if (typeof echarts === 'undefined') {
             await new Promise((resolve, reject) => {
@@ -299,12 +332,19 @@
         }
     }
 
-    // Открытие Аналитического центра
+    // Открытие Аналитического центра (сохраняет состояние между закрытием и повторным вызовом)
     window.openAnalyticsCenter = async function (lat, lon) {
         injectAnalyticsStyles();
         await ensureEcharts();
 
-        if (analyticsModal) analyticsModal.remove();
+        // Если окно уже было открыто ранее — просто показываем его снова
+        if (analyticsModal) {
+            analyticsModal.style.display = 'flex';
+            currentChartInstances.forEach(c => c.resize());
+            return;
+        }
+
+        const initialPrefix = getDefaultCadastralPrefix();
 
         analyticsModal = document.createElement('div');
         analyticsModal.id = 'analytics-center-overlay';
@@ -353,7 +393,7 @@
                             <span class="ac-filter-title">Кадастровый номер и текст</span>
                             <div class="ac-form-row">
                                 <label>Кадастровый номер или маска (мин. 4 цифры):</label>
-                                <input type="text" id="ac-cadnum-search" class="ac-input-text" value="${getDefaultCadastralPrefix()}" placeholder="16:56: или 16:56:010101">
+                                <input type="text" id="ac-cadnum-search" class="ac-input-text" value="${initialPrefix}01:" placeholder="${initialPrefix}01: или ${initialPrefix}01:000000">
                             </div>
                             <div class="ac-form-row">
                                 <label>Поиск по адресу / тексту:</label>
@@ -362,7 +402,7 @@
                             <div style="font-size: 0.8rem; margin-top: 4px;">
                                 <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; color: #475569;">
                                     <input type="checkbox" id="ac-exact-match">
-                                    <span>Точное совпадение (иначе по части слова)</span>
+                                    <span>Точное совпадение (иначе по любой части слова)</span>
                                 </label>
                             </div>
                         </div>
@@ -525,15 +565,10 @@
 
         document.body.appendChild(analyticsModal);
 
-        const close = () => {
-            currentChartInstances.forEach(c => c.dispose());
-            currentChartInstances = [];
-            analyticsModal.remove();
-            analyticsModal = null;
+        // Закрытие ТОЛЬКО по крестику
+        analyticsModal.querySelector('#ac-close-btn').onclick = () => {
+            analyticsModal.style.display = 'none';
         };
-
-        analyticsModal.querySelector('#ac-close-btn').onclick = close;
-        analyticsModal.onclick = (e) => { if (e.target === analyticsModal) close(); };
 
         const spatialSelect = document.getElementById('ac-spatial-type');
         const radiusWrap = document.getElementById('ac-radius-wrap');
@@ -556,21 +591,21 @@
         document.getElementById('ac-btn-xlsx').onclick = exportToExcel;
         document.getElementById('ac-btn-geojson').onclick = exportToGeoJSON;
 
-        // Автозапуск первичного анализа
+        // Автозапуск первого поиска
         runAnalyticsQuery(lat, lon);
     };
 
-    // Сбор параметров с проверкой обязательных 4 цифр кадастрового номера
+    // Сбор параметров с проверкой 4 обязательных цифр
     function collectFilterPayload(clickLat, clickLon) {
         const spatialType = document.getElementById('ac-spatial-type').value;
         const cad = document.getElementById('ac-cadnum-search').value.trim();
 
-        // Проверка: минимум 4 цифры района (например: 16:56 или 16:56:)
+        // Проверка: минимум 4 цифры района (например: 01:01 или 16:01:)
         const hasValidCadPrefix = /^\d{2}:\d{2}/.test(cad);
 
         if (!hasValidCadPrefix && spatialType === 'all') {
             const defPrefix = getDefaultCadastralPrefix();
-            alert(`Для выборки по базе необходимо указать как минимум код региона и района (например: ${defPrefix}56: или ${defPrefix}01:).`);
+            alert(`Для выборки по базе необходимо указать как минимум код региона и района (например: ${defPrefix}01:).`);
             document.getElementById('ac-cadnum-search').focus();
             return null;
         }
@@ -664,7 +699,7 @@
         return payload;
     }
 
-    // Запрос к серверу
+    // Выполнение запроса
     async function runAnalyticsQuery(lat, lon) {
         const payload = collectFilterPayload(lat, lon);
         if (!payload) return;
@@ -721,8 +756,8 @@
   "area_max": число или null,
   "cost_min": число или null,
   "cost_max": число или null,
-  "materials": "материал стен (кирпич, дерево и т.д.) или пусто",
-  "purpose": "назначение (жилой дом, магазин и т.д.) или пусто",
+  "materials": "материал стен или пусто",
+  "purpose": "назначение здания или пусто",
   "ownership": "Частная, Муниципальная или пусто",
   "types": ["zu", "oks", "structure", "zones"]
 }
@@ -943,11 +978,12 @@
                         <thead>
                             <tr>
                                 <th style="width: 45px;">№</th>
-                                <th style="width: 210px;">Кадастровый номер</th>
+                                <th style="width: 220px;">Кадастровый номер</th>
                                 <th style="width: 75px;">Тип</th>
                                 <th>Адрес / Местоположение</th>
                                 <th style="width: 110px;">Параметр</th>
                                 <th style="width: 130px;">Стоимость</th>
+                                <th style="width: 110px;">Дата сведений</th>
                                 <th style="width: 50px;"></th>
                             </tr>
                         </thead>
@@ -969,24 +1005,41 @@
                     const p = f.properties || {};
                     const o = p.options || {};
                     const addr = o.readable_address || o.address_readable_address || 'Адрес не указан';
-                    const area = o.specified_area || o.build_record_area || o.params_extension || f.area || '-';
+                    const rawArea = o.specified_area || o.build_record_area || o.params_extension || f.area || '-';
                     const cost = o.cost_value ? Number(o.cost_value).toLocaleString('ru-RU') + ' ₽' : '-';
                     const typeName = f._layer_type === 'zu' ? 'ЗУ' : (f._layer_type === 'oks' ? 'Здание' : 'Сооружение');
+                    const hasGeom = hasRealBoundaries(f);
+                    const isDecl = isDeclaredParcel(f);
+                    const dateStr = getFeatureDate(f);
+
+                    // Если ЗУ декларированный — подсвечиваем площадь красным цветом
+                    const areaHtml = isDecl
+                        ? `<span style="color: #dc2626; font-weight: 700;" title="Декларированная площадь (границы не установлены)">${rawArea}</span>`
+                        : `<span>${rawArea}</span>`;
+
+                    // Кнопка перехода на карте показывается ТОЛЬКО если есть реальные границы
+                    const actionHtml = hasGeom
+                        ? `<button class="ac-zoom-btn" data-fid="${f.id}" title="Перейти к объекту на карте">
+                                <i class="fas fa-crosshairs"></i>
+                           </button>`
+                        : `<span style="color: #cbd5e1; font-weight: bold;" title="Границы не установлены">—</span>`;
 
                     const tr = document.createElement('tr');
                     tr.className = 'ac-table-row-clickable';
                     tr.innerHTML = `
                         <td style="color: #64748b;">${i + 1}</td>
-                        <td style="font-weight: 700; color: #0284c7;">${f.id}</td>
+                        <td style="font-weight: 700; color: #0284c7;">
+                            <div style="display:flex; align-items:center; gap:6px;">
+                                <span>${f.id}</span>
+                                ${hasGeom ? '<span title="Границы определены" style="color:#10b981;font-size:0.75rem;"><i class="fas fa-draw-polygon"></i></span>' : ''}
+                            </div>
+                        </td>
                         <td>${typeName}</td>
                         <td>${addr}</td>
-                        <td>${area}</td>
+                        <td>${areaHtml}</td>
                         <td>${cost}</td>
-                        <td>
-                            <button class="ac-zoom-btn" data-fid="${f.id}" title="Перейти на карте">
-                                <i class="fas fa-crosshairs"></i>
-                            </button>
-                        </td>
+                        <td style="color: #64748b; font-size: 0.8rem;">${dateStr}</td>
+                        <td>${actionHtml}</td>
                     `;
 
                     // Клик по строке — открытие подробного паспорта с Google панорамой
@@ -995,10 +1048,13 @@
                         openObjectDetailCard(f);
                     };
 
-                    tr.querySelector('.ac-zoom-btn').onclick = (e) => {
-                        e.stopPropagation();
-                        focusSingleFeatureOnMainMap(f);
-                    };
+                    const zoomBtn = tr.querySelector('.ac-zoom-btn');
+                    if (zoomBtn) {
+                        zoomBtn.onclick = (e) => {
+                            e.stopPropagation();
+                            focusSingleFeatureOnMainMap(f);
+                        };
+                    }
 
                     fragment.appendChild(tr);
                 }
@@ -1020,7 +1076,7 @@
         }
     }
 
-    // Открытие детальной карточки объекта с панорамой Google Улиц и кнопкой выписки
+    // Открытие детальной карточки объекта с панорамой Google Улиц и кнопкой перехода
     function openObjectDetailCard(feature) {
         const existingCard = document.getElementById('ac-object-card-overlay');
         if (existingCard) existingCard.remove();
@@ -1029,6 +1085,7 @@
         const o = p.options || {};
         const cn = feature.id || p.descr || 'Без номера';
         const typeName = feature._layer_type === 'zu' ? 'Земельный участок' : (feature._layer_type === 'oks' ? 'Здание' : 'Сооружение');
+        const hasGeom = hasRealBoundaries(feature);
 
         const center = getFeatureCenterWgs(feature);
         const streetViewUrl = center 
@@ -1048,6 +1105,7 @@
 
         addRow('Кадастровый номер', cn);
         addRow('Тип объекта', typeName);
+        addRow('Дата сведений', getFeatureDate(feature));
         addRow('Адрес', o.readable_address || o.address_readable_address);
         addRow('Площадь / Длина', o.specified_area || o.build_record_area || o.params_extension || feature.area);
         addRow('Кадастровая стоимость', o.cost_value ? `${Number(o.cost_value).toLocaleString('ru-RU')} ₽` : null);
@@ -1062,6 +1120,15 @@
         addRow('Год постройки', o.year_built || o.params_year_built);
         addRow('Категория земель', o.land_record_category_type);
         addRow('Разрешенное использование', o.permitted_use_established_by_document);
+
+        // Если у объекта нет границ на карте — кнопка блокируется
+        const zoomBtnHtml = hasGeom
+            ? `<button class="ac-card-btn" id="ac-card-btn-zoom" style="background:#0284c7; color:#fff;" title="Показать на главной карте">
+                    <i class="fas fa-crosshairs"></i> Показать на карте
+               </button>`
+            : `<button class="ac-card-btn" id="ac-card-btn-zoom" disabled style="background:#f1f5f9; color:#94a3b8; cursor:not-allowed;" title="Границы объекта отсутствуют в базе">
+                    <i class="fas fa-crosshairs"></i> Без границ на карте
+               </button>`;
 
         cardOverlay.innerHTML = `
             <div class="ac-card-window">
@@ -1091,9 +1158,7 @@
                         <button class="ac-card-btn ac-btn-egrn" id="ac-card-btn-egrn" title="Посмотреть актуальные данные">
                             <i class="fas fa-file-alt"></i> Посмотреть актуальные данные
                         </button>
-                        <button class="ac-card-btn" id="ac-card-btn-zoom" style="background:#0284c7; color:#fff;" title="Показать на главной карте">
-                            <i class="fas fa-crosshairs"></i> Показать на карте
-                        </button>
+                        ${zoomBtnHtml}
                     </div>
                 </div>
             </div>
@@ -1103,9 +1168,8 @@
 
         const closeCard = () => cardOverlay.remove();
         cardOverlay.querySelector('#ac-card-close').onclick = closeCard;
-        cardOverlay.onclick = (e) => { if (e.target === cardOverlay) closeCard(); };
 
-        // Кнопка: копирует номер и открывает egrn.html
+        // Копирует номер и открывает egrn.html
         cardOverlay.querySelector('#ac-card-btn-egrn').onclick = async () => {
             try {
                 await navigator.clipboard.writeText(cn);
@@ -1113,11 +1177,14 @@
             window.open('egrn.html', '_blank');
         };
 
-        // Кнопка: фокус на карте
-        cardOverlay.querySelector('#ac-card-btn-zoom').onclick = () => {
-            closeCard();
-            focusSingleFeatureOnMainMap(feature);
-        };
+        // Фокус на карте
+        const zoomBtn = cardOverlay.querySelector('#ac-card-btn-zoom');
+        if (zoomBtn && !zoomBtn.disabled) {
+            zoomBtn.onclick = () => {
+                closeCard();
+                focusSingleFeatureOnMainMap(feature);
+            };
+        }
     }
 
     // Фокус на конкретном одном объекте из таблицы
@@ -1125,9 +1192,9 @@
         const activeMap = getActiveMap();
         if (!feature || !activeMap) return;
 
+        // Просто скрываем окно, не разрушая его состояние
         if (analyticsModal) {
-            analyticsModal.remove();
-            analyticsModal = null;
+            analyticsModal.style.display = 'none';
         }
 
         if (feature._layer_type === 'zu' && typeof processAndDrawParcels === 'function') {
@@ -1141,7 +1208,7 @@
         }
     }
 
-    // Перенос выборки на главную карту с модальным подтверждением при > 200 объектов
+    // Перенос выборки на главную карту с подтверждением при > 200 объектов
     function showResultsOnMainMap() {
         const activeMap = getActiveMap();
         if (!lastQueryResults?.features?.length || !activeMap) {
@@ -1222,9 +1289,9 @@
             if (str.length > 0 && typeof processAndDrawStructures === 'function') processAndDrawStructures(str);
         }
 
+        // При переходе на карту скрываем окно, чтобы сохранить состояние
         if (analyticsModal) {
-            analyticsModal.remove();
-            analyticsModal = null;
+            analyticsModal.style.display = 'none';
         }
 
         if (typeof showNotification === 'function') {
@@ -1240,7 +1307,7 @@
         }
         await ensureXlsx();
 
-        const headers = ["Кадастровый / Учетный номер", "Тип", "Адрес", "Площадь/Длина", "Кадастровая стоимость", "ВРИ / Назначение", "Собственность", "Тип права", "Статус", "Этажность", "Материал стен"];
+        const headers = ["Кадастровый / Учетный номер", "Тип", "Адрес", "Площадь/Длина", "Кадастровая стоимость", "Дата сведений", "ВРИ / Назначение", "Собственность", "Тип права", "Статус", "Этажность", "Материал стен"];
         const rows = [headers];
 
         lastQueryResults.features.forEach(f => {
@@ -1251,6 +1318,7 @@
                 o.readable_address || o.address_readable_address || '',
                 o.specified_area || o.build_record_area || o.params_extension || f.area || '',
                 o.cost_value || '',
+                getFeatureDate(f),
                 o.permitted_use_established_by_document || o.purpose || '',
                 o.ownership_type || '',
                 o.right_type || '',
