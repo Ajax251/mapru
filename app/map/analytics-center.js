@@ -835,7 +835,7 @@
         return features;
     }
 
-    // Автоопределение наиболее часто встречающегося района/квартала (например, "16:56")
+    // Автоопределение наиболее часто встречающегося района/квартала (например, "01:02")
     function detectPopularCadastralPrefix(features) {
         if (!features || !features.length) return '';
         const counts = {};
@@ -854,7 +854,7 @@
                 best = k;
             }
         }
-        return best; // Вернет, например, "16:56"
+        return best; 
     }
   
 
@@ -942,7 +942,7 @@
             const o = p.options || {};
             const objCad = extractCadastralNumber(f).toLowerCase();
 
-            // Если задана маска номера (например, 16:56)
+            // Если задана маска номера (например, 01:02)
             if (filters.cad_num) {
                 const searchCad = filters.cad_num.toLowerCase().replace(/:+$/, '');
                 if (/^\d{1,2}:/.test(objCad)) {
@@ -1162,7 +1162,7 @@
                             <span class="ac-filter-title"><i class="fas fa-hashtag"></i> Кадастровый номер и адрес</span>
                             <div class="ac-form-row">
                                 <label>Кадастровый номер или маска (мин. 4 цифры):</label>
-                                <input type="text" id="ac-cadnum-search" class="ac-input-text" value="${initialCadValue}" placeholder="16:56 или 16:56:010101">
+                                <input type="text" id="ac-cadnum-search" class="ac-input-text" value="${initialCadValue}" placeholder="01:02 или 01:02:010101">
                             </div>
                             <div class="ac-form-row">
                                 <label>Поиск по адресу / ориентиру:</label>
