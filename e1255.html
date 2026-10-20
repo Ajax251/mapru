@@ -27,6 +27,7 @@
     <script src="webfonts/index.js"></script>
 <script src="app/map/schema-generator.js?v=2.0"></script>
     <script src="app/map/pzz-module.js"></script>
+    <script src="app/map/analytics-center.js"></script>
  <style>
     body {
         margin: 0;
@@ -5299,30 +5300,37 @@ body:has(#parcel-results-sidebar.collapsed:not(.hidden)) #map-magnifier-quick-wr
   <script src="msk.js"></script> 
       <script src="sk.js"></script>
 <script type="text/javascript">
+    
+    try {
+        localStorage.removeItem('yandexApiKeyIndex');
+    } catch(e) {}
+
     window.ymapsLoadedPromise = (function() {
+        
         const yandexKeys = [
             "dde71a0e-b612-44b7-b53b-82533420240f", 
-            "c1cf3415-0264-44d8-9182-a710db769eb3",
-            "b01c32cd-2d8e-46a3-a58f-ba37c65f87e7",
-            "5e56c3ce-9dd6-425c-ba73-f01480c78b88"
+            "5e56c3ce-9dd6-425c-ba73-f01480c78b88"  
         ];
-        
-        let currentKeyIndex = parseInt(localStorage.getItem('yandexApiKeyIndex') || '0', 10);
-        if (currentKeyIndex >= yandexKeys.length) currentKeyIndex = 0;
 
         return new Promise((resolve) => {
             function loadYmaps(index) {
+                if (index >= yandexKeys.length) {
+                    console.warn('Ни один ключ Яндекс Карт не ответил. Переход в автономный режим.');
+                    resolve();
+                    return;
+                }
+
                 const apiKey = yandexKeys[index];
                 const script = document.createElement('script');
                 script.src = `https://api-maps.yandex.ru/2.1/?apikey=${apiKey}&lang=ru_RU`;
                 script.type = 'text/javascript';
+
                 
                 script.onload = function() {
                     if (typeof ymaps === 'undefined') {
                         handleFailure();
                         return;
                     }
-                    localStorage.setItem('yandexApiKeyIndex', index);
                     resolve(); 
                 };
 
@@ -5331,19 +5339,16 @@ body:has(#parcel-results-sidebar.collapsed:not(.hidden)) #map-magnifier-quick-wr
                 };
 
                 function handleFailure() {
-                    const nextIndex = (index + 1) % yandexKeys.length;
-                    if (nextIndex !== currentKeyIndex && navigator.onLine) {
-                        script.remove();
-                        loadYmaps(nextIndex);
-                    } else {
-                        resolve(); 
-                    }
+                    script.remove();
+                    
+                    loadYmaps(index + 1);
                 }
 
                 document.head.appendChild(script);
             }
 
-            loadYmaps(currentKeyIndex);
+            
+            loadYmaps(0);
         });
     })();
 </script>
@@ -6778,27 +6783,30 @@ async function generateParcelDataZipBlob(features, internalJsonFilename) {
     return zipBlob;
 }
 
-async function uploadNspdDataToLocalServer(features, quarterNumber) {
-    if (!features || features.length === 0) {
-
+async function uploadNspdDataToLocalServer(features, quarterNumber, prefix = 'ZU') {
+    if (!features || features.length === 0 || !quarterNumber) {
         return;
     }
-    if (!quarterNumber) {
-        console.error("Не указан номер квартала для создания имени файла, выгрузка отменена.");
-        return;
-    }
-
 
     try {
-      const quarterName = quarterNumber.replace(/:/g, '_');
+        const quarterName = quarterNumber.replace(/:/g, '_');
         const today = new Date();
         const dateString = today.getFullYear() + '-' +
                        String(today.getMonth() + 1).padStart(2, '0') + '-' +
                        String(today.getDate()).padStart(2, '0');
         
-        
+       
         const zipFilename = `${quarterName} ${dateString}.nspd`;
-        const internalJsonFilename = `${quarterName} ${dateString}.json`;
+        
+        
+        let internalJsonFilename = `${quarterName} ${dateString}.json`;
+        if (prefix === 'OKS') {
+            internalJsonFilename = `OKS_${quarterName}_${dateString}.json`;
+        } else if (prefix === 'STR') {
+            internalJsonFilename = `STR_${quarterName}_${dateString}.json`;
+        } else if (prefix === 'ZOUIT') {
+            internalJsonFilename = `ZOUIT_${quarterName}_${dateString}.json`;
+        }
 
         const jsonData = JSON.stringify(features, null, 2);
         const zip = new JSZip();
@@ -6807,32 +6815,20 @@ async function uploadNspdDataToLocalServer(features, quarterNumber) {
         const zipBlob = await zip.generateAsync({
             type: "blob",
             compression: "DEFLATE",
-            compressionOptions: {
-                level: 9
-            }
+            compressionOptions: { level: 9 }
         });
 
         const formData = new FormData();
         formData.append('file', new File([zipBlob], zipFilename, { type: 'application/zip' }));
 
-        const response = await fetch(`${STORAGE_API_URL}/nspd/upload`, {
+        await fetch(`${STORAGE_API_URL}/nspd/upload`, {
             method: 'POST',
             body: formData,
         });
 
-        if (!response.ok) {
-            
-            const errorData = await response.json().catch(() => null); 
-            throw new Error(errorData?.error || `Сервер ответил ошибкой: ${response.statusText}`);
-        }
-        
-        const responseData = await response.json();
-
-       
-
+        console.log(`[Upload] Отправлен архив ${zipFilename} с файлом ${internalJsonFilename}`);
     } catch (error) {
-       
-        console.error(`ФОНОВАЯ ОШИБКА: Не удалось выгрузить данные. Причина:`, error.message);
+        console.error(`ФОНОВАЯ ОШИБКА: Не удалось выгрузить данные (${prefix}):`, error.message);
     }
 }
 
@@ -8863,61 +8859,126 @@ async function fetchCadastralData(cadastralNumber) {
 }
 
 
-       async function getAddressByCoords(coords) {
-    if (!coords || !Array.isArray(coords)) return 'Адрес не определен';
+    
 
-   
-    if (typeof ymaps !== 'undefined' && ymaps.geocode) {
+const GEOCODER_API_KEYS = [
+    "d9d1bd51-4c8a-49e2-9a83-a12fa5dd58a6", 
+    "dde71a0e-b612-44b7-b53b-82533420240f"  
+];
+
+
+async function fetchYandexGeocoder(geocodeParam) {
+    for (let i = 0; i < GEOCODER_API_KEYS.length; i++) {
+        const apiKey = GEOCODER_API_KEYS[i];
         try {
-            const yandexTimeout = new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('Yandex geocode timeout')), 3500)
-            );
-            const res = await Promise.race([ymaps.geocode(coords), yandexTimeout]);
-            const firstGeoObject = res.geoObjects.get(0);
-            if (firstGeoObject) {
-                return firstGeoObject.getAddressLine();
+            const ctrl = new AbortController();
+            const timer = setTimeout(() => ctrl.abort(), 3500);
+
+            const url = `https://geocode-maps.yandex.ru/1.x/?apikey=${apiKey}&geocode=${encodeURIComponent(geocodeParam)}&format=json&lang=ru_RU&results=1`;
+            const resp = await fetch(url, { signal: ctrl.signal });
+            clearTimeout(timer);
+
+            if (resp.ok) {
+                const data = await resp.json();
+                const geoObject = data.response?.GeoObjectCollection?.featureMember?.[0]?.GeoObject;
+                if (geoObject) {
+                    return geoObject;
+                }
+            } else if (resp.status === 403 || resp.status === 429) {
+                console.warn(`Ключ ${apiKey} исчерпан/заблокирован (${resp.status}), переключаемся на следующий ключ...`);
+                continue; 
             }
-        } catch (e) {
-            console.warn('Яндекс Геокодер недоступен, переключаемся на резерв:', e.message);
+        } catch (err) {
+            console.warn(`Ключ ${apiKey} не ответил:`, err.message);
         }
     }
-
-  
-    try {
-        const lat = coords[0];
-        const lon = coords[1];
-        const ctrl = new AbortController();
-        const tId = setTimeout(() => ctrl.abort(), 3500);
-
-        const resp = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&accept-language=ru`, {
-            signal: ctrl.signal,
-            headers: { 'Accept': 'application/json' }
-        });
-        clearTimeout(tId);
-
-        if (resp.ok) {
-            const data = await resp.json();
-            if (data && data.display_name) {
-                return data.display_name;
-            }
-        }
-    } catch (err) {
-        console.warn('Резервный геокодер Nominatim также не ответил:', err.message);
-    }
-
-
-    return `${coords[0].toFixed(6)}, ${coords[1].toFixed(6)}`;
+    return null;
 }
 
-        async function getCadastralNumber(lat, lon) {
-            const cadastralData = await queryCadastralInfo(lat, lon);
-            if (cadastralData && cadastralData.features && cadastralData.features.length > 0) {
-                return cadastralData.features[0].properties.descr;
+
+async function geocodeAddress(query) {
+    if (!query || !query.trim()) return null;
+
+    
+    try {
+        const geoObject = await fetchYandexGeocoder(query);
+        if (geoObject) {
+            const [lon, lat] = geoObject.Point.pos.split(' ').map(parseFloat);
+            const addressLine = geoObject.metaDataProperty?.GeocoderMetaData?.text || geoObject.name || query;
+
+            let bounds = null;
+            const env = geoObject.boundedBy?.Envelope;
+            if (env) {
+                const [lowerLon, lowerLat] = env.lowerCorner.split(' ').map(parseFloat);
+                const [upperLon, upperLat] = env.upperCorner.split(' ').map(parseFloat);
+                bounds = [[lowerLat, lowerLon], [upperLat, upperLon]];
             }
-            return null;
+
+            return { coords: [lat, lon], addressLine, bounds };
         }
+    } catch (e) {}
+
+    
+    try {
+        const pUrl = `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&limit=1&lang=ru`;
+        const pResp = await fetch(pUrl);
+        if (pResp.ok) {
+            const pData = await pResp.json();
+            if (pData?.features?.length > 0) {
+                const feat = pData.features[0];
+                const [lon, lat] = feat.geometry.coordinates;
+                const p = feat.properties || {};
+                const parts = [p.name, p.street, p.housenumber, p.city || p.town, p.country].filter(Boolean);
+                return { coords: [lat, lon], addressLine: parts.join(', ') || query, bounds: null };
+            }
+        }
+    } catch (err) {}
+
+    
+    try {
+        const url = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1&accept-language=ru`;
+        const resp = await fetch(url, { headers: { 'Accept': 'application/json' } });
+        if (resp.ok) {
+            const data = await resp.json();
+            if (data?.length > 0) {
+                const item = data[0];
+                return { 
+                    coords: [parseFloat(item.lat), parseFloat(item.lon)], 
+                    addressLine: item.display_name, 
+                    bounds: null 
+                };
+            }
+        }
+    } catch (e) {}
+
+    return null;
+}
 
 
+async function getAddressByCoords(coords) {
+    if (!coords || !Array.isArray(coords)) return 'Адрес не определен';
+    const lat = coords[0];
+    const lon = coords[1];
+
+    
+    try {
+        const geoObject = await fetchYandexGeocoder(`${lon},${lat}`);
+        if (geoObject) {
+            return geoObject.metaDataProperty?.GeocoderMetaData?.text || geoObject.name;
+        }
+    } catch (e) {}
+
+    
+    try {
+        const nResp = await fetch(`https://nominatim.openstreetmap.org/reverse?format=json&lat=${lat}&lon=${lon}&accept-language=ru`);
+        if (nResp.ok) {
+            const nData = await nResp.json();
+            if (nData?.display_name) return nData.display_name;
+        }
+    } catch (e) {}
+
+    return `${lat.toFixed(6)}, ${lon.toFixed(6)}`;
+}
 
 
     
@@ -10948,7 +11009,7 @@ function initMap() {
     const savedZoomStr = localStorage.getItem('mapZoom');
 
     
-    const initialCenter = savedCenterStr ? JSON.parse(savedCenterStr) : [54.8492, 50.7910];
+    const initialCenter = savedCenterStr ? JSON.parse(savedCenterStr) : [55.7558, 37.6173];
     const initialZoom = savedZoomStr ? parseInt(savedZoomStr, 10) : 9;
 
     map = new ymaps.Map('map', {
@@ -10958,6 +11019,7 @@ function initMap() {
         behaviors: ['default']
         
     });
+    window.yandexMap = map;window.yandexMap = map;
     
     
     map.options.set({
@@ -11598,6 +11660,11 @@ map.events.add('click', function (e) {
         <div class="custom-context-menu-item" id="all-zouits-in-quarter-menu-item">
             <i class="fas fa-exclamation-triangle"></i>ЗОУИТ
         </div>
+        
+        <div class="custom-context-menu-item" id="all-objects-in-quarter-menu-item">
+            <i class="fas fa-boxes" style="color: #10b981;"></i>Все объекты
+        </div>
+        
         <div class="custom-context-menu-item" id="quarter-menu-item">
             <i class="fas fa-th"></i>Границы 
         </div>
@@ -11677,6 +11744,8 @@ map.events.add('click', function (e) {
 <div class="custom-context-menu-item" id="map-main-menu-item">
     <i class="fas fa-map"></i>Карта
     <div class="custom-context-submenu">
+    
+
 
    <div class="custom-context-menu-item" id="update-panel-menu-item">
             <i class="fas fa-list-alt" style="color: #2563eb;"></i>Показать на Панели
@@ -11690,6 +11759,10 @@ map.events.add('click', function (e) {
                <div class="custom-context-menu-item" id="open-infographics-menu-item">
             <i class="fas fa-chart-pie" style="color: #0284c7;"></i>Инфографика
         </div>
+        
+            <div class="custom-context-menu-item" id="open-analytics-center-menu-item">
+    <i class="fas fa-chart-line" style="color: #0284c7;"></i>Аналитический центр
+</div>
         
         
          <div style="border-top: 1px solid #eee; margin: 2px 0;"></div>
@@ -11954,6 +12027,20 @@ if (event.target.id === 'update-panel-menu-item' || event.target.closest('#updat
             contextMenu.style.display = 'none';
             await handleUpdatePanelWorkflow();
         }
+        
+        
+        if (event.target.id === 'all-objects-in-quarter-menu-item' || event.target.closest('#all-objects-in-quarter-menu-item')) {
+    contextMenu.style.display = 'none';
+    const enteredQuarter = cityInput ? cityInput.value.trim() : '';
+    const lat = parseFloat(contextMenu.dataset.lat);
+    const lon = parseFloat(contextMenu.dataset.lon);
+
+    if (isCadastralQuarter(enteredQuarter)) {
+        await getAllObjectsInQuarter(null, null, enteredQuarter);
+    } else {
+        await getAllObjectsInQuarter(lat, lon);
+    }
+}
    
 
 if (event.target.id === 'select-objects-rect-menu-item' || event.target.closest('#select-objects-rect-menu-item')) {
@@ -12091,6 +12178,15 @@ if (event.target.id === 'open-3d-clipped-menu-item') {
     }
 }
       
+      
+      if (targetId === 'open-analytics-center-menu-item' || event.target.id === 'open-analytics-center-menu-item') {
+    contextMenu.style.display = 'none';
+    const lat = parseFloat(contextMenu.dataset.lat) || (map ? map.getCenter()[0] : null);
+    const lon = parseFloat(contextMenu.dataset.lon) || (map ? map.getCenter()[1] : null);
+    if (typeof openAnalyticsCenter === 'function') {
+        openAnalyticsCenter(lat, lon);
+    }
+}
       
       if (event.target.id === 'load-overlapping-kpt-menu-item' || event.target.closest('#load-overlapping-kpt-menu-item')) {
     contextMenu.style.display = 'none';
@@ -25972,7 +26068,7 @@ if (categoryCount > 1) {
         sidebarTitle.textContent = `Импорт (${restoredParcelsData.length + restoredBuildingsData.length + restoredStructuresData.length + restoredZouitsData.length})`;
     }
 } else if (restoredBuildingsData.length > 0) {
-    // Если только здания (как в вашем файле)
+    
     await populateSidebarWithFoundObjects(restoredBuildingsData, 'Здания');
 } else if (restoredParcelsData.length > 0) {
     populateSidebarWithParcels(restoredParcelsData, "Импорт MapData");
@@ -26161,52 +26257,219 @@ async function copyAndOpenEgrn(cadastralNumber) {
 }
 
 
-async function loadAndParseZipBlob(zipBlob) {
+function showCloudArchiveLayersModal(archiveInfo) {
+    return new Promise((resolve) => {
+        const existing = document.getElementById('cloud-archive-select-modal');
+        if (existing) existing.remove();
+
+        const modal = document.createElement('div');
+        modal.id = 'cloud-archive-select-modal';
+        modal.style.cssText = `
+            position: fixed; inset: 0; background: rgba(15, 23, 42, 0.65);
+            backdrop-filter: blur(5px); z-index: 100050;
+            display: flex; align-items: center; justify-content: center;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            animation: fadeInScale 0.25s ease;
+        `;
+
+        modal.innerHTML = `
+            <div style="
+                background: #ffffff; border-radius: 18px; width: 440px; max-width: 92vw;
+                box-shadow: 0 25px 50px -12px rgba(0, 0, 0, 0.35); overflow: hidden;
+                border: 1px solid #e2e8f0; display: flex; flex-direction: column;
+            ">
+                <div style="background: linear-gradient(135deg, #1e3a8a, #2563eb); padding: 18px 22px; color: white;">
+                    <div style="display: flex; align-items: center; justify-content: space-between;">
+                        <div style="display: flex; align-items: center; gap: 10px;">
+                            <i class="fas fa-cloud-download-alt" style="font-size: 1.3rem; color: #60a5fa;"></i>
+                            <h3 style="margin: 0; font-size: 1.15rem; font-weight: 700;">Облачный архив КПТ</h3>
+                        </div>
+                        <button id="cam-close-btn" style="background:none; border:none; color:white; font-size:20px; cursor:pointer; line-height:1;">&times;</button>
+                    </div>
+                    <div style="font-size: 0.85rem; color: #bfdbfe; margin-top: 4px;">
+                        ${archiveInfo.quarter || 'Квартал'} &bull; Дата: <b>${archiveInfo.date || 'Не указана'}</b>
+                    </div>
+                </div>
+
+                <div style="padding: 20px 22px; display: flex; flex-direction: column; gap: 12px;">
+                    <div style="font-size: 0.88rem; color: #475569; font-weight: 600;">
+                        В архиве обнаружено несколько типов объектов. Выберите слои для отображения:
+                    </div>
+
+                    ${archiveInfo.zu.length > 0 ? `
+                        <label style="display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 10px; cursor: pointer; transition: 0.15s;">
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <i class="fas fa-vector-square" style="color: #16a34a; font-size: 1.1rem; width: 20px; text-align: center;"></i>
+                                <span style="font-weight: 600; color: #1e293b; font-size: 0.95rem;">Земельные участки</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <span style="background: #dcfce7; color: #166534; font-size: 0.75rem; font-weight: bold; padding: 2px 8px; border-radius: 6px;">${archiveInfo.zu.length} шт.</span>
+                                <input type="checkbox" id="cam-zu" checked style="width: 18px; height: 18px; cursor: pointer; accent-color: #16a34a;">
+                            </div>
+                        </label>
+                    ` : ''}
+
+                    ${archiveInfo.oks.length > 0 ? `
+                        <label style="display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 10px; cursor: pointer; transition: 0.15s;">
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <i class="fas fa-building" style="color: #0284c7; font-size: 1.1rem; width: 20px; text-align: center;"></i>
+                                <span style="font-weight: 600; color: #1e293b; font-size: 0.95rem;">Здания (ОКС)</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <span style="background: #e0f2fe; color: #075985; font-size: 0.75rem; font-weight: bold; padding: 2px 8px; border-radius: 6px;">${archiveInfo.oks.length} шт.</span>
+                                <input type="checkbox" id="cam-oks" checked style="width: 18px; height: 18px; cursor: pointer; accent-color: #0284c7;">
+                            </div>
+                        </label>
+                    ` : ''}
+
+                    ${archiveInfo.str.length > 0 ? `
+                        <label style="display: flex; align-items: center; justify-content: space-between; padding: 10px 14px; background: #f8fafc; border: 1.5px solid #e2e8f0; border-radius: 10px; cursor: pointer; transition: 0.15s;">
+                            <div style="display: flex; align-items: center; gap: 10px;">
+                                <i class="fas fa-project-diagram" style="color: #ea580c; font-size: 1.1rem; width: 20px; text-align: center;"></i>
+                                <span style="font-weight: 600; color: #1e293b; font-size: 0.95rem;">Сооружения</span>
+                            </div>
+                            <div style="display: flex; align-items: center; gap: 8px;">
+                                <span style="background: #ffedd5; color: #9a3412; font-size: 0.75rem; font-weight: bold; padding: 2px 8px; border-radius: 6px;">${archiveInfo.str.length} шт.</span>
+                                <input type="checkbox" id="cam-str" checked style="width: 18px; height: 18px; cursor: pointer; accent-color: #ea580c;">
+                            </div>
+                        </label>
+                    ` : ''}
+
+                    <div style="display: flex; gap: 10px; margin-top: 10px;">
+                        <button id="cam-submit-btn" style="
+                            flex: 1.4; padding: 11px; border: none; border-radius: 9px;
+                            background: linear-gradient(135deg, #10b981, #059669); color: white;
+                            font-size: 0.95rem; font-weight: 700; cursor: pointer;
+                            display: flex; align-items: center; justify-content: center; gap: 8px;
+                            box-shadow: 0 4px 10px rgba(16, 185, 129, 0.3);
+                        "><i class="fas fa-check"></i> Загрузить</button>
+                        <button id="cam-cancel-btn" style="
+                            flex: 1; padding: 11px; border: 1px solid #cbd5e1; border-radius: 9px;
+                            background: #ffffff; color: #64748b; font-size: 0.95rem; font-weight: 600; cursor: pointer;
+                        ">Отмена</button>
+                    </div>
+                </div>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+
+        const close = (result) => {
+            modal.remove();
+            resolve(result);
+        };
+
+        modal.querySelector('#cam-close-btn').onclick = () => close(null);
+        modal.querySelector('#cam-cancel-btn').onclick = () => close(null);
+        modal.onclick = (e) => { if (e.target === modal) close(null); };
+
+        modal.querySelector('#cam-submit-btn').onclick = () => {
+            const zu = modal.querySelector('#cam-zu')?.checked || false;
+            const oks = modal.querySelector('#cam-oks')?.checked || false;
+            const str = modal.querySelector('#cam-str')?.checked || false;
+            close({ zu, oks, str });
+        };
+    });
+}
+
+
+async function loadAndParseZipBlob(zipBlob, askLayerSelection = false) {
     if (!zipBlob) throw new Error("Нет ZIP файла для загрузки.");
 
     document.querySelector('.loading-text').textContent = 'Обработка архива...';
     const zip = await JSZip.loadAsync(zipBlob);
 
-    let jsonFile = null;
     let loadedDate = null;
     let inferredQuarter = null;
-    
-    
-    
-    const jsonFilenamePattern = /^(\d{2}_\d{2}_\d{6,7}(?:_\d+)?)\s(\d{4}-\d{2}-\d{2})\.json$/;
+
+    const layers = {
+        zu: [],
+        oks: [],
+        str: [],
+        other: []
+    };
 
 
-    console.log("Поиск JSON файла в архиве...");
-for (const filename in zip.files) {
-                if (filename.startsWith('__MACOSX') || !filename.endsWith('.json')) continue;
-                
-                const baseName = filename.split('/').pop();
-              
-                const dateMatch = baseName.match(/(\d{4}-\d{2}-\d{2})/);
-                if (dateMatch) {
-                    jsonFile = zip.files[filename];
-                    loadedDate = dateMatch[1];
-                    const qMatch = baseName.match(/(\d{2}_\d{2}_\d{6,7}(?:_\d+)?)/);
-                    if (qMatch) inferredQuarter = qMatch[1].replace(/_/g, ':');
-                    break;
-                }
+    for (const filename in zip.files) {
+        if (filename.startsWith('__MACOSX') || !filename.toLowerCase().endsWith('.json')) continue;
+
+        const baseName = filename.split('/').pop();
+        const dateMatch = baseName.match(/(\d{4}-\d{2}-\d{2})/);
+        if (dateMatch && !loadedDate) loadedDate = dateMatch[1];
+
+        const qMatch = baseName.match(/(\d{2}_\d{2}_\d{6,7}(?:_\d+)?)/);
+        if (qMatch && !inferredQuarter) inferredQuarter = qMatch[1].replace(/_/g, ':');
+
+        const jsonText = await zip.files[filename].async("text");
+        try {
+            const parsed = JSON.parse(jsonText);
+            const features = Array.isArray(parsed) ? parsed : (parsed.features || []);
+
+            if (baseName.startsWith('OKS_')) {
+                layers.oks.push(...features);
+            } else if (baseName.startsWith('STR_')) {
+                layers.str.push(...features);
+            } else {
+                // Если префикса нет, демультиплексируем объекты по свойствам
+                const d = demuxFeatures(features);
+                layers.zu.push(...d.zu);
+                layers.oks.push(...d.oks);
+                layers.str.push(...d.structure);
             }
-
-    if (!jsonFile) {
-        throw new Error("Файл данных (XX_YY_ZZZZZZ(Z)[_PPPP] YYYY-MM-DD.json) не найден в архиве.");
+        } catch (e) {
+            console.warn(`Ошибка разбора ${filename}:`, e);
+        }
     }
 
-    document.querySelector('.loading-text').textContent = 'Чтение данных...';
-    const jsonText = await jsonFile.async("text");
+    const availableLayersCount = (layers.zu.length > 0 ? 1 : 0) +
+                                 (layers.oks.length > 0 ? 1 : 0) +
+                                 (layers.str.length > 0 ? 1 : 0);
 
-    document.querySelector('.loading-text').textContent = 'Парсинг данных...';
-    const loadedFeatures = JSON.parse(jsonText);
+   
+    if (askLayerSelection && availableLayersCount > 1) {
+        hideLoader();
+        const selection = await showCloudArchiveLayersModal({
+            quarter: inferredQuarter,
+            date: loadedDate,
+            zu: layers.zu,
+            oks: layers.oks,
+            str: layers.str
+        });
 
-    if (!Array.isArray(loadedFeatures) || loadedFeatures.length === 0) {
+        if (!selection) {
+            throw new Error("Загрузка отменена пользователем.");
+        }
+
+        showLoader("Отрисовка выбранных слоёв...");
+        const resultFeatures = [];
+        if (selection.zu) resultFeatures.push(...layers.zu);
+        if (selection.oks) resultFeatures.push(...layers.oks);
+        if (selection.str) resultFeatures.push(...layers.str);
+
+        return {
+            features: resultFeatures,
+            layers: {
+                zu: selection.zu ? layers.zu : [],
+                oks: selection.oks ? layers.oks : [],
+                str: selection.str ? layers.str : []
+            },
+            date: loadedDate,
+            quarter: inferredQuarter
+        };
+    }
+
+  
+    const combinedFeatures = [...layers.zu, ...layers.oks, ...layers.str];
+    if (combinedFeatures.length === 0) {
         throw new Error("Файл содержит некорректные или пустые данные.");
     }
 
-    return { features: loadedFeatures, date: loadedDate, quarter: inferredQuarter };
+    return {
+        features: combinedFeatures,
+        layers: layers,
+        date: loadedDate,
+        quarter: inferredQuarter
+    };
 }
 
 
@@ -26350,9 +26613,10 @@ async function loadAndProcessSupabaseData(loadedFeatures, loadedDate) {
 
 
 
-window.pendingQuarterGeometryToDraw = null;
-window.pendingQuarterNumber = null; 
+// --- ПОЛНАЯ ФУНКЦИЯ ИМПОРТА ИЗ ОБЛАЧНОГО АРХИВА ---
 
+window.pendingQuarterGeometryToDraw = null;
+window.pendingQuarterNumber = null;
 
 async function triggerSupabaseImport() {
     if (!map) {
@@ -26361,68 +26625,54 @@ async function triggerSupabaseImport() {
         return;
     }
 
-    const inputText = cityInput.value.trim();
-    console.log("triggerSupabaseImport CALLED. inputText:", inputText, "currentQuarterNumber:", currentQuarterNumber, "pendingQuarterNumber:", window.pendingQuarterNumber);
-
+    const cityInputEl = document.getElementById('city-input');
+    const inputText = cityInputEl ? cityInputEl.value.trim() : '';
     let baseCadastralNumber = null;
 
-    
+    // 1. Определение номера квартала из поля ввода
     if (inputText) {
-        if (isCadastralQuarter(inputText)) {
+        if (typeof isCadastralQuarter === 'function' && isCadastralQuarter(inputText)) {
             baseCadastralNumber = inputText;
-            console.log("Определен baseCadastralNumber из inputText (квартал):", baseCadastralNumber);
-        } else if (isValidCadastralNumber(inputText)) {
+        } else if (typeof isValidCadastralNumber === 'function' && isValidCadastralNumber(inputText)) {
             const parts = inputText.split(':');
             if (parts.length >= 3) {
                 baseCadastralNumber = parts.slice(0, 3).join(':');
-                console.log("Определен baseCadastralNumber из inputText (КН -> квартал):", baseCadastralNumber);
             }
         }
     }
 
-    
+    // 2. Если в поле пусто, проверяем сохраненные значения
     if (!baseCadastralNumber && window.pendingQuarterNumber) {
         baseCadastralNumber = window.pendingQuarterNumber;
-        console.log("Определен baseCadastralNumber из window.pendingQuarterNumber:", baseCadastralNumber);
     }
 
-    
-    if (!baseCadastralNumber && currentQuarterNumber) {
+    if (!baseCadastralNumber && typeof currentQuarterNumber !== 'undefined' && currentQuarterNumber) {
         baseCadastralNumber = currentQuarterNumber;
-        console.log("Определен baseCadastralNumber из currentQuarterNumber:", baseCadastralNumber);
     }
-
 
     if (!baseCadastralNumber) {
-        showNotification('Не указан квартал для импорта. Введите номер в поле или определите квартал.', 'warning', 'exclamation-triangle');
+        showNotification('Не указан квартал для импорта. Введите номер в поле поиска или кликните по объекту.', 'warning', 'exclamation-triangle');
         hideLoader();
         return;
     }
 
-    
     currentQuarterNumber = baseCadastralNumber;
-    cityInput.value = baseCadastralNumber; 
-    console.log("ИТОГОВЫЙ baseCadastralNumber для импорта:", baseCadastralNumber);
+    if (cityInputEl) {
+        cityInputEl.value = baseCadastralNumber;
+    }
 
-
-    showLoader(`Загрузка данных для ${baseCadastralNumber}...`);
-    if (loaderTextEl) loaderTextEl.textContent = `Загрузка данных для ${baseCadastralNumber}...`;
-
-    
+    showLoader('Загрузка данных для ' + baseCadastralNumber + '...');
     clearMapAndResetTheme();
 
     let quarterDrawnFromDB = false;
     let quarterGeometrySource = null;
 
-    
+    // Проверка геометрии квартала
     if (window.pendingQuarterGeometryToDraw && window.pendingQuarterNumber === baseCadastralNumber) {
         quarterGeometrySource = window.pendingQuarterGeometryToDraw;
-        console.log(`Используется pending quarter geometry для ${baseCadastralNumber}`);
         window.pendingQuarterGeometryToDraw = null;
         window.pendingQuarterNumber = null;
-    } else {
-        console.log(`Запрос геометрии квартала ${baseCadastralNumber} из таблицы Supabase...`);
-        if (loaderTextEl) loaderTextEl.textContent = `Запрос геометрии квартала ${baseCadastralNumber} из архива КПТ...`;
+    } else if (typeof supabaseClient !== 'undefined' && supabaseClient) {
         try {
             const { data: geomData, error: geomError } = await supabaseClient
                 .from('cadastral_quarters')
@@ -26430,110 +26680,126 @@ async function triggerSupabaseImport() {
                 .eq('quarter_number', baseCadastralNumber)
                 .single();
 
-            if (geomError && geomError.code !== 'PGRST116') {
-                throw geomError;
-            }
-            if (geomData && geomData.geometry) {
+            if (!geomError && geomData && geomData.geometry) {
                 quarterGeometrySource = geomData.geometry;
-                console.log(`Геометрия для квартала ${baseCadastralNumber} получена из таблицы Supabase.`);
-            } else {
-                console.warn(`Геометрия для квартала ${baseCadastralNumber} не найдена в таблице Supabase.`);
             }
         } catch (dbError) {
-            console.error(`Ошибка запроса геометрии квартала ${baseCadastralNumber} из таблицы Supabase:`, dbError);
+            console.warn('Геометрия квартала в таблице не найдена:', dbError);
         }
     }
 
+    // Отрисовка границ квартала (если найдены)
     if (quarterGeometrySource) {
-        if (loaderTextEl) loaderTextEl.textContent = `Отрисовка квартала ${baseCadastralNumber} из архива КПТ...`;
         try {
-            const geometryType = quarterGeometrySource.type;
-            const nspdCoordsForDrawing = quarterGeometrySource.coordinates;
-            const yandexPolygonsToDraw = [];
-
-            const processNspdRingsForYandex = (rings) => {
-                const outerRingEPSG3857 = rings[0];
-                const wgs84Coords = outerRingEPSG3857.map(coord => {
-                    const p = proj4('EPSG:3857', 'EPSG:4326', coord);
-                    return [p[1], p[0]];
-                });
-                return wgs84Coords.map(c => [c[0] - mapOffsetY * 0.000008983, c[1] - mapOffsetX * 0.000008983]);
-            };
-
-            if (geometryType === "Polygon") {
-                yandexPolygonsToDraw.push(processNspdRingsForYandex(nspdCoordsForDrawing));
-            } else if (geometryType === "MultiPolygon") {
-                nspdCoordsForDrawing.forEach(polygonRingsArray => {
-                    yandexPolygonsToDraw.push(processNspdRingsForYandex(polygonRingsArray));
-                });
-            }
-
-           if (yandexPolygonsToDraw.length > 0) {
-                const qPoly = new ymaps.Polygon(yandexPolygonsToDraw, {
-                    cadastralNumber: baseCadastralNumber,
-                    isQuarterBoundary: true
-                }, {
-                    strokeColor: '#00DD00',
-                    strokeWidth: polygonStyle.width,
-                    strokeStyle: 'dash',
-                    fillOpacity: 0,
-                    zIndex: 150
-                });
-                map.geoObjects.add(qPoly);
-                polygons.push(qPoly);
-                map.setBounds(qPoly.geometry.getBounds(), { checkZoomRange: true, duration: 300 });
+            if (typeof drawQuarterFromGeoJson === 'function') {
+                drawQuarterFromGeoJson(baseCadastralNumber, quarterGeometrySource, '#00DD00');
                 quarterDrawnFromDB = true;
-                
-             
             }
         } catch (e) {
-            console.error("Ошибка отрисовки квартала из геометрии Supabase (в triggerSupabaseImport):", e);
-            showNotification("Ошибка отрисовки геометрии квартала из архива КПТ", "error");
+            console.warn('Ошибка быстрой отрисовки границ квартала:', e);
         }
     }
 
-    const bucketFilePath = formatQuarterPath(baseCadastralNumber);
-    let loadedFeaturesFromArchive = null;
-    let loadedDateFromArchive = null;
+    const bucketFilePath = String(baseCadastralNumber).split(':').slice(0, 3).join('_') + '.nspd';
 
-    if (bucketFilePath) {
-     
-        if (loaderTextEl) loaderTextEl.textContent = `Загрузка из архива КПТ ${baseCadastralNumber}...`;
-        
-  const zipBlob = await fetchZipFromLocalServer('nspd', bucketFilePath);
+    try {
+        showLoader('Поиск в архиве КПТ: ' + baseCadastralNumber + '...');
+        const zipBlob = await fetchZipFromLocalServer('nspd', bucketFilePath);
+
         if (zipBlob) {
-            try {
-                const parseResult = await loadAndParseZipBlob(zipBlob);
-                loadedFeaturesFromArchive = parseResult.features;
-                loadedDateFromArchive = parseResult.date;
-                
-                
-                
-                
-                
-                
-                console.log(`Архив ${bucketFilePath} успешно загружен и распарсен. Найдено участков: ${loadedFeaturesFromArchive.length}`);
-            } catch (zipError) {
-                console.error(`Ошибка обработки ZIP ${bucketFilePath}:`, zipError);
-                showNotification(`Ошибка обработки архива КПТ: ${zipError.message}`, 'warning');
+            // Передаем true, чтобы открыть диалог выбора слоев при наличии разных типов (ЗУ/ОКС/Сооружения)
+            const parseResult = await loadAndParseZipBlob(zipBlob, true);
+
+            const layers = parseResult.layers || {
+                zu: parseResult.features || [],
+                oks: [],
+                str: []
+            };
+
+            const hasOksOrStr = (layers.oks && layers.oks.length > 0) || (layers.str && layers.str.length > 0);
+            const hasMultipleLayers = (layers.zu.length > 0 && hasOksOrStr) || (layers.oks.length > 0 && layers.str.length > 0);
+
+            // Сохраняем разобранные данные в глобальные массивы
+            parcelFeaturesData = layers.zu || [];
+            buildingFeaturesData = layers.oks || [];
+            structureFeaturesData = layers.str || [];
+
+            // Отрисовываем выбранные слои
+            if (layers.zu.length > 0) {
+                await processAndDrawParcels(layers.zu, 'quarter', true);
             }
+            if (layers.oks.length > 0) {
+                await processAndDrawBuildings(layers.oks);
+            }
+            if (layers.str.length > 0) {
+                await processAndDrawStructures(layers.str);
+            }
+
+            // Настраиваем боковую панель
+            if (hasMultipleLayers) {
+                populateSidebarWithAllObjects({
+                    zu: layers.zu,
+                    oks: layers.oks,
+                    structure: layers.str,
+                    zouit: []
+                });
+            } else if (layers.zu.length > 0) {
+                populateSidebarWithParcels(layers.zu, parseResult.date);
+            } else if (layers.oks.length > 0) {
+                await populateSidebarWithFoundObjects(layers.oks, 'Здания');
+            } else if (layers.str.length > 0) {
+                await populateSidebarWithFoundObjects(layers.str, 'Сооружения');
+            }
+
+            // Масштабирование карты ко всем загруженным объектам
+            let allBounds = null;
+            polygons.forEach(obj => {
+                if (obj && obj.geometry && typeof obj.geometry.getBounds === 'function') {
+                    const b = obj.geometry.getBounds();
+                    if (b && isFinite(b[0][0])) {
+                        if (!allBounds) {
+                            allBounds = [[b[0][0], b[0][1]], [b[1][0], b[1][1]]];
+                        } else {
+                            allBounds[0][0] = Math.min(allBounds[0][0], b[0][0]);
+                            allBounds[0][1] = Math.min(allBounds[0][1], b[0][1]);
+                            allBounds[1][0] = Math.max(allBounds[1][0], b[1][0]);
+                            allBounds[1][1] = Math.max(allBounds[1][1], b[1][1]);
+                        }
+                    }
+                }
+            });
+
+            if (allBounds) {
+                map.setBounds(allBounds, { checkZoomRange: true, duration: 300 });
+            }
+
+            updatePlacemarksVisibility();
+            applyCurrentTheme();
+
+            const dateStr = parseResult.date ? ' (' + parseResult.date + ')' : '';
+            const cityNameDisplay = document.getElementById('city-name-display');
+            if (cityNameDisplay) {
+                cityNameDisplay.innerHTML = 'Архив КПТ' + dateStr + ':<br>' + baseCadastralNumber;
+            }
+
+            showNotification('Данные из архива КПТ' + dateStr + ' успешно загружены (ЗУ: ' + layers.zu.length + ', ОКС: ' + layers.oks.length + ', Сооружений: ' + layers.str.length + ')', 'success');
+
         } else {
-            console.log(`Архив ${bucketFilePath} не найден (bucket: 'nspd').`); 
+            // Если архив не найден на сервере — загружаем онлайн из ЕГРН
+            showNotification('Архив для квартала ' + baseCadastralNumber + ' не найден. Загрузка напрямую из ЕГРН...', 'info');
+            await getAllParcelsInQuarter(null, null, false, baseCadastralNumber, quarterDrawnFromDB);
         }
-    }
 
-    if (loadedFeaturesFromArchive && loadedFeaturesFromArchive.length > 0) {
-        if (loaderTextEl) loaderTextEl.textContent = 'Обработка данных из архива...';
-        parcelFeaturesData = loadedFeaturesFromArchive;
-        await loadAndProcessSupabaseData(loadedFeaturesFromArchive, loadedDateFromArchive);
-        showNotification(`Данные из архива КПТ (${loadedDateFromArchive || 'дата не указана'}) успешно загружены: ${loadedFeaturesFromArchive.length} ЗУ`, 'success');
-    } else {
-        showNotification(`Архив КПТ для квартала ${baseCadastralNumber} не найден или пуст. Обычная загрузка ...`, "info");
-        if (loaderTextEl) loaderTextEl.textContent = `Загрузка  ${baseCadastralNumber}...`;
-        await getAllParcelsInQuarter(null, null, false, baseCadastralNumber, quarterDrawnFromDB);
+    } catch (err) {
+        if (err.message && err.message.includes('отменена пользователем')) {
+            showNotification('Загрузка отменена', 'info');
+        } else {
+            console.error('Ошибка в triggerSupabaseImport:', err);
+            showNotification('Ошибка загрузки архива: ' + err.message, 'error');
+        }
+    } finally {
+        hideLoader();
     }
-
-    hideLoader();
 }
 
 
@@ -28010,90 +28276,7 @@ function showHistoryModal() {
             });
             
             
-         async function geocodeAddress(query) {
-    if (!query || !query.trim()) return null;
-
-   
-    if (typeof ymaps !== 'undefined' && ymaps.geocode) {
-        try {
-            const yandexTimeout = new Promise((_, reject) => 
-                setTimeout(() => reject(new Error('Yandex timeout')), 3500)
-            );
-            const res = await Promise.race([
-                ymaps.geocode(query, { results: 1 }), 
-                yandexTimeout
-            ]);
-            const firstGeoObject = res.geoObjects.get(0);
-            if (firstGeoObject) {
-                const coords = firstGeoObject.geometry.getCoordinates();
-                const addressLine = (typeof firstGeoObject.getAddressLine === 'function') 
-                    ? firstGeoObject.getAddressLine() 
-                    : (firstGeoObject.properties.get('text') || query);
-                const bounds = firstGeoObject.properties.get('boundedBy');
-                return { coords, addressLine, bounds };
-            }
-        } catch (e) {
-            console.warn('Яндекс Геокодер не ответил (scriptError/timeout), пробуем резерв:', e.message);
-        }
-    }
-
-   
-    try {
-        const ctrl = new AbortController();
-        const tId = setTimeout(() => ctrl.abort(), 4000);
-        const url = `https://photon.komoot.io/api/?q=${encodeURIComponent(query)}&limit=1&lang=ru`;
-        const resp = await fetch(url, { signal: ctrl.signal });
-        clearTimeout(tId);
-
-        if (resp.ok) {
-            const data = await resp.json();
-            if (data && data.features && data.features.length > 0) {
-                const feat = data.features[0];
-                const [lon, lat] = feat.geometry.coordinates;
-                const p = feat.properties || {};
-                const parts = [p.name, p.street, p.housenumber, p.city || p.town, p.country].filter(Boolean);
-                const addressLine = parts.join(', ') || query;
-                return { coords: [lat, lon], addressLine, bounds: null };
-            }
-        }
-    } catch (err) {
-        console.warn('Резерв Photon не ответил:', err.message);
-    }
-
-
-    try {
-        const ctrl2 = new AbortController();
-        const tId2 = setTimeout(() => ctrl2.abort(), 7000);
-        const url2 = `https://nominatim.openstreetmap.org/search?format=json&q=${encodeURIComponent(query)}&limit=1&accept-language=ru`;
-        const resp2 = await fetch(url2, { 
-            signal: ctrl2.signal,
-            headers: { 'Accept': 'application/json' } 
-        });
-        clearTimeout(tId2);
-
-        if (resp2.ok) {
-            const data2 = await resp2.json();
-            if (data2 && data2.length > 0) {
-                const item = data2[0];
-                const lat = parseFloat(item.lat);
-                const lon = parseFloat(item.lon);
-                let bounds = null;
-                if (item.boundingbox) {
-                    bounds = [
-                        [parseFloat(item.boundingbox[0]), parseFloat(item.boundingbox[2])],
-                        [parseFloat(item.boundingbox[1]), parseFloat(item.boundingbox[3])]
-                    ];
-                }
-                return { coords: [lat, lon], addressLine: item.display_name, bounds };
-            }
-        }
-    } catch (err) {
-        console.warn('Резерв Nominatim не ответил:', err.message);
-    }
-
-    return null;
-}
-
+ 
 
         async function updateCity(address) {
     showLoader('Поиск адреса...');
@@ -35596,13 +35779,153 @@ async function getAllStructuresInQuarter(lat, lon) {
 
         await processAndDrawStructures(structureFeaturesData);
         await populateSidebarWithFoundObjects(structureFeaturesData, 'Сооружения');
- silentUploadFeaturesToDB(structureFeaturesData, quarterNumberToQuery, 'STR');
+ uploadNspdDataToLocalServer(structureFeaturesData, quarterNumberToQuery, 'STR')
+    .catch(err => console.error("Ошибка выгрузки Сооружений:", err));
  saveToLocalArchive(quarterNumberToQuery, structureFeaturesData, 'STR', 'nspd');
         showNotification(`Загружено Сооружений: ${structureFeaturesData.length} для ${quarterNumberToQuery}`, 'success');
 
     } catch (error) {
         console.error('Ошибка в getAllStructuresInQuarter:', error);
         showNotification(`Ошибка сети или обработки данных: ${error.message}`, 'error');
+    } finally {
+        hideLoader();
+    }
+}
+
+
+async function getAllObjectsInQuarter(lat, lon, directQuarterNumber = null) {
+    let quarterNumberToQuery = directQuarterNumber;
+
+    if (!quarterNumberToQuery && lat !== null && lon !== null) {
+        showLoader("Определение квартала...");
+        const cadastralData = await queryCadastralInfo(lat, lon);
+        if (cadastralData?.features?.length) {
+            const cn = cadastralData.features[0].properties?.descr;
+            if (cn && cn.split(':').length >= 3) {
+                quarterNumberToQuery = cn.split(':').slice(0, 3).join(':');
+            }
+        }
+    }
+
+    if (!quarterNumberToQuery) {
+        showNotification("Не удалось определить кадастровый квартал", "error");
+        hideLoader();
+        return;
+    }
+
+    if (isZeroQuarterRequest(quarterNumberToQuery)) {
+        showNotification("Поиск в нулевом квартале не выполняется", "warning");
+        hideLoader();
+        return;
+    }
+
+    autoUpdateMskSettings(quarterNumberToQuery);
+    currentQuarterNumber = quarterNumberToQuery;
+
+    showLoader(`Поиск границ квартала ${quarterNumberToQuery}...`);
+
+    try {
+        let quarterFeature = await fetchNSPDQuarterGeometry(quarterNumberToQuery);
+        if (!quarterFeature || !quarterFeature.geometry) {
+            showNotification(`Нет геометрии для квартала ${quarterNumberToQuery}`, "error");
+            hideLoader();
+            return;
+        }
+
+        
+        drawQuarterFromGeoJson(quarterNumberToQuery, quarterFeature.geometry, '#AAAAAA');
+
+        showLoader(`Запрос всех объектов (ЗУ, ОКС, Сооружения) для ${quarterNumberToQuery}...`);
+
+       
+        const requestBody = {
+            "geom": {
+                "type": "FeatureCollection",
+                "features": [{
+                    "type": "Feature",
+                    "geometry": {
+                        "crs": { "type": "name", "properties": { "name": "EPSG:3857" } },
+                        "type": quarterFeature.geometry.type,
+                        "coordinates": quarterFeature.geometry.coordinates
+                    },
+                    "properties": {}
+                }]
+            },
+            "categories": [
+                { "id": 36368 }, 
+                { "id": 36369 }, 
+                { "id": 36383 }  
+            ]
+        };
+
+        const response = await fetchNspd('https://nspd.gov.ru/api/geoportal/v1/intersects?typeIntersect=fullObject', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(requestBody)
+        });
+
+        if (!response.ok) throw new Error(`HTTP ошибка ${response.status}`);
+        const data = await response.json();
+        const allFeatures = data.features || [];
+
+        if (allFeatures.length === 0) {
+            showNotification(`Объекты в квартале ${quarterNumberToQuery} не найдены`, "warning");
+            hideLoader();
+            return;
+        }
+
+       
+        const demuxed = demuxFeatures(allFeatures);
+
+        parcelFeaturesData = demuxed.zu;
+        buildingFeaturesData = demuxed.oks;
+        structureFeaturesData = demuxed.structure;
+
+      
+        if (demuxed.zu.length > 0) await processAndDrawParcels(demuxed.zu, 'quarter', true);
+        if (demuxed.oks.length > 0) await processAndDrawBuildings(demuxed.oks);
+        if (demuxed.structure.length > 0) await processAndDrawStructures(demuxed.structure);
+
+        
+        populateSidebarWithAllObjects(demuxed);
+        updatePlacemarksVisibility();
+        applyCurrentTheme();
+
+       
+        const quarterName = quarterNumberToQuery.replace(/:/g, '_');
+        const today = new Date();
+        const dateString = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+        
+        const zipFilename = `${quarterName} ${dateString}.nspd`;
+        const zip = new JSZip();
+
+        if (demuxed.zu.length > 0) {
+            zip.file(`${quarterName} ${dateString}.json`, JSON.stringify(demuxed.zu, null, 2));
+            saveToLocalArchive(quarterNumberToQuery, demuxed.zu, 'ZU', 'nspd');
+        }
+        if (demuxed.oks.length > 0) {
+            zip.file(`OKS_${quarterName}_${dateString}.json`, JSON.stringify(demuxed.oks, null, 2));
+            saveToLocalArchive(quarterNumberToQuery, demuxed.oks, 'OKS', 'nspd');
+        }
+        if (demuxed.structure.length > 0) {
+            zip.file(`STR_${quarterName}_${dateString}.json`, JSON.stringify(demuxed.structure, null, 2));
+            saveToLocalArchive(quarterNumberToQuery, demuxed.structure, 'STR', 'nspd');
+        }
+
+        saveToLocalArchive(quarterNumberToQuery, quarterFeature.geometry, 'GEOM', 'nspd');
+
+      
+        zip.generateAsync({ type: "blob", compression: "DEFLATE", compressionOptions: { level: 9 } })
+            .then(blob => {
+                const formData = new FormData();
+                formData.append('file', new File([blob], zipFilename, { type: 'application/zip' }));
+                fetch(`${STORAGE_API_URL}/nspd/upload`, { method: 'POST', body: formData });
+            });
+
+        showNotification(`Квартал ${quarterNumberToQuery}: ЗУ: ${demuxed.zu.length}, Зданий: ${demuxed.oks.length}, Сооружений: ${demuxed.structure.length}`, "success");
+    } catch (e) {
+        console.error("Ошибка getAllObjectsInQuarter:", e);
+        showNotification("Ошибка загрузки объектов: " + e.message, "error");
     } finally {
         hideLoader();
     }
@@ -36185,7 +36508,8 @@ async function getAllBuildingsInQuarter(lat, lon) {
 
         await processAndDrawBuildings(buildingFeaturesData);
         await populateSidebarWithFoundObjects(buildingFeaturesData, 'Здания');
-   silentUploadFeaturesToDB(buildingFeaturesData, quarterNumberToQuery, 'OKS');
+   uploadNspdDataToLocalServer(buildingFeaturesData, quarterNumberToQuery, 'OKS')
+    .catch(err => console.error("Ошибка выгрузки ОКС:", err));
    saveToLocalArchive(quarterNumberToQuery, buildingFeaturesData, 'OKS', 'nspd');
    
         showNotification(`Загружено Зданий: ${buildingFeaturesData.length} для ${quarterNumberToQuery}`, 'success');
@@ -45586,7 +45910,7 @@ function openMapMagnifier() {
 
     setupMagnifierMapListeners();
 
-    const focusCoords = currentMouseMapCoords || (map ? map.getCenter() : [54.8492, 50.7910]);
+    const focusCoords = currentMouseMapCoords || (map ? map.getCenter() : [55.7558, 37.6173]);
 
     if (!mapMagnifierInstance) {
         ymaps.ready(() => {
@@ -46608,7 +46932,7 @@ function parseInfographicsDataset(results) {
         const upks = area > 0 && cost > 0 ? (cost / area) : 0;
         const own = (o.ownership_type || 'Не указано').trim();
         
-        // Извлекаем отдельно Наименование и Назначение:
+        
         const name = (o.name || o.building_name || o.params_name || '').trim();
         const purpose = (o.purpose || '').trim();
         
@@ -46637,8 +46961,8 @@ else oksFloorsDist['10+ эт.']++;
             type: 'oks',
             typeLabel: 'ОКС',
             cn,
-            name: name,         // <-- Сохраняем Наименование
-            purpose: purpose,   // <-- Сохраняем Назначение
+            name: name,         
+            purpose: purpose,   
             area,
             cost,
             upks: Math.round(upks * 100) / 100,
@@ -46750,7 +47074,7 @@ function renderInfographicsModalUI(stats) {
     overlay.innerHTML = `
         <div class="info-modal-card">
             
-            <!-- Шапка окна -->
+            
             <div style="padding: 14px 24px; background: #ffffff; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; gap: 10px;">
                 <div style="display: flex; align-items: center; gap: 14px;">
                     <div style="width: 44px; height: 44px; border-radius: 12px; background: linear-gradient(135deg, #0284c7, #1d4ed8); color: #fff; display: flex; align-items: center; justify-content: center; font-size: 1.25rem; box-shadow: 0 6px 14px rgba(2, 132, 199, 0.28);">
@@ -46771,7 +47095,7 @@ function renderInfographicsModalUI(stats) {
                 </div>
 
                 <div class="info-no-print" style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
-                    <!-- Поле глобального поиска -->
+                    
                     <div style="position: relative; display: flex; align-items: center;">
                         <i class="fas fa-search" style="position: absolute; left: 10px; color: #94a3b8; font-size: 0.8rem; pointer-events: none;"></i>
                         <input type="text" id="info-global-search" placeholder="Поиск" 
@@ -46783,7 +47107,7 @@ function renderInfographicsModalUI(stats) {
                                 title="Очистить поиск">&times;</button>
                     </div>
 
-                    <!-- Группа выбора категории (Все / ЗУ / ОКС) -->
+                    
                     <div class="info-scope-group">
                         <button class="info-scope-btn ${infographicsSettings.scope === 'all' ? 'active' : ''}" data-scope="all">Все (${stats.totalZu + stats.totalOks})</button>
                         <button class="info-scope-btn ${infographicsSettings.scope === 'zu' ? 'active' : ''}" data-scope="zu">Только ЗУ (${stats.totalZu})</button>
@@ -46800,10 +47124,10 @@ function renderInfographicsModalUI(stats) {
                 </div>
             </div>
 
-            <!-- Верхняя панель ключевых показателей (KPI) -->
+            
             <div id="info-kpi-container" class="info-kpi-grid"></div>
 
-            <!-- Вкладки навигации и контекстные селекторы -->
+            
             <div class="info-no-print" style="padding: 6px 24px 0 24px; background: #ffffff; border-bottom: 1px solid #e2e8f0; display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; flex-wrap: wrap; gap: 8px;">
                 <div style="display: flex; gap: 4px;">
                     <button class="info-tab-nav ${currentActiveTab === 'treemap' ? 'active' : ''}" data-tab="treemap">
@@ -46820,17 +47144,17 @@ function renderInfographicsModalUI(stats) {
                     </button>
                 </div>
 
-                <!-- Подконтролы текущей вкладки (селекторы метрик) -->
+                
                 <div id="info-subcontrols" style="display: flex; align-items: center; gap: 8px; font-size: 0.82rem; padding-bottom: 6px;"></div>
             </div>
 
-            <!-- Рабочая область графиков -->
+            
             <div style="flex: 1; position: relative; background: #f8fafc; padding: 14px 20px; overflow: hidden; display: flex; flex-direction: column;">
                 <div id="infographics-echart-main" style="width: 100%; height: 100%; display: block; background: #ffffff; border-radius: 14px; border: 1px solid #e2e8f0; padding: 10px; box-sizing: border-box; box-shadow: 0 2px 8px rgba(15,23,42,0.03);"></div>
                 <div id="infographics-summary-grid" style="width: 100%; height: 100%; display: none; overflow-y: auto; grid-template-columns: repeat(auto-fit, minmax(420px, 1fr)); gap: 14px; padding: 2px;"></div>
             </div>
 
-            <!-- Подвал с подсказками -->
+            
             <div class="info-no-print" style="padding: 9px 24px; background: #ffffff; border-top: 1px solid #e2e8f0; font-size: 0.78rem; color: #64748b; display: flex; justify-content: space-between; align-items: center; flex-shrink: 0;">
                 <div style="display: flex; align-items: center; gap: 16px;">
                     <span><i class="fas fa-mouse-pointer" style="color:#0284c7;"></i> <b>Наведение:</b> паспорт объекта</span>
@@ -46845,7 +47169,7 @@ function renderInfographicsModalUI(stats) {
     document.body.appendChild(overlay);
     updateKpiBarUI();
 
-    // Ресайз графиков при изменении размеров экрана
+    
     if (infographicsResizeHandler) window.removeEventListener('resize', infographicsResizeHandler);
     infographicsResizeHandler = () => {
         if (echartMainInstance && !echartMainInstance.isDisposed()) echartMainInstance.resize();
@@ -46855,7 +47179,7 @@ function renderInfographicsModalUI(stats) {
     };
     window.addEventListener('resize', infographicsResizeHandler);
 
-    // Закрытие модального окна
+    
     const close = () => {
         disposeAllInfographicsCharts();
         if (infographicsResizeHandler) {
@@ -46875,7 +47199,7 @@ function renderInfographicsModalUI(stats) {
     overlay.onclick = (e) => { if (e.target === overlay) close(); };
     overlay.querySelector('#info-fullscreen-print').onclick = () => window.print();
 
-    // Экспорт в PNG
+    
     overlay.querySelector('#info-export-png').onclick = () => {
         const targetChart = echartMainInstance || echartSummaryInstances[0];
         if (!targetChart) {
@@ -46894,7 +47218,7 @@ function renderInfographicsModalUI(stats) {
         }
     };
 
-    // Слушатели текстового поиска с дебаунсом
+    
     const searchInput = overlay.querySelector('#info-global-search');
     const clearBtn = overlay.querySelector('#info-clear-search');
     let searchDebounce = null;
@@ -46918,7 +47242,7 @@ function renderInfographicsModalUI(stats) {
         searchInput.focus();
     });
 
-    // Переключение вкладок
+    
     overlay.querySelectorAll('.info-tab-nav').forEach(btn => {
         btn.onclick = () => {
             overlay.querySelectorAll('.info-tab-nav').forEach(b => b.classList.remove('active'));
@@ -46928,7 +47252,7 @@ function renderInfographicsModalUI(stats) {
         };
     });
 
-    // Переключение охвата (Все / ЗУ / ОКС)
+    
     overlay.querySelectorAll('.info-scope-btn').forEach(btn => {
         btn.onclick = () => {
             overlay.querySelectorAll('.info-scope-btn').forEach(b => b.classList.remove('active'));
@@ -47001,7 +47325,7 @@ function generateInfographicsTooltipHtml(item) {
             padding: 4px;
             box-sizing: border-box;
         ">
-            <!-- Заголовок -->
+            
             <div style="
                 display: flex; align-items: center; justify-content: space-between;
                 border-bottom: 1px solid #e2e8f0; padding-bottom: 6px; margin-bottom: 7px; gap: 6px;
@@ -47016,7 +47340,7 @@ function generateInfographicsTooltipHtml(item) {
 
             <div style="margin-bottom: 7px;">${specBadge}</div>
 
-            <!-- Блок показателей (Площадь / УПКС / Кад. стоимость) -->
+            
             <div style="display:grid; grid-template-columns: 1fr 1fr; gap: 6px; background:#f8fafc; padding: 6px 8px; border-radius: 7px; border:1px solid #f1f5f9; margin-bottom: 7px;">
                 <div>
                     <div style="font-size:9.5px; color:#64748b; text-transform:uppercase; font-weight:700;">Площадь</div>
@@ -47032,7 +47356,7 @@ function generateInfographicsTooltipHtml(item) {
                 </div>
             </div>
 
-            <!-- Характеристики -->
+            
             <div style="display: flex; flex-direction: column; gap: 3px; font-size: 11px;">
                 ${item.ownership && item.ownership !== 'Не указано' ? `<div><span style="color:#64748b;">Собственность:</span> <b>${item.ownership}</b></div>` : ''}
                 ${item.right && item.right !== '-' ? `<div><span style="color:#64748b;">Право:</span> <b>${item.right}</b></div>` : ''}
@@ -47185,7 +47509,7 @@ function renderTreemapTab(items, subcontrols) {
         renderTreemapTab(items, subcontrols);
     };
 
-    const metric = infographicsSettings.treemapMetric; // 'area', 'cost' или 'upks'
+    const metric = infographicsSettings.treemapMetric; 
     const colorMode = infographicsSettings.treemapColoring;
 
     let minUpks = Infinity, maxUpks = -Infinity;
@@ -47213,7 +47537,7 @@ function renderTreemapTab(items, subcontrols) {
                 itemColor = '#94a3b8';
             } else {
                 const ratio = maxUpks > minUpks ? Math.max(0, Math.min(1, (item.upks - minUpks) / (maxUpks - minUpks))) : 0.5;
-                const hue = Math.round((1 - ratio) * 145); // Градиент от зеленого (145) к красному (0)
+                const hue = Math.round((1 - ratio) * 145); 
                 itemColor = `hsl(${hue}, 76%, 43%)`;
             }
         } else if (colorMode === 'ownership') {
