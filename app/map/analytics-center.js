@@ -1,10 +1,9 @@
 /**
  * Модуль: Аналитический центр базы данных
- * Версия: 2.11 
- */
+  */
 
 (function () {
-    const ANALYTICS_CENTER_VERSION = "2.10";
+    const ANALYTICS_CENTER_VERSION = "2.12";
     console.log(`[Analytics Center] Загружена версия ${ANALYTICS_CENTER_VERSION}`);
 
     const MAPRUAPP_AI_URL = "https://mapruapp.ru/ai/api/v1/chat/completions";
@@ -530,6 +529,30 @@
         const hasDeclaredField = o.declared_area || o.land_record_area_declaration || o.land_record_area;
         return !isVerified && !!hasDeclaredField;
     }
+    
+    // Надежное извлечение кадастрового номера из объекта (Feature)
+    function extractCadastralNumber(f) {
+        if (!f) return '';
+        const p = f.properties || {};
+        const o = p.options || {};
+        
+        const candidates = [
+            o.cad_num,
+            o.cad_number,
+            p.descr,
+            o.reg_numb_border,
+            p.label,
+            typeof f.id === 'string' && f.id.includes(':') ? f.id : null
+        ];
+
+        for (const c of candidates) {
+            if (c && typeof c === 'string' && c.includes(':') && !c.startsWith('Полигон_') && !c.startsWith('Линия_') && c !== 'Объект') {
+                return c.trim();
+            }
+        }
+
+        return o.cad_num || o.cad_number || p.descr || o.reg_numb_border || (typeof f.id === 'string' ? f.id : '') || '';
+    }
 
     // Получение числового значения площади объекта
     function getNumericArea(f) {
@@ -713,78 +736,104 @@
     }
     
     
-    // Сбор всех объектов карты во внутренний формат аналитики
-    function getMapObjectsAsFeatures() {
-        let collected = null;
-        if (typeof collectAllMapFeatures === 'function') {
-            try { collected = collectAllMapFeatures(); } catch(e) {}
-        } else if (typeof window.collectAllMapFeatures === 'function') {
-            try { collected = window.collectAllMapFeatures(); } catch(e) {}
-        }
+ 
 
+    // Сбор объектов карты без привязки к window (прямой доступ к массивам index.html)
+    function getMapObjectsAsFeatures() {
         const features = [];
         const seen = new Set();
 
-        const processList = (list, type) => {
-            if (!Array.isArray(list)) return;
-            list.forEach(f => {
-                if (!f) return;
-                const p = f.properties || {};
-                const o = p.options || {};
-                const id = f.id || o.cad_num || o.cad_number || o.reg_numb_border || p.descr || 'Объект';
-                if (id && id !== 'Объект' && seen.has(id)) return;
-                if (id && id !== 'Объект') seen.add(id);
+        const addFeature = (f, defaultType) => {
+            if (!f) return;
+            const p = f.properties || {};
+            const o = p.options || {};
+            const cn = extractCadastralNumber(f) || 'Объект';
+            
+            const key = (cn && cn !== 'Объект') ? cn : (p._exportId || `${defaultType}_${Math.random()}`);
+            if (seen.has(key)) return;
+            seen.add(key);
 
-                features.push({
-                    id: id,
-                    _layer_type: type,
-                    properties: p,
-                    geometry: f.geometry || null,
-                    area: getNumericArea(f),
-                    cost: getNumericCost(f),
-                    db_date: f.db_date || p.updated_date || new Date().toISOString().slice(0, 10)
-                });
+            let layerType = defaultType;
+            const cat = p.category;
+            const catName = (p.categoryName || '').toLowerCase();
+            if (cat === 36369 || catName.includes('здани') || o.build_record_area || (o.cad_num && o.purpose)) {
+                layerType = 'oks';
+            } else if (cat === 36383 || catName.includes('сооружен') || o.params_extension) {
+                layerType = 'structure';
+            } else if (cat === 36940 || cat === 36315 || cat === 36281 || cat === 36278 || cat === 36314 || catName.includes('зон') || p._zone_type) {
+                layerType = 'zones';
+            } else if (cat === 36368 || catName.includes('земельн') || o.land_record_type || o.specified_area || o.declared_area) {
+                layerType = 'zu';
+            }
+
+            features.push({
+                id: cn,
+                _layer_type: layerType,
+                properties: p,
+                geometry: f.geometry || null,
+                area: getNumericArea(f),
+                cost: getNumericCost(f),
+                db_date: f.db_date || p.updated_date || new Date().toISOString().slice(0, 10)
             });
         };
 
-        if (collected && collected.results) {
-            processList(collected.results.zu, 'zu');
-            processList(collected.results.oks, 'oks');
-            processList(collected.results.structure, 'structure');
-            processList(collected.results.zouit, 'zones');
-        }
+        // 1. Опрос глобальных массивов index.html
+        const zuArray = (typeof parcelFeaturesData !== 'undefined' && Array.isArray(parcelFeaturesData)) ? parcelFeaturesData : (window.parcelFeaturesData || []);
+        const oksArray = (typeof buildingFeaturesData !== 'undefined' && Array.isArray(buildingFeaturesData)) ? buildingFeaturesData : (window.buildingFeaturesData || []);
+        const strArray = (typeof structureFeaturesData !== 'undefined' && Array.isArray(structureFeaturesData)) ? structureFeaturesData : (window.structureFeaturesData || []);
+        const zouitArray = (typeof zouitFeaturesData !== 'undefined' && Array.isArray(zouitFeaturesData)) ? zouitFeaturesData : (window.zouitFeaturesData || []);
 
-        if (features.length === 0) {
-            processList(window.parcelFeaturesData, 'zu');
-            processList(window.buildingFeaturesData, 'oks');
-            processList(window.structureFeaturesData, 'structure');
-            processList(window.zouitFeaturesData, 'zones');
-        }
+        zuArray.forEach(f => addFeature(f, 'zu'));
+        oksArray.forEach(f => addFeature(f, 'oks'));
+        strArray.forEach(f => addFeature(f, 'structure'));
+        zouitArray.forEach(f => addFeature(f, 'zones'));
 
-        if (features.length === 0 && typeof polygons !== 'undefined' && Array.isArray(polygons)) {
-            polygons.forEach(obj => {
-                if (!obj || !obj.properties) return;
-                const fd = obj.properties.get('featureData');
-                if (fd) {
-                    const isB = obj.properties.get('isBuilding');
-                    const isS = obj.properties.get('isStructure');
-                    const isZ = obj.properties.get('isZouit');
-                    const type = isB ? 'oks' : (isS ? 'structure' : (isZ ? 'zones' : 'zu'));
-                    processList([fd], type);
-                }
-            });
-        }
+        // 2. Опрос векторных объектов polygons на карте
+        const polyArray = (typeof polygons !== 'undefined' && Array.isArray(polygons)) ? polygons : (window.polygons || []);
+        polyArray.forEach(obj => {
+            if (!obj || !obj.properties) return;
+            const p = obj.properties;
+            if (p.get('isQuarterBoundary') || p.get('isSearchShape') || p.get('isVertexPoint')) return;
+
+            let fd = p.get('featureData');
+            const cn = p.get('cadastralNumber');
+
+            let defaultType = 'zu';
+            if (p.get('isBuilding')) defaultType = 'oks';
+            else if (p.get('isStructure')) defaultType = 'structure';
+            else if (p.get('isZouit')) defaultType = 'zones';
+
+            if (fd) {
+                addFeature(fd, defaultType);
+            } else if (cn || obj instanceof ymaps.Polygon || obj instanceof ymaps.Polyline) {
+                const stats = (typeof calculatePreciseGeometry === 'function') ? calculatePreciseGeometry(obj) : { area: 0, perimeter: 0 };
+                addFeature({
+                    type: "Feature",
+                    id: cn || 'Объект',
+                    geometry: obj.geometry ? { type: obj.geometry.getType(), coordinates: obj.geometry.getCoordinates() } : null,
+                    properties: {
+                        descr: cn || 'Объект',
+                        options: {
+                            cad_num: cn || 'Объект',
+                            readable_address: p.get('address') || 'Нанесен на карту',
+                            specified_area: stats.area || null,
+                            params_extension: stats.perimeter || null
+                        }
+                    }
+                }, defaultType);
+            }
+        });
 
         return features;
     }
 
-    // Автоопределение самого частого района (например, "16:56") среди объектов карты
+    // Автоопределение наиболее часто встречающегося района/квартала (например, "16:56")
     function detectPopularCadastralPrefix(features) {
         if (!features || !features.length) return '';
         const counts = {};
         features.forEach(f => {
-            const cn = String(f.id || f.properties?.descr || f.properties?.options?.cad_num || '').trim();
-            const m = cn.match(/^(\d{2}:\d{2})/);
+            const cn = extractCadastralNumber(f);
+            const m = cn.match(/\b(\d{1,2}:\d{1,2})\b/);
             if (m) {
                 counts[m[1]] = (counts[m[1]] || 0) + 1;
             }
@@ -797,8 +846,9 @@
                 best = k;
             }
         }
-        return best; // возвращает строку вида "16:56"
+        return best; // Вернет, например, "16:56"
     }
+  
 
     // Расчет сводной статистики (summary) из массива объектов карты
     function generateSummaryFromFeatures(features) {
@@ -873,8 +923,7 @@
         };
     }
 
-    // Локальная фильтрация объектов карты по параметрам сайдбара
-    function filterMapFeatures(allFeatures, payload) {
+  function filterMapFeatures(allFeatures, payload) {
         const filters = payload.filters || {};
         const tables = payload.tables || ['zu', 'oks', 'structure', 'zones'];
 
@@ -883,11 +932,14 @@
 
             const p = f.properties || {};
             const o = p.options || {};
+            const objCad = extractCadastralNumber(f).toLowerCase();
 
+            // Если задана маска номера (например, 16:56)
             if (filters.cad_num) {
-                const searchCad = filters.cad_num.toLowerCase().replace(/:$/, '');
-                const objCad = String(f.id || '').toLowerCase();
-                if (/^\d{1,2}:/.test(objCad) && !objCad.includes(searchCad)) return false;
+                const searchCad = filters.cad_num.toLowerCase().replace(/:+$/, '');
+                if (/^\d{1,2}:/.test(objCad)) {
+                    if (!objCad.includes(searchCad)) return false;
+                }
             }
 
             if (filters.address) {
@@ -969,6 +1021,75 @@
         });
     }
 
+    async function runAnalyticsQuery(lat, lon) {
+        const spatialType = document.getElementById('ac-spatial-type')?.value;
+
+        // Режим: "Объекты на карте" — сразу локальный расчет без запросов к серверу БД
+        if (spatialType === 'map_objects') {
+            const rawMapFeatures = getMapObjectsAsFeatures();
+            if (!rawMapFeatures.length) {
+                const container = document.getElementById('ac-content-view');
+                container.innerHTML = `
+                    <div style="text-align: center; padding-top: 110px; color: #d97706;">
+                        <i class="fas fa-layer-group" style="font-size: 2.8rem; margin-bottom: 12px; color: #f59e0b;"></i>
+                        <div style="font-weight: 800; font-size: 1.15rem; color: #0f172a;">На карте нет загруженных объектов</div>
+                        <div style="font-size: 0.9rem; color: #64748b; margin-top: 6px;">
+                            Загрузите участки на карту или выберите гео-зону «Текущий экран карты» / «По всей базе»
+                        </div>
+                    </div>
+                `;
+                return;
+            }
+
+            const payload = collectFilterPayload(lat, lon, true);
+            const filtered = filterMapFeatures(rawMapFeatures, payload || { tables: ['zu', 'oks', 'structure', 'zones'], filters: {} });
+
+            lastQueryResults = {
+                summary: generateSummaryFromFeatures(filtered),
+                features: filtered
+            };
+            lastQueryResults._clientStats = computeClientStats(filtered);
+
+            renderActiveTabContent();
+            return;
+        }
+
+        // Остальные режимы — запрос на бэкенд
+        const payload = collectFilterPayload(lat, lon);
+        if (!payload) return;
+
+        const container = document.getElementById('ac-content-view');
+        container.innerHTML = `
+            <div style="text-align: center; padding-top: 120px; color: #2563eb;">
+                <i class="fas fa-circle-notch fa-spin" style="font-size: 2.8rem; margin-bottom: 14px;"></i>
+                <div style="font-weight: 800; font-size: 1.15rem; color: #0f172a;">Анализ базы данных и расчет показателей...</div>
+                <div style="font-size: 0.85rem; color: #64748b; margin-top: 6px;">Выполняется агрегация геоданных и атрибутов</div>
+            </div>
+        `;
+
+        try {
+            const resp = await fetch(BACKEND_QUERY_URL, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(payload)
+            });
+
+            if (!resp.ok) throw new Error(`Ошибка сервера: ${resp.status}`);
+            lastQueryResults = await resp.json();
+            lastQueryResults._clientStats = computeClientStats(lastQueryResults.features || []);
+
+            renderActiveTabContent();
+        } catch (err) {
+            container.innerHTML = `
+                <div style="text-align: center; padding-top: 110px; color: #ef4444;">
+                    <i class="fas fa-triangle-exclamation" style="font-size: 2.8rem; margin-bottom: 12px;"></i>
+                    <div style="font-weight: 800; font-size: 1.15rem;">Не удалось выполнить запрос к аналитическому ядру</div>
+                    <div style="font-size: 0.9rem; color: #64748b; margin-top: 6px;">${escapeHtml(err.message)}</div>
+                </div>
+            `;
+        }
+    }
+
     // Открытие Аналитического центра
   window.openAnalyticsCenter = async function (lat, lon) {
         injectAnalyticsStyles();
@@ -981,10 +1102,10 @@
         }
 
         
+       // Автоопределение района по объектам карты
         const mapFeatures = getMapObjectsAsFeatures();
         const popularDistrict = detectPopularCadastralPrefix(mapFeatures);
-        const initialPrefix = popularDistrict || getDefaultCadastralPrefix();
-        const initialCadValue = popularDistrict ? popularDistrict : `${initialPrefix}01:`;
+        const initialCadValue = popularDistrict ? popularDistrict : (getDefaultCadastralPrefix() + '01:');
 
         analyticsModal = document.createElement('div');
         analyticsModal.id = 'analytics-center-overlay';
@@ -993,7 +1114,8 @@
             <div class="ac-window">
                 <div class="ac-header">
                     <div class="ac-header-title">
-                        <div class="ac-header-icon"><i class="fas fa-chart-network"></i></div>
+                        <!-- Заменена иконка на fa-chart-pie -->
+                        <div class="ac-header-icon"><i class="fas fa-chart-pie"></i></div>
                         <div>
                             <div style="display:flex; align-items:center; gap:8px;">
                                 <span>Аналитический центр недвижимости</span>
@@ -1008,17 +1130,8 @@
                 <div class="ac-body">
                     <!-- Сайдбар параметров -->
                     <div class="ac-sidebar">
-                        <!-- Блок ИИ -->
-                        <div class="ac-ai-box">
-                            <h4><i class="fas fa-sparkles" style="color: #2563eb;"></i> ИИ-Аналитик (Запрос на русском)</h4>
-                            <textarea id="ac-ai-text" class="ac-ai-input" placeholder="Например: найди кирпичные дома от 2 этажей дороже 5 млн руб..."></textarea>
-                            <button id="ac-ai-submit" class="ac-btn-ai">
-                                <i class="fas fa-wand-magic-sparkles"></i> Сформировать фильтр ИИ
-                            </button>
-                        </div>
 
-                     
-                 <!-- Пространственный охват -->
+                        <!-- Пространственный охват -->
                         <div class="ac-filter-group">
                             <span class="ac-filter-title"><i class="fas fa-globe"></i> Пространственный охват</span>
                             <div class="ac-form-row">
@@ -1041,7 +1154,7 @@
                             <span class="ac-filter-title"><i class="fas fa-hashtag"></i> Кадастровый номер и адрес</span>
                             <div class="ac-form-row">
                                 <label>Кадастровый номер или маска (мин. 4 цифры):</label>
-                                <input type="text" id="ac-cadnum-search" class="ac-input-text" value="${initialCadValue}" placeholder="16:01 или 16:01:010101">
+                                <input type="text" id="ac-cadnum-search" class="ac-input-text" value="${initialCadValue}" placeholder="16:56 или 16:56:010101">
                             </div>
                             <div class="ac-form-row">
                                 <label>Поиск по адресу / ориентиру:</label>
@@ -1055,8 +1168,6 @@
                             </div>
                         </div>
 
-                    
-
                         <!-- Типы объектов -->
                         <div class="ac-filter-group">
                             <span class="ac-filter-title"><i class="fas fa-layer-group"></i> Типы объектов</span>
@@ -1068,7 +1179,7 @@
                             </div>
                         </div>
 
-                        <!-- Общие права и статус -->
+                        <!-- Права и статус -->
                         <div class="ac-filter-group">
                             <span class="ac-filter-title"><i class="fas fa-scale-balanced"></i> Права и статус</span>
                             <div class="ac-form-row">
@@ -1095,7 +1206,7 @@
                             </div>
                         </div>
 
-                        <!-- Параметры Участков (ЗУ) -->
+                        <!-- Параметры участков (ЗУ) -->
                         <div class="ac-filter-group">
                             <span class="ac-filter-title"><i class="fas fa-vector-square"></i> Параметры участков (ЗУ)</span>
                             <div class="ac-form-row">
@@ -1123,7 +1234,7 @@
                             </div>
                         </div>
 
-                        <!-- Параметры Зданий (ОКС) -->
+                        <!-- Параметры зданий (ОКС) -->
                         <div class="ac-filter-group">
                             <span class="ac-filter-title"><i class="fas fa-building"></i> Параметры зданий (ОКС)</span>
                             <div class="ac-form-row">
@@ -1173,6 +1284,15 @@
                                     <input type="number" id="ac-cost-max" class="ac-input-text" placeholder="До руб.">
                                 </div>
                             </div>
+                        </div>
+
+                        <!-- Блок ИИ перемещен в самый низ -->
+                        <div class="ac-ai-box" style="flex-shrink: 0; margin-top: 4px;">
+                            <h4><i class="fas fa-sparkles" style="color: #2563eb;"></i> ИИ-Аналитик (Запрос на русском)</h4>
+                            <textarea id="ac-ai-text" class="ac-ai-input" placeholder="Например: найди кирпичные дома от 2 этажей дороже 5 млн руб..."></textarea>
+                            <button id="ac-ai-submit" class="ac-btn-ai">
+                                <i class="fas fa-wand-magic-sparkles"></i> Сформировать фильтр ИИ
+                            </button>
                         </div>
 
                         <div class="ac-sidebar-footer">
@@ -1398,74 +1518,7 @@
         return payload;
     }
 
-    async function runAnalyticsQuery(lat, lon) {
-        const spatialType = document.getElementById('ac-spatial-type')?.value;
-
-        // Режим: "Объекты на карте" (локальный анализ без сетевого запроса)
-        if (spatialType === 'map_objects') {
-            const rawMapFeatures = getMapObjectsAsFeatures();
-            if (!rawMapFeatures.length) {
-                const container = document.getElementById('ac-content-view');
-                container.innerHTML = `
-                    <div style="text-align: center; padding-top: 110px; color: #d97706;">
-                        <i class="fas fa-layer-group" style="font-size: 2.8rem; margin-bottom: 12px; color: #f59e0b;"></i>
-                        <div style="font-weight: 800; font-size: 1.15rem; color: #0f172a;">На карте нет загруженных объектов</div>
-                        <div style="font-size: 0.9rem; color: #64748b; margin-top: 6px;">
-                            Загрузите участки или выберите гео-зону «Текущий экран карты» / «По всей базе»
-                        </div>
-                    </div>
-                `;
-                return;
-            }
-
-            const payload = collectFilterPayload(lat, lon, true);
-            const filtered = filterMapFeatures(rawMapFeatures, payload || { tables: ['zu', 'oks', 'structure', 'zones'], filters: {} });
-
-            lastQueryResults = {
-                summary: generateSummaryFromFeatures(filtered),
-                features: filtered
-            };
-            lastQueryResults._clientStats = computeClientStats(filtered);
-
-            renderActiveTabContent();
-            return;
-        }
-
-        // Стандартные режимы гео-зон (viewport, radius, all)
-        const payload = collectFilterPayload(lat, lon);
-        if (!payload) return;
-
-        const container = document.getElementById('ac-content-view');
-        container.innerHTML = `
-            <div style="text-align: center; padding-top: 120px; color: #2563eb;">
-                <i class="fas fa-circle-notch fa-spin" style="font-size: 2.8rem; margin-bottom: 14px;"></i>
-                <div style="font-weight: 800; font-size: 1.15rem; color: #0f172a;">Анализ базы данных и расчет показателей...</div>
-                <div style="font-size: 0.85rem; color: #64748b; margin-top: 6px;">Выполняется агрегация геоданных и атрибутов</div>
-            </div>
-        `;
-
-        try {
-            const resp = await fetch(BACKEND_QUERY_URL, {
-                method: 'POST',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify(payload)
-            });
-
-            if (!resp.ok) throw new Error(`Ошибка сервера: ${resp.status}`);
-            lastQueryResults = await resp.json();
-            lastQueryResults._clientStats = computeClientStats(lastQueryResults.features || []);
-
-            renderActiveTabContent();
-        } catch (err) {
-            container.innerHTML = `
-                <div style="text-align: center; padding-top: 110px; color: #ef4444;">
-                    <i class="fas fa-triangle-exclamation" style="font-size: 2.8rem; margin-bottom: 12px;"></i>
-                    <div style="font-weight: 800; font-size: 1.15rem;">Не удалось выполнить запрос к аналитическому ядру</div>
-                    <div style="font-size: 0.9rem; color: #64748b; margin-top: 6px;">${escapeHtml(err.message)}</div>
-                </div>
-            `;
-        }
-    }
+   
 
     // ИИ-парсер запроса
     async function processAiQuery() {
