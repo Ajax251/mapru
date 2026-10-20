@@ -3,7 +3,7 @@
   */
 
 (function () {
-    const ANALYTICS_CENTER_VERSION = "2.13";
+    const ANALYTICS_CENTER_VERSION = "2.15";
     console.log(`[Analytics Center] Загружена версия ${ANALYTICS_CENTER_VERSION}`);
 
     const MAPRUAPP_AI_URL = "https://mapruapp.ru/ai/api/v1/chat/completions";
@@ -593,24 +593,30 @@
         };
     }
 
-    // Дополнительный клиентский расчет аналитики по выборке
+  // Дополнительный клиентский расчет аналитики по выборке
     function computeClientStats(features) {
         let withGeom = 0;
         let withoutGeom = 0;
         let zuSpecified = 0;
         let zuDeclared = 0;
+        let oksWithGeom = 0;
+        let oksWithoutGeom = 0;
         const vriCounts = {};
         const upksList = [];
         const scatterData = [];
 
         features.forEach(f => {
             const o = f.properties?.options || {};
-            if (hasRealBoundaries(f)) withGeom++;
+            const hasGeom = hasRealBoundaries(f);
+            if (hasGeom) withGeom++;
             else withoutGeom++;
 
             if (f._layer_type === 'zu') {
                 if (isDeclaredParcel(f)) zuDeclared++;
                 else zuSpecified++;
+            } else if (f._layer_type === 'oks' || f._layer_type === 'structure') {
+                if (hasGeom) oksWithGeom++;
+                else oksWithoutGeom++;
             }
 
             const vriRaw = (o.permitted_use_established_by_document || o.purpose || o.params_purpose || '').trim();
@@ -653,6 +659,8 @@
             withoutGeom,
             zuSpecified,
             zuDeclared,
+            oksWithGeom,
+            oksWithoutGeom,
             topVri,
             medianUpks,
             minUpks,
@@ -1289,7 +1297,7 @@
                         <!-- Блок ИИ перемещен в самый низ -->
                         <div class="ac-ai-box" style="flex-shrink: 0; margin-top: 4px;">
                             <h4><i class="fas fa-sparkles" style="color: #2563eb;"></i> ИИ-Аналитик (Запрос на русском)</h4>
-                            <textarea id="ac-ai-text" class="ac-ai-input" placeholder="Например: найди кирпичные дома от 2 этажей дороже 5 млн руб..."></textarea>
+                            <textarea id="ac-ai-text" class="ac-ai-input" placeholder=""></textarea>
                             <button id="ac-ai-submit" class="ac-btn-ai">
                                 <i class="fas fa-wand-magic-sparkles"></i> Сформировать фильтр ИИ
                             </button>
@@ -1722,6 +1730,7 @@
             currentChartInstances.push(chart2);
 
             // 3. Качество геоданных и межевания (НОВЫЙ ГРАФИК)
+          // 3. Качество геоданных и межевания
             const chart3 = echarts.init(document.getElementById('ac-chart-geom-quality'));
             chart3.setOption({
                 title: { text: 'Качество границ и межевания', left: 'center', textStyle: { fontSize: 13, fontWeight: 700, color: '#1e293b' } },
@@ -1733,8 +1742,8 @@
                     data: [
                         { name: 'Уточненные ЗУ', value: cs.zuSpecified, itemStyle: { color: '#059669' } },
                         { name: 'Декларированные ЗУ', value: cs.zuDeclared, itemStyle: { color: '#ef4444' } },
-                        { name: 'ОКС / Сооружения с контуром', value: Math.max(0, cs.withGeom - cs.zuSpecified), itemStyle: { color: '#0284c7' } },
-                        { name: 'Без координат контура', value: Math.max(0, cs.withoutGeom - cs.zuDeclared), itemStyle: { color: '#cbd5e1' } }
+                        { name: 'ОКС / Сооружения с контуром', value: cs.oksWithGeom, itemStyle: { color: '#0284c7' } },
+                        { name: 'ОКС без контура', value: cs.oksWithoutGeom, itemStyle: { color: '#cbd5e1' } }
                     ].filter(d => d.value > 0)
                 }]
             });
