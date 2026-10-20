@@ -1,6 +1,6 @@
 /**
  * Модуль: Аналитический центр базы данных
- * Версия: 2.10 (Pro UI & Extended Analytics Edition)
+ * Версия: 2.11 
  */
 
 (function () {
@@ -711,9 +711,266 @@
             });
         }
     }
+    
+    
+    // Сбор всех объектов карты во внутренний формат аналитики
+    function getMapObjectsAsFeatures() {
+        let collected = null;
+        if (typeof collectAllMapFeatures === 'function') {
+            try { collected = collectAllMapFeatures(); } catch(e) {}
+        } else if (typeof window.collectAllMapFeatures === 'function') {
+            try { collected = window.collectAllMapFeatures(); } catch(e) {}
+        }
+
+        const features = [];
+        const seen = new Set();
+
+        const processList = (list, type) => {
+            if (!Array.isArray(list)) return;
+            list.forEach(f => {
+                if (!f) return;
+                const p = f.properties || {};
+                const o = p.options || {};
+                const id = f.id || o.cad_num || o.cad_number || o.reg_numb_border || p.descr || 'Объект';
+                if (id && id !== 'Объект' && seen.has(id)) return;
+                if (id && id !== 'Объект') seen.add(id);
+
+                features.push({
+                    id: id,
+                    _layer_type: type,
+                    properties: p,
+                    geometry: f.geometry || null,
+                    area: getNumericArea(f),
+                    cost: getNumericCost(f),
+                    db_date: f.db_date || p.updated_date || new Date().toISOString().slice(0, 10)
+                });
+            });
+        };
+
+        if (collected && collected.results) {
+            processList(collected.results.zu, 'zu');
+            processList(collected.results.oks, 'oks');
+            processList(collected.results.structure, 'structure');
+            processList(collected.results.zouit, 'zones');
+        }
+
+        if (features.length === 0) {
+            processList(window.parcelFeaturesData, 'zu');
+            processList(window.buildingFeaturesData, 'oks');
+            processList(window.structureFeaturesData, 'structure');
+            processList(window.zouitFeaturesData, 'zones');
+        }
+
+        if (features.length === 0 && typeof polygons !== 'undefined' && Array.isArray(polygons)) {
+            polygons.forEach(obj => {
+                if (!obj || !obj.properties) return;
+                const fd = obj.properties.get('featureData');
+                if (fd) {
+                    const isB = obj.properties.get('isBuilding');
+                    const isS = obj.properties.get('isStructure');
+                    const isZ = obj.properties.get('isZouit');
+                    const type = isB ? 'oks' : (isS ? 'structure' : (isZ ? 'zones' : 'zu'));
+                    processList([fd], type);
+                }
+            });
+        }
+
+        return features;
+    }
+
+    // Автоопределение самого частого района (например, "16:56") среди объектов карты
+    function detectPopularCadastralPrefix(features) {
+        if (!features || !features.length) return '';
+        const counts = {};
+        features.forEach(f => {
+            const cn = String(f.id || f.properties?.descr || f.properties?.options?.cad_num || '').trim();
+            const m = cn.match(/^(\d{2}:\d{2})/);
+            if (m) {
+                counts[m[1]] = (counts[m[1]] || 0) + 1;
+            }
+        });
+        let best = '';
+        let max = 0;
+        for (const k in counts) {
+            if (counts[k] > max) {
+                max = counts[k];
+                best = k;
+            }
+        }
+        return best; // возвращает строку вида "16:56"
+    }
+
+    // Расчет сводной статистики (summary) из массива объектов карты
+    function generateSummaryFromFeatures(features) {
+        let count_zu = 0, count_oks = 0, count_str = 0, count_zones = 0;
+        let total_area = 0, total_cost = 0;
+        let cost_count = 0, cost_upks_sum = 0;
+        const ownership_dist = {};
+        const floors_dist = {};
+        const materials_dist = {};
+        const cost_brackets = {
+            'До 1 млн ₽': 0,
+            '1 - 3 млн ₽': 0,
+            '3 - 5 млн ₽': 0,
+            '5 - 10 млн ₽': 0,
+            '10 - 20 млн ₽': 0,
+            '20+ млн ₽': 0
+        };
+
+        features.forEach(f => {
+            const o = f.properties?.options || {};
+            if (f._layer_type === 'zu') count_zu++;
+            else if (f._layer_type === 'oks') count_oks++;
+            else if (f._layer_type === 'structure') count_str++;
+            else if (f._layer_type === 'zones') count_zones++;
+
+            const area = getNumericArea(f);
+            const cost = getNumericCost(f);
+
+            total_area += area;
+            if (cost > 0) {
+                total_cost += cost;
+                if (area > 0) {
+                    cost_upks_sum += (cost / area);
+                    cost_count++;
+                }
+                if (cost < 1e6) cost_brackets['До 1 млн ₽']++;
+                else if (cost < 3e6) cost_brackets['1 - 3 млн ₽']++;
+                else if (cost < 5e6) cost_brackets['3 - 5 млн ₽']++;
+                else if (cost < 1e7) cost_brackets['5 - 10 млн ₽']++;
+                else if (cost < 2e7) cost_brackets['10 - 20 млн ₽']++;
+                else cost_brackets['20+ млн ₽']++;
+            }
+
+            const own = (o.ownership_type || 'Не указано').trim();
+            ownership_dist[own] = (ownership_dist[own] || 0) + 1;
+
+            const fl = parseInt(o.floors, 10);
+            if (fl && fl > 0 && fl <= 50) {
+                floors_dist[fl] = (floors_dist[fl] || 0) + 1;
+            }
+
+            const mat = (o.materials || '').trim();
+            if (mat && mat !== '-' && mat !== 'null') {
+                materials_dist[mat] = (materials_dist[mat] || 0) + 1;
+            }
+        });
+
+        return {
+            total_count: features.length,
+            count_zu,
+            count_oks,
+            count_str,
+            count_zones,
+            total_area,
+            total_cost,
+            avg_upks: cost_count > 0 ? (cost_upks_sum / cost_count) : 0,
+            ownership_dist,
+            floors_dist,
+            cost_brackets,
+            materials_dist,
+            is_limit_reached: false
+        };
+    }
+
+    // Локальная фильтрация объектов карты по параметрам сайдбара
+    function filterMapFeatures(allFeatures, payload) {
+        const filters = payload.filters || {};
+        const tables = payload.tables || ['zu', 'oks', 'structure', 'zones'];
+
+        return allFeatures.filter(f => {
+            if (!tables.includes(f._layer_type)) return false;
+
+            const p = f.properties || {};
+            const o = p.options || {};
+
+            if (filters.cad_num) {
+                const searchCad = filters.cad_num.toLowerCase().replace(/:$/, '');
+                const objCad = String(f.id || '').toLowerCase();
+                if (/^\d{1,2}:/.test(objCad) && !objCad.includes(searchCad)) return false;
+            }
+
+            if (filters.address) {
+                const searchAddr = filters.address.toLowerCase();
+                const objAddr = String(o.readable_address || o.address_readable_address || '').toLowerCase();
+                if (filters.exact_match) {
+                    if (!objAddr.includes(searchAddr)) return false;
+                } else {
+                    const terms = searchAddr.split(/\s+/).filter(Boolean);
+                    for (const term of terms) {
+                        if (!objAddr.includes(term)) return false;
+                    }
+                }
+            }
+
+            if (filters.ownership) {
+                const objOwn = (o.ownership_type || '').toLowerCase();
+                if (!objOwn.includes(filters.ownership.toLowerCase())) return false;
+            }
+
+            if (filters.right_type) {
+                const objRight = (o.right_type || '').toLowerCase();
+                if (!objRight.includes(filters.right_type.toLowerCase())) return false;
+            }
+
+            if (filters.status) {
+                const objStatus = (o.status || '').toLowerCase();
+                if (!objStatus.includes(filters.status.toLowerCase())) return false;
+            }
+
+            if (filters.zu_area_type && f._layer_type === 'zu') {
+                if (filters.zu_area_type === 'specified' && !hasRealBoundaries(f)) return false;
+                if (filters.zu_area_type === 'declared' && !isDeclaredParcel(f)) return false;
+            }
+
+            if (filters.zu_category && f._layer_type === 'zu') {
+                const cat = (o.land_record_category_type || '').toLowerCase();
+                if (!cat.includes(filters.zu_category.toLowerCase())) return false;
+            }
+
+            if (filters.zu_vri && f._layer_type === 'zu') {
+                const vri = (o.permitted_use_established_by_document || '').toLowerCase();
+                if (!vri.includes(filters.zu_vri.toLowerCase())) return false;
+            }
+
+            if (filters.oks_kind && f._layer_type === 'oks') {
+                const kind = (o.build_record_type_value || o.purpose || '').toLowerCase();
+                if (!kind.includes(filters.oks_kind.toLowerCase())) return false;
+            }
+
+            if (filters.oks_purpose && f._layer_type === 'oks') {
+                const purp = (o.purpose || '').toLowerCase();
+                if (!purp.includes(filters.oks_purpose.toLowerCase())) return false;
+            }
+
+            if (filters.oks_name && f._layer_type === 'oks') {
+                const name = (o.name || o.building_name || o.params_name || '').toLowerCase();
+                if (!name.includes(filters.oks_name.toLowerCase())) return false;
+            }
+
+            const floors = parseInt(o.floors, 10);
+            if (filters.floors_min !== undefined && (!floors || floors < filters.floors_min)) return false;
+            if (filters.floors_max !== undefined && (!floors || floors > filters.floors_max)) return false;
+
+            const area = getNumericArea(f);
+            if (filters.area_min !== undefined && area < filters.area_min) return false;
+            if (filters.area_max !== undefined && area > filters.area_max) return false;
+
+            const cost = getNumericCost(f);
+            if (filters.cost_min !== undefined && cost < filters.cost_min) return false;
+            if (filters.cost_max !== undefined && cost > filters.cost_max) return false;
+
+            if (filters.materials && f._layer_type === 'oks') {
+                const mat = (o.materials || '').toLowerCase();
+                if (!mat.includes(filters.materials.toLowerCase())) return false;
+            }
+
+            return true;
+        });
+    }
 
     // Открытие Аналитического центра
-    window.openAnalyticsCenter = async function (lat, lon) {
+  window.openAnalyticsCenter = async function (lat, lon) {
         injectAnalyticsStyles();
         await ensureEcharts();
 
@@ -723,7 +980,11 @@
             return;
         }
 
-        const initialPrefix = getDefaultCadastralPrefix();
+        
+        const mapFeatures = getMapObjectsAsFeatures();
+        const popularDistrict = detectPopularCadastralPrefix(mapFeatures);
+        const initialPrefix = popularDistrict || getDefaultCadastralPrefix();
+        const initialCadValue = popularDistrict ? popularDistrict : `${initialPrefix}01:`;
 
         analyticsModal = document.createElement('div');
         analyticsModal.id = 'analytics-center-overlay';
@@ -756,18 +1017,20 @@
                             </button>
                         </div>
 
-                        <!-- Пространственный охват -->
+                     
+                 <!-- Пространственный охват -->
                         <div class="ac-filter-group">
                             <span class="ac-filter-title"><i class="fas fa-globe"></i> Пространственный охват</span>
                             <div class="ac-form-row">
                                 <label>Гео-зона поиска:</label>
                                 <select id="ac-spatial-type" class="ac-select">
-                                    <option value="viewport" selected>Текущий экран карты</option>
-                                    <option value="radius" ${lat && lon ? 'selected' : ''}>В радиусе от точки клика</option>
+                                    <option value="map_objects" selected>Объекты на карте</option>
+                                    <option value="viewport">Текущий экран карты</option>
+                                    <option value="radius">В радиусе от точки клика</option>
                                     <option value="all">По всей базе (требуется район)</option>
                                 </select>
                             </div>
-                            <div class="ac-form-row" id="ac-radius-wrap" style="${lat && lon ? '' : 'display: none;'}">
+                            <div class="ac-form-row" id="ac-radius-wrap" style="display: none;">
                                 <label>Радиус поиска (метров):</label>
                                 <input type="number" id="ac-radius-val" class="ac-input-text" value="1000" min="50" step="50">
                             </div>
@@ -778,7 +1041,7 @@
                             <span class="ac-filter-title"><i class="fas fa-hashtag"></i> Кадастровый номер и адрес</span>
                             <div class="ac-form-row">
                                 <label>Кадастровый номер или маска (мин. 4 цифры):</label>
-                                <input type="text" id="ac-cadnum-search" class="ac-input-text" value="${initialPrefix}01:" placeholder="${initialPrefix}01: или ${initialPrefix}01:000000">
+                                <input type="text" id="ac-cadnum-search" class="ac-input-text" value="${initialCadValue}" placeholder="16:01 или 16:01:010101">
                             </div>
                             <div class="ac-form-row">
                                 <label>Поиск по адресу / ориентиру:</label>
@@ -791,6 +1054,8 @@
                                 </label>
                             </div>
                         </div>
+
+                    
 
                         <!-- Типы объектов -->
                         <div class="ac-filter-group">
@@ -997,11 +1262,12 @@
     };
 
     // Сброс всех фильтров
-    function resetAllFilters(initialPrefix, lat, lon) {
+  // Сброс всех фильтров
+    function resetAllFilters(defaultCadValue, lat, lon) {
         document.getElementById('ac-ai-text').value = '';
-        document.getElementById('ac-spatial-type').value = 'viewport';
+        document.getElementById('ac-spatial-type').value = 'map_objects';
         document.getElementById('ac-radius-wrap').style.display = 'none';
-        document.getElementById('ac-cadnum-search').value = `${initialPrefix}01:`;
+        document.getElementById('ac-cadnum-search').value = defaultCadValue;
         document.getElementById('ac-address-search').value = '';
         document.getElementById('ac-exact-match').checked = false;
         document.getElementById('ac-type-zu').checked = true;
@@ -1029,14 +1295,14 @@
         runAnalyticsQuery(lat, lon);
     }
 
-    // Сбор параметров
-    function collectFilterPayload(clickLat, clickLon) {
+    // Сбор параметров фильтрации
+    function collectFilterPayload(clickLat, clickLon, isMapObjectsMode = false) {
         const spatialType = document.getElementById('ac-spatial-type').value;
         const cad = document.getElementById('ac-cadnum-search').value.trim();
 
         const hasValidCadPrefix = /^\d{2}:\d{2}/.test(cad);
 
-        if (!hasValidCadPrefix && spatialType === 'all') {
+        if (!isMapObjectsMode && !hasValidCadPrefix && spatialType === 'all') {
             const defPrefix = getDefaultCadastralPrefix();
             alert(`Для выборки по всей базе необходимо указать как минимум код региона и района (например: ${defPrefix}01:).`);
             document.getElementById('ac-cadnum-search').focus();
@@ -1132,8 +1398,40 @@
         return payload;
     }
 
-    // Запрос к серверу
     async function runAnalyticsQuery(lat, lon) {
+        const spatialType = document.getElementById('ac-spatial-type')?.value;
+
+        // Режим: "Объекты на карте" (локальный анализ без сетевого запроса)
+        if (spatialType === 'map_objects') {
+            const rawMapFeatures = getMapObjectsAsFeatures();
+            if (!rawMapFeatures.length) {
+                const container = document.getElementById('ac-content-view');
+                container.innerHTML = `
+                    <div style="text-align: center; padding-top: 110px; color: #d97706;">
+                        <i class="fas fa-layer-group" style="font-size: 2.8rem; margin-bottom: 12px; color: #f59e0b;"></i>
+                        <div style="font-weight: 800; font-size: 1.15rem; color: #0f172a;">На карте нет загруженных объектов</div>
+                        <div style="font-size: 0.9rem; color: #64748b; margin-top: 6px;">
+                            Загрузите участки или выберите гео-зону «Текущий экран карты» / «По всей базе»
+                        </div>
+                    </div>
+                `;
+                return;
+            }
+
+            const payload = collectFilterPayload(lat, lon, true);
+            const filtered = filterMapFeatures(rawMapFeatures, payload || { tables: ['zu', 'oks', 'structure', 'zones'], filters: {} });
+
+            lastQueryResults = {
+                summary: generateSummaryFromFeatures(filtered),
+                features: filtered
+            };
+            lastQueryResults._clientStats = computeClientStats(filtered);
+
+            renderActiveTabContent();
+            return;
+        }
+
+        // Стандартные режимы гео-зон (viewport, radius, all)
         const payload = collectFilterPayload(lat, lon);
         if (!payload) return;
 
