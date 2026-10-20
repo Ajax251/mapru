@@ -1758,7 +1758,7 @@
                         <i class="fas fa-search" style="position: absolute; left: 9px; color: #94a3b8; font-size: 0.78rem; pointer-events: none;"></i>
                         <input type="text" id="ac-table-quick-search" class="ac-input-text" 
                                style="width: 260px; padding: 5px 26px 5px 28px; font-size: 0.82rem;" 
-                               placeholder="Поиск (напр: москва тверс 5 8)..." 
+                               placeholder="Адрес..." 
                                value="${escapeHtml(analyticsSettings.tableSearchTerm)}">
                         <button id="ac-table-clear-search" 
                                 style="position: absolute; right: 5px; background: none; border: none; color: #94a3b8; cursor: pointer; display: ${analyticsSettings.tableSearchTerm ? 'block' : 'none'}; font-size: 14px; padding: 0 4px;" 
