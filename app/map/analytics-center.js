@@ -1,7 +1,4 @@
-/**
- * Модуль: Аналитический центр базы данных и пространственной аналитики
- * Версия: 3.10 (Ultimate Infographics & Smart Token-Boundary Address Search)
- */
+
 
 (function () {
     const ANALYTICS_CENTER_VERSION = "3.10";
@@ -12,31 +9,31 @@
     const BACKEND_QUERY_URL = "https://mapruapp.ru/api/analytics/query";
     const SAFE_MAP_OBJECT_LIMIT = 300;
 
-    // Глобальное состояние модуля
+    
     let analyticsModal = null;
     let echartMainInstance = null;
     let currentChartInstances = [];
     let lastQueryResults = null;
     let currentParsedDataset = null;
-    let activeTab = 'summary'; // 'summary' | 'treemap' | 'scatter' | 'ranking' | 'table'
+    let activeTab = 'summary'; 
     let resizeObserver = null;
 
-    // Настройки визуализаций и фильтрации
+    
     let analyticsSettings = {
-        scope: 'all',                // 'all' | 'zu' | 'oks' | 'structure'
-        treemapMetric: 'area',       // 'area' | 'cost' | 'upks'
-        treemapColoring: 'upks',     // 'upks' | 'ownership' | 'type'
-        scatterYAxis: 'upks',        // 'upks' | 'cost'
-        scatterColorBy: 'ownership', // 'ownership' | 'boundary'
-        rankingMetric: 'area',       // 'area' | 'cost' | 'upks'
-        rankingLimit: 30,            // 15 | 30 | 50 | 0 (all)
-        tableSearchTerm: '',         // Строка быстрого фильтра реестра
-        tableSortField: 'default'    // 'default' | 'cost_desc' | 'cost_asc' | 'area_desc' | 'area_asc'
+        scope: 'all',                
+        treemapMetric: 'area',       
+        treemapColoring: 'upks',     
+        scatterYAxis: 'upks',        
+        scatterColorBy: 'ownership', 
+        rankingMetric: 'area',       
+        rankingLimit: 30,            
+        tableSearchTerm: '',         
+        tableSortField: 'default'    
     };
 
-    // =========================================================================
-    // 1. ВНЕДРЕНИЕ ПОЛНЫХ СТИЛЕЙ ИНТЕРФЕЙСА (CSS)
-    // =========================================================================
+    
+    
+    
 
     function injectAnalyticsStyles() {
         if (document.getElementById('analytics-center-inline-styles')) return;
@@ -144,12 +141,78 @@
             .ac-btn-reset { padding: 11px 13px; background: #f1f5f9; color: #475569; border: 1px solid #cbd5e1; border-radius: 10px; cursor: pointer; }
 
             .ac-main { display: flex; flex-direction: column; overflow: hidden; padding: 14px 18px; gap: 12px; }
-            .ac-tabs-bar { display: flex; justify-content: space-between; align-items: center; background: #ffffff; padding: 7px 12px; border-radius: 14px; border: 1px solid #e2e8f0; flex-shrink: 0; flex-wrap: wrap; gap: 8px; }
-            .ac-tabs { display: flex; gap: 5px; flex-wrap: wrap; }
-            .ac-tab-btn { padding: 8px 14px; border: none; background: transparent; font-weight: 600; font-size: 0.83rem; color: #64748b; border-radius: 9px; cursor: pointer; display: flex; align-items: center; gap: 7px; transition: all 0.18s ease; }
+     .ac-tabs-bar { 
+                display: flex; 
+                flex-direction: column; 
+                background: #ffffff; 
+                padding: 7px 12px; 
+                border-radius: 12px; 
+                border: 1px solid #e2e8f0; 
+                flex-shrink: 0; 
+                gap: 6px; 
+            }
+            .ac-tabs { 
+                display: flex; 
+                gap: 5px; 
+                flex-wrap: nowrap; 
+                overflow-x: auto; 
+            }
+            .ac-tab-btn { 
+                padding: 6px 12px; 
+                border: none; 
+                background: transparent; 
+                font-weight: 600; 
+                font-size: 0.8rem; 
+                color: #64748b; 
+                border-radius: 8px; 
+                cursor: pointer; 
+                display: flex; 
+                align-items: center; 
+                gap: 6px; 
+                transition: all 0.18s ease; 
+                white-space: nowrap; 
+            }
             .ac-tab-btn:hover { background: #f1f5f9; color: #0f172a; }
             .ac-tab-btn.active { background: linear-gradient(135deg, #e0f2fe 0%, #dbeafe 100%); color: #0369a1; font-weight: 700; box-shadow: inset 0 0 0 1px #bae6fd; }
-            .ac-action-btn { padding: 7px 13px; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 8px; font-size: 0.8rem; font-weight: 700; color: #334155; cursor: pointer; display: flex; align-items: center; gap: 6px; }
+
+            
+            .ac-subbar {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                gap: 10px;
+                width: 100%;
+                border-top: 1px solid #f1f5f9;
+                padding-top: 6px;
+            }
+            #ac-subcontrols {
+                display: flex;
+                align-items: center;
+                gap: 8px;
+                font-size: 0.8rem;
+                white-space: nowrap;
+            }
+            .ac-actions { 
+                display: flex; 
+                align-items: center; 
+                gap: 6px; 
+                flex-shrink: 0; 
+                margin-left: auto;
+            }
+            .ac-action-btn { 
+                padding: 5px 10px; 
+                background: #ffffff; 
+                border: 1px solid #cbd5e1; 
+                border-radius: 7px; 
+                font-size: 0.78rem; 
+                font-weight: 700; 
+                color: #334155; 
+                cursor: pointer; 
+                display: flex; 
+                align-items: center; 
+                gap: 5px; 
+                white-space: nowrap; 
+            }
             .ac-action-btn:hover { background: #f8fafc; border-color: #94a3b8; transform: translateY(-1px); }
 
             .ac-content-view { flex: 1; overflow-y: auto; position: relative; background: #ffffff; border-radius: 16px; border: 1px solid #e2e8f0; padding: 14px; box-sizing: border-box; }
@@ -193,9 +256,9 @@
         document.head.appendChild(style);
     }
 
-    // =========================================================================
-    // 2. УМНЫЙ АЛГОРИТМ ПОИСКА ПО АДРЕСУ С ГРАНИЦАМИ ЧИСЕЛ
-    // =========================================================================
+    
+    
+    
 
     function matchSmartAddress(rawAddress, query) {
         if (!query || !query.trim()) return true;
@@ -205,18 +268,18 @@
         const tokens = query.trim().toLowerCase().split(/\s+/).filter(Boolean);
 
         for (const token of tokens) {
-            // Литерные номера домов и квартир: "5", "5а", "8к1", "12/2"
+            
             const isHouseOrAptNumber = /^(\d+[\/а-яa-z\-]*(?:к\d+)?)$/i.test(token);
 
             if (isHouseOrAptNumber) {
                 const cleanToken = token.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
-                // Строгая проверка границ слова/числа: 5 не совпадет с 51 или 15
+                
                 const boundaryRegex = new RegExp(`(?:^|[^0-9а-яa-z])${cleanToken}(?:[^0-9а-яa-z]|$)`, 'i');
                 if (!boundaryRegex.test(addr)) {
                     return false;
                 }
             } else {
-                // Текстовые части улицы, района, города
+                
                 if (!addr.includes(token)) {
                     return false;
                 }
@@ -225,9 +288,9 @@
         return true;
     }
 
-    // =========================================================================
-    // 3. ХЕЛПЕРЫ ДАННЫХ И КООРДИНАТ
-    // =========================================================================
+    
+    
+    
 
     function escapeHtml(str) {
         if (str === null || str === undefined) return '';
@@ -375,9 +438,9 @@
         }
     }
 
-    // =========================================================================
-    // 4. СБОР ОБЪЕКТОВ С КАРТЫ, РАСЧЕТ И ФИЛЬТРАЦИЯ
-    // =========================================================================
+    
+    
+    
 
     function getMapObjectsAsFeatures() {
         const features = [];
@@ -597,7 +660,7 @@
                 if (filters.exact_match) {
                     if (!objAddr.toLowerCase().includes(filters.address.toLowerCase())) return false;
                 } else {
-                    // Используем умный поиск по адресу с границами чисел
+                    
                     if (!matchSmartAddress(objAddr, filters.address)) return false;
                 }
             }
@@ -837,13 +900,13 @@
             alert("Ошибка распознавания ИИ: " + err.message);
         } finally {
             submitBtn.disabled = false;
-            submitBtn.innerHTML = '<i class="fas fa-wand-magic-sparkles"></i> Применить фильтр ИИ';
+            submitBtn.innerHTML = '<i class="fas fa-wand-magic-sparkles"></i> Применить фильтр';
         }
     }
 
-    // =========================================================================
-    // 5. ПАРСИНГ НАБОРА И РАСЧЕТ KPI КАРТОЧЕК
-    // =========================================================================
+    
+    
+    
 
     function parseInfographicsDataset(features) {
         const items = [];
@@ -1027,9 +1090,9 @@
     
     
     
-    // =========================================================================
-    // 6. ИНТЕРАКТИВНЫЙ ТУЛТИП-ПАСПОРТ ОБЪЕКТА ДЛЯ ГРАФИКОВ
-    // =========================================================================
+    
+    
+    
 
     function generateInfographicsTooltipHtml(item) {
         if (!item) return '';
@@ -1110,9 +1173,9 @@
         `;
     }
 
-    // =========================================================================
-    // 7. УПРАВЛЕНИЕ И ПЕРЕКЛЮЧЕНИЕ ВКЛАДОК АНАЛИТИЧЕСКОГО ЦЕНТРА
-    // =========================================================================
+    
+    
+    
 
     function disposeAllCharts() {
         if (echartMainInstance && !echartMainInstance.isDisposed()) {
@@ -1138,7 +1201,7 @@
         subcontrols.innerHTML = '';
         disposeAllCharts();
 
-        // Переключение видимости блоков
+        
         mainChartEl.style.display = 'none';
         summaryGridEl.style.display = 'none';
         tableContainerEl.style.display = 'none';
@@ -1157,12 +1220,12 @@
             return;
         }
 
-        // Для графиков Treemap, Scatter, Ranking используется общий полноразмерный ECharts контейнер
+        
         mainChartEl.style.display = 'block';
         echartMainInstance = echarts.init(mainChartEl);
         currentChartInstances.push(echartMainInstance);
 
-        // Интерактивный клик по точке/плитке: фокус на карте
+        
         echartMainInstance.on('click', (params) => {
             const raw = params.data?.rawItem || params.data?.raw;
             if (raw && raw.cn && typeof focusSingleFeatureOnMainMap === 'function') {
@@ -1181,20 +1244,20 @@
         }
     }
 
-    // =========================================================================
-    // 8. МОДУЛЬ 1: ДРЕВОВИДНАЯ ПЛИТОЧНАЯ КАРТА (TREEMAP)
-    // =========================================================================
+    
+    
+    
 
     function renderTreemapTab(items, subcontrols) {
-        subcontrols.innerHTML = `
-            <span style="color:#64748b; font-weight:600;">Размер блоков:</span>
-            <select id="ac-tree-metric-sel" class="ac-select" style="width: auto; padding: 4px 24px 4px 8px;">
+     subcontrols.innerHTML = `
+            <span style="color:#64748b; font-weight:600; font-size:0.78rem;">Размер:</span>
+            <select id="ac-tree-metric-sel" class="ac-select" style="width: auto; padding: 3px 20px 3px 6px; font-size: 0.78rem;">
                 <option value="area" ${analyticsSettings.treemapMetric === 'area' ? 'selected' : ''}>По площади (м²)</option>
                 <option value="cost" ${analyticsSettings.treemapMetric === 'cost' ? 'selected' : ''}>По стоимости (₽)</option>
                 <option value="upks" ${analyticsSettings.treemapMetric === 'upks' ? 'selected' : ''}>По УПКС (₽/м²)</option>
             </select>
-            <span style="color:#64748b; font-weight:600; margin-left:8px;">Окраска:</span>
-            <select id="ac-tree-color-sel" class="ac-select" style="width: auto; padding: 4px 24px 4px 8px;">
+            <span style="color:#64748b; font-weight:600; font-size:0.78rem; margin-left:4px;">Цвет:</span>
+            <select id="ac-tree-color-sel" class="ac-select" style="width: auto; padding: 3px 20px 3px 6px; font-size: 0.78rem;">
                 <option value="upks" ${analyticsSettings.treemapColoring === 'upks' ? 'selected' : ''}>Тепловая шкала (УПКС)</option>
                 <option value="ownership" ${analyticsSettings.treemapColoring === 'ownership' ? 'selected' : ''}>Форма собственности</option>
                 <option value="type" ${analyticsSettings.treemapColoring === 'type' ? 'selected' : ''}>Тип объекта (ЗУ / ОКС)</option>
@@ -1213,7 +1276,7 @@
         const metric = analyticsSettings.treemapMetric;
         const colorMode = analyticsSettings.treemapColoring;
 
-        // Поиск мин/макс УПКС для динамической тепловой карты
+        
         let minUpks = Infinity, maxUpks = -Infinity;
         items.forEach(i => {
             if (i.upks > 0) {
@@ -1240,7 +1303,7 @@
                     itemColor = '#94a3b8';
                 } else {
                     const ratio = maxUpks > minUpks ? Math.max(0, Math.min(1, (item.upks - minUpks) / (maxUpks - minUpks))) : 0.5;
-                    // Плавный градиент HSL: от зеленого (140) через желтый к красному (0)
+                    
                     const hue = Math.round((1 - ratio) * 140);
                     itemColor = `hsl(${hue}, 80%, 42%)`;
                 }
@@ -1316,19 +1379,19 @@
         echartMainInstance.setOption(option, true);
     }
 
-    // =========================================================================
-    // 9. МОДУЛЬ 2: МАТРИЦА КОРРЕЛЯЦИИ И ВЫБРОСОВ (SCATTER PLOT)
-    // =========================================================================
+    
+    
+    
 
     function renderScatterTab(items, subcontrols) {
-        subcontrols.innerHTML = `
-            <span style="color:#64748b; font-weight:600;">Ось Y:</span>
-            <select id="ac-scatter-yaxis-sel" class="ac-select" style="width: auto; padding: 4px 24px 4px 8px;">
+    subcontrols.innerHTML = `
+            <span style="color:#64748b; font-weight:600; font-size:0.78rem;">Ось Y:</span>
+            <select id="ac-scatter-yaxis-sel" class="ac-select" style="width: auto; padding: 3px 20px 3px 6px; font-size: 0.78rem;">
                 <option value="upks" ${analyticsSettings.scatterYAxis === 'upks' ? 'selected' : ''}>УПКС (₽/м²)</option>
                 <option value="cost" ${analyticsSettings.scatterYAxis === 'cost' ? 'selected' : ''}>Кадастровая стоимость (₽)</option>
             </select>
-            <span style="color:#64748b; font-weight:600; margin-left:8px;">Группировка:</span>
-            <select id="ac-scatter-color-sel" class="ac-select" style="width: auto; padding: 4px 24px 4px 8px;">
+            <span style="color:#64748b; font-weight:600; font-size:0.78rem; margin-left:4px;">Группировка:</span>
+            <select id="ac-scatter-color-sel" class="ac-select" style="width: auto; padding: 3px 20px 3px 6px; font-size: 0.78rem;">
                 <option value="ownership" ${analyticsSettings.scatterColorBy === 'ownership' ? 'selected' : ''}>По собственности</option>
                 <option value="boundary" ${analyticsSettings.scatterColorBy === 'boundary' ? 'selected' : ''}>По межеванию (ЗУ)</option>
             </select>
@@ -1385,7 +1448,7 @@
             type: 'scatter',
             symbolSize: (data) => {
                 const cost = data[2] || 0;
-                // Размер маркера масштабируется от корня стоимости
+                
                 return Math.max(10, Math.min(50, Math.sqrt(cost) / 100));
             },
             itemStyle: {
@@ -1450,24 +1513,24 @@
         echartMainInstance.setOption(option, true);
     }
 
-    // =========================================================================
-    // 10. МОДУЛЬ 3: РАНЖИРОВАННЫЙ РЕЙТИНГ ОБЪЕКТОВ (RANKING BAR CHART)
-    // =========================================================================
+    
+    
+    
 
     function renderRankingTab(items, subcontrols) {
         subcontrols.innerHTML = `
-            <span style="color:#64748b; font-weight:600;">Метрика рейтинга:</span>
-            <select id="ac-rank-metric-sel" class="ac-select" style="width: auto; padding: 4px 24px 4px 8px;">
+            <span style="color:#64748b; font-weight:600; font-size:0.78rem;">Метрика:</span>
+            <select id="ac-rank-metric-sel" class="ac-select" style="width: auto; padding: 3px 20px 3px 6px; font-size: 0.78rem;">
                 <option value="area" ${analyticsSettings.rankingMetric === 'area' ? 'selected' : ''}>По площади (м²)</option>
                 <option value="cost" ${analyticsSettings.rankingMetric === 'cost' ? 'selected' : ''}>По стоимости (₽)</option>
                 <option value="upks" ${analyticsSettings.rankingMetric === 'upks' ? 'selected' : ''}>По УПКС (₽/м²)</option>
             </select>
-            <span style="color:#64748b; font-weight:600; margin-left:8px;">Глубина топа:</span>
-            <select id="ac-rank-limit-sel" class="ac-select" style="width: auto; padding: 4px 24px 4px 8px;">
+            <span style="color:#64748b; font-weight:600; font-size:0.78rem; margin-left:4px;">Глубина:</span>
+            <select id="ac-rank-limit-sel" class="ac-select" style="width: auto; padding: 3px 20px 3px 6px; font-size: 0.78rem;">
                 <option value="15" ${analyticsSettings.rankingLimit === 15 ? 'selected' : ''}>Топ-15</option>
                 <option value="30" ${analyticsSettings.rankingLimit === 30 ? 'selected' : ''}>Топ-30</option>
                 <option value="50" ${analyticsSettings.rankingLimit === 50 ? 'selected' : ''}>Топ-50</option>
-                <option value="0" ${analyticsSettings.rankingLimit === 0 ? 'selected' : ''}>Все объекты</option>
+                <option value="0" ${analyticsSettings.rankingLimit === 0 ? 'selected' : ''}>Все</option>
             </select>
         `;
 
@@ -1486,7 +1549,7 @@
 
         const names = limited.map((i, idx) => `#${idx + 1}  ${i.cn}`).reverse();
         const values = limited.map((item, idx) => {
-            // Золотой градиент для Топ-1, изумрудный для Топ-2/3, лазурный для остальных
+            
             let barColor = new echarts.graphic.LinearGradient(0, 0, 1, 0, [
                 { offset: 0, color: '#0284c7' },
                 { offset: 1, color: '#38bdf8' }
@@ -1567,9 +1630,9 @@
         echartMainInstance.setOption(option, true);
     }
 
-    // =========================================================================
-    // 11. МОДУЛЬ 4: СВОДНЫЙ ДАШБОРД (SUMMARY GRID ИЗ 6 ДИАГРАММ)
-    // =========================================================================
+    
+    
+    
 
     function renderSummaryTabGrid(gridEl) {
         gridEl.innerHTML = `
@@ -1584,7 +1647,7 @@
         const stats = currentParsedDataset;
         const palette = ['#0284c7', '#10b981', '#f59e0b', '#8b5cf6', '#ec4899', '#64748b'];
 
-        // 1. Формы собственности
+        
         const c1 = echarts.init(document.getElementById('sub-chart-own'));
         c1.setOption({
             title: { text: '1. Формы собственности (ЗУ)', textStyle: { fontSize: 13, fontWeight: 800, color: '#0f172a' } },
@@ -1600,7 +1663,7 @@
             }]
         });
 
-        // 2. Межевание границ ЗУ
+        
         const c2 = echarts.init(document.getElementById('sub-chart-ki'));
         c2.setOption({
             title: { text: '2. Межевание границ ЗУ', textStyle: { fontSize: 13, fontWeight: 800, color: '#0f172a' } },
@@ -1618,7 +1681,7 @@
             }]
         });
 
-        // 3. Топ-10 ВРИ
+        
         const topVri = Object.entries(stats.vriDist).sort((a, b) => b[1] - a[1]).slice(0, 10);
         const c3 = echarts.init(document.getElementById('sub-chart-vri'));
         c3.setOption({
@@ -1640,7 +1703,7 @@
             }]
         });
 
-        // 4. Категории земель
+        
         const topCat = Object.entries(stats.categoryDist).sort((a, b) => b[1] - a[1]);
         const c4 = echarts.init(document.getElementById('sub-chart-cat'));
         c4.setOption({
@@ -1656,7 +1719,7 @@
             }]
         });
 
-        // 5. Хронология застройки по годам ввода со слайдером
+        
         const c5 = echarts.init(document.getElementById('sub-chart-oks-eras'));
         const yearCounts = {};
         const features = (lastQueryResults && lastQueryResults.features) ? lastQueryResults.features : [];
@@ -1710,7 +1773,7 @@
             }]
         });
 
-        // 6. Распределение ОКС по этажности
+        
         const c6 = echarts.init(document.getElementById('sub-chart-floors'));
         c6.setOption({
             title: { text: '6. Распределение ОКС по этажности', textStyle: { fontSize: 13, fontWeight: 800, color: '#0f172a' } },
@@ -1731,9 +1794,9 @@
     }
     
     
-// =========================================================================
-    // 12. МОДУЛЬ 5: ИНТЕРАКТИВНЫЙ РЕЕСТР ОБЪЕКТОВ С УМНЫМ ПОИСКОМ АДРЕСА
-    // =========================================================================
+
+    
+    
 
     function renderTableTab() {
         const tableContainerEl = document.getElementById('ac-table-container');
@@ -1933,9 +1996,9 @@
         applyClientFilterAndSort();
     }
 
-    // =========================================================================
-    // 13. ДЕТАЛЬНАЯ КАРТОЧКА ОБЪЕКТА С ПАНОРАМАМИ И ДАННЫМИ ЕГРН
-    // =========================================================================
+    
+    
+    
 
     function openObjectDetailCard(feature) {
         const existingCard = document.getElementById('ac-object-card-overlay');
@@ -2060,9 +2123,9 @@
         }
     }
 
-    // =========================================================================
-    // 14. СВЯЗКА С КАРТОЙ: ФОКУСИРОВКА И ПЕРЕНОС ВЫБОРКИ
-    // =========================================================================
+    
+    
+    
 
     function focusSingleFeatureOnMainMap(feature) {
         const activeMap = getActiveMap();
@@ -2217,9 +2280,9 @@
         }
     }
 
-    // =========================================================================
-    // 15. МОДУЛИ ЭКСПОРТА (EXCEL, GEOJSON)
-    // =========================================================================
+    
+    
+    
 
     async function exportToExcel() {
         if (!lastQueryResults?.features?.length) {
@@ -2303,14 +2366,14 @@
         a.click();
     }
 
-    // =========================================================================
-    // 16. ВЫПОЛНЕНИЕ ЗАПРОСА И ИНИЦИАЛИЗАЦИЯ
-    // =========================================================================
+    
+    
+    
 
     async function runAnalyticsQuery(lat, lon) {
         const spatialType = document.getElementById('ac-spatial-type')?.value || 'map_objects';
 
-        // Режим «Объекты на карте»: моментальный анализ без сетевых задержек
+        
         if (spatialType === 'map_objects') {
             const rawMapFeatures = getMapObjectsAsFeatures();
             if (!rawMapFeatures.length) {
@@ -2344,7 +2407,7 @@
             return;
         }
 
-        // Серверный режим через бэкенд
+        
         const payload = collectFilterPayload(lat, lon);
         if (!payload) return;
 
@@ -2386,9 +2449,9 @@
         }
     }
 
-    // =========================================================================
-    // 17. ГЛАВНАЯ ТОЧКА ВХОДА: ОТКРЫТИЕ ОКНА АНАЛИТИЧЕСКОГО ЦЕНТРА
-    // =========================================================================
+    
+    
+    
 
     window.openAnalyticsCenter = async function (lat, lon) {
         injectAnalyticsStyles();
@@ -2584,7 +2647,7 @@
 
                         <div class="ac-sidebar-footer">
                             <button id="ac-btn-execute" class="ac-btn-run">
-                                <i class="fas fa-bolt"></i> Сформировать
+                                <i class="fas fa-bolt"></i> Обновить
                             </button>
                             <button id="ac-btn-reset" class="ac-btn-reset" title="Сбросить все критерии">
                                 <i class="fas fa-rotate-left"></i>
@@ -2593,7 +2656,8 @@
                     </div>
 
                     <div class="ac-main">
-                        <div class="ac-tabs-bar">
+                     <div class="ac-tabs-bar">
+                            
                             <div class="ac-tabs">
                                 <button class="ac-tab-btn active" data-tab="summary"><i class="fas fa-chart-pie"></i> Сводный дашборд</button>
                                 <button class="ac-tab-btn" data-tab="treemap"><i class="fas fa-table-cells-large"></i> Плиточная карта</button>
@@ -2602,8 +2666,9 @@
                                 <button class="ac-tab-btn" data-tab="table"><i class="fas fa-list-check"></i> Реестр объектов</button>
                             </div>
 
-                            <div style="display:flex; align-items:center; gap:10px;">
-                                <div id="ac-subcontrols" style="display:flex; align-items:center; gap:6px;"></div>
+                            
+                            <div class="ac-subbar">
+                                <div id="ac-subcontrols"></div>
                                 <div class="ac-actions">
                                     <button class="ac-action-btn" id="ac-btn-map" title="Отобразить выборку на карте">
                                         <i class="fas fa-map-location-dot" style="color:#0284c7;"></i> На карту
