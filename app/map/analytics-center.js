@@ -1,10 +1,10 @@
 /**
  * Модуль: Аналитический центр базы данных
- * Версия: 2.05
+ * Версия: 2.10 (Pro UI & Extended Analytics Edition)
  */
 
 (function () {
-    const ANALYTICS_CENTER_VERSION = "2.05";
+    const ANALYTICS_CENTER_VERSION = "2.10";
     console.log(`[Analytics Center] Загружена версия ${ANALYTICS_CENTER_VERSION}`);
 
     const MAPRUAPP_AI_URL = "https://mapruapp.ru/ai/api/v1/chat/completions";
@@ -16,174 +16,414 @@
     let currentChartInstances = [];
     let lastQueryResults = null;
     let activeTab = 'summary';
+    let treemapMetric = 'area'; // 'area' | 'cost'
+    let tableSearchTerm = '';
+    let tableSortField = 'default';
+    let resizeObserver = null;
 
-    // Внедрение стилей интерфейса
+    // Внедрение улучшенных стилей интерфейса
     function injectAnalyticsStyles() {
         if (document.getElementById('analytics-center-inline-styles')) return;
         const style = document.createElement('style');
         style.id = 'analytics-center-inline-styles';
         style.textContent = `
+            @keyframes acFadeIn {
+                from { opacity: 0; transform: scale(0.98) translateY(8px); }
+                to { opacity: 1; transform: scale(1) translateY(0); }
+            }
+            @keyframes acPulseGlow {
+                0%, 100% { box-shadow: 0 0 0 0 rgba(37, 99, 235, 0.25); }
+                50% { box-shadow: 0 0 0 6px rgba(37, 99, 235, 0); }
+            }
+
             #analytics-center-overlay {
-                position: fixed; inset: 0; background: rgba(15, 23, 42, 0.78);
-                backdrop-filter: blur(8px); -webkit-backdrop-filter: blur(8px);
+                position: fixed; inset: 0;
+                background: rgba(15, 23, 42, 0.72);
+                backdrop-filter: blur(10px); -webkit-backdrop-filter: blur(10px);
                 z-index: 999999; display: flex; align-items: center; justify-content: center;
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Helvetica, Arial, sans-serif;
+                font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                color: #0f172a;
+                user-select: none;
             }
+
+            /* Кастомный скроллбар */
+            #analytics-center-overlay ::-webkit-scrollbar,
+            .ac-card-overlay ::-webkit-scrollbar {
+                width: 6px; height: 6px;
+            }
+            #analytics-center-overlay ::-webkit-scrollbar-track,
+            .ac-card-overlay ::-webkit-scrollbar-track {
+                background: #f1f5f9; border-radius: 4px;
+            }
+            #analytics-center-overlay ::-webkit-scrollbar-thumb,
+            .ac-card-overlay ::-webkit-scrollbar-thumb {
+                background: #cbd5e1; border-radius: 4px;
+            }
+            #analytics-center-overlay ::-webkit-scrollbar-thumb:hover,
+            .ac-card-overlay ::-webkit-scrollbar-thumb:hover {
+                background: #94a3b8;
+            }
+
             .ac-window {
-                width: 98vw; height: 98vh; background: #f8fafc; border-radius: 16px;
-                box-shadow: 0 25px 60px rgba(0, 0, 0, 0.4), 0 0 0 1px rgba(255,255,255,0.1);
+                width: 97vw; height: 96vh; max-width: 1920px;
+                background: #f8fafc; border-radius: 20px;
+                box-shadow: 0 25px 70px -10px rgba(0, 0, 0, 0.45), 0 0 0 1px rgba(255, 255, 255, 0.15);
                 display: flex; flex-direction: column; overflow: hidden;
+                animation: acFadeIn 0.25s cubic-bezier(0.16, 1, 0.3, 1);
             }
+
+            /* Шапка */
             .ac-header {
-                padding: 12px 20px; background: #ffffff; border-bottom: 1px solid #e2e8f0;
-                display: flex; align-items: center; justify-content: space-between; flex-shrink: 0; gap: 15px;
+                padding: 12px 24px;
+                background: linear-gradient(90deg, #ffffff 0%, #f8fafc 100%);
+                border-bottom: 1px solid #e2e8f0;
+                display: flex; align-items: center; justify-content: space-between;
+                flex-shrink: 0; gap: 15px;
             }
             .ac-header-title {
-                display: flex; align-items: center; gap: 12px; font-weight: 800; color: #0f172a; font-size: 1.25rem;
+                display: flex; align-items: center; gap: 12px;
+                font-weight: 800; color: #0f172a; font-size: 1.2rem; letter-spacing: -0.02em;
             }
-            .ac-header-title i {
-                width: 38px; height: 38px; background: linear-gradient(135deg, #0284c7, #2563eb);
-                color: #fff; border-radius: 10px; display: flex; align-items: center; justify-content: center; font-size: 1.1rem;
+            .ac-header-icon {
+                width: 40px; height: 40px;
+                background: linear-gradient(135deg, #2563eb 0%, #0284c7 100%);
+                color: #fff; border-radius: 12px;
+                display: flex; align-items: center; justify-content: center;
+                font-size: 1.15rem;
+                box-shadow: 0 6px 14px rgba(37, 99, 235, 0.28);
             }
+            .ac-version-badge {
+                font-size: 0.7rem; font-weight: 700; color: #0369a1;
+                background: #e0f2fe; border: 1px solid #bae6fd;
+                padding: 2px 8px; border-radius: 999px; letter-spacing: 0.03em;
+            }
+
+            /* Основная сетка */
             .ac-body {
-                flex: 1; display: grid; grid-template-columns: 380px 1fr; overflow: hidden; background: #f1f5f9;
+                flex: 1; display: grid; grid-template-columns: 375px 1fr;
+                overflow: hidden; background: #f1f5f9;
             }
+
+            /* Левая панель фильтров */
             .ac-sidebar {
-                background: #ffffff; border-right: 1px solid #e2e8f0; display: flex; flex-direction: column;
+                background: #ffffff; border-right: 1px solid #e2e8f0;
+                display: flex; flex-direction: column;
                 overflow-y: auto; padding: 16px; gap: 12px; box-sizing: border-box;
             }
+
+            /* ИИ Блок */
             .ac-ai-box {
-                background: linear-gradient(135deg, #eff6ff 0%, #f0fdf4 100%);
-                border: 1.5px solid #bfdbfe; border-radius: 12px; padding: 12px; display: flex; flex-direction: column; gap: 8px;
+                background: linear-gradient(135deg, #eff6ff 0%, #eef2ff 50%, #f0fdf4 100%);
+                border: 1px solid #bfdbfe; border-radius: 14px; padding: 14px;
+                display: flex; flex-direction: column; gap: 9px;
+                box-shadow: 0 4px 12px rgba(37, 99, 235, 0.06);
+                position: relative; overflow: hidden;
             }
             .ac-ai-box h4 {
-                margin: 0; color: #1e40af; font-size: 0.88rem; display: flex; align-items: center; gap: 6px;
+                margin: 0; color: #1e3a8a; font-size: 0.86rem; font-weight: 800;
+                display: flex; align-items: center; gap: 7px;
             }
             .ac-ai-input {
-                width: 100%; height: 55px; padding: 8px 10px; border-radius: 8px; border: 1px solid #cbd5e1;
-                font-size: 0.85rem; resize: none; box-sizing: border-box; outline: none; font-family: inherit;
+                width: 100%; height: 60px; padding: 9px 11px;
+                border-radius: 10px; border: 1px solid #cbd5e1;
+                font-size: 0.83rem; resize: none; box-sizing: border-box;
+                outline: none; font-family: inherit; background: rgba(255,255,255,0.9);
+                transition: all 0.2s ease; color: #0f172a;
             }
-            .ac-ai-input:focus { border-color: #2563eb; box-shadow: 0 0 0 2px rgba(37, 99, 235, 0.15); }
+            .ac-ai-input:focus {
+                background: #ffffff; border-color: #2563eb;
+                box-shadow: 0 0 0 3px rgba(37, 99, 235, 0.15);
+            }
             .ac-btn-ai {
-                padding: 7px 12px; background: linear-gradient(135deg, #2563eb, #1d4ed8);
-                color: #fff; border: none; border-radius: 7px; font-size: 0.82rem; font-weight: 700;
-                cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 6px;
+                padding: 8px 14px;
+                background: linear-gradient(135deg, #2563eb 0%, #4f46e5 100%);
+                color: #fff; border: none; border-radius: 9px;
+                font-size: 0.82rem; font-weight: 700; cursor: pointer;
+                display: flex; align-items: center; justify-content: center; gap: 7px;
+                box-shadow: 0 4px 10px rgba(37, 99, 235, 0.22);
+                transition: all 0.2s ease;
             }
-            .ac-btn-ai:hover { filter: brightness(1.08); }
+            .ac-btn-ai:hover:not(:disabled) {
+                transform: translateY(-1px);
+                box-shadow: 0 6px 14px rgba(37, 99, 235, 0.32);
+                filter: brightness(1.05);
+            }
+            .ac-btn-ai:disabled { opacity: 0.65; cursor: not-allowed; }
+
+            /* Группы фильтров */
             .ac-filter-group {
-                background: #ffffff; border: 1px solid #e2e8f0; border-radius: 10px; padding: 12px; display: flex; flex-direction: column; gap: 9px;
+                background: #ffffff; border: 1px solid #e2e8f0; border-radius: 12px;
+                padding: 13px; display: flex; flex-direction: column; gap: 10px;
+                transition: border-color 0.2s ease, box-shadow 0.2s ease;
+            }
+            .ac-filter-group:hover {
+                border-color: #cbd5e1;
+                box-shadow: 0 2px 8px rgba(15, 23, 42, 0.03);
             }
             .ac-filter-title {
-                font-size: 0.78rem; font-weight: 700; color: #475569; text-transform: uppercase; letter-spacing: 0.5px;
+                font-size: 0.74rem; font-weight: 800; color: #475569;
+                text-transform: uppercase; letter-spacing: 0.05em;
+                display: flex; align-items: center; gap: 6px;
             }
+            .ac-filter-title i { color: #0284c7; font-size: 0.8rem; }
+
             .ac-form-row {
-                display: flex; flex-direction: column; gap: 4px; font-size: 0.82rem; color: #334155;
+                display: flex; flex-direction: column; gap: 4px;
+                font-size: 0.8rem; color: #334155; font-weight: 500;
             }
             .ac-input-text, .ac-select {
-                width: 100%; padding: 6px 10px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 0.85rem;
-                outline: none; box-sizing: border-box; background: #fff;
+                width: 100%; padding: 7px 10px; border-radius: 8px;
+                border: 1px solid #cbd5e1; font-size: 0.83rem; color: #0f172a;
+                outline: none; box-sizing: border-box; background: #f8fafc;
+                transition: all 0.18s ease;
             }
-            .ac-input-text:focus, .ac-select:focus { border-color: #0284c7; }
+            .ac-input-text:focus, .ac-select:focus {
+                background: #ffffff; border-color: #0284c7;
+                box-shadow: 0 0 0 3px rgba(2, 132, 199, 0.14);
+            }
             .ac-range-row {
                 display: grid; grid-template-columns: 1fr 1fr; gap: 8px;
             }
+
+            /* Стилизованные чекбоксы-пилюли */
             .ac-checkbox-grid {
-                display: grid; grid-template-columns: 1fr 1fr; gap: 6px; font-size: 0.82rem;
+                display: grid; grid-template-columns: 1fr 1fr; gap: 7px;
             }
-            .ac-checkbox-grid label { display: flex; align-items: center; gap: 6px; cursor: pointer; }
+            .ac-checkbox-pill {
+                display: flex; align-items: center; gap: 7px;
+                padding: 6px 9px; border-radius: 8px;
+                border: 1px solid #e2e8f0; background: #f8fafc;
+                font-size: 0.8rem; font-weight: 600; color: #334155;
+                cursor: pointer; transition: all 0.15s ease;
+            }
+            .ac-checkbox-pill:hover { background: #f1f5f9; border-color: #cbd5e1; }
+            .ac-checkbox-pill input { accent-color: #0284c7; width: 15px; height: 15px; cursor: pointer; margin: 0; }
+
+            /* Кнопки запуска и сброса */
+            .ac-sidebar-footer {
+                display: flex; gap: 8px; margin-top: 2px; position: sticky; bottom: 0;
+                background: linear-gradient(180deg, rgba(255,255,255,0) 0%, #ffffff 20%);
+                padding-top: 8px;
+            }
             .ac-btn-run {
-                padding: 10px; background: linear-gradient(135deg, #10b981, #059669); color: white;
-                border: none; border-radius: 8px; font-weight: 700; font-size: 0.95rem; cursor: pointer;
-                display: flex; align-items: center; justify-content: center; gap: 8px; box-shadow: 0 4px 10px rgba(16,185,129,0.25);
+                flex: 1; padding: 11px 14px;
+                background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+                color: white; border: none; border-radius: 10px;
+                font-weight: 700; font-size: 0.9rem; cursor: pointer;
+                display: flex; align-items: center; justify-content: center; gap: 8px;
+                box-shadow: 0 6px 16px rgba(16, 185, 129, 0.28);
+                transition: all 0.2s ease;
             }
-            .ac-btn-run:hover { filter: brightness(1.05); }
+            .ac-btn-run:hover {
+                transform: translateY(-1px);
+                box-shadow: 0 8px 20px rgba(16, 185, 129, 0.36);
+                filter: brightness(1.04);
+            }
+            .ac-btn-reset {
+                padding: 11px 13px; background: #f1f5f9; color: #475569;
+                border: 1px solid #cbd5e1; border-radius: 10px;
+                font-weight: 600; font-size: 0.85rem; cursor: pointer;
+                transition: all 0.2s ease;
+            }
+            .ac-btn-reset:hover { background: #e2e8f0; color: #0f172a; }
+
+            /* Правая рабочая область */
             .ac-main {
-                display: flex; flex-direction: column; overflow: hidden; padding: 14px 18px; gap: 12px;
+                display: flex; flex-direction: column; overflow: hidden;
+                padding: 14px 18px; gap: 12px;
             }
             .ac-tabs-bar {
-                display: flex; justify-content: space-between; align-items: center; background: #ffffff;
-                padding: 6px 12px; border-radius: 10px; border: 1px solid #e2e8f0; flex-shrink: 0;
+                display: flex; justify-content: space-between; align-items: center;
+                background: #ffffff; padding: 7px 12px; border-radius: 14px;
+                border: 1px solid #e2e8f0; flex-shrink: 0;
+                box-shadow: 0 2px 6px rgba(15, 23, 42, 0.02);
+                flex-wrap: wrap; gap: 8px;
             }
-            .ac-tabs { display: flex; gap: 4px; }
+            .ac-tabs { display: flex; gap: 5px; flex-wrap: wrap; }
             .ac-tab-btn {
-                padding: 7px 14px; border: none; background: transparent; font-weight: 600; font-size: 0.85rem;
-                color: #64748b; border-radius: 6px; cursor: pointer; display: flex; align-items: center; gap: 6px;
+                padding: 8px 14px; border: none; background: transparent;
+                font-weight: 600; font-size: 0.83rem; color: #64748b;
+                border-radius: 9px; cursor: pointer;
+                display: flex; align-items: center; gap: 7px;
+                transition: all 0.18s ease;
             }
             .ac-tab-btn:hover { background: #f1f5f9; color: #0f172a; }
-            .ac-tab-btn.active { background: #e0f2fe; color: #0369a1; font-weight: 700; }
+            .ac-tab-btn.active {
+                background: linear-gradient(135deg, #e0f2fe 0%, #dbeafe 100%);
+                color: #0369a1; font-weight: 700;
+                box-shadow: inset 0 0 0 1px #bae6fd;
+            }
+
             .ac-actions { display: flex; gap: 8px; }
             .ac-action-btn {
-                padding: 6px 12px; background: #ffffff; border: 1px solid #cbd5e1; border-radius: 6px;
-                font-size: 0.82rem; font-weight: 600; color: #334155; cursor: pointer; display: flex; align-items: center; gap: 6px;
+                padding: 7px 13px; background: #ffffff;
+                border: 1px solid #cbd5e1; border-radius: 8px;
+                font-size: 0.8rem; font-weight: 700; color: #334155;
+                cursor: pointer; display: flex; align-items: center; gap: 6px;
+                transition: all 0.18s ease;
             }
-            .ac-action-btn:hover { background: #f8fafc; border-color: #94a3b8; }
+            .ac-action-btn:hover {
+                background: #f8fafc; border-color: #94a3b8;
+                transform: translateY(-1px);
+                box-shadow: 0 3px 8px rgba(15, 23, 42, 0.06);
+            }
+
+            /* Контейнер контента */
             .ac-content-view {
-                flex: 1; overflow-y: auto; position: relative; background: #ffffff; border-radius: 12px;
-                border: 1px solid #e2e8f0; padding: 14px; box-sizing: border-box;
+                flex: 1; overflow-y: auto; position: relative;
+                background: #ffffff; border-radius: 16px;
+                border: 1px solid #e2e8f0; padding: 16px; box-sizing: border-box;
+                box-shadow: 0 4px 12px rgba(15, 23, 42, 0.02);
             }
+
+            /* KPI Карточки */
             .ac-kpi-grid {
-                display: grid; grid-template-columns: repeat(auto-fit, minmax(200px, 1fr)); gap: 12px; margin-bottom: 14px;
+                display: grid; grid-template-columns: repeat(auto-fit, minmax(215px, 1fr));
+                gap: 14px; margin-bottom: 16px;
             }
             .ac-kpi-card {
-                padding: 12px 14px; border-radius: 10px; background: #f8fafc; border: 1px solid #e2e8f0;
+                padding: 14px 16px; border-radius: 14px;
+                background: linear-gradient(180deg, #ffffff 0%, #f8fafc 100%);
+                border: 1px solid #e2e8f0;
+                display: flex; align-items: flex-start; justify-content: space-between;
+                gap: 12px; transition: all 0.2s ease;
+                box-shadow: 0 2px 6px rgba(15, 23, 42, 0.02);
             }
-            .ac-kpi-card span { font-size: 0.72rem; font-weight: 700; color: #64748b; text-transform: uppercase; }
-            .ac-kpi-card strong { display: block; font-size: 1.25rem; color: #0f172a; margin-top: 3px; }
+            .ac-kpi-card:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 8px 20px rgba(15, 23, 42, 0.06);
+                border-color: #cbd5e1;
+            }
+            .ac-kpi-info span {
+                font-size: 0.72rem; font-weight: 700; color: #64748b;
+                text-transform: uppercase; letter-spacing: 0.04em;
+            }
+            .ac-kpi-info strong {
+                display: block; font-size: 1.35rem; font-weight: 800;
+                color: #0f172a; margin-top: 4px; letter-spacing: -0.02em;
+            }
+            .ac-kpi-sub {
+                font-size: 0.73rem; color: #64748b; margin-top: 5px; font-weight: 500;
+            }
+            .ac-kpi-icon {
+                width: 42px; height: 42px; border-radius: 11px;
+                display: flex; align-items: center; justify-content: center;
+                font-size: 1.15rem; flex-shrink: 0;
+            }
+
+            /* Полоса аналитических инсайтов */
+            .ac-insights-bar {
+                display: flex; flex-wrap: wrap; gap: 10px;
+                padding: 10px 14px; background: #f8fafc;
+                border: 1px solid #e2e8f0; border-radius: 12px;
+                margin-bottom: 16px; align-items: center;
+            }
+            .ac-insight-pill {
+                font-size: 0.78rem; color: #334155; background: #ffffff;
+                border: 1px solid #e2e8f0; padding: 5px 11px; border-radius: 999px;
+                display: inline-flex; align-items: center; gap: 6px; font-weight: 600;
+            }
+
+            /* Сетка графиков */
             .ac-charts-grid {
-                display: grid; grid-template-columns: repeat(auto-fit, minmax(440px, 1fr)); gap: 14px;
+                display: grid; grid-template-columns: repeat(auto-fit, minmax(430px, 1fr));
+                gap: 16px;
+            }
+            .ac-charts-grid-3 {
+                display: grid; grid-template-columns: repeat(auto-fit, minmax(330px, 1fr));
+                gap: 16px;
+            }
+            .ac-chart-card {
+                background: #ffffff; border: 1px solid #e2e8f0;
+                border-radius: 14px; padding: 12px;
+                box-shadow: 0 2px 8px rgba(15, 23, 42, 0.02);
+                display: flex; flex-direction: column;
             }
             .ac-chart-container {
-                height: 310px; background: #ffffff; border: 1px solid #f1f5f9; border-radius: 8px; padding: 8px;
+                height: 315px; width: 100%;
+            }
+
+            /* Таблица и панель инструментов */
+            .ac-table-toolbar {
+                margin-bottom: 10px; padding: 8px 12px;
+                background: #f8fafc; border: 1px solid #e2e8f0; border-radius: 10px;
+                display: flex; justify-content: space-between; align-items: center;
+                flex-wrap: wrap; gap: 10px;
             }
             .ac-table {
-                width: 100%; border-collapse: collapse; font-size: 0.82rem; text-align: left;
+                width: 100%; border-collapse: separate; border-spacing: 0;
+                font-size: 0.82rem; text-align: left;
             }
             .ac-table th {
-                position: sticky; top: 0; background: #f1f5f9; padding: 8px 10px; border-bottom: 2px solid #cbd5e1;
+                position: sticky; top: 0; background: #f1f5f9;
+                padding: 10px 12px; border-bottom: 2px solid #cbd5e1;
                 color: #334155; font-weight: 700; z-index: 2;
+                font-size: 0.76rem; text-transform: uppercase; letter-spacing: 0.03em;
             }
             .ac-table td {
-                padding: 8px 10px; border-bottom: 1px solid #f1f5f9; color: #1e293b;
+                padding: 9px 12px; border-bottom: 1px solid #f1f5f9;
+                color: #1e293b; vertical-align: middle;
             }
-            .ac-table-row-clickable { cursor: pointer; }
+            .ac-table-row-clickable { cursor: pointer; transition: background 0.12s ease; }
+            .ac-table-row-clickable:nth-child(even) td { background: #fafaf9; }
             .ac-table-row-clickable:hover td { background: #eff6ff !important; }
+
+            .ac-badge-type {
+                display: inline-block; padding: 2px 8px; border-radius: 6px;
+                font-size: 0.72rem; font-weight: 700;
+            }
+            .ac-badge-zu { background: #dcfce7; color: #15803d; }
+            .ac-badge-oks { background: #e0f2fe; color: #0369a1; }
+            .ac-badge-str { background: #ffedd5; color: #c2410c; }
+
             .ac-close-btn {
-                background: none; border: none; font-size: 1.5rem; color: #94a3b8; cursor: pointer; line-height: 1;
+                width: 36px; height: 36px; border-radius: 10px;
+                background: #f1f5f9; border: none; font-size: 1.4rem;
+                color: #64748b; cursor: pointer; display: flex;
+                align-items: center; justify-content: center;
+                transition: all 0.18s ease;
             }
-            .ac-close-btn:hover { color: #ef4444; }
+            .ac-close-btn:hover { background: #fee2e2; color: #ef4444; }
+
             .ac-zoom-btn {
-                padding: 3px 8px; background: #eff6ff; border: 1px solid #bfdbfe; border-radius: 4px;
-                color: #1d4ed8; font-weight: 600; cursor: pointer; font-size: 0.75rem;
+                padding: 5px 9px; background: #eff6ff; border: 1px solid #bfdbfe;
+                border-radius: 6px; color: #1d4ed8; font-weight: 600;
+                cursor: pointer; font-size: 0.76rem; transition: all 0.15s ease;
             }
-            .ac-zoom-btn:hover { background: #2563eb; color: #ffffff; }
+            .ac-zoom-btn:hover { background: #2563eb; color: #ffffff; border-color: #2563eb; }
 
             /* Карточка выбранного объекта */
             .ac-card-overlay {
                 position: fixed; inset: 0; background: rgba(15, 23, 42, 0.65);
                 z-index: 1000005; display: flex; align-items: center; justify-content: center;
-                backdrop-filter: blur(4px);
+                backdrop-filter: blur(5px); -webkit-backdrop-filter: blur(5px);
+                font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             }
             .ac-card-window {
-                background: #ffffff; width: 920px; max-width: 95vw; max-height: 90vh;
-                border-radius: 16px; box-shadow: 0 25px 60px rgba(0, 0, 0, 0.35);
-                display: flex; flex-direction: column; overflow: hidden; border: 1px solid #cbd5e1;
+                background: #ffffff; width: 960px; max-width: 95vw; max-height: 90vh;
+                border-radius: 20px; box-shadow: 0 25px 70px rgba(0, 0, 0, 0.4);
+                display: flex; flex-direction: column; overflow: hidden;
+                border: 1px solid #cbd5e1;
+                animation: acFadeIn 0.2s cubic-bezier(0.16, 1, 0.3, 1);
             }
             .ac-card-header {
-                padding: 14px 20px; background: #f8fafc; border-bottom: 1px solid #e2e8f0;
+                padding: 16px 22px; background: linear-gradient(90deg, #f8fafc 0%, #ffffff 100%);
+                border-bottom: 1px solid #e2e8f0;
                 display: flex; align-items: center; justify-content: space-between;
             }
             .ac-card-body {
-                display: grid; grid-template-columns: 1.2fr 1fr; gap: 16px; padding: 18px;
-                overflow-y: auto;
+                display: grid; grid-template-columns: 1.25fr 1fr; gap: 20px;
+                padding: 20px; overflow-y: auto;
             }
             .ac-card-prop-table {
-                width: 100%; border-collapse: collapse; font-size: 0.85rem;
+                width: 100%; border-collapse: collapse; font-size: 0.84rem;
             }
             .ac-card-prop-table td {
-                padding: 6px 8px; border-bottom: 1px solid #f1f5f9; vertical-align: top;
+                padding: 8px 10px; border-bottom: 1px solid #f1f5f9; vertical-align: top;
             }
+            .ac-card-prop-table tr:hover td { background: #f8fafc; }
             .ac-card-prop-table td:first-child {
-                color: #64748b; font-weight: 600; width: 38%;
+                color: #64748b; font-weight: 600; width: 40%;
             }
             .ac-card-prop-table td:last-child {
                 color: #0f172a; font-weight: 600; word-break: break-word;
@@ -192,35 +432,55 @@
                 display: flex; flex-direction: column; gap: 12px;
             }
             .ac-streetview-box {
-                width: 100%; height: 260px; background: #0f172a; border-radius: 10px;
-                overflow: hidden; border: 1px solid #cbd5e1; position: relative;
+                width: 100%; height: 280px; background: #0f172a;
+                border-radius: 12px; overflow: hidden;
+                border: 1px solid #cbd5e1; position: relative;
+                box-shadow: inset 0 2px 6px rgba(0,0,0,0.2);
             }
             .ac-card-btn {
-                padding: 9px 14px; border-radius: 8px; font-size: 0.85rem; font-weight: 700;
-                cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
-                border: none; transition: 0.2s;
+                padding: 10px 14px; border-radius: 10px; font-size: 0.85rem;
+                font-weight: 700; cursor: pointer;
+                display: flex; align-items: center; justify-content: center; gap: 8px;
+                border: none; transition: all 0.2s ease;
             }
+            .ac-card-btn:hover { transform: translateY(-1px); filter: brightness(1.06); }
             .ac-btn-egrn {
-                background: linear-gradient(135deg, #10b981, #059669); color: #fff;
+                background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+                color: #fff; box-shadow: 0 4px 12px rgba(16, 185, 129, 0.25);
             }
-            .ac-btn-egrn:hover { filter: brightness(1.08); }
 
             /* Модальное окно подтверждения большого объема */
             .ac-confirm-dialog-overlay {
-                position: fixed; inset: 0; background: rgba(15, 23, 42, 0.6);
+                position: fixed; inset: 0; background: rgba(15, 23, 42, 0.65);
                 z-index: 1000000; display: flex; align-items: center; justify-content: center;
                 backdrop-filter: blur(4px);
+                font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             }
             .ac-confirm-dialog {
-                background: #ffffff; width: 440px; max-width: 90vw; border-radius: 14px; padding: 22px;
-                box-shadow: 0 20px 40px rgba(0,0,0,0.25); border: 1px solid #e2e8f0; text-align: center;
+                background: #ffffff; width: 450px; max-width: 90vw;
+                border-radius: 18px; padding: 24px;
+                box-shadow: 0 25px 50px rgba(0,0,0,0.3);
+                border: 1px solid #e2e8f0; text-align: center;
+                animation: acFadeIn 0.2s ease;
             }
             .ac-confirm-icon {
-                width: 48px; height: 48px; border-radius: 50%; background: #fef3c7; color: #d97706;
-                display: flex; align-items: center; justify-content: center; font-size: 1.4rem; margin: 0 auto 12px auto;
+                width: 52px; height: 52px; border-radius: 50%;
+                background: #fef3c7; color: #d97706;
+                display: flex; align-items: center; justify-content: center;
+                font-size: 1.5rem; margin: 0 auto 14px auto;
             }
         `;
         document.head.appendChild(style);
+    }
+
+    // Безопасное экранирование HTML
+    function escapeHtml(str) {
+        if (str === null || str === undefined) return '';
+        return String(str)
+            .replace(/&/g, '&amp;')
+            .replace(/</g, '&lt;')
+            .replace(/>/g, '&gt;')
+            .replace(/"/g, '&quot;');
     }
 
     // Безопасное получение карты
@@ -271,8 +531,24 @@
         return !isVerified && !!hasDeclaredField;
     }
 
+    // Получение числового значения площади объекта
+    function getNumericArea(f) {
+        if (!f) return 0;
+        const o = f.properties?.options || {};
+        const val = parseFloat(o.specified_area || o.build_record_area || o.declared_area || o.land_record_area || o.params_extension || f.area || 0);
+        return isFinite(val) && val > 0 ? val : 0;
+    }
+
+    // Получение числового значения стоимости объекта
+    function getNumericCost(f) {
+        if (!f) return 0;
+        const o = f.properties?.options || {};
+        const val = parseFloat(o.cost_value || 0);
+        return isFinite(val) && val > 0 ? val : 0;
+    }
+
     // Получение даты сведений
-  function getFeatureDate(f) {
+    function getFeatureDate(f) {
         if (!f) return { regDate: null, dbDate: null };
         const p = f.properties || {};
         const o = p.options || {};
@@ -285,7 +561,7 @@
         const format = (d) => {
             if (!d || d === '-') return null;
             const m = String(d).match(/^(\d{4})-(\d{2})-(\d{2})/);
-            return m ? `${m[3]}.${m[2]}.${m[1]}` : d;
+            return m ? `${m[3]}.${m[2]}.${m[1]}` : String(d);
         };
 
         return {
@@ -294,11 +570,80 @@
         };
     }
 
+    // Дополнительный клиентский расчет аналитики по выборке
+    function computeClientStats(features) {
+        let withGeom = 0;
+        let withoutGeom = 0;
+        let zuSpecified = 0;
+        let zuDeclared = 0;
+        const vriCounts = {};
+        const upksList = [];
+        const scatterData = [];
+
+        features.forEach(f => {
+            const o = f.properties?.options || {};
+            if (hasRealBoundaries(f)) withGeom++;
+            else withoutGeom++;
+
+            if (f._layer_type === 'zu') {
+                if (isDeclaredParcel(f)) zuDeclared++;
+                else zuSpecified++;
+            }
+
+            const vriRaw = (o.permitted_use_established_by_document || o.purpose || o.params_purpose || '').trim();
+            if (vriRaw && vriRaw !== '-' && vriRaw !== 'null') {
+                const shortVri = vriRaw.length > 48 ? vriRaw.slice(0, 45) + '...' : vriRaw;
+                vriCounts[shortVri] = (vriCounts[shortVri] || 0) + 1;
+            }
+
+            const area = getNumericArea(f);
+            const cost = getNumericCost(f);
+            if (area > 0 && cost > 0) {
+                const upks = cost / area;
+                if (upks > 1 && upks < 5000000) {
+                    upksList.push(upks);
+                }
+                if (scatterData.length < 1500) {
+                    scatterData.push({
+                        value: [Math.round(area), Math.round(cost)],
+                        id: f.id,
+                        type: f._layer_type,
+                        raw: f
+                    });
+                }
+            }
+        });
+
+        upksList.sort((a, b) => a - b);
+        const medianUpks = upksList.length > 0
+            ? upksList[Math.floor(upksList.length / 2)]
+            : 0;
+        const minUpks = upksList.length > 0 ? upksList[0] : 0;
+        const maxUpks = upksList.length > 0 ? upksList[upksList.length - 1] : 0;
+
+        const topVri = Object.entries(vriCounts)
+            .sort((a, b) => b[1] - a[1])
+            .slice(0, 10);
+
+        return {
+            withGeom,
+            withoutGeom,
+            zuSpecified,
+            zuDeclared,
+            topVri,
+            medianUpks,
+            minUpks,
+            maxUpks,
+            scatterData
+        };
+    }
+
     // Преобразование координат центра объекта из 3857 в WGS84
     function getFeatureCenterWgs(feature) {
         if (!feature || !feature.geometry) return null;
         let x = 0, y = 0, count = 0;
         const extractPoints = (coords) => {
+            if (!Array.isArray(coords)) return;
             if (typeof coords[0] === 'number') {
                 x += coords[0]; y += coords[1]; count++;
             } else {
@@ -374,7 +719,7 @@
 
         if (analyticsModal) {
             analyticsModal.style.display = 'flex';
-            currentChartInstances.forEach(c => c.resize());
+            setTimeout(() => currentChartInstances.forEach(c => c.resize()), 50);
             return;
         }
 
@@ -387,10 +732,16 @@
             <div class="ac-window">
                 <div class="ac-header">
                     <div class="ac-header-title">
-                        <i class="fas fa-chart-line"></i>
-                        <span>Аналитический центр </span>
+                        <div class="ac-header-icon"><i class="fas fa-chart-network"></i></div>
+                        <div>
+                            <div style="display:flex; align-items:center; gap:8px;">
+                                <span>Аналитический центр недвижимости</span>
+                                <span class="ac-version-badge">v${ANALYTICS_CENTER_VERSION}</span>
+                            </div>
+                            <div style="font-size:0.75rem; font-weight:500; color:#64748b;">Интеллектуальная система пространственного и кадастрового анализа</div>
+                        </div>
                     </div>
-                    <button class="ac-close-btn" id="ac-close-btn">&times;</button>
+                    <button class="ac-close-btn" id="ac-close-btn" title="Закрыть окно">&times;</button>
                 </div>
                 
                 <div class="ac-body">
@@ -398,18 +749,18 @@
                     <div class="ac-sidebar">
                         <!-- Блок ИИ -->
                         <div class="ac-ai-box">
-                            <h4><i class="fas fa-robot" style="color: #2563eb;"></i> ИИ-Аналитик (Запрос на русском)</h4>
-                            <textarea id="ac-ai-text" class="ac-ai-input" placeholder="Опишите нужные объекты естественным языком..."></textarea>
+                            <h4><i class="fas fa-sparkles" style="color: #2563eb;"></i> ИИ-Аналитик (Запрос на русском)</h4>
+                            <textarea id="ac-ai-text" class="ac-ai-input" placeholder="Например: найди кирпичные дома от 2 этажей дороже 5 млн руб..."></textarea>
                             <button id="ac-ai-submit" class="ac-btn-ai">
-                                <i class="fas fa-magic"></i> Сформировать фильтр ИИ
+                                <i class="fas fa-wand-magic-sparkles"></i> Сформировать фильтр ИИ
                             </button>
                         </div>
 
                         <!-- Пространственный охват -->
                         <div class="ac-filter-group">
-                            <span class="ac-filter-title">Пространственный охват</span>
+                            <span class="ac-filter-title"><i class="fas fa-globe"></i> Пространственный охват</span>
                             <div class="ac-form-row">
-                                <label>Гео-зона:</label>
+                                <label>Гео-зона поиска:</label>
                                 <select id="ac-spatial-type" class="ac-select">
                                     <option value="viewport" selected>Текущий экран карты</option>
                                     <option value="radius" ${lat && lon ? 'selected' : ''}>В радиусе от точки клика</option>
@@ -424,37 +775,37 @@
 
                         <!-- Кадастровый номер и текстовый поиск -->
                         <div class="ac-filter-group">
-                            <span class="ac-filter-title">Кадастровый номер и текст</span>
+                            <span class="ac-filter-title"><i class="fas fa-hashtag"></i> Кадастровый номер и адрес</span>
                             <div class="ac-form-row">
                                 <label>Кадастровый номер или маска (мин. 4 цифры):</label>
                                 <input type="text" id="ac-cadnum-search" class="ac-input-text" value="${initialPrefix}01:" placeholder="${initialPrefix}01: или ${initialPrefix}01:000000">
                             </div>
                             <div class="ac-form-row">
-                                <label>Поиск по адресу / тексту:</label>
-                                <input type="text" id="ac-address-search" class="ac-input-text" placeholder="Улица, поселок или ориентир...">
+                                <label>Поиск по адресу / ориентиру:</label>
+                                <input type="text" id="ac-address-search" class="ac-input-text" placeholder="Улица, поселок, СНТ...">
                             </div>
-                            <div style="font-size: 0.8rem; margin-top: 4px;">
+                            <div style="font-size: 0.78rem; margin-top: 2px;">
                                 <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; color: #475569;">
-                                    <input type="checkbox" id="ac-exact-match">
-                                    <span>Точное совпадение (иначе по любой части слова)</span>
+                                    <input type="checkbox" id="ac-exact-match" style="accent-color:#0284c7;">
+                                    <span>Точное совпадение фразы</span>
                                 </label>
                             </div>
                         </div>
 
                         <!-- Типы объектов -->
                         <div class="ac-filter-group">
-                            <span class="ac-filter-title">Типы объектов</span>
+                            <span class="ac-filter-title"><i class="fas fa-layer-group"></i> Типы объектов</span>
                             <div class="ac-checkbox-grid">
-                                <label><input type="checkbox" id="ac-type-zu" checked> Участки (ЗУ)</label>
-                                <label><input type="checkbox" id="ac-type-oks" checked> Здания (ОКС)</label>
-                                <label><input type="checkbox" id="ac-type-str"> Сооружения</label>
-                                <label><input type="checkbox" id="ac-type-zones"> Границы и зоны</label>
+                                <label class="ac-checkbox-pill"><input type="checkbox" id="ac-type-zu" checked> Участки (ЗУ)</label>
+                                <label class="ac-checkbox-pill"><input type="checkbox" id="ac-type-oks" checked> Здания (ОКС)</label>
+                                <label class="ac-checkbox-pill"><input type="checkbox" id="ac-type-str"> Сооружения</label>
+                                <label class="ac-checkbox-pill"><input type="checkbox" id="ac-type-zones"> Зоны / Границы</label>
                             </div>
                         </div>
 
                         <!-- Общие права и статус -->
                         <div class="ac-filter-group">
-                            <span class="ac-filter-title">Права и статус объекта</span>
+                            <span class="ac-filter-title"><i class="fas fa-scale-balanced"></i> Права и статус</span>
                             <div class="ac-form-row">
                                 <label>Форма собственности:</label>
                                 <select id="ac-ownership-type" class="ac-select">
@@ -465,8 +816,8 @@
                                 </select>
                             </div>
                             <div class="ac-form-row">
-                                <label>Тип права:</label>
-                                <input type="text" id="ac-right-type" class="ac-input-text" placeholder="Собственность, Аренда, Бессрочное...">
+                                <label>Вид права:</label>
+                                <input type="text" id="ac-right-type" class="ac-input-text" placeholder="Собственность, Аренда...">
                             </div>
                             <div class="ac-form-row">
                                 <label>Статус записи:</label>
@@ -481,12 +832,12 @@
 
                         <!-- Параметры Участков (ЗУ) -->
                         <div class="ac-filter-group">
-                            <span class="ac-filter-title">Параметры участков (ЗУ)</span>
+                            <span class="ac-filter-title"><i class="fas fa-vector-square"></i> Параметры участков (ЗУ)</span>
                             <div class="ac-form-row">
                                 <label>Характер площади (межевание):</label>
                                 <select id="ac-zu-area-type" class="ac-select">
                                     <option value="">(Все участки)</option>
-                                    <option value="specified">Уточненная (границы определены)</option>
+                                    <option value="specified">Уточненная (с границами)</option>
                                     <option value="declared">Декларированная (без границ)</option>
                                 </select>
                             </div>
@@ -503,13 +854,13 @@
                             </div>
                             <div class="ac-form-row">
                                 <label>Разрешенное использование (ВРИ):</label>
-                                <input type="text" id="ac-zu-vri" class="ac-input-text" placeholder="ИЖС, ЛПХ, торговля...">
+                                <input type="text" id="ac-zu-vri" class="ac-input-text" placeholder="ИЖС, ЛПХ, магазин, сквер...">
                             </div>
                         </div>
 
                         <!-- Параметры Зданий (ОКС) -->
                         <div class="ac-filter-group">
-                            <span class="ac-filter-title">Параметры зданий (ОКС)</span>
+                            <span class="ac-filter-title"><i class="fas fa-building"></i> Параметры зданий (ОКС)</span>
                             <div class="ac-form-row">
                                 <label>Вид объекта:</label>
                                 <select id="ac-oks-kind" class="ac-select">
@@ -525,33 +876,33 @@
                             </div>
                             <div class="ac-form-row">
                                 <label>Наименование:</label>
-                                <input type="text" id="ac-oks-name" class="ac-input-text" placeholder="Жилой дом, склад, магазин...">
+                                <input type="text" id="ac-oks-name" class="ac-input-text" placeholder="Школа, склад, гараж...">
                             </div>
                             <div class="ac-form-row">
                                 <label>Этажность:</label>
                                 <div class="ac-range-row">
-                                    <input type="number" id="ac-floors-min" class="ac-input-text" placeholder="От этажей" min="1">
-                                    <input type="number" id="ac-floors-max" class="ac-input-text" placeholder="До этажей" min="1">
+                                    <input type="number" id="ac-floors-min" class="ac-input-text" placeholder="От эт." min="1">
+                                    <input type="number" id="ac-floors-max" class="ac-input-text" placeholder="До эт." min="1">
                                 </div>
                             </div>
                             <div class="ac-form-row">
                                 <label>Материал стен:</label>
-                                <input type="text" id="ac-materials" class="ac-input-text" placeholder="Кирпич, дерево, бетон...">
+                                <input type="text" id="ac-materials" class="ac-input-text" placeholder="Кирпич, дерево, монолит...">
                             </div>
                         </div>
 
                         <!-- Площадь и стоимость -->
                         <div class="ac-filter-group">
-                            <span class="ac-filter-title">Площадь и стоимость</span>
+                            <span class="ac-filter-title"><i class="fas fa-ruble-sign"></i> Площадь и стоимость</span>
                             <div class="ac-form-row">
                                 <label>Площадь (м²):</label>
                                 <div class="ac-range-row">
-                                    <input type="number" id="ac-area-min" class="ac-input-text" placeholder="От">
-                                    <input type="number" id="ac-area-max" class="ac-input-text" placeholder="До">
+                                    <input type="number" id="ac-area-min" class="ac-input-text" placeholder="От м²">
+                                    <input type="number" id="ac-area-max" class="ac-input-text" placeholder="До м²">
                                 </div>
                             </div>
                             <div class="ac-form-row">
-                                <label>Кадастровая стоимость (руб):</label>
+                                <label>Кадастровая стоимость (₽):</label>
                                 <div class="ac-range-row">
                                     <input type="number" id="ac-cost-min" class="ac-input-text" placeholder="От руб.">
                                     <input type="number" id="ac-cost-max" class="ac-input-text" placeholder="До руб.">
@@ -559,37 +910,42 @@
                             </div>
                         </div>
 
-                        <button id="ac-btn-execute" class="ac-btn-run">
-                            <i class="fas fa-search"></i> Сформировать анализ
-                        </button>
+                        <div class="ac-sidebar-footer">
+                            <button id="ac-btn-execute" class="ac-btn-run">
+                                <i class="fas fa-bolt"></i> Сформировать анализ
+                            </button>
+                            <button id="ac-btn-reset" class="ac-btn-reset" title="Сбросить все критерии">
+                                <i class="fas fa-rotate-left"></i>
+                            </button>
+                        </div>
                     </div>
 
                     <!-- Рабочая область -->
                     <div class="ac-main">
                         <div class="ac-tabs-bar">
                             <div class="ac-tabs">
-                                <button class="ac-tab-btn active" data-tab="summary"><i class="fas fa-tachometer-alt"></i> Сводка и KPI</button>
-                                <button class="ac-tab-btn" data-tab="charts"><i class="fas fa-chart-pie"></i> Графика и распределения</button>
-                                <button class="ac-tab-btn" data-tab="treemap"><i class="fas fa-th-large"></i> Плиточная структура</button>
-                                <button class="ac-tab-btn" data-tab="table"><i class="fas fa-table"></i> Реестр объектов</button>
+                                <button class="ac-tab-btn active" data-tab="summary"><i class="fas fa-chart-pie"></i> Сводка и KPI</button>
+                                <button class="ac-tab-btn" data-tab="charts"><i class="fas fa-chart-column"></i> Распределения и аналитика</button>
+                                <button class="ac-tab-btn" data-tab="treemap"><i class="fas fa-table-cells-large"></i> Плиточная карта</button>
+                                <button class="ac-tab-btn" data-tab="table"><i class="fas fa-list-check"></i> Реестр объектов</button>
                             </div>
                             <div class="ac-actions">
                                 <button class="ac-action-btn" id="ac-btn-map" title="Отобразить найденную выборку на карте">
-                                    <i class="fas fa-map-marked-alt" style="color:#0284c7;"></i> На карту
+                                    <i class="fas fa-map-location-dot" style="color:#0284c7;"></i> На карту
                                 </button>
                                 <button class="ac-action-btn" id="ac-btn-xlsx" title="Скачать таблицу в Excel">
-                                    <i class="fas fa-file-excel" style="color:#107c10;"></i> Excel
+                                    <i class="fas fa-file-excel" style="color:#16a34a;"></i> Excel
                                 </button>
                                 <button class="ac-action-btn" id="ac-btn-geojson" title="Скачать GeoJSON">
-                                    <i class="fas fa-file-code" style="color:#f59e0b;"></i> GeoJSON
+                                    <i class="fas fa-file-code" style="color:#ea580c;"></i> GeoJSON
                                 </button>
                             </div>
                         </div>
 
                         <div class="ac-content-view" id="ac-content-view">
-                            <div style="text-align: center; color: #94a3b8; padding-top: 100px;">
-                                <i class="fas fa-database" style="font-size: 3rem; margin-bottom: 12px; color: #cbd5e1;"></i>
-                                <div style="font-size: 1.1rem; font-weight: 600;">Задайте критерии поиска или отправьте текстовый запрос ИИ</div>
+                            <div style="text-align: center; color: #94a3b8; padding-top: 120px;">
+                                <i class="fas fa-database" style="font-size: 3.2rem; margin-bottom: 14px; color: #cbd5e1;"></i>
+                                <div style="font-size: 1.1rem; font-weight: 700; color: #475569;">Задайте критерии поиска или отправьте текстовый запрос ИИ</div>
                             </div>
                         </div>
                     </div>
@@ -599,7 +955,18 @@
 
         document.body.appendChild(analyticsModal);
 
-        // Закрытие ТОЛЬКО по крестику
+        // Автоматический ресайз графиков при изменении размера контейнера
+        const contentViewEl = document.getElementById('ac-content-view');
+        if (typeof ResizeObserver !== 'undefined' && contentViewEl) {
+            resizeObserver = new ResizeObserver(() => {
+                currentChartInstances.forEach(c => {
+                    try { c.resize(); } catch (e) {}
+                });
+            });
+            resizeObserver.observe(contentViewEl);
+        }
+
+        // Закрытие по крестику
         analyticsModal.querySelector('#ac-close-btn').onclick = () => {
             analyticsModal.style.display = 'none';
         };
@@ -620,6 +987,7 @@
         });
 
         document.getElementById('ac-btn-execute').onclick = () => runAnalyticsQuery(lat, lon);
+        document.getElementById('ac-btn-reset').onclick = () => resetAllFilters(initialPrefix, lat, lon);
         document.getElementById('ac-ai-submit').onclick = processAiQuery;
         document.getElementById('ac-btn-map').onclick = showResultsOnMainMap;
         document.getElementById('ac-btn-xlsx').onclick = exportToExcel;
@@ -627,6 +995,39 @@
 
         runAnalyticsQuery(lat, lon);
     };
+
+    // Сброс всех фильтров
+    function resetAllFilters(initialPrefix, lat, lon) {
+        document.getElementById('ac-ai-text').value = '';
+        document.getElementById('ac-spatial-type').value = 'viewport';
+        document.getElementById('ac-radius-wrap').style.display = 'none';
+        document.getElementById('ac-cadnum-search').value = `${initialPrefix}01:`;
+        document.getElementById('ac-address-search').value = '';
+        document.getElementById('ac-exact-match').checked = false;
+        document.getElementById('ac-type-zu').checked = true;
+        document.getElementById('ac-type-oks').checked = true;
+        document.getElementById('ac-type-str').checked = false;
+        document.getElementById('ac-type-zones').checked = false;
+        document.getElementById('ac-ownership-type').value = '';
+        document.getElementById('ac-right-type').value = '';
+        document.getElementById('ac-status-val').value = '';
+        document.getElementById('ac-zu-area-type').value = '';
+        document.getElementById('ac-zu-category').value = '';
+        document.getElementById('ac-zu-vri').value = '';
+        document.getElementById('ac-oks-kind').value = '';
+        document.getElementById('ac-oks-purpose').value = '';
+        document.getElementById('ac-oks-name').value = '';
+        document.getElementById('ac-floors-min').value = '';
+        document.getElementById('ac-floors-max').value = '';
+        document.getElementById('ac-materials').value = '';
+        document.getElementById('ac-area-min').value = '';
+        document.getElementById('ac-area-max').value = '';
+        document.getElementById('ac-cost-min').value = '';
+        document.getElementById('ac-cost-max').value = '';
+        tableSearchTerm = '';
+        tableSortField = 'default';
+        runAnalyticsQuery(lat, lon);
+    }
 
     // Сбор параметров
     function collectFilterPayload(clickLat, clickLon) {
@@ -637,7 +1038,7 @@
 
         if (!hasValidCadPrefix && spatialType === 'all') {
             const defPrefix = getDefaultCadastralPrefix();
-            alert(`Для выборки по базе необходимо указать как минимум код региона и района (например: ${defPrefix}01:).`);
+            alert(`Для выборки по всей базе необходимо указать как минимум код региона и района (например: ${defPrefix}01:).`);
             document.getElementById('ac-cadnum-search').focus();
             return null;
         }
@@ -738,9 +1139,10 @@
 
         const container = document.getElementById('ac-content-view');
         container.innerHTML = `
-            <div style="text-align: center; padding-top: 100px; color: #2563eb;">
-                <i class="fas fa-spinner fa-spin" style="font-size: 2.5rem; margin-bottom: 12px;"></i>
-                <div style="font-weight: 700; font-size: 1.1rem;">Анализ базы данных и расчет показателей...</div>
+            <div style="text-align: center; padding-top: 120px; color: #2563eb;">
+                <i class="fas fa-circle-notch fa-spin" style="font-size: 2.8rem; margin-bottom: 14px;"></i>
+                <div style="font-weight: 800; font-size: 1.15rem; color: #0f172a;">Анализ базы данных и расчет показателей...</div>
+                <div style="font-size: 0.85rem; color: #64748b; margin-top: 6px;">Выполняется агрегация геоданных и атрибутов</div>
             </div>
         `;
 
@@ -753,14 +1155,15 @@
 
             if (!resp.ok) throw new Error(`Ошибка сервера: ${resp.status}`);
             lastQueryResults = await resp.json();
+            lastQueryResults._clientStats = computeClientStats(lastQueryResults.features || []);
 
             renderActiveTabContent();
         } catch (err) {
             container.innerHTML = `
-                <div style="text-align: center; padding-top: 100px; color: #ef4444;">
-                    <i class="fas fa-exclamation-triangle" style="font-size: 2.5rem; margin-bottom: 12px;"></i>
-                    <div style="font-weight: 700; font-size: 1.1rem;">Не удалось выполнить запрос к аналитическому ядру</div>
-                    <div style="font-size: 0.9rem; color: #64748b; margin-top: 4px;">${err.message}</div>
+                <div style="text-align: center; padding-top: 110px; color: #ef4444;">
+                    <i class="fas fa-triangle-exclamation" style="font-size: 2.8rem; margin-bottom: 12px;"></i>
+                    <div style="font-weight: 800; font-size: 1.15rem;">Не удалось выполнить запрос к аналитическому ядру</div>
+                    <div style="font-size: 0.9rem; color: #64748b; margin-top: 6px;">${escapeHtml(err.message)}</div>
                 </div>
             `;
         }
@@ -790,7 +1193,8 @@
   "cost_max": число или null,
   "materials": "материал стен или пусто",
   "purpose": "назначение здания или пусто",
-  "ownership": "Частная, Муниципальная или пусто",
+  "zu_vri": "разрешенное использование участка или пусто",
+  "ownership": "Частная, Муниципальная, Государственная или пусто",
   "types": ["zu", "oks", "structure", "zones"]
 }
 `;
@@ -815,19 +1219,20 @@
             const cleanJson = textResponse.replace(/^```json\s*|\s*```$/g, '').trim();
             const parsed = JSON.parse(cleanJson);
 
-            if (parsed.address) document.getElementById('ac-address-search').value = parsed.address;
+            if (parsed.address !== undefined) document.getElementById('ac-address-search').value = parsed.address || '';
             if (parsed.cad_num) document.getElementById('ac-cadnum-search').value = parsed.cad_num;
-            if (parsed.floors_min) document.getElementById('ac-floors-min').value = parsed.floors_min;
-            if (parsed.floors_max) document.getElementById('ac-floors-max').value = parsed.floors_max;
-            if (parsed.area_min) document.getElementById('ac-area-min').value = parsed.area_min;
-            if (parsed.area_max) document.getElementById('ac-area-max').value = parsed.area_max;
-            if (parsed.cost_min) document.getElementById('ac-cost-min').value = parsed.cost_min;
-            if (parsed.cost_max) document.getElementById('ac-cost-max').value = parsed.cost_max;
-            if (parsed.materials) document.getElementById('ac-materials').value = parsed.materials;
-            if (parsed.purpose) document.getElementById('ac-oks-purpose').value = parsed.purpose;
-            if (parsed.ownership) document.getElementById('ac-ownership-type').value = parsed.ownership;
+            if (parsed.floors_min !== undefined) document.getElementById('ac-floors-min').value = parsed.floors_min || '';
+            if (parsed.floors_max !== undefined) document.getElementById('ac-floors-max').value = parsed.floors_max || '';
+            if (parsed.area_min !== undefined) document.getElementById('ac-area-min').value = parsed.area_min || '';
+            if (parsed.area_max !== undefined) document.getElementById('ac-area-max').value = parsed.area_max || '';
+            if (parsed.cost_min !== undefined) document.getElementById('ac-cost-min').value = parsed.cost_min || '';
+            if (parsed.cost_max !== undefined) document.getElementById('ac-cost-max').value = parsed.cost_max || '';
+            if (parsed.materials !== undefined) document.getElementById('ac-materials').value = parsed.materials || '';
+            if (parsed.purpose !== undefined) document.getElementById('ac-oks-purpose').value = parsed.purpose || '';
+            if (parsed.zu_vri !== undefined) document.getElementById('ac-zu-vri').value = parsed.zu_vri || '';
+            if (parsed.ownership !== undefined) document.getElementById('ac-ownership-type').value = parsed.ownership || '';
 
-            if (Array.isArray(parsed.types)) {
+            if (Array.isArray(parsed.types) && parsed.types.length > 0) {
                 document.getElementById('ac-type-zu').checked = parsed.types.includes('zu');
                 document.getElementById('ac-type-oks').checked = parsed.types.includes('oks');
                 document.getElementById('ac-type-str').checked = parsed.types.includes('structure');
@@ -839,7 +1244,7 @@
             alert("ИИ не смог распознать критерии: " + err.message);
         } finally {
             submitBtn.disabled = false;
-            submitBtn.innerHTML = '<i class="fas fa-magic"></i> Сформировать фильтр ИИ';
+            submitBtn.innerHTML = '<i class="fas fa-wand-magic-sparkles"></i> Сформировать фильтр ИИ';
         }
     }
 
@@ -852,110 +1257,213 @@
         currentChartInstances = [];
 
         if (!lastQueryResults || !lastQueryResults.summary) {
-            container.innerHTML = '<div style="padding:40px;text-align:center;color:#64748b;">Нет данных для отображения</div>';
+            container.innerHTML = '<div style="padding:50px;text-align:center;color:#64748b;font-weight:600;">Нет данных для отображения</div>';
             return;
         }
 
         const s = lastQueryResults.summary;
         const features = lastQueryResults.features || [];
+        const cs = lastQueryResults._clientStats || computeClientStats(features);
+
+        const geomPercent = features.length > 0 ? Math.round((cs.withGeom / features.length) * 100) : 0;
+        const totalZu = cs.zuSpecified + cs.zuDeclared;
+        const zuSpecPercent = totalZu > 0 ? Math.round((cs.zuSpecified / totalZu) * 100) : 0;
 
         if (activeTab === 'summary') {
             container.innerHTML = `
                 <div class="ac-kpi-grid">
-                    <div class="ac-kpi-card" style="border-left: 4px solid #3b82f6;">
-                        <span>Всего объектов</span>
-                        <strong>${s.total_count.toLocaleString('ru-RU')}</strong>
+                    <div class="ac-kpi-card">
+                        <div class="ac-kpi-info">
+                            <span>Всего объектов</span>
+                            <strong>${(s.total_count || 0).toLocaleString('ru-RU')}</strong>
+                            <div class="ac-kpi-sub">ЗУ: ${s.count_zu || 0} • ОКС: ${s.count_oks || 0}</div>
+                        </div>
+                        <div class="ac-kpi-icon" style="background:#eff6ff; color:#2563eb;"><i class="fas fa-cubes"></i></div>
                     </div>
-                    <div class="ac-kpi-card" style="border-left: 4px solid #10b981;">
-                        <span>Суммарная площадь</span>
-                        <strong>${Math.round(s.total_area).toLocaleString('ru-RU')} м²</strong>
+
+                    <div class="ac-kpi-card">
+                        <div class="ac-kpi-info">
+                            <span>Суммарная площадь</span>
+                            <strong>${Math.round(s.total_area || 0).toLocaleString('ru-RU')} м²</strong>
+                            <div class="ac-kpi-sub">≈ ${((s.total_area || 0) / 10000).toFixed(2)} га</div>
+                        </div>
+                        <div class="ac-kpi-icon" style="background:#ecfdf5; color:#10b981;"><i class="fas fa-ruler-combined"></i></div>
                     </div>
-                    <div class="ac-kpi-card" style="border-left: 4px solid #f59e0b;">
-                        <span>Кадастровая стоимость</span>
-                        <strong>${Math.round(s.total_cost).toLocaleString('ru-RU')} ₽</strong>
+
+                    <div class="ac-kpi-card">
+                        <div class="ac-kpi-info">
+                            <span>Кадастровая стоимость</span>
+                            <strong>${Math.round(s.total_cost || 0).toLocaleString('ru-RU')} ₽</strong>
+                            <div class="ac-kpi-sub">Суммарная база оценки</div>
+                        </div>
+                        <div class="ac-kpi-icon" style="background:#fffbeb; color:#d97706;"><i class="fas fa-sack-dollar"></i></div>
                     </div>
-                    <div class="ac-kpi-card" style="border-left: 4px solid #8b5cf6;">
-                        <span>Средний УПКС</span>
-                        <strong>${Math.round(s.avg_upks).toLocaleString('ru-RU')} ₽/м²</strong>
+
+                    <div class="ac-kpi-card">
+                        <div class="ac-kpi-info">
+                            <span>УПКС (Средний / Медиана)</span>
+                            <strong>${Math.round(s.avg_upks || 0).toLocaleString('ru-RU')} ₽/м²</strong>
+                            <div class="ac-kpi-sub">Медиана: ${Math.round(cs.medianUpks).toLocaleString('ru-RU')} ₽/м²</div>
+                        </div>
+                        <div class="ac-kpi-icon" style="background:#f5f3ff; color:#7c3aed;"><i class="fas fa-scale-unbalanced"></i></div>
+                    </div>
+
+                    <div class="ac-kpi-card">
+                        <div class="ac-kpi-info">
+                            <span>Координаты и межевание</span>
+                            <strong>${geomPercent}% с границами</strong>
+                            <div class="ac-kpi-sub">Межевание ЗУ: ${zuSpecPercent}% (${cs.zuSpecified} из ${totalZu})</div>
+                        </div>
+                        <div class="ac-kpi-icon" style="background:#ecfeff; color:#0891b2;"><i class="fas fa-draw-polygon"></i></div>
                     </div>
                 </div>
 
-                <div class="ac-charts-grid">
-                    <div class="ac-chart-container" id="ac-chart-types"></div>
-                    <div class="ac-chart-container" id="ac-chart-ownership"></div>
+                <div class="ac-insights-bar">
+                    <span style="font-size:0.78rem; font-weight:800; color:#0284c7; text-transform:uppercase;">
+                        <i class="fas fa-lightbulb"></i> Экспресс-аналитика:
+                    </span>
+                    <span class="ac-insight-pill">Мин. УПКС: <b>${Math.round(cs.minUpks).toLocaleString('ru-RU')} ₽/м²</b></span>
+                    <span class="ac-insight-pill">Макс. УПКС: <b>${Math.round(cs.maxUpks).toLocaleString('ru-RU')} ₽/м²</b></span>
+                    <span class="ac-insight-pill">С контуром: <b style="color:#16a34a;">${cs.withGeom}</b> / Без контура: <b style="color:#dc2626;">${cs.withoutGeom}</b></span>
+                    <span class="ac-insight-pill">Декларированных ЗУ: <b style="color:#d97706;">${cs.zuDeclared}</b></span>
+                </div>
+
+                <div class="ac-charts-grid-3">
+                    <div class="ac-chart-card"><div class="ac-chart-container" id="ac-chart-types"></div></div>
+                    <div class="ac-chart-card"><div class="ac-chart-container" id="ac-chart-ownership"></div></div>
+                    <div class="ac-chart-card"><div class="ac-chart-container" id="ac-chart-geom-quality"></div></div>
                 </div>
             `;
 
+            // 1. Состав выборки по типам
             const chart1 = echarts.init(document.getElementById('ac-chart-types'));
             chart1.setOption({
-                title: { text: 'Состав выборки по типам', left: 'center', textStyle: { fontSize: 13, color: '#334155' } },
-                tooltip: { trigger: 'item' },
+                title: { text: 'Состав выборки по типам объектов', left: 'center', textStyle: { fontSize: 13, fontWeight: 700, color: '#1e293b' } },
+                tooltip: { trigger: 'item', formatter: '{b}: <b>{c}</b> ({d}%)' },
+                legend: { bottom: 0, textStyle: { fontSize: 11 } },
                 series: [{
-                    type: 'pie', radius: ['40%', '70%'],
+                    type: 'pie', radius: ['42%', '68%'], center: ['50%', '46%'],
+                    itemStyle: { borderRadius: 6, borderColor: '#fff', borderWidth: 2 },
                     data: [
-                        { name: 'Земельные участки', value: s.count_zu || 0, itemStyle: { color: '#16a34a' } },
+                        { name: 'Земельные участки', value: s.count_zu || 0, itemStyle: { color: '#10b981' } },
                         { name: 'Здания (ОКС)', value: s.count_oks || 0, itemStyle: { color: '#0284c7' } },
-                        { name: 'Сооружения', value: s.count_str || 0, itemStyle: { color: '#ea580c' } },
-                        { name: 'Зоны и границы', value: s.count_zones || 0, itemStyle: { color: '#9333ea' } }
-                    ]
+                        { name: 'Сооружения', value: s.count_str || 0, itemStyle: { color: '#f97316' } },
+                        { name: 'Зоны и границы', value: s.count_zones || 0, itemStyle: { color: '#8b5cf6' } }
+                    ].filter(d => d.value > 0)
                 }]
             });
             currentChartInstances.push(chart1);
 
+            // 2. Формы собственности
             const ownData = Object.entries(s.ownership_dist || {}).map(([name, value]) => ({ name, value }));
             const chart2 = echarts.init(document.getElementById('ac-chart-ownership'));
             chart2.setOption({
-                title: { text: 'Формы собственности', left: 'center', textStyle: { fontSize: 13, color: '#334155' } },
-                tooltip: { trigger: 'item' },
-                series: [{ type: 'pie', radius: '65%', data: ownData }]
+                title: { text: 'Распределение по формам собственности', left: 'center', textStyle: { fontSize: 13, fontWeight: 700, color: '#1e293b' } },
+                tooltip: { trigger: 'item', formatter: '{b}: <b>{c}</b> ({d}%)' },
+                legend: { bottom: 0, textStyle: { fontSize: 11 } },
+                color: ['#3b82f6', '#f59e0b', '#10b981', '#6366f1', '#94a3b8'],
+                series: [{
+                    type: 'pie', radius: ['42%', '68%'], center: ['50%', '46%'],
+                    itemStyle: { borderRadius: 6, borderColor: '#fff', borderWidth: 2 },
+                    data: ownData.length ? ownData : [{ name: 'Не указано', value: features.length }]
+                }]
             });
             currentChartInstances.push(chart2);
+
+            // 3. Качество геоданных и межевания (НОВЫЙ ГРАФИК)
+            const chart3 = echarts.init(document.getElementById('ac-chart-geom-quality'));
+            chart3.setOption({
+                title: { text: 'Качество границ и межевания', left: 'center', textStyle: { fontSize: 13, fontWeight: 700, color: '#1e293b' } },
+                tooltip: { trigger: 'item', formatter: '{b}: <b>{c} шт.</b> ({d}%)' },
+                legend: { bottom: 0, textStyle: { fontSize: 11 } },
+                series: [{
+                    type: 'pie', radius: ['42%', '68%'], center: ['50%', '46%'],
+                    itemStyle: { borderRadius: 6, borderColor: '#fff', borderWidth: 2 },
+                    data: [
+                        { name: 'Уточненные ЗУ', value: cs.zuSpecified, itemStyle: { color: '#059669' } },
+                        { name: 'Декларированные ЗУ', value: cs.zuDeclared, itemStyle: { color: '#ef4444' } },
+                        { name: 'ОКС / Сооружения с контуром', value: Math.max(0, cs.withGeom - cs.zuSpecified), itemStyle: { color: '#0284c7' } },
+                        { name: 'Без координат контура', value: Math.max(0, cs.withoutGeom - cs.zuDeclared), itemStyle: { color: '#cbd5e1' } }
+                    ].filter(d => d.value > 0)
+                }]
+            });
+            currentChartInstances.push(chart3);
 
         } else if (activeTab === 'charts') {
             container.innerHTML = `
                 <div class="ac-charts-grid">
-                    <div class="ac-chart-container" id="ac-chart-floors"></div>
-                    <div class="ac-chart-container" id="ac-chart-cost-brackets"></div>
-                    <div class="ac-chart-container" id="ac-chart-materials"></div>
-                    <div class="ac-chart-container" id="ac-chart-years"></div>
+                    <div class="ac-chart-card"><div class="ac-chart-container" id="ac-chart-floors"></div></div>
+                    <div class="ac-chart-card"><div class="ac-chart-container" id="ac-chart-cost-brackets"></div></div>
+                    <div class="ac-chart-card"><div class="ac-chart-container" id="ac-chart-materials"></div></div>
+                    <div class="ac-chart-card"><div class="ac-chart-container" id="ac-chart-years"></div></div>
+                    <div class="ac-chart-card"><div class="ac-chart-container" id="ac-chart-vri"></div></div>
+                    <div class="ac-chart-card"><div class="ac-chart-container" id="ac-chart-scatter"></div></div>
                 </div>
             `;
 
-            // Этажность
+            // 1. Этажность
             const cFloors = echarts.init(document.getElementById('ac-chart-floors'));
-            const floorsEntries = Object.entries(s.floors_dist || {}).sort((a,b) => parseInt(a[0])-parseInt(b[0]));
+            const floorsEntries = Object.entries(s.floors_dist || {}).sort((a, b) => parseInt(a[0], 10) - parseInt(b[0], 10));
             cFloors.setOption({
-                title: { text: 'Распределение зданий по этажности', textStyle: { fontSize: 13 } },
+                title: { text: 'Распределение зданий по этажности', textStyle: { fontSize: 13, fontWeight: 700, color: '#1e293b' } },
                 tooltip: { trigger: 'axis' },
+                grid: { left: '10%', right: '5%', bottom: '15%', top: '18%' },
                 xAxis: { type: 'category', data: floorsEntries.map(e => e[0] + ' эт.') },
                 yAxis: { type: 'value', minInterval: 1 },
-                series: [{ type: 'bar', data: floorsEntries.map(e => e[1]), itemStyle: { color: '#0284c7', borderRadius: [4, 4, 0, 0] } }]
+                series: [{
+                    type: 'bar',
+                    data: floorsEntries.map(e => e[1]),
+                    barMaxWidth: 36,
+                    itemStyle: {
+                        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                            { offset: 0, color: '#38bdf8' },
+                            { offset: 1, color: '#0284c7' }
+                        ]),
+                        borderRadius: [5, 5, 0, 0]
+                    }
+                }]
             });
             currentChartInstances.push(cFloors);
 
-            // Ценовые диапазоны
+            // 2. Ценовые диапазоны
             const cCost = echarts.init(document.getElementById('ac-chart-cost-brackets'));
             const costEntries = Object.entries(s.cost_brackets || {});
             cCost.setOption({
-                title: { text: 'Ценовые диапазоны (кадастровая стоимость)', textStyle: { fontSize: 13 } },
+                title: { text: 'Ценовые диапазоны (кадастровая стоимость)', textStyle: { fontSize: 13, fontWeight: 700, color: '#1e293b' } },
                 tooltip: { trigger: 'axis' },
-                xAxis: { type: 'category', data: costEntries.map(e => e[0]), axisLabel: { interval: 0, rotate: 15 } },
+                grid: { left: '10%', right: '5%', bottom: '20%', top: '18%' },
+                xAxis: { type: 'category', data: costEntries.map(e => e[0]), axisLabel: { interval: 0, rotate: 14, fontSize: 11 } },
                 yAxis: { type: 'value', minInterval: 1 },
-                series: [{ type: 'bar', data: costEntries.map(e => e[1]), itemStyle: { color: '#10b981', borderRadius: [4, 4, 0, 0] } }]
+                series: [{
+                    type: 'bar',
+                    data: costEntries.map(e => e[1]),
+                    barMaxWidth: 38,
+                    itemStyle: {
+                        color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
+                            { offset: 0, color: '#34d399' },
+                            { offset: 1, color: '#059669' }
+                        ]),
+                        borderRadius: [5, 5, 0, 0]
+                    }
+                }]
             });
             currentChartInstances.push(cCost);
 
-            // Материалы стен
+            // 3. Материалы стен
             const cMat = echarts.init(document.getElementById('ac-chart-materials'));
-            const matEntries = Object.entries(s.materials_dist || {}).slice(0, 6);
+            const matEntries = Object.entries(s.materials_dist || {}).slice(0, 7);
             cMat.setOption({
-                title: { text: 'Основные материалы наружных стен', textStyle: { fontSize: 13 } },
-                tooltip: { trigger: 'item' },
-                series: [{ type: 'pie', radius: '60%', data: matEntries.map(e => ({ name: e[0], value: e[1] })) }]
+                title: { text: 'Основные материалы наружных стен', textStyle: { fontSize: 13, fontWeight: 700, color: '#1e293b' } },
+                tooltip: { trigger: 'item', formatter: '{b}: <b>{c}</b> ({d}%)' },
+                series: [{
+                    type: 'pie', radius: ['35%', '65%'],
+                    itemStyle: { borderRadius: 5, borderColor: '#fff', borderWidth: 2 },
+                    data: matEntries.map(e => ({ name: e[0], value: e[1] }))
+                }]
             });
             currentChartInstances.push(cMat);
 
-            // Года постройки: ХРОНОЛОГИЧЕСКИЙ РЯД С ДИНАМИЧЕСКИМ ЗУМОМ
+            // 4. Года постройки: Хронологический ряд с динамическим зумом
             const cYears = echarts.init(document.getElementById('ac-chart-years'));
             const yearCounts = {};
             features.forEach(f => {
@@ -965,7 +1473,7 @@
                 }
             });
 
-            const uniqueYears = Object.keys(yearCounts).map(Number).sort((a,b) => a - b);
+            const uniqueYears = Object.keys(yearCounts).map(Number).sort((a, b) => a - b);
             let xYears = [];
             let yYearsCount = [];
 
@@ -979,92 +1487,175 @@
             }
 
             cYears.setOption({
-                title: { text: 'Периоды постройки зданий (хронология)', textStyle: { fontSize: 13 } },
-                tooltip: { 
+                title: { text: 'Динамика застройки по годам ввода', textStyle: { fontSize: 13, fontWeight: 700, color: '#1e293b' } },
+                tooltip: {
                     trigger: 'axis',
                     formatter: (params) => {
                         const item = params[0];
-                        return `<b>${item.name} год</b><br>Построено зданий: <b>${item.value} шт.</b>`;
+                        return item ? `<b>${item.name} год</b><br>Построено зданий: <b>${item.value} шт.</b>` : '';
                     }
                 },
-                grid: { left: '8%', right: '5%', bottom: '22%', top: '20%' },
-                xAxis: { 
-                    type: 'category', 
-                    data: xYears,
-                    axisLabel: { color: '#64748b', fontSize: 10 }
-                },
-                yAxis: { 
-                    type: 'value', 
-                    minInterval: 1,
-                    splitLine: { lineStyle: { color: '#f1f5f9' } }
-                },
+                grid: { left: '8%', right: '5%', bottom: '22%', top: '18%' },
+                xAxis: { type: 'category', data: xYears, axisLabel: { color: '#64748b', fontSize: 10 } },
+                yAxis: { type: 'value', minInterval: 1, splitLine: { lineStyle: { color: '#f1f5f9' } } },
                 dataZoom: [
                     { type: 'inside', xAxisIndex: 0 },
-                    { 
-                        type: 'slider', 
-                        xAxisIndex: 0, 
-                        bottom: 4, 
-                        height: 18, 
-                        borderColor: '#cbd5e1', 
-                        fillerColor: 'rgba(99, 102, 241, 0.2)',
-                        handleSize: '80%'
-                    }
+                    { type: 'slider', xAxisIndex: 0, bottom: 4, height: 18, borderColor: '#cbd5e1', fillerColor: 'rgba(99, 102, 241, 0.2)', handleSize: '80%' }
                 ],
-                series: [{ 
-                    type: 'bar', 
+                series: [{
+                    type: 'bar',
                     data: yYearsCount,
                     barMaxWidth: 14,
-                    itemStyle: { 
+                    itemStyle: {
                         color: new echarts.graphic.LinearGradient(0, 0, 0, 1, [
                             { offset: 0, color: '#8b5cf6' },
                             { offset: 1, color: '#6366f1' }
                         ]),
-                        borderRadius: [3, 3, 0, 0] 
+                        borderRadius: [3, 3, 0, 0]
                     }
                 }]
             });
             currentChartInstances.push(cYears);
 
-        } else if (activeTab === 'treemap') {
-            container.innerHTML = `<div id="ac-chart-treemap" style="width: 100%; height: 100%;"></div>`;
-            const cTree = echarts.init(document.getElementById('ac-chart-treemap'));
+            // 5. ТОП-10 Видов разрешенного использования / назначений (НОВЫЙ ГРАФИК)
+            const cVri = echarts.init(document.getElementById('ac-chart-vri'));
+            const vriReversed = [...cs.topVri].reverse();
+            cVri.setOption({
+                title: { text: 'ТОП-10 видов использования и назначения', textStyle: { fontSize: 13, fontWeight: 700, color: '#1e293b' } },
+                tooltip: { trigger: 'axis', axisPointer: { type: 'shadow' } },
+                grid: { left: '38%', right: '8%', bottom: '10%', top: '16%' },
+                xAxis: { type: 'value', minInterval: 1 },
+                yAxis: {
+                    type: 'category',
+                    data: vriReversed.map(item => item[0]),
+                    axisLabel: { fontSize: 10, color: '#334155', width: 150, overflow: 'truncate' }
+                },
+                series: [{
+                    type: 'bar',
+                    data: vriReversed.map(item => item[1]),
+                    barMaxWidth: 20,
+                    itemStyle: {
+                        color: new echarts.graphic.LinearGradient(1, 0, 0, 0, [
+                            { offset: 0, color: '#0ea5e9' },
+                            { offset: 1, color: '#2563eb' }
+                        ]),
+                        borderRadius: [0, 4, 4, 0]
+                    }
+                }]
+            });
+            currentChartInstances.push(cVri);
 
-            const palette = ['#3b82f6', '#10b981', '#f59e0b', '#8b5cf6', '#06b6d4', '#ec4899', '#6366f1', '#14b8a6', '#f97316'];
+            // 6. Диаграмма рассеяния: Площадь vs Кадастровая стоимость (НОВЫЙ ГРАФИК)
+            const cScatter = echarts.init(document.getElementById('ac-chart-scatter'));
+            cScatter.setOption({
+                title: { text: 'Корреляция: Площадь vs Стоимость (клик — паспорт)', textStyle: { fontSize: 13, fontWeight: 700, color: '#1e293b' } },
+                tooltip: {
+                    trigger: 'item',
+                    formatter: (p) => {
+                        const d = p.data;
+                        if (!d) return '';
+                        const upks = d.value[0] > 0 ? Math.round(d.value[1] / d.value[0]) : 0;
+                        return `<b>${d.id}</b><br/>Площадь: <b>${d.value[0].toLocaleString('ru-RU')} м²</b><br/>Стоимость: <b>${d.value[1].toLocaleString('ru-RU')} ₽</b><br/>УПКС: <b>${upks.toLocaleString('ru-RU')} ₽/м²</b>`;
+                    }
+                },
+                grid: { left: '14%', right: '8%', bottom: '18%', top: '18%' },
+                xAxis: {
+                    type: 'value', name: 'Площадь (м²)', nameLocation: 'middle', nameGap: 25,
+                    splitLine: { lineStyle: { color: '#f1f5f9' } },
+                    axisLabel: { fontSize: 10 }
+                },
+                yAxis: {
+                    type: 'value', name: 'Стоимость (₽)',
+                    splitLine: { lineStyle: { color: '#f1f5f9' } },
+                    axisLabel: {
+                        fontSize: 10,
+                        formatter: (v) => v >= 1e6 ? (v / 1e6).toFixed(1) + 'M' : (v >= 1e3 ? (v / 1e3).toFixed(0) + 'k' : v)
+                    }
+                },
+                dataZoom: [{ type: 'inside', xAxisIndex: 0 }, { type: 'inside', yAxisIndex: 0 }],
+                series: [{
+                    type: 'scatter',
+                    symbolSize: 9,
+                    data: cs.scatterData,
+                    itemStyle: {
+                        color: (params) => params.data?.type === 'zu' ? 'rgba(16, 185, 129, 0.75)' : 'rgba(37, 99, 235, 0.75)',
+                        borderColor: '#ffffff',
+                        borderWidth: 1
+                    }
+                }]
+            });
+            cScatter.on('click', (params) => {
+                if (params.data?.raw) openObjectDetailCard(params.data.raw);
+            });
+            currentChartInstances.push(cScatter);
+
+        } else if (activeTab === 'treemap') {
+            container.innerHTML = `
+                <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:10px; flex-wrap:wrap; gap:8px;">
+                    <div style="font-size:0.85rem; font-weight:700; color:#334155;">
+                        Иерархическая карта объектов (размер блока пропорционален выбранному показателю)
+                    </div>
+                    <div style="display:flex; gap:6px;">
+                        <button id="ac-tree-mode-area" class="ac-action-btn" style="${treemapMetric === 'area' ? 'background:#eff6ff; border-color:#3b82f6; color:#1d4ed8;' : ''}">
+                            <i class="fas fa-ruler-combined"></i> По площади (м²)
+                        </button>
+                        <button id="ac-tree-mode-cost" class="ac-action-btn" style="${treemapMetric === 'cost' ? 'background:#eff6ff; border-color:#3b82f6; color:#1d4ed8;' : ''}">
+                            <i class="fas fa-ruble-sign"></i> По стоимости (₽)
+                        </button>
+                    </div>
+                </div>
+                <div id="ac-chart-treemap" style="width: 100%; height: calc(100% - 45px);"></div>
+            `;
+
+            document.getElementById('ac-tree-mode-area').onclick = () => {
+                treemapMetric = 'area';
+                renderActiveTabContent();
+            };
+            document.getElementById('ac-tree-mode-cost').onclick = () => {
+                treemapMetric = 'cost';
+                renderActiveTabContent();
+            };
+
+            const cTree = echarts.init(document.getElementById('ac-chart-treemap'));
+            const palette = ['#2563eb', '#059669', '#d97706', '#7c3aed', '#0891b2', '#db2777', '#4f46e5', '#0d9488', '#ea580c'];
+
             const treeData = features.map((f, idx) => {
-                const p = f.properties || {};
-                const o = p.options || {};
-                const area = parseFloat(o.specified_area || o.build_record_area || o.declared_area || f.area || 1);
+                const area = getNumericArea(f);
+                const cost = getNumericCost(f);
+                const val = treemapMetric === 'cost' ? Math.round(cost) : Math.round(area);
                 return {
                     name: f.id,
-                    value: Math.round(area),
+                    value: val,
+                    areaVal: Math.round(area),
+                    costVal: Math.round(cost),
                     raw: f,
-                    itemStyle: {
-                        color: palette[idx % palette.length]
-                    }
+                    itemStyle: { color: palette[idx % palette.length] }
                 };
             }).filter(i => i.value > 0);
+
+            const unitSuffix = treemapMetric === 'cost' ? '₽' : 'м²';
 
             cTree.setOption({
                 tooltip: {
                     trigger: 'item',
                     confine: true,
-                    padding: 10,
+                    padding: 12,
                     backgroundColor: 'rgba(255, 255, 255, 0.98)',
                     borderColor: '#cbd5e1',
                     borderWidth: 1,
-                    extraCssText: 'box-shadow: 0 10px 30px rgba(15,23,42,0.25); border-radius: 8px; max-width: 320px; white-space: normal; line-height: 1.4;',
+                    extraCssText: 'box-shadow: 0 12px 32px rgba(15,23,42,0.22); border-radius: 10px; max-width: 340px; white-space: normal; line-height: 1.45;',
                     formatter: (info) => {
                         const raw = info.data?.raw;
                         if (!raw) return '';
                         const o = raw.properties?.options || {};
-                        const addr = o.readable_address || o.address_readable_address || 'Адрес не указан';
-                        const cost = o.cost_value ? `${Number(o.cost_value).toLocaleString('ru-RU')} ₽` : '-';
+                        const addr = escapeHtml(o.readable_address || o.address_readable_address || 'Адрес не указан');
+                        const cost = info.data.costVal ? `${info.data.costVal.toLocaleString('ru-RU')} ₽` : '-';
                         return `
                             <div style="font-size: 12px; color: #0f172a;">
-                                <div style="font-weight: 800; font-size: 13px; color: #0284c7; margin-bottom: 4px;">${raw.id}</div>
+                                <div style="font-weight: 800; font-size: 13px; color: #0284c7; margin-bottom: 4px;">${escapeHtml(raw.id)}</div>
                                 <div style="color: #64748b; font-size: 11px; margin-bottom: 6px;">${addr}</div>
-                                <div style="display: flex; justify-content: space-between; gap: 8px; font-size: 11px; border-top: 1px solid #e2e8f0; padding-top: 4px;">
-                                    <span>Площадь: <b>${info.value.toLocaleString('ru-RU')} м²</b></span>
+                                <div style="display: flex; justify-content: space-between; gap: 10px; font-size: 11px; border-top: 1px solid #e2e8f0; padding-top: 5px;">
+                                    <span>Площадь: <b>${(info.data.areaVal || 0).toLocaleString('ru-RU')} м²</b></span>
                                     <span>Стоимость: <b>${cost}</b></span>
                                 </div>
                                 <div style="font-size: 10px; color: #10b981; font-weight: 700; margin-top: 6px; text-align: center;">Кликните для открытия паспорта</div>
@@ -1074,174 +1665,228 @@
                 },
                 series: [{
                     type: 'treemap',
-                    width: '100%',
-                    height: '100%',
-                    top: 0,
-                    bottom: 0,
-                    left: 0,
-                    right: 0,
-                    roam: false,
-                    nodeClick: false,
+                    width: '100%', height: '100%', top: 0, bottom: 0, left: 0, right: 0,
+                    roam: false, nodeClick: false,
                     breadcrumb: { show: false },
                     itemStyle: {
                         borderColor: 'rgba(255,255,255,0.95)',
                         borderWidth: 1.5,
                         gapWidth: 1.5,
-                        borderRadius: 3
+                        borderRadius: 4
                     },
                     label: {
                         show: true,
-                        formatter: '{b}\n{c} м²',
+                        formatter: (p) => `${p.name}\n${Number(p.value).toLocaleString('ru-RU')} ${unitSuffix}`,
                         fontSize: 10,
+                        fontWeight: 600,
                         color: '#ffffff'
                     },
                     data: treeData
                 }]
             });
 
-            // Клик и дабл-клик по плитке открывает карточку
-            cTree.off('click');
             cTree.on('click', (params) => {
-                if (params.data?.raw) {
-                    openObjectDetailCard(params.data.raw);
-                }
-            });
-            cTree.off('dblclick');
-            cTree.on('dblclick', (params) => {
-                if (params.data?.raw) {
-                    openObjectDetailCard(params.data.raw);
-                }
+                if (params.data?.raw) openObjectDetailCard(params.data.raw);
             });
 
             currentChartInstances.push(cTree);
 
-       } else if (activeTab === 'table') {
-            const BATCH_SIZE = 120;
-            let renderedCount = 0;
-            const isLimit = s.is_limit_reached || features.length >= 3000;
+        } else if (activeTab === 'table') {
+            renderTableTab(container, features, s);
+        }
+    }
 
-            const limitWarningBadge = isLimit
-                ? `<span style="background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; padding: 2px 8px; border-radius: 6px; font-size: 0.75rem; font-weight: bold; display: inline-flex; align-items: center; gap: 4px;">
-                       <i class="fas fa-exclamation-triangle"></i> Достигнут лимит (3 000 объектов). Уточните фильтр.
-                   </span>`
-                : '';
+    // Отрисовка вкладки Реестра с быстрым поиском и сортировкой
+    function renderTableTab(container, allFeatures, s) {
+        const BATCH_SIZE = 120;
+        let renderedCount = 0;
+        const isLimit = s.is_limit_reached || allFeatures.length >= 3000;
 
-            container.innerHTML = `
-                <div style="margin-bottom: 8px; font-weight: 600; color: #475569; display: flex; justify-content: space-between; align-items: center; flex-wrap: wrap; gap: 8px;">
-                    <div style="display: flex; align-items: center; gap: 8px;">
-                        <span>Показано: <b id="ac-table-rendered-count" style="color: #0284c7;">0</b> из ${features.length.toLocaleString('ru-RU')}</span>
-                        ${limitWarningBadge}
-                    </div>
-                    <span style="font-size: 0.78rem; color: #94a3b8; font-weight: normal;">Прокручивайте вниз для отображения объектов</span>
+        const limitWarningBadge = isLimit
+            ? `<span style="background: #fef2f2; color: #dc2626; border: 1px solid #fecaca; padding: 3px 9px; border-radius: 6px; font-size: 0.74rem; font-weight: 700; display: inline-flex; align-items: center; gap: 5px;">
+                   <i class="fas fa-triangle-exclamation"></i> Лимит выборки (3 000). Уточните фильтр.
+               </span>`
+            : '';
+
+        container.innerHTML = `
+            <div class="ac-table-toolbar">
+                <div style="display: flex; align-items: center; gap: 10px; flex-wrap: wrap;">
+                    <span style="font-size: 0.82rem; font-weight: 700; color: #334155;">
+                        Показано: <b id="ac-table-rendered-count" style="color: #0284c7;">0</b> из <b id="ac-table-filtered-total">${allFeatures.length.toLocaleString('ru-RU')}</b>
+                    </span>
+                    ${limitWarningBadge}
                 </div>
-                <div id="ac-table-scroll-wrap" style="overflow-x: auto; overflow-y: auto; max-height: calc(100% - 35px);">
-                    <table class="ac-table">
-                        <thead>
-                            <tr>
-                                <th style="width: 45px;">№</th>
-                                <th style="width: 210px;">Кадастровый номер</th>
-                                <th style="width: 75px;">Тип</th>
-                                <th>Адрес / Местоположение</th>
-                                <th style="width: 110px;">Параметр</th>
-                                <th style="width: 130px;">Стоимость</th>
-                                <th style="width: 140px;">Дата сведений</th>
-                                <th style="width: 50px;"></th>
-                            </tr>
-                        </thead>
-                        <tbody id="ac-table-body"></tbody>
-                    </table>
+                <div style="display: flex; align-items: center; gap: 8px; flex-wrap: wrap;">
+                    <input type="text" id="ac-table-quick-search" class="ac-input-text" style="width: 230px; padding: 5px 10px;" placeholder="Быстрый фильтр по таблице..." value="${escapeHtml(tableSearchTerm)}">
+                    <select id="ac-table-sort" class="ac-select" style="width: 195px; padding: 5px 10px;">
+                        <option value="default" ${tableSortField === 'default' ? 'selected' : ''}>Сортировка: по умолчанию</option>
+                        <option value="cost_desc" ${tableSortField === 'cost_desc' ? 'selected' : ''}>Стоимость: по убыванию</option>
+                        <option value="cost_asc" ${tableSortField === 'cost_asc' ? 'selected' : ''}>Стоимость: по возрастанию</option>
+                        <option value="area_desc" ${tableSortField === 'area_desc' ? 'selected' : ''}>Площадь: по убыванию</option>
+                        <option value="area_asc" ${tableSortField === 'area_asc' ? 'selected' : ''}>Площадь: по возрастанию</option>
+                    </select>
                 </div>
-            `;
+            </div>
+            <div id="ac-table-scroll-wrap" style="overflow-x: auto; overflow-y: auto; max-height: calc(100% - 54px);">
+                <table class="ac-table">
+                    <thead>
+                        <tr>
+                            <th style="width: 45px;">№</th>
+                            <th style="width: 205px;">Кадастровый номер</th>
+                            <th style="width: 85px;">Тип</th>
+                            <th>Адрес / ВРИ и Назначение</th>
+                            <th style="width: 115px;">Площадь</th>
+                            <th style="width: 145px;">Стоимость / УПКС</th>
+                            <th style="width: 135px;">Дата сведений</th>
+                            <th style="width: 48px;"></th>
+                        </tr>
+                    </thead>
+                    <tbody id="ac-table-body"></tbody>
+                </table>
+            </div>
+        `;
 
-            const tbody = document.getElementById('ac-table-body');
-            const countEl = document.getElementById('ac-table-rendered-count');
-            const scrollWrap = document.getElementById('ac-table-scroll-wrap');
+        const tbody = document.getElementById('ac-table-body');
+        const countEl = document.getElementById('ac-table-rendered-count');
+        const totalEl = document.getElementById('ac-table-filtered-total');
+        const scrollWrap = document.getElementById('ac-table-scroll-wrap');
+        const quickSearchInput = document.getElementById('ac-table-quick-search');
+        const sortSelect = document.getElementById('ac-table-sort');
 
-            function renderRowsBatch() {
-                const nextLimit = Math.min(renderedCount + BATCH_SIZE, features.length);
-                const fragment = document.createDocumentFragment();
+        let filteredFeatures = [];
 
-                for (let i = renderedCount; i < nextLimit; i++) {
-                    const f = features[i];
-                    const p = f.properties || {};
-                    const o = p.options || {};
-                    const addr = o.readable_address || o.address_readable_address || 'Адрес не указан';
-                    const rawArea = o.specified_area || o.build_record_area || o.params_extension || f.area || '-';
-                    const cost = o.cost_value ? Number(o.cost_value).toLocaleString('ru-RU') + ' ₽' : '-';
-                    const typeName = f._layer_type === 'zu' ? 'ЗУ' : (f._layer_type === 'oks' ? 'Здание' : 'Сооружение');
-                    const hasGeom = hasRealBoundaries(f);
-                    const isDecl = isDeclaredParcel(f);
+        function applyClientFilterAndSort() {
+            const q = tableSearchTerm.trim().toLowerCase();
+            filteredFeatures = allFeatures.filter(f => {
+                if (!q) return true;
+                const o = f.properties?.options || {};
+                const idStr = String(f.id || '').toLowerCase();
+                const addrStr = String(o.readable_address || o.address_readable_address || '').toLowerCase();
+                const vriStr = String(o.permitted_use_established_by_document || o.purpose || '').toLowerCase();
+                return idStr.includes(q) || addrStr.includes(q) || vriStr.includes(q);
+            });
 
-                    // Сборка дат: официальная дата + дата записи в базу данных
-                    const dateObj = getFeatureDate(f);
-                    let dateHtml = '-';
-                    if (dateObj.regDate && dateObj.dbDate) {
-                        dateHtml = `<div>${dateObj.regDate}</div><div style="font-size:0.73rem; color:#64748b;" title="Дата внесения в базу данных">БД: ${dateObj.dbDate}</div>`;
-                    } else if (dateObj.dbDate) {
-                        dateHtml = `<div style="font-size:0.75rem; color:#64748b;" title="Дата внесения в базу данных">БД: ${dateObj.dbDate}</div>`;
-                    } else if (dateObj.regDate) {
-                        dateHtml = `<div>${dateObj.regDate}</div>`;
-                    }
-
-                    const areaHtml = isDecl
-                        ? `<span style="color: #dc2626; font-weight: 700;" title="Декларированная площадь (границы не установлены)">${rawArea}</span>`
-                        : `<span>${rawArea}</span>`;
-
-                    const actionHtml = hasGeom
-                        ? `<button class="ac-zoom-btn" data-fid="${f.id}" title="Перейти к объекту на карте">
-                                <i class="fas fa-crosshairs"></i>
-                           </button>`
-                        : `<span style="color: #cbd5e1; font-weight: bold;" title="Границы не установлены">—</span>`;
-
-                    const tr = document.createElement('tr');
-                    tr.className = 'ac-table-row-clickable';
-                    tr.innerHTML = `
-                        <td style="color: #64748b;">${i + 1}</td>
-                        <td style="font-weight: 700; color: #0284c7;">
-                            <div style="display:flex; align-items:center; gap:6px;">
-                                <span>${f.id}</span>
-                                ${hasGeom ? '<span title="Границы определены" style="color:#10b981;font-size:0.75rem;"><i class="fas fa-draw-polygon"></i></span>' : ''}
-                            </div>
-                        </td>
-                        <td>${typeName}</td>
-                        <td>${addr}</td>
-                        <td>${areaHtml}</td>
-                        <td>${cost}</td>
-                        <td style="color: #1e293b; line-height: 1.25;">${dateHtml}</td>
-                        <td>${actionHtml}</td>
-                    `;
-
-                    tr.onclick = (e) => {
-                        if (e.target.closest('.ac-zoom-btn')) return;
-                        openObjectDetailCard(f);
-                    };
-
-                    const zoomBtn = tr.querySelector('.ac-zoom-btn');
-                    if (zoomBtn) {
-                        zoomBtn.onclick = (e) => {
-                            e.stopPropagation();
-                            focusSingleFeatureOnMainMap(f);
-                        };
-                    }
-
-                    fragment.appendChild(tr);
-                }
-
-                tbody.appendChild(fragment);
-                renderedCount = nextLimit;
-                countEl.textContent = renderedCount.toLocaleString('ru-RU');
+            if (tableSortField === 'cost_desc') {
+                filteredFeatures.sort((a, b) => getNumericCost(b) - getNumericCost(a));
+            } else if (tableSortField === 'cost_asc') {
+                filteredFeatures.sort((a, b) => getNumericCost(a) - getNumericCost(b));
+            } else if (tableSortField === 'area_desc') {
+                filteredFeatures.sort((a, b) => getNumericArea(b) - getNumericArea(a));
+            } else if (tableSortField === 'area_asc') {
+                filteredFeatures.sort((a, b) => getNumericArea(a) - getNumericArea(b));
             }
 
+            tbody.innerHTML = '';
+            renderedCount = 0;
+            totalEl.textContent = filteredFeatures.length.toLocaleString('ru-RU');
             renderRowsBatch();
-
-            scrollWrap.addEventListener('scroll', () => {
-                if (renderedCount < features.length) {
-                    if (scrollWrap.scrollTop + scrollWrap.clientHeight >= scrollWrap.scrollHeight - 140) {
-                        renderRowsBatch();
-                    }
-                }
-            });
         }
+
+        function renderRowsBatch() {
+            const nextLimit = Math.min(renderedCount + BATCH_SIZE, filteredFeatures.length);
+            const fragment = document.createDocumentFragment();
+
+            for (let i = renderedCount; i < nextLimit; i++) {
+                const f = filteredFeatures[i];
+                const p = f.properties || {};
+                const o = p.options || {};
+                const addr = escapeHtml(o.readable_address || o.address_readable_address || 'Адрес не указан');
+                const subPurpose = escapeHtml(o.permitted_use_established_by_document || o.purpose || o.params_purpose || '');
+                const rawArea = o.specified_area || o.build_record_area || o.params_extension || f.area || '-';
+                const numArea = getNumericArea(f);
+                const numCost = getNumericCost(f);
+                const costStr = numCost > 0 ? numCost.toLocaleString('ru-RU') + ' ₽' : '-';
+                const upksStr = (numCost > 0 && numArea > 0) ? `${Math.round(numCost / numArea).toLocaleString('ru-RU')} ₽/м²` : '';
+
+                const badgeClass = f._layer_type === 'zu' ? 'ac-badge-zu' : (f._layer_type === 'oks' ? 'ac-badge-oks' : 'ac-badge-str');
+                const typeName = f._layer_type === 'zu' ? 'Участок' : (f._layer_type === 'oks' ? 'Здание' : 'Сооружение');
+                const hasGeom = hasRealBoundaries(f);
+                const isDecl = isDeclaredParcel(f);
+
+                const dateObj = getFeatureDate(f);
+                let dateHtml = '-';
+                if (dateObj.regDate && dateObj.dbDate) {
+                    dateHtml = `<div>${escapeHtml(dateObj.regDate)}</div><div style="font-size:0.72rem; color:#64748b;" title="Дата записи в БД">БД: ${escapeHtml(dateObj.dbDate)}</div>`;
+                } else if (dateObj.dbDate) {
+                    dateHtml = `<div style="font-size:0.74rem; color:#64748b;">БД: ${escapeHtml(dateObj.dbDate)}</div>`;
+                } else if (dateObj.regDate) {
+                    dateHtml = `<div>${escapeHtml(dateObj.regDate)}</div>`;
+                }
+
+                const areaHtml = isDecl
+                    ? `<span style="color: #dc2626; font-weight: 700;" title="Декларированная площадь (границы не установлены)">${escapeHtml(rawArea)} м²</span>`
+                    : `<span>${rawArea !== '-' ? escapeHtml(rawArea) + ' м²' : '-'}</span>`;
+
+                const actionHtml = hasGeom
+                    ? `<button class="ac-zoom-btn" data-fid="${escapeHtml(f.id)}" title="Перейти к объекту на карте">
+                           <i class="fas fa-location-crosshairs"></i>
+                       </button>`
+                    : `<span style="color: #cbd5e1; font-weight: bold;" title="Границы не установлены">—</span>`;
+
+                const tr = document.createElement('tr');
+                tr.className = 'ac-table-row-clickable';
+                tr.innerHTML = `
+                    <td style="color: #64748b; font-weight: 600;">${i + 1}</td>
+                    <td style="font-weight: 700; color: #0284c7;">
+                        <div style="display:flex; align-items:center; gap:6px;">
+                            <span>${escapeHtml(f.id)}</span>
+                            ${hasGeom ? '<span title="Границы определены" style="color:#10b981;font-size:0.75rem;"><i class="fas fa-draw-polygon"></i></span>' : ''}
+                        </div>
+                    </td>
+                    <td><span class="ac-badge-type ${badgeClass}">${typeName}</span></td>
+                    <td>
+                        <div style="font-weight: 500; color: #0f172a;">${addr}</div>
+                        ${subPurpose ? `<div style="font-size: 0.73rem; color: #64748b; margin-top: 2px;">${subPurpose}</div>` : ''}
+                    </td>
+                    <td style="font-weight: 600;">${areaHtml}</td>
+                    <td>
+                        <div style="font-weight: 700; color: #0f172a;">${costStr}</div>
+                        ${upksStr ? `<div style="font-size: 0.72rem; color: #64748b;">${upksStr}</div>` : ''}
+                    </td>
+                    <td style="color: #1e293b; line-height: 1.25;">${dateHtml}</td>
+                    <td>${actionHtml}</td>
+                `;
+
+                tr.onclick = (e) => {
+                    if (e.target.closest('.ac-zoom-btn')) return;
+                    openObjectDetailCard(f);
+                };
+
+                const zoomBtn = tr.querySelector('.ac-zoom-btn');
+                if (zoomBtn) {
+                    zoomBtn.onclick = (e) => {
+                        e.stopPropagation();
+                        focusSingleFeatureOnMainMap(f);
+                    };
+                }
+
+                fragment.appendChild(tr);
+            }
+
+            tbody.appendChild(fragment);
+            renderedCount = nextLimit;
+            countEl.textContent = renderedCount.toLocaleString('ru-RU');
+        }
+
+        quickSearchInput.oninput = (e) => {
+            tableSearchTerm = e.target.value;
+            applyClientFilterAndSort();
+        };
+
+        sortSelect.onchange = (e) => {
+            tableSortField = e.target.value;
+            applyClientFilterAndSort();
+        };
+
+        scrollWrap.addEventListener('scroll', () => {
+            if (renderedCount < filteredFeatures.length) {
+                if (scrollWrap.scrollTop + scrollWrap.clientHeight >= scrollWrap.scrollHeight - 140) {
+                    renderRowsBatch();
+                }
+            }
+        });
+
+        applyClientFilterAndSort();
     }
 
     // Открытие детальной карточки объекта с панорамой Google Улиц и кнопкой перехода
@@ -1252,11 +1897,11 @@
         const p = feature.properties || {};
         const o = p.options || {};
         const cn = feature.id || p.descr || 'Без номера';
-        const typeName = feature._layer_type === 'zu' ? 'Земельный участок' : (feature._layer_type === 'oks' ? 'Здание' : 'Сооружение');
+        const typeName = feature._layer_type === 'zu' ? 'Земельный участок' : (feature._layer_type === 'oks' ? 'Здание (ОКС)' : 'Сооружение');
         const hasGeom = hasRealBoundaries(feature);
 
         const center = getFeatureCenterWgs(feature);
-        const streetViewUrl = center 
+        const streetViewUrl = center
             ? `https://maps.google.com/maps?layer=c&cbll=${center.lat},${center.lon}&cbp=12,0,0,0,0&output=svembed`
             : null;
 
@@ -1266,10 +1911,14 @@
 
         let propRows = '';
         const addRow = (label, val) => {
-            if (val && String(val).trim() !== '-' && String(val).trim() !== 'null') {
-                propRows += `<tr><td>${label}:</td><td>${val}</td></tr>`;
+            if (val !== null && val !== undefined && String(val).trim() !== '' && String(val).trim() !== '-' && String(val).trim() !== 'null') {
+                propRows += `<tr><td>${escapeHtml(label)}:</td><td>${escapeHtml(val)}</td></tr>`;
             }
         };
+
+        const areaNum = getNumericArea(feature);
+        const costNum = getNumericCost(feature);
+        const calcUpks = (areaNum > 0 && costNum > 0) ? `${Math.round(costNum / areaNum).toLocaleString('ru-RU')} ₽/м²` : null;
 
         addRow('Кадастровый номер', cn);
         addRow('Тип объекта', typeName);
@@ -1277,11 +1926,12 @@
         if (dateInfo.regDate) addRow('Дата внесения сведений', dateInfo.regDate);
         if (dateInfo.dbDate) addRow('Дата записи в базу данных', dateInfo.dbDate);
         addRow('Адрес', o.readable_address || o.address_readable_address);
-        addRow('Площадь / Длина', o.specified_area || o.build_record_area || o.params_extension || feature.area);
+        addRow('Площадь / Протяженность', o.specified_area || o.build_record_area || o.params_extension || feature.area);
+        addRow('Характер границ', hasGeom ? 'Границы установлены (координаты в базе)' : 'Без координат границ (декларированный)');
         addRow('Кадастровая стоимость', o.cost_value ? `${Number(o.cost_value).toLocaleString('ru-RU')} ₽` : null);
-        addRow('УПКС', o.cost_index ? `${o.cost_index} ₽/м²` : null);
+        addRow('УПКС', o.cost_index ? `${Number(o.cost_index).toLocaleString('ru-RU')} ₽/м²` : calcUpks);
         addRow('Форма собственности', o.ownership_type);
-        addRow('Тип права', o.right_type);
+        addRow('Вид права', o.right_type);
         addRow('Статус записи', o.status);
         addRow('Назначение', o.purpose || o.params_purpose);
         addRow('Наименование', o.name || o.building_name || o.params_name);
@@ -1291,40 +1941,40 @@
         addRow('Категория земель', o.land_record_category_type);
         addRow('Разрешенное использование', o.permitted_use_established_by_document);
 
-        // Если у объекта нет границ на карте — кнопка полностью скрывается
         const zoomBtnHtml = hasGeom
-            ? `<button class="ac-card-btn" id="ac-card-btn-zoom" style="background:#0284c7; color:#fff;" title="Показать на главной карте">
-                    <i class="fas fa-crosshairs"></i> Показать на карте
+            ? `<button class="ac-card-btn" id="ac-card-btn-zoom" style="background:linear-gradient(135deg, #0284c7, #2563eb); color:#fff; box-shadow:0 4px 12px rgba(2,132,199,0.25);">
+                   <i class="fas fa-location-crosshairs"></i> Показать контур на карте
                </button>`
             : '';
 
         cardOverlay.innerHTML = `
             <div class="ac-card-window">
                 <div class="ac-card-header">
-                    <div style="display:flex; align-items:center; gap:8px;">
-                        <span style="font-weight:800; font-size:1.1rem; color:#0f172a;">${cn}</span>
-                        <span style="background:#e0f2fe; color:#0369a1; font-size:0.75rem; font-weight:700; padding:2px 8px; border-radius:4px;">${typeName}</span>
+                    <div style="display:flex; align-items:center; gap:10px; flex-wrap:wrap;">
+                        <span style="font-weight:800; font-size:1.15rem; color:#0f172a;">${escapeHtml(cn)}</span>
+                        <button id="ac-copy-cn-btn" style="background:#f1f5f9; border:1px solid #cbd5e1; border-radius:6px; padding:3px 8px; font-size:0.74rem; font-weight:600; color:#334155; cursor:pointer;" title="Скопировать номер">
+                            <i class="fas fa-copy"></i> Копировать
+                        </button>
+                        <span style="background:#e0f2fe; color:#0369a1; font-size:0.75rem; font-weight:700; padding:3px 9px; border-radius:6px;">${typeName}</span>
                     </div>
                     <button class="ac-close-btn" id="ac-card-close">&times;</button>
                 </div>
                 <div class="ac-card-body">
-                    <!-- Таблица параметров -->
                     <div style="overflow-y:auto; max-height:480px; padding-right:8px;">
                         <table class="ac-card-prop-table">
                             <tbody>${propRows}</tbody>
                         </table>
                     </div>
 
-                    <!-- Панорама и действия -->
                     <div class="ac-card-right-panel">
                         <div class="ac-streetview-box">
-                            ${streetViewUrl 
+                            ${streetViewUrl
                                 ? `<iframe src="${streetViewUrl}" style="width:100%;height:100%;border:none;" allowfullscreen></iframe>`
                                 : `<div style="display:flex;align-items:center;justify-content:center;height:100%;color:#94a3b8;font-size:0.85rem;">Координаты для панорамы не определены</div>`
                             }
                         </div>
-                        <button class="ac-card-btn ac-btn-egrn" id="ac-card-btn-egrn" title="Посмотреть актуальные данные">
-                            <i class="fas fa-file-alt"></i> Посмотреть актуальные данные
+                        <button class="ac-card-btn ac-btn-egrn" id="ac-card-btn-egrn">
+                            <i class="fas fa-file-shield"></i> Проверить актуальные данные (ЕГРН)
                         </button>
                         ${zoomBtnHtml}
                     </div>
@@ -1336,16 +1986,24 @@
 
         const closeCard = () => cardOverlay.remove();
         cardOverlay.querySelector('#ac-card-close').onclick = closeCard;
+        cardOverlay.onclick = (e) => {
+            if (e.target === cardOverlay) closeCard();
+        };
 
-        // Копирует номер и открывает egrn.html
-        cardOverlay.querySelector('#ac-card-btn-egrn').onclick = async () => {
+        const copyBtn = cardOverlay.querySelector('#ac-copy-cn-btn');
+        copyBtn.onclick = async () => {
             try {
                 await navigator.clipboard.writeText(cn);
-            } catch (err) {}
+                copyBtn.innerHTML = '<i class="fas fa-check" style="color:#16a34a;"></i> Скопировано';
+                setTimeout(() => { copyBtn.innerHTML = '<i class="fas fa-copy"></i> Копировать'; }, 1500);
+            } catch (e) {}
+        };
+
+        cardOverlay.querySelector('#ac-card-btn-egrn').onclick = async () => {
+            try { await navigator.clipboard.writeText(cn); } catch (err) {}
             window.open('egrn.html', '_blank');
         };
 
-        // Фокус на карте
         const zoomBtn = cardOverlay.querySelector('#ac-card-btn-zoom');
         if (zoomBtn) {
             zoomBtn.onclick = () => {
@@ -1355,17 +2013,15 @@
         }
     }
 
-    // Фокус на конкретном одном объекте из таблицы с точным расчетом границ
+    // Фокус на конкретном одном объекте из таблицы
     function focusSingleFeatureOnMainMap(feature) {
         const activeMap = getActiveMap();
         if (!feature || !activeMap) return;
 
-        // Скрываем окно, сохраняя его состояние
         if (analyticsModal) {
             analyticsModal.style.display = 'none';
         }
 
-        // Отрисовываем объект, если его еще нет на карте
         if (feature._layer_type === 'zu' && typeof processAndDrawParcels === 'function') {
             processAndDrawParcels([feature], 'areaSearch', true);
         } else if (feature._layer_type === 'oks' && typeof processAndDrawBuildings === 'function') {
@@ -1374,7 +2030,6 @@
             processAndDrawStructures([feature]);
         }
 
-        // Расчет границ для точного центрирования
         const yandexRings = convertFeatureToYandexCoords(feature);
         if (yandexRings && yandexRings.length > 0) {
             let minLat = Infinity, maxLat = -Infinity, minLon = Infinity, maxLon = -Infinity;
@@ -1398,7 +2053,6 @@
             }
         }
 
-        // Подсветка контура на карте
         setTimeout(() => {
             const targetPolygon = (typeof polygons !== 'undefined' ? polygons : []).find(p =>
                 p.properties && (p.properties.get('cadastralNumber') === feature.id || p.properties.get('descr') === feature.id)
@@ -1429,7 +2083,7 @@
         }
     }
 
-    // Перенос выборки на главную карту с подтверждением при > 200 объектов
+    // Перенос выборки на главную карту
     function showResultsOnMainMap() {
         const activeMap = getActiveMap();
         if (!lastQueryResults?.features?.length || !activeMap) {
@@ -1443,11 +2097,9 @@
         if (totalCount > SAFE_MAP_OBJECT_LIMIT) {
             promptLargeVolumeConfirmation(totalCount, (choice) => {
                 if (choice === 'cancel') return;
-
-                const featuresToRender = (choice === 'all') 
-                    ? allFeatures 
+                const featuresToRender = (choice === 'all')
+                    ? allFeatures
                     : allFeatures.slice(0, SAFE_MAP_OBJECT_LIMIT);
-
                 executeDrawOnMap(featuresToRender, choice === 'limit' ? SAFE_MAP_OBJECT_LIMIT : totalCount);
             });
         } else {
@@ -1463,23 +2115,23 @@
         dialogOverlay.innerHTML = `
             <div class="ac-confirm-dialog">
                 <div class="ac-confirm-icon">
-                    <i class="fas fa-exclamation-triangle"></i>
+                    <i class="fas fa-triangle-exclamation"></i>
                 </div>
-                <h3 style="margin: 0 0 8px 0; color: #1e3a8a; font-size: 1.2rem;">Большой объем данных</h3>
+                <h3 style="margin: 0 0 8px 0; color: #0f172a; font-size: 1.2rem; font-weight: 800;">Большой объем геоданных</h3>
                 <div style="font-size: 0.95rem; font-weight: 700; color: #0284c7; margin-bottom: 8px;">
                     Найдено объектов: ${totalCount.toLocaleString('ru-RU')} шт.
                 </div>
-                <p style="font-size: 0.85rem; color: #64748b; margin: 0 0 18px 0; line-height: 1.4;">
-                    Отображение более 200 сложных контуров одновременно может замедлить работу карты. Выберите действие:
+                <p style="font-size: 0.85rem; color: #64748b; margin: 0 0 18px 0; line-height: 1.45;">
+                    Отрисовка более ${SAFE_MAP_OBJECT_LIMIT} полигонов одновременно может снизить плавность карты. Как поступить?
                 </p>
                 <div style="display: flex; flex-direction: column; gap: 8px;">
-                    <button id="ac-confirm-first" style="padding: 10px; border-radius: 8px; border: none; background: #2563eb; color: #fff; font-weight: 700; cursor: pointer;">
-                        Нанести первые 200 объектов (Рекомендуется)
+                    <button id="ac-confirm-first" style="padding: 11px; border-radius: 10px; border: none; background: linear-gradient(135deg, #2563eb, #1d4ed8); color: #fff; font-weight: 700; cursor: pointer;">
+                        Нанести первые ${SAFE_MAP_OBJECT_LIMIT} объектов (Рекомендуется)
                     </button>
-                    <button id="ac-confirm-all" style="padding: 10px; border-radius: 8px; border: 1px solid #cbd5e1; background: #f8fafc; color: #334155; font-weight: 600; cursor: pointer;">
-                        Нанести весь объем (${totalCount} шт.)
+                    <button id="ac-confirm-all" style="padding: 10px; border-radius: 10px; border: 1px solid #cbd5e1; background: #f8fafc; color: #334155; font-weight: 600; cursor: pointer;">
+                        Нанести весь объем (${totalCount.toLocaleString('ru-RU')} шт.)
                     </button>
-                    <button id="ac-confirm-cancel" style="padding: 8px; border-radius: 8px; border: none; background: transparent; color: #ef4444; font-weight: 600; cursor: pointer;">
+                    <button id="ac-confirm-cancel" style="padding: 8px; border-radius: 10px; border: none; background: transparent; color: #ef4444; font-weight: 700; cursor: pointer;">
                         Отмена
                     </button>
                 </div>
@@ -1519,7 +2171,7 @@
         }
     }
 
-    // Выгрузка в Excel
+    // Выгрузка в Excel (с исправлением дат и автошириной колонок)
     async function exportToExcel() {
         if (!lastQueryResults?.features?.length) {
             alert('Нет данных для выгрузки в Excel');
@@ -1527,30 +2179,62 @@
         }
         await ensureXlsx();
 
-        const headers = ["Кадастровый / Учетный номер", "Тип", "Адрес", "Площадь/Длина", "Кадастровая стоимость", "Дата сведений", "ВРИ / Назначение", "Собственность", "Тип права", "Статус", "Этажность", "Материал стен"];
+        const headers = [
+            "Кадастровый номер",
+            "Тип объекта",
+            "Адрес",
+            "Площадь / Длина",
+            "Кадастровая стоимость (₽)",
+            "УПКС (₽/м²)",
+            "Дата регистрации",
+            "Дата обновления БД",
+            "Наличие границ",
+            "ВРИ / Назначение",
+            "Форма собственности",
+            "Вид права",
+            "Статус",
+            "Этажность",
+            "Материал стен",
+            "Год постройки"
+        ];
         const rows = [headers];
 
         lastQueryResults.features.forEach(f => {
             const o = f.properties?.options || {};
+            const dateObj = getFeatureDate(f);
+            const areaVal = getNumericArea(f);
+            const costVal = getNumericCost(f);
+            const upksVal = (areaVal > 0 && costVal > 0) ? Math.round(costVal / areaVal) : (o.cost_index || '');
+
             rows.push([
-                f.id,
-                f._layer_type || 'Объект',
+                f.id || '',
+                f._layer_type === 'zu' ? 'Земельный участок' : (f._layer_type === 'oks' ? 'Здание' : 'Сооружение'),
                 o.readable_address || o.address_readable_address || '',
-                o.specified_area || o.build_record_area || o.params_extension || f.area || '',
-                o.cost_value || '',
-                getFeatureDate(f),
+                areaVal || o.specified_area || o.build_record_area || '',
+                costVal || '',
+                upksVal,
+                dateObj.regDate || '',
+                dateObj.dbDate || '',
+                hasRealBoundaries(f) ? 'Да' : 'Нет',
                 o.permitted_use_established_by_document || o.purpose || '',
                 o.ownership_type || '',
                 o.right_type || '',
                 o.status || '',
                 o.floors || '',
-                o.materials || ''
+                o.materials || '',
+                o.year_built || o.params_year_built || ''
             ]);
         });
 
         const wb = XLSX.utils.book_new();
         const ws = XLSX.utils.aoa_to_sheet(rows);
-        XLSX.utils.book_append_sheet(wb, ws, "Выборка");
+        ws['!cols'] = [
+            { wch: 22 }, { wch: 18 }, { wch: 45 }, { wch: 15 },
+            { wch: 20 }, { wch: 15 }, { wch: 16 }, { wch: 16 },
+            { wch: 14 }, { wch: 35 }, { wch: 18 }, { wch: 20 },
+            { wch: 16 }, { wch: 12 }, { wch: 18 }, { wch: 14 }
+        ];
+        XLSX.utils.book_append_sheet(wb, ws, "Аналитическая выборка");
         XLSX.writeFile(wb, `Аналитическая_выборка_${new Date().toISOString().slice(0, 10)}.xlsx`);
     }
 
