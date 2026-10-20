@@ -1289,7 +1289,7 @@
                         <!-- Блок ИИ перемещен в самый низ -->
                         <div class="ac-ai-box" style="flex-shrink: 0; margin-top: 4px;">
                             <h4><i class="fas fa-sparkles" style="color: #2563eb;"></i> ИИ-Аналитик (Запрос на русском)</h4>
-                            <textarea id="ac-ai-text" class="ac-ai-input" placeholder="Например: найди кирпичные дома от 2 этажей дороже 5 млн руб..."></textarea>
+                            <textarea id="ac-ai-text" class="ac-ai-input" placeholder=""></textarea>
                             <button id="ac-ai-submit" class="ac-btn-ai">
                                 <i class="fas fa-wand-magic-sparkles"></i> Сформировать фильтр ИИ
                             </button>
