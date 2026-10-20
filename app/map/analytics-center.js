@@ -912,7 +912,7 @@
 
                         <div class="ac-sidebar-footer">
                             <button id="ac-btn-execute" class="ac-btn-run">
-                                <i class="fas fa-bolt"></i> Сформировать анализ
+                                <i class="fas fa-bolt"></i> Сформировать
                             </button>
                             <button id="ac-btn-reset" class="ac-btn-reset" title="Сбросить все критерии">
                                 <i class="fas fa-rotate-left"></i>
