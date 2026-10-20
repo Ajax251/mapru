@@ -1129,7 +1129,7 @@
                                 <span>Аналитический центр недвижимости</span>
                                 <span class="ac-version-badge">v${ANALYTICS_CENTER_VERSION}</span>
                             </div>
-                            <div style="font-size:0.75rem; font-weight:500; color:#64748b;">Интеллектуальная система пространственного и кадастрового анализа</div>
+                            <div style="font-size:0.75rem; font-weight:500; color:#64748b;">Система пространственного и кадастрового анализа</div>
                         </div>
                     </div>
                     <button class="ac-close-btn" id="ac-close-btn" title="Закрыть окно">&times;</button>
