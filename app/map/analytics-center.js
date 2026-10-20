@@ -2464,7 +2464,7 @@
                             </div>
                             <div class="ac-form-row">
                                 <label>Адрес / ориентир (умный поиск):</label>
-                                <input type="text" id="ac-address-search" class="ac-input-text" placeholder="напр: москва тверс 5 8">
+                                <input type="text" id="ac-address-search" class="ac-input-text" placeholder="">
                             </div>
                             <div style="font-size: 0.78rem; margin-top: 2px;">
                                 <label style="display: flex; align-items: center; gap: 6px; cursor: pointer; color: #475569;">
