@@ -3,7 +3,7 @@
   */
 
 (function () {
-    const ANALYTICS_CENTER_VERSION = "2.12";
+    const ANALYTICS_CENTER_VERSION = "2.13";
     console.log(`[Analytics Center] Загружена версия ${ANALYTICS_CENTER_VERSION}`);
 
     const MAPRUAPP_AI_URL = "https://mapruapp.ru/ai/api/v1/chat/completions";
@@ -1289,7 +1289,7 @@
                         <!-- Блок ИИ перемещен в самый низ -->
                         <div class="ac-ai-box" style="flex-shrink: 0; margin-top: 4px;">
                             <h4><i class="fas fa-sparkles" style="color: #2563eb;"></i> ИИ-Аналитик (Запрос на русском)</h4>
-                            <textarea id="ac-ai-text" class="ac-ai-input" placeholder=""></textarea>
+                            <textarea id="ac-ai-text" class="ac-ai-input" placeholder="Например: найди кирпичные дома от 2 этажей дороже 5 млн руб..."></textarea>
                             <button id="ac-ai-submit" class="ac-btn-ai">
                                 <i class="fas fa-wand-magic-sparkles"></i> Сформировать фильтр ИИ
                             </button>
@@ -2108,13 +2108,21 @@
 
         function applyClientFilterAndSort() {
             const q = tableSearchTerm.trim().toLowerCase();
+            const terms = q ? q.split(/\s+/).filter(Boolean) : [];
+
             filteredFeatures = allFeatures.filter(f => {
-                if (!q) return true;
+                if (terms.length === 0) return true;
+
                 const o = f.properties?.options || {};
-                const idStr = String(f.id || '').toLowerCase();
-                const addrStr = String(o.readable_address || o.address_readable_address || '').toLowerCase();
-                const vriStr = String(o.permitted_use_established_by_document || o.purpose || '').toLowerCase();
-                return idStr.includes(q) || addrStr.includes(q) || vriStr.includes(q);
+                const p = f.properties || {};
+                const idStr = String(f.id || p.descr || o.cad_num || '');
+                const addrStr = String(o.readable_address || o.address_readable_address || '');
+                const vriStr = String(o.permitted_use_established_by_document || o.purpose || o.params_purpose || o.name || o.building_name || '');
+                
+                const fullSearchStr = `${idStr} ${addrStr} ${vriStr}`.toLowerCase();
+
+                // Условие "И": каждое введенное слово через пробел должно присутствовать в строке
+                return terms.every(term => fullSearchStr.includes(term));
             });
 
             if (tableSortField === 'cost_desc') {
