@@ -1,7 +1,7 @@
 
 
 (function () {
-    const ANALYTICS_CENTER_VERSION = "3.10";
+    const ANALYTICS_CENTER_VERSION = "3.11";
     console.log(`[Analytics Center] Загружена расширенная версия ${ANALYTICS_CENTER_VERSION}`);
 
     const MAPRUAPP_AI_URL = "https://mapruapp.ru/ai/api/v1/chat/completions";
