@@ -12356,324 +12356,307 @@ if (event.target.id === 'google-pano-menu-item') {
         }
 
 if (event.target.id === 'open-multimap-menu-item' || event.target.closest('#open-multimap-menu-item')) {
-            contextMenu.style.display = 'none';
-            const lat = parseFloat(contextMenu.dataset.lat);
-            const lon = parseFloat(contextMenu.dataset.lon);
-            const clickPt = turf.point([lon, lat]);
+    contextMenu.style.display = 'none';
+    const lat = parseFloat(contextMenu.dataset.lat);
+    const lon = parseFloat(contextMenu.dataset.lon);
+    const clickPt = turf.point([lon, lat]);
 
-            // Функция форматирования координат полигона с замыканием контура
-             const extractPolygonRings = (rawCoords) => {
-                if (!rawCoords || !Array.isArray(rawCoords) || rawCoords.length === 0) return [];
-                // Если передан сразу массив точек: [[lat, lon], [lat, lon], ...]
-                if (Array.isArray(rawCoords[0]) && typeof rawCoords[0][0] === 'number') {
-                    return [rawCoords];
+    const extractPolygonRings = (rawCoords) => {
+        if (!rawCoords || !Array.isArray(rawCoords) || rawCoords.length === 0) return [];
+        if (Array.isArray(rawCoords[0]) && typeof rawCoords[0][0] === 'number') {
+            return [rawCoords];
+        }
+        if (Array.isArray(rawCoords[0]) && Array.isArray(rawCoords[0][0]) && typeof rawCoords[0][0][0] === 'number') {
+            return rawCoords;
+        }
+        if (Array.isArray(rawCoords[0]) && Array.isArray(rawCoords[0][0]) && Array.isArray(rawCoords[0][0][0])) {
+            return rawCoords.flat(1);
+        }
+        return [];
+    };
+
+    const getPolygonCoordsText = (polygonObj) => {
+        const rings = extractPolygonRings(polygonObj.geometry.getCoordinates());
+
+        const ringBlocks = rings.map(ring => {
+            const validPts = ring
+                .filter(c => Array.isArray(c) && typeof c[0] === 'number' && typeof c[1] === 'number' && isFinite(c[0]) && isFinite(c[1]))
+                .map(c => [c[0], c[1]]);
+
+            if (validPts.length > 0) {
+                const first = validPts[0];
+                const last = validPts[validPts.length - 1];
+                if (first[0] !== last[0] || first[1] !== last[1]) {
+                    validPts.push([first[0], first[1]]);
                 }
-                // Стандартный полигон Yandex: массив колец [[[lat, lon], ...], [[lat, lon], ...]]
-                if (Array.isArray(rawCoords[0]) && Array.isArray(rawCoords[0][0]) && typeof rawCoords[0][0][0] === 'number') {
-                    return rawCoords;
-                }
-                // Мультиполигон: [[[[lat, lon], ...]]]
-                if (Array.isArray(rawCoords[0]) && Array.isArray(rawCoords[0][0]) && Array.isArray(rawCoords[0][0][0])) {
-                    return rawCoords.flat(1);
-                }
-                return [];
-            };
+            }
+            return validPts.map(p => `${p[0].toFixed(8)}\t${p[1].toFixed(8)}`).join('\n');
+        }).filter(block => block.trim().length > 0);
 
-            // Функция форматирования координат полигона с замыканием контура
-            const getPolygonCoordsText = (polygonObj) => {
-                const rings = extractPolygonRings(polygonObj.geometry.getCoordinates());
+        return ringBlocks.join('\n\n');
+    };
 
-                const ringBlocks = rings.map(ring => {
-                    const validPts = ring
-                        .filter(c => Array.isArray(c) && typeof c[0] === 'number' && typeof c[1] === 'number' && isFinite(c[0]) && isFinite(c[1]))
-                        .map(c => [c[0], c[1]]);
+    const getLineCoordsText = (lineObj) => {
+        let pts = lineObj.geometry.getCoordinates();
+        while (Array.isArray(pts[0]) && Array.isArray(pts[0][0])) {
+            pts = pts.flat(1);
+        }
+        return pts
+            .filter(p => Array.isArray(p) && typeof p[0] === 'number' && typeof p[1] === 'number' && isFinite(p[0]) && isFinite(p[1]))
+            .map(p => `${p[0].toFixed(8)}\t${p[1].toFixed(8)}`)
+            .join('\n');
+    };
 
-                    if (validPts.length > 0) {
-                        const first = validPts[0];
-                        const last = validPts[validPts.length - 1];
-                        if (first[0] !== last[0] || first[1] !== last[1]) {
-                            validPts.push([first[0], first[1]]); // Замыкание контура
+    const copyAndOpenMultimap = (textToCopy, notifyMsg) => {
+        navigator.clipboard.writeText(textToCopy);
+        showNotification(notifyMsg, 'success', 'check-circle');
+
+        const placemark = new ymaps.Placemark([lat, lon], {
+            iconContent: `Широта: ${lat}\nДолгота: ${lon}`
+        }, {
+            preset: 'islands#greenStretchyIcon',
+            draggable: true
+        });
+        map.geoObjects.add(placemark);
+        polygons.push(placemark);
+
+        window.open('mk.html', '_blank');
+    };
+
+    const allCandidateObjects = new Set([...polygons, ...areaObjects]);
+    if (map && map.geoObjects) {
+        map.geoObjects.each(obj => allCandidateObjects.add(obj));
+    }
+
+    const matchedPolygons = [];
+    const nearbyLines = [];
+    const seenPolyIds = new Set();
+    const seenLineIds = new Set();
+
+    allCandidateObjects.forEach(obj => {
+        const p = obj.properties;
+        if (p && (p.get('isQuarterBoundary') || p.get('isSearchShape') || (p.get('isMeasureTool') && !p.get('isAreaMeasurement')))) return;
+        if (typeof rectSelectionState !== 'undefined' && (obj === rectSelectionState?.rectObject || obj === rectSelectionState?.previewObject)) return;
+        if (obj.options && obj.options.get('visible') === false) return;
+
+        const fd = p ? p.get('featureData') : null;
+        const opts = fd?.properties?.options || {};
+        let title = p?.get('cadastralNumber') || opts.cad_num || opts.cad_number || opts.reg_numb_border || fd?.properties?.descr;
+        if (!title) {
+            const hint = p?.get('hintContent');
+            if (typeof hint === 'object' && hint?.cadastralNumber) title = hint.cadastralNumber;
+            else if (typeof hint === 'string') title = hint.replace(/<[^>]*>?/gm, '').trim();
+        }
+
+        if (obj instanceof ymaps.Polygon) {
+            let isInside = false;
+            try {
+                const rawCoords = obj.geometry.getCoordinates();
+                const polys = (rawCoords && Array.isArray(rawCoords[0]) && Array.isArray(rawCoords[0][0]) && typeof rawCoords[0][0][0] === 'number')
+                    ? [rawCoords]
+                    : (Array.isArray(rawCoords[0]) && typeof rawCoords[0][0] === 'number' ? [[rawCoords]] : rawCoords);
+
+                for (const polyRings of polys) {
+                    if (!polyRings || !polyRings[0] || polyRings[0].length < 3) continue;
+                    const outer = polyRings[0].map(c => [c[1], c[0]]);
+                    if (outer[0][0] !== outer[outer.length - 1][0] || outer[0][1] !== outer[outer.length - 1][1]) {
+                        outer.push([...outer[0]]);
+                    }
+                    if (outer.length >= 4 && turf.booleanPointInPolygon(clickPt, turf.polygon([outer]))) {
+                        let inHole = false;
+                        for (let h = 1; h < polyRings.length; h++) {
+                            const hole = polyRings[h].map(c => [c[1], c[0]]);
+                            if (hole[0][0] !== hole[hole.length - 1][0] || hole[0][1] !== hole[hole.length - 1][1]) {
+                                hole.push([...hole[0]]);
+                            }
+                            if (hole.length >= 4 && turf.booleanPointInPolygon(clickPt, turf.polygon([hole]))) {
+                                inHole = true;
+                                break;
+                            }
+                        }
+                        if (!inHole) {
+                            isInside = true;
+                            break;
                         }
                     }
-                    return validPts.map(p => `${p[0].toFixed(8)}\t${p[1].toFixed(8)}`).join('\n');
-                }).filter(block => block.trim().length > 0);
-
-                return ringBlocks.join('\n\n');
-            };
-
-            // Функция форматирования координат линии
-            const getLineCoordsText = (lineObj) => {
-                let pts = lineObj.geometry.getCoordinates();
-                while (Array.isArray(pts[0]) && Array.isArray(pts[0][0])) {
-                    pts = pts.flat(1);
                 }
-                return pts
-                    .filter(p => Array.isArray(p) && typeof p[0] === 'number' && typeof p[1] === 'number' && isFinite(p[0]) && isFinite(p[1]))
-                    .map(p => `${p[0].toFixed(8)}\t${p[1].toFixed(8)}`)
-                    .join('\n');
-            };
-
-
-            // Стандартное действие: скопировать текст, добавить маркер и открыть mk.html
-            const copyAndOpenMultimap = (textToCopy, notifyMsg) => {
-                navigator.clipboard.writeText(textToCopy);
-                showNotification(notifyMsg, 'success', 'check-circle');
-
-                const placemark = new ymaps.Placemark([lat, lon], {
-                    iconContent: `Широта: ${lat}\nДолгота: ${lon}`
-                }, {
-                    preset: 'islands#greenStretchyIcon',
-                    draggable: true
-                });
-                map.geoObjects.add(placemark);
-                polygons.push(placemark);
-
-                window.open('mk.html', '_blank');
-            };
-
-            const allCandidateObjects = new Set([...polygons, ...areaObjects]);
-            if (map && map.geoObjects) {
-                map.geoObjects.each(obj => allCandidateObjects.add(obj));
+            } catch (e) {
+                if (obj.geometry?.contains && obj.geometry.contains([lat, lon])) {
+                    isInside = true;
+                }
             }
 
-            const matchedPolygons = [];
-            const nearbyLines = [];
-            const seenPolyIds = new Set();
-            const seenLineIds = new Set();
-
-            allCandidateObjects.forEach(obj => {
-                const p = obj.properties;
-                if (p && (p.get('isQuarterBoundary') || p.get('isSearchShape') || p.get('isMeasureTool'))) return;
-                if (typeof rectSelectionState !== 'undefined' && (obj === rectSelectionState?.rectObject || obj === rectSelectionState?.previewObject)) return;
-                if (obj.options && obj.options.get('visible') === false) return;
-
-                const fd = p ? p.get('featureData') : null;
-                const opts = fd?.properties?.options || {};
-                let title = p?.get('cadastralNumber') || opts.cad_num || opts.cad_number || opts.reg_numb_border || fd?.properties?.descr;
-                if (!title) {
-                    const hint = p?.get('hintContent');
-                    if (typeof hint === 'object' && hint?.cadastralNumber) title = hint.cadastralNumber;
-                    else if (typeof hint === 'string') title = hint.replace(/<[^>]*>?/gm, '').trim();
+            if (isInside) {
+                const id = title || `Полигон #${matchedPolygons.length + 1}`;
+                if (!seenPolyIds.has(id)) {
+                    seenPolyIds.add(id);
+                    const stats = calculatePreciseGeometry(obj);
+                    matchedPolygons.push({
+                        id,
+                        coordsText: getPolygonCoordsText(obj),
+                        areaStr: stats.area > 0 ? `~${Math.round(stats.area).toLocaleString('ru-RU')} м²` : ''
+                    });
                 }
-
-                // 1. Проверка полигонов (вхождение точки внутрь контура)
-                if (obj instanceof ymaps.Polygon) {
-                    let isInside = false;
-                    try {
-                        const rawCoords = obj.geometry.getCoordinates();
-                        const polys = (rawCoords && Array.isArray(rawCoords[0]) && Array.isArray(rawCoords[0][0]) && typeof rawCoords[0][0][0] === 'number')
-                            ? [rawCoords]
-                            : (Array.isArray(rawCoords[0]) && typeof rawCoords[0][0] === 'number' ? [[rawCoords]] : rawCoords);
-
-                        for (const polyRings of polys) {
-                            if (!polyRings || !polyRings[0] || polyRings[0].length < 3) continue;
-                            const outer = polyRings[0].map(c => [c[1], c[0]]);
-                            if (outer[0][0] !== outer[outer.length - 1][0] || outer[0][1] !== outer[outer.length - 1][1]) {
-                                outer.push([...outer[0]]);
-                            }
-                            if (outer.length >= 4 && turf.booleanPointInPolygon(clickPt, turf.polygon([outer]))) {
-                                let inHole = false;
-                                for (let h = 1; h < polyRings.length; h++) {
-                                    const hole = polyRings[h].map(c => [c[1], c[0]]);
-                                    if (hole[0][0] !== hole[hole.length - 1][0] || hole[0][1] !== hole[hole.length - 1][1]) {
-                                        hole.push([...hole[0]]);
-                                    }
-                                    if (hole.length >= 4 && turf.booleanPointInPolygon(clickPt, turf.polygon([hole]))) {
-                                        inHole = true;
-                                        break;
-                                    }
-                                }
-                                if (!inHole) {
-                                    isInside = true;
-                                    break;
-                                }
-                            }
-                        }
-                    } catch (e) {
-                        if (obj.geometry?.contains && obj.geometry.contains([lat, lon])) {
-                            isInside = true;
-                        }
-                    }
-
-                    if (isInside) {
-                        const id = title || `Полигон #${matchedPolygons.length + 1}`;
-                        if (!seenPolyIds.has(id)) {
-                            seenPolyIds.add(id);
+            }
+        } else if (obj instanceof ymaps.Polyline) {
+            try {
+                const lineCoords = obj.geometry.getCoordinates();
+                if (lineCoords && lineCoords.length >= 2) {
+                    const turfLine = turf.lineString(lineCoords.map(c => [c[1], c[0]]));
+                    const distMeters = turf.pointToLineDistance(clickPt, turfLine, { units: 'meters' });
+                    if (distMeters <= 100) {
+                        const id = title || `Линия #${nearbyLines.length + 1}`;
+                        if (!seenLineIds.has(id)) {
+                            seenLineIds.add(id);
                             const stats = calculatePreciseGeometry(obj);
-                            matchedPolygons.push({
+                            nearbyLines.push({
                                 id,
-                                coordsText: getPolygonCoordsText(obj),
-                                areaStr: stats.area > 0 ? `~${Math.round(stats.area).toLocaleString('ru-RU')} м²` : ''
+                                coordsText: getLineCoordsText(obj),
+                                dist: Math.round(distMeters),
+                                lengthStr: stats.perimeter > 0 ? `L: ~${Math.round(stats.perimeter)} м` : ''
                             });
                         }
                     }
                 }
-
-                // 2. Проверка линейных объектов (в радиусе 100 метров)
-                else if (obj instanceof ymaps.Polyline) {
-                    try {
-                        const lineCoords = obj.geometry.getCoordinates();
-                        if (lineCoords && lineCoords.length >= 2) {
-                            const turfLine = turf.lineString(lineCoords.map(c => [c[1], c[0]]));
-                            const distMeters = turf.pointToLineDistance(clickPt, turfLine, { units: 'meters' });
-                            if (distMeters <= 100) {
-                                const id = title || `Линия #${nearbyLines.length + 1}`;
-                                if (!seenLineIds.has(id)) {
-                                    seenLineIds.add(id);
-                                    const stats = calculatePreciseGeometry(obj);
-                                    nearbyLines.push({
-                                        id,
-                                        coordsText: getLineCoordsText(obj),
-                                        dist: Math.round(distMeters),
-                                        lengthStr: stats.perimeter > 0 ? `L: ~${Math.round(stats.perimeter)} м` : ''
-                                    });
-                                }
-                            }
-                        }
-                    } catch (e) {}
-                }
-            });
-
-            // Если полигонов под точкой и линий в радиусе 100м нет — копируем только координаты точки
-            if (matchedPolygons.length === 0 && nearbyLines.length === 0) {
-                proceedWithCopy(`${lat} ${lon}`, 'Координаты точки скопированы, открывается МультиКарта...');
-                return;
-            }
-
-            // Построение диалогового окна выбора
-            const modal = document.createElement('div');
-            modal.style.cssText = `
-                position: fixed; inset: 0; background: rgba(15, 23, 42, 0.55);
-                backdrop-filter: blur(4px); z-index: 20050;
-                display: flex; align-items: center; justify-content: center;
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-            `;
-
-            let listHtml = '';
-
-            if (matchedPolygons.length > 0) {
-                listHtml += `<div style="font-size: 0.78rem; font-weight: 700; color: #1e40af; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px;">Полигоны в точке (замкнутый контур):</div>`;
-                listHtml += matchedPolygons.map((p, idx) => `
-                    <button class="mm-coord-btn" data-type="poly" data-idx="${idx}" style="
-                        display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 10px 14px;
-                        background: #f8fafc; border: 1.5px solid #cbd5e1; border-radius: 8px;
-                        color: #1e293b; font-size: 0.92rem; font-weight: 600; cursor: pointer;
-                        text-align: left; transition: all 0.15s ease; box-sizing: border-box;
-                    " onmouseenter="this.style.background='#eff6ff'; this.style.borderColor='#93c5fd';" onmouseleave="this.style.background='#f8fafc'; this.style.borderColor='#cbd5e1';">
-                        <div style="display:flex; align-items:center; gap:8px; overflow:hidden; min-width:0;">
-                            <i class="fas fa-draw-polygon" style="color: #2563eb; font-size: 1.05rem; flex-shrink:0;"></i>
-                            <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${p.id}</span>
-                        </div>
-                        ${p.areaStr ? `<span style="font-size: 0.8rem; color: #64748b; font-weight: 500; margin-left:8px; flex-shrink:0;">${p.areaStr}</span>` : ''}
-                    </button>
-                `).join('');
-            }
-
-            if (nearbyLines.length > 0) {
-                listHtml += `<div style="font-size: 0.78rem; font-weight: 700; color: #d97706; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 6px;">Линейные объекты рядом (до 100 м):</div>`;
-                listHtml += nearbyLines.map((l, idx) => `
-                    <button class="mm-coord-btn" data-type="line" data-idx="${idx}" style="
-                        display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 10px 14px;
-                        background: #f8fafc; border: 1.5px solid #fed7aa; border-radius: 8px;
-                        color: #1e293b; font-size: 0.92rem; font-weight: 600; cursor: pointer;
-                        text-align: left; transition: all 0.15s ease; box-sizing: border-box;
-                    " onmouseenter="this.style.background='#fff7ed'; this.style.borderColor='#fb923c';" onmouseleave="this.style.background='#f8fafc'; this.style.borderColor='#fed7aa';">
-                        <div style="display:flex; align-items:center; gap:8px; overflow:hidden; min-width:0;">
-                            <i class="fas fa-route" style="color: #ea580c; font-size: 1.05rem; flex-shrink:0;"></i>
-                            <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${l.id}</span>
-                        </div>
-                        <span style="font-size: 0.8rem; color: #ea580c; font-weight: 600; margin-left:8px; flex-shrink:0;">${l.lengthStr ? l.lengthStr + ' · ' : ''}~${l.dist} м</span>
-                    </button>
-                `).join('');
-            }
-
-            const totalObjects = matchedPolygons.length + nearbyLines.length;
-
-            modal.innerHTML = `
-                <div style="
-                    background: #ffffff; border-radius: 16px; width: 460px; max-width: 92vw;
-                    padding: 22px 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.25);
-                    display: flex; flex-direction: column; gap: 14px; border: 1px solid #e2e8f0;
-                ">
-                    <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #f1f5f9; padding-bottom: 10px;">
-                        <h3 style="margin: 0; color: #1e3a8a; font-size: 1.15rem; font-weight: 700; display: flex; align-items: center; gap: 8px;">
-                            <i class="fas fa-th-large" style="color: #4ade80;"></i> МультиКарта: выбор координат
-                        </h3>
-                        <button id="mm-close-btn" style="background: none; border: none; font-size: 22px; color: #94a3b8; cursor: pointer; line-height: 1;">&times;</button>
-                    </div>
-
-                    <div style="font-size: 0.88rem; color: #475569; line-height: 1.4;">
-                        Выберите объект, чьи географические координаты нужно скопировать в буфер обмена перед открытием МультиКарты:
-                    </div>
-
-                    <div style="display: flex; flex-direction: column; gap: 6px; max-height: 42vh; overflow-y: auto; padding-right: 2px;">
-                        ${listHtml}
-                    </div>
-
-                    ${totalObjects > 1 ? `
-                        <button id="mm-copy-all-btn" style="
-                            padding: 10px 14px; background: #e0f2fe; border: 1.5px solid #7dd3fc;
-                            color: #0369a1; border-radius: 8px; font-weight: 700; font-size: 0.88rem;
-                            cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
-                            transition: all 0.15s ease;
-                        " onmouseenter="this.style.background='#bae6fd';" onmouseleave="this.style.background='#e0f2fe';">
-                            <i class="fas fa-copy"></i> Скопировать координаты всех объектов (${totalObjects} шт.)
-                        </button>
-                    ` : ''}
-
-                    <button id="mm-copy-point-btn" style="
-                        padding: 10px 14px; background: #f0fdf4; border: 1.5px solid #86efac;
-                        color: #15803d; border-radius: 8px; font-weight: 700; font-size: 0.88rem;
-                        cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
-                        transition: all 0.15s ease;
-                    " onmouseenter="this.style.background='#dcfce7';" onmouseleave="this.style.background='#f0fdf4';">
-                        <i class="fas fa-map-marker-alt"></i> Только координаты точки (${lat.toFixed(6)}, ${lon.toFixed(6)})
-                    </button>
-
-                    <button id="mm-cancel-btn" style="
-                        padding: 8px; border: 1px solid #cbd5e1; border-radius: 8px;
-                        background: #ffffff; color: #64748b; font-weight: 600; font-size: 0.85rem; cursor: pointer;
-                    ">Отмена</button>
-                </div>
-            `;
-
-            document.body.appendChild(modal);
-
-            const closeModal = () => modal.remove();
-            modal.querySelector('#mm-close-btn').onclick = closeModal;
-            modal.querySelector('#mm-cancel-btn').onclick = closeModal;
-            modal.onclick = (e) => { if (e.target === modal) closeModal(); };
-
-            // Клик по конкретному полигону или линии — копирование координат
-            modal.querySelectorAll('.mm-coord-btn').forEach(btn => {
-                btn.onclick = () => {
-                    const type = btn.dataset.type;
-                    const idx = parseInt(btn.dataset.idx, 10);
-                    const item = type === 'poly' ? matchedPolygons[idx] : nearbyLines[idx];
-                    closeModal();
-                    copyAndOpenMultimap(item.coordsText, `Координаты ${item.id} скопированы, открывается МультиКарта...`);
-                };
-            });
-
-            // Скопировать координаты всех найденных объектов
-            const copyAllBtn = modal.querySelector('#mm-copy-all-btn');
-            if (copyAllBtn) {
-                copyAllBtn.onclick = () => {
-                    const allCoordsArr = [
-                        ...matchedPolygons.map(p => p.coordsText),
-                        ...nearbyLines.map(l => l.coordsText)
-                    ];
-                    closeModal();
-                    copyAndOpenMultimap(allCoordsArr.join('\n\n'), `Координаты ${totalObjects} объектов скопированы, открывается МультиКарта...`);
-                };
-            }
-
-            // Скопировать только точку клика
-            modal.querySelector('#mm-copy-point-btn').onclick = () => {
-                closeModal();
-                copyAndOpenMultimap(`${lat} ${lon}`, 'Координаты точки скопированы, открывается МультиКарта...');
-            };
+            } catch (e) {}
         }
+    });
+
+    if (matchedPolygons.length === 0 && nearbyLines.length === 0) {
+        copyAndOpenMultimap(`${lat} ${lon}`, 'Координаты точки скопированы, открывается МультиКарта...');
+        return;
+    }
+
+    const modal = document.createElement('div');
+    modal.style.cssText = `
+        position: fixed; inset: 0; background: rgba(15, 23, 42, 0.55);
+        backdrop-filter: blur(4px); z-index: 20050;
+        display: flex; align-items: center; justify-content: center;
+        font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+    `;
+
+    let listHtml = '';
+
+    if (matchedPolygons.length > 0) {
+        listHtml += `<div style="font-size: 0.78rem; font-weight: 700; color: #1e40af; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 4px;">Полигоны в точке (замкнутый контур):</div>`;
+        listHtml += matchedPolygons.map((p, idx) => `
+            <button class="mm-coord-btn" data-type="poly" data-idx="${idx}" style="
+                display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 10px 14px;
+                background: #f8fafc; border: 1.5px solid #cbd5e1; border-radius: 8px;
+                color: #1e293b; font-size: 0.92rem; font-weight: 600; cursor: pointer;
+                text-align: left; transition: all 0.15s ease; box-sizing: border-box;
+            " onmouseenter="this.style.background='#eff6ff'; this.style.borderColor='#93c5fd';" onmouseleave="this.style.background='#f8fafc'; this.style.borderColor='#cbd5e1';">
+                <div style="display:flex; align-items:center; gap:8px; overflow:hidden; min-width:0;">
+                    <i class="fas fa-draw-polygon" style="color: #2563eb; font-size: 1.05rem; flex-shrink:0;"></i>
+                    <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${p.id}</span>
+                </div>
+                ${p.areaStr ? `<span style="font-size: 0.8rem; color: #64748b; font-weight: 500; margin-left:8px; flex-shrink:0;">${p.areaStr}</span>` : ''}
+            </button>
+        `).join('');
+    }
+
+    if (nearbyLines.length > 0) {
+        listHtml += `<div style="font-size: 0.78rem; font-weight: 700; color: #d97706; text-transform: uppercase; letter-spacing: 0.5px; margin-top: 6px;">Линейные объекты рядом (до 100 м):</div>`;
+        listHtml += nearbyLines.map((l, idx) => `
+            <button class="mm-coord-btn" data-type="line" data-idx="${idx}" style="
+                display: flex; align-items: center; justify-content: space-between; width: 100%; padding: 10px 14px;
+                background: #f8fafc; border: 1.5px solid #fed7aa; border-radius: 8px;
+                color: #1e293b; font-size: 0.92rem; font-weight: 600; cursor: pointer;
+                text-align: left; transition: all 0.15s ease; box-sizing: border-box;
+            " onmouseenter="this.style.background='#fff7ed'; this.style.borderColor='#fb923c';" onmouseleave="this.style.background='#f8fafc'; this.style.borderColor='#fed7aa';">
+                <div style="display:flex; align-items:center; gap:8px; overflow:hidden; min-width:0;">
+                    <i class="fas fa-route" style="color: #ea580c; font-size: 1.05rem; flex-shrink:0;"></i>
+                    <span style="overflow: hidden; text-overflow: ellipsis; white-space: nowrap;">${l.id}</span>
+                </div>
+                <span style="font-size: 0.8rem; color: #ea580c; font-weight: 600; margin-left:8px; flex-shrink:0;">${l.lengthStr ? l.lengthStr + ' · ' : ''}~${l.dist} м</span>
+            </button>
+        `).join('');
+    }
+
+    const totalObjects = matchedPolygons.length + nearbyLines.length;
+
+    modal.innerHTML = `
+        <div style="
+            background: #ffffff; border-radius: 16px; width: 460px; max-width: 92vw;
+            padding: 22px 24px; box-shadow: 0 20px 40px rgba(0,0,0,0.25);
+            display: flex; flex-direction: column; gap: 14px; border: 1px solid #e2e8f0;
+        ">
+            <div style="display: flex; justify-content: space-between; align-items: center; border-bottom: 2px solid #f1f5f9; padding-bottom: 10px;">
+                <h3 style="margin: 0; color: #1e3a8a; font-size: 1.15rem; font-weight: 700; display: flex; align-items: center; gap: 8px;">
+                    <i class="fas fa-th-large" style="color: #4ade80;"></i> МультиКарта: выбор координат
+                </h3>
+                <button id="mm-close-btn" style="background: none; border: none; font-size: 22px; color: #94a3b8; cursor: pointer; line-height: 1;">&times;</button>
+            </div>
+
+            <div style="font-size: 0.88rem; color: #475569; line-height: 1.4;">
+                Выберите объект, чьи географические координаты нужно скопировать в буфер обмена перед открытием МультиКарты:
+            </div>
+
+            <div style="display: flex; flex-direction: column; gap: 6px; max-height: 42vh; overflow-y: auto; padding-right: 2px;">
+                ${listHtml}
+            </div>
+
+            ${totalObjects > 1 ? `
+                <button id="mm-copy-all-btn" style="
+                    padding: 10px 14px; background: #e0f2fe; border: 1.5px solid #7dd3fc;
+                    color: #0369a1; border-radius: 8px; font-weight: 700; font-size: 0.88rem;
+                    cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
+                    transition: all 0.15s ease;
+                " onmouseenter="this.style.background='#bae6fd';" onmouseleave="this.style.background='#e0f2fe';">
+                    <i class="fas fa-copy"></i> Скопировать координаты всех объектов (${totalObjects} шт.)
+                </button>
+            ` : ''}
+
+            <button id="mm-copy-point-btn" style="
+                padding: 10px 14px; background: #f0fdf4; border: 1.5px solid #86efac;
+                color: #15803d; border-radius: 8px; font-weight: 700; font-size: 0.88rem;
+                cursor: pointer; display: flex; align-items: center; justify-content: center; gap: 8px;
+                transition: all 0.15s ease;
+            " onmouseenter="this.style.background='#dcfce7';" onmouseleave="this.style.background='#f0fdf4';">
+                <i class="fas fa-map-marker-alt"></i> Только координаты точки (${lat.toFixed(6)}, ${lon.toFixed(6)})
+            </button>
+
+            <button id="mm-cancel-btn" style="
+                padding: 8px; border: 1px solid #cbd5e1; border-radius: 8px;
+                background: #ffffff; color: #64748b; font-weight: 600; font-size: 0.85rem; cursor: pointer;
+            ">Отмена</button>
+        </div>
+    `;
+
+    document.body.appendChild(modal);
+
+    const closeModal = () => modal.remove();
+    modal.querySelector('#mm-close-btn').onclick = closeModal;
+    modal.querySelector('#mm-cancel-btn').onclick = closeModal;
+    modal.onclick = (e) => { if (e.target === modal) closeModal(); };
+
+    modal.querySelectorAll('.mm-coord-btn').forEach(btn => {
+        btn.onclick = () => {
+            const type = btn.dataset.type;
+            const idx = parseInt(btn.dataset.idx, 10);
+            const item = type === 'poly' ? matchedPolygons[idx] : nearbyLines[idx];
+            closeModal();
+            copyAndOpenMultimap(item.coordsText, `Координаты ${item.id} скопированы, открывается МультиКарта...`);
+        };
+    });
+
+    const copyAllBtn = modal.querySelector('#mm-copy-all-btn');
+    if (copyAllBtn) {
+        copyAllBtn.onclick = () => {
+            const allCoordsArr = [
+                ...matchedPolygons.map(p => p.coordsText),
+                ...nearbyLines.map(l => l.coordsText)
+            ];
+            closeModal();
+            copyAndOpenMultimap(allCoordsArr.join('\n\n'), `Координаты ${totalObjects} объектов скопированы, открывается МультиКарта...`);
+        };
+    }
+
+    modal.querySelector('#mm-copy-point-btn').onclick = () => {
+        closeModal();
+        copyAndOpenMultimap(`${lat} ${lon}`, 'Координаты точки скопированы, открывается МультиКарта...');
+    };
+}
         
         
         
