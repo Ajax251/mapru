@@ -12273,205 +12273,271 @@ function runValidation(xmlDoc, xmlText) {
     messages.push(`<div class="subsection" style="margin-top:0"><div class="subsection-title">Все кадастровые номера в документе</div>${numberListHtml}</div>`);
 
     
-    const targetParcels = All(xmlDoc, 'NewParcel, SpecifyParcel > ExistParcel, SpecifyParcel > ExistEZ');
-
-    targetParcels.forEach((parcel, index) => {
-        let categoryCode = null;
-        let area = 0;
-        let statedAreaInaccuracy = 0;
-        let parcelId = '';
-
-        if (parcel.tagName === 'NewParcel') {
-            parcelId = A(parcel, 'Definition') || T(parcel, 'CadastralBlock') || `ЗУ${index + 1}`;
-        } else if (parcel.tagName === 'ExistEZ') {
-            parcelId = A(E(parcel, 'ExistEZParcels'), 'CadastralNumber') || 'ЕЗ';
-        } else {
-            parcelId = A(parcel, 'CadastralNumber') || 'Уточняемый ЗУ';
-        }
-
-        const categoryNode = E(parcel, 'Category');
-        if (categoryNode) {
-            categoryCode = A(categoryNode, 'Category');
-        }
-
-        const requiredMt = categoryCode ? accuracyStandards[categoryCode] : null;
-
-        if (parcel.tagName === 'ExistEZ') {
-            const ezParcels = E(parcel, 'ExistEZParcels');
-            if (ezParcels) {
-                area = parseFloat(T(ezParcels, 'Area > Area'));
-                statedAreaInaccuracy = parseFloat(T(ezParcels, 'Area > Inaccuracy'));
+   // --- ПРОВЕРКА ТОЧНОСТИ, СК, ПЛОЩАДЕЙ И ФОРМУЛ (ВСЕ УЧАСТКИ, ВКЛЮЧАЯ СМЕЖНЫЕ С ПЛОЩАДЬЮ) ---
+        const targetParcels = Array.from(xmlDoc.querySelectorAll(
+            'NewParcel, SpecifyParcel > ExistParcel, SpecifyParcel > ExistEZ, SpecifyParcelApproximal > ExistParcel, SpecifyRelatedParcel'
+        )).filter(p => {
+            if (p.tagName === 'SpecifyRelatedParcel') {
+                return p.querySelector('AllBorder') || p.querySelector('Area');
             }
-        } else {
-            const directAreaNode = Array.from(parcel.children).find(el => el.tagName === 'Area');
-            if (directAreaNode) {
-                area = parseFloat(T(directAreaNode, 'Area'));
-                statedAreaInaccuracy = parseFloat(T(directAreaNode, 'Inaccuracy'));
+            return true;
+        });
+
+        targetParcels.forEach((parcel, index) => {
+            let categoryCode = null;
+            let area = 0;
+            let statedAreaInaccuracy = 0;
+            let parcelId = '';
+
+            if (parcel.tagName === 'NewParcel') {
+                parcelId = A(parcel, 'Definition') || T(parcel, 'CadastralBlock') || `ЗУ${index + 1}`;
+            } else if (parcel.tagName === 'ExistEZ') {
+                parcelId = A(E(parcel, 'ExistEZParcels'), 'CadastralNumber') || 'ЕЗ';
             } else {
-                 area = parseFloat(T(parcel, 'Area > Area'));
-                 statedAreaInaccuracy = parseFloat(T(parcel, 'Area > Inaccuracy'));
+                parcelId = A(parcel, 'CadastralNumber') || (parcel.closest('SpecifyParcelApproximal') ? 'Смежный ЗУ' : 'Уточняемый ЗУ');
             }
-        }
 
-        const ordinates = Array.from(All(parcel, 'Ordinate, NewOrdinate'));
+            const categoryNode = E(parcel, 'Category');
+            if (categoryNode) {
+                categoryCode = A(categoryNode, 'Category');
+            }
 
-        if (ordinates.length > 0) {
-            const spatialEl = parcel.querySelector('EntitySpatial');
-            if (spatialEl) {
-                const sysInfo = parseSpatialSystemInfo(spatialEl, xmlDoc);
-                if (sysInfo) {
-                    let zoneOk = null;
-                    let detectedZone = null;
-                    let maxCoord = null;
+            const requiredMt = categoryCode ? accuracyStandards[categoryCode] : null;
 
-                    const firstOrd = ordinates[0];
-                    const xVal = parseFloat(firstOrd.getAttribute('X'));
-                    const yVal = parseFloat(firstOrd.getAttribute('Y'));
-                    if (!isNaN(xVal) && !isNaN(yVal)) {
-                        maxCoord = Math.max(Math.abs(xVal), Math.abs(yVal));
-                        detectedZone = maxCoord.toString().charAt(0);
+            if (parcel.tagName === 'ExistEZ') {
+                const ezParcels = E(parcel, 'ExistEZParcels');
+                if (ezParcels) {
+                    area = parseFloat(T(ezParcels, 'Area > Area'));
+                    statedAreaInaccuracy = parseFloat(T(ezParcels, 'Area > Inaccuracy'));
+                }
+            } else {
+                const directAreaNode = Array.from(parcel.children).find(el => el.tagName === 'Area');
+                if (directAreaNode) {
+                    area = parseFloat(T(directAreaNode, 'Area'));
+                    statedAreaInaccuracy = parseFloat(T(directAreaNode, 'Inaccuracy'));
+                } else {
+                    area = parseFloat(T(parcel, 'Area > Area'));
+                    statedAreaInaccuracy = parseFloat(T(parcel, 'Area > Inaccuracy'));
+                }
+            }
 
-                        if (sysInfo.zone) {
-                            zoneOk = (sysInfo.zone === detectedZone);
+            // Проверка обязательного указания площади и погрешности
+            if (isNaN(area) || area <= 0) {
+                messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${parcelId}] Ошибка:</strong> Не указана площадь земельного участка (&lt;Area&gt;).</div>`);
+            }
+
+            if (isNaN(statedAreaInaccuracy) || statedAreaInaccuracy <= 0) {
+                messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${parcelId}] Ошибка:</strong> Не указана погрешность определения площади (&lt;Inaccuracy&gt;).</div>`);
+            }
+
+            // Проверка соответствия DeltaArea (разницы с площадью по ЕГРН)
+            const areaGknNode = parcel.querySelector('AreaInGKN');
+            if (areaGknNode && !isNaN(area) && area > 0) {
+                const areaGkn = parseFloat(areaGknNode.textContent.trim());
+                const deltaAreaNode = parcel.querySelector('DeltaArea');
+                if (!isNaN(areaGkn)) {
+                    const expectedDelta = Math.round(Math.abs(area - areaGkn));
+                    if (deltaAreaNode) {
+                        const statedDelta = parseFloat(deltaAreaNode.textContent.trim());
+                        if (!isNaN(statedDelta) && Math.abs(statedDelta - expectedDelta) > 1) {
+                            messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${parcelId}] Ошибка расхождения площадей:</strong> Значение &lt;DeltaArea&gt; (${statedDelta} м²) не соответствует разнице между уточненной площадью (${area} м²) и площадью по ЕГРН (${areaGkn} м²). Ожидалось: ${expectedDelta} м².</div>`);
                         }
-                    }
-
-                    let regionOk = null;
-                    const cadRef = T(parcel, 'CadastralBlock') || parcel.getAttribute('CadastralNumber') || '';
-                    const quarterRegion = cadRef.includes(':') ? cadRef.split(':')[0].trim() : '';
-                    if (sysInfo.region && quarterRegion) {
-                        regionOk = (parseInt(sysInfo.region, 10) === parseInt(quarterRegion, 10));
-                    }
-
-                    if (zoneOk === true && regionOk === true) {
-                        messages.push(`<div class="validation-message validation-success">${sectionIcons.successIcon} <strong>[${parcelId}] Система координат указана верно:</strong> ${sysInfo.csDisplay} (регион ${sysInfo.region}, зона ${sysInfo.zone}).</div>`);
                     } else {
-                        if (zoneOk === false) {
-                            messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${parcelId}] Несоответствие зоны СК:</strong> В СК указана зона <strong>${sysInfo.zone}</strong> (${sysInfo.csDisplay}), а по координатам определена зона <strong>${detectedZone}</strong> (координата <code>${maxCoord.toFixed(2)}</code>).</div>`);
-                        }
-                        if (regionOk === false) {
-                            messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${parcelId}] Несоответствие региона СК:</strong> В СК указан регион <strong>${sysInfo.region}</strong> (${sysInfo.csDisplay}), а кадастровый квартал относится к региону <strong>${quarterRegion}</strong> (<code>${cadRef}</code>).</div>`);
-                        }
+                        messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>[${parcelId}] Предупреждение:</strong> Не указано расхождение площадей (&lt;DeltaArea&gt;).</div>`);
                     }
                 }
             }
 
-            const accuracies = new Set();
-            let allFixingsFilled = true;
+            const ordinates = Array.from(All(parcel, 'SpatialElement Ordinate, SpatialElement NewOrdinate, SpelementUnit > Ordinate, SpelementUnit > NewOrdinate, AllBorder Ordinate, AllBorder NewOrdinate'));
 
-            ordinates.forEach(ord => {
-                const delta = A(ord, 'DeltaGeopoint');
-                if(delta && delta !== '—') accuracies.add(parseFloat(delta));
-                if(A(ord, 'GeopointZacrep') === '—') allFixingsFilled = false;
-            });
-
-            if (!allFixingsFilled) {
-                messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>[${parcelId}] Предупреждение:</strong> Не для всех точек указан метод закрепления на местности.</div>`);
-            }
-
-            if (accuracies.size > 1) {
-                messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>[${parcelId}] Предупреждение:</strong> У точек участка разные значения погрешности (${Array.from(accuracies).join(', ')}).</div>`);
-            }
-
-            const actualMt = accuracies.size > 0 ? accuracies.values().next().value : null;
-
-            const minAreaNode = parcel.querySelector('MinArea > Area');
-            const maxAreaNode = parcel.querySelector('MaxArea > Area');
-
-            const minAreaVal = minAreaNode ? parseFloat(minAreaNode.textContent.trim()) : null;
-            const maxAreaVal = maxAreaNode ? parseFloat(maxAreaNode.textContent.trim()) : null;
-
-            if ((minAreaVal === null || isNaN(minAreaVal)) && (maxAreaVal === null || isNaN(maxAreaVal))) {
-                messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>[${parcelId}] Предупреждение:</strong> Не указаны предельные минимальный и максимальный размеры земельного участка (&lt;MinArea&gt; и &lt;MaxArea&gt;).</div>`);
+            if (ordinates.length === 0) {
+                messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${parcelId}] Ошибка:</strong> В XML не найдены координаты границ земельного участка.</div>`);
             } else {
-                if (area && !isNaN(area)) {
-                    let sizeMismatch = false;
-                    if (minAreaVal !== null && !isNaN(minAreaVal) && area < minAreaVal) {
-                        messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${parcelId}] Ошибка размера:</strong> Фактическая площадь участка <strong>(${area} кв.м.)</strong> меньше установленного минимального размера <strong>(${minAreaVal} кв.м.)</strong>.</div>`);
-                        sizeMismatch = true;
-                    }
-                    if (maxAreaVal !== null && !isNaN(maxAreaVal) && area > maxAreaVal) {
-                        messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${parcelId}] Ошибка размера:</strong> Фактическая площадь участка <strong>(${area} кв.м.)</strong> превышает установленный максимальный размер <strong>(${maxAreaVal} кв.м.)</strong>.</div>`);
-                        sizeMismatch = true;
-                    }
-                    if (!sizeMismatch) {
-                        messages.push(`<div class="validation-message validation-success">${sectionIcons.successIcon} <strong>[${parcelId}] Проверка размера:</strong> Площадь участка <strong>(${area} кв.м.)</strong> находится в допустимых пределах [${minAreaVal !== null ? minAreaVal : '—'} ; ${maxAreaVal !== null ? maxAreaVal : '—'}] кв.м.</div>`);
+                const spatialEl = parcel.querySelector('EntitySpatial, AllBorder > EntitySpatial');
+                if (spatialEl) {
+                    const sysInfo = parseSpatialSystemInfo(spatialEl, xmlDoc);
+                    if (sysInfo) {
+                        let zoneOk = null;
+                        let detectedZone = null;
+                        let maxCoord = null;
+
+                        const firstOrd = ordinates[0];
+                        const xVal = parseFloat(firstOrd.getAttribute('X'));
+                        const yVal = parseFloat(firstOrd.getAttribute('Y'));
+                        if (!isNaN(xVal) && !isNaN(yVal)) {
+                            maxCoord = Math.max(Math.abs(xVal), Math.abs(yVal));
+                            detectedZone = maxCoord.toString().charAt(0);
+
+                            if (sysInfo.zone) {
+                                zoneOk = (sysInfo.zone === detectedZone);
+                            }
+                        }
+
+                        let regionOk = null;
+                        const cadRef = T(parcel, 'CadastralBlock') || parcel.getAttribute('CadastralNumber') || '';
+                        const quarterRegion = cadRef.includes(':') ? cadRef.split(':')[0].trim() : '';
+                        if (sysInfo.region && quarterRegion) {
+                            regionOk = (parseInt(sysInfo.region, 10) === parseInt(quarterRegion, 10));
+                        }
+
+                        if (zoneOk === true && regionOk === true) {
+                            messages.push(`<div class="validation-message validation-success">${sectionIcons.successIcon} <strong>[${parcelId}] Система координат указана верно:</strong> ${sysInfo.csDisplay} (регион ${sysInfo.region}, зона ${sysInfo.zone}).</div>`);
+                        } else {
+                            if (zoneOk === false) {
+                                messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${parcelId}] Несоответствие зоны СК:</strong> В СК указана зона <strong>${sysInfo.zone}</strong> (${sysInfo.csDisplay}), а по координатам определена зона <strong>${detectedZone}</strong> (координата <code>${maxCoord.toFixed(2)}</code>).</div>`);
+                            }
+                            if (regionOk === false) {
+                                messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${parcelId}] Несоответствие региона СК:</strong> В СК указан регион <strong>${sysInfo.region}</strong> (${sysInfo.csDisplay}), а кадастровый квартал относится к региону <strong>${quarterRegion}</strong> (<code>${cadRef}</code>).</div>`);
+                            }
+                        }
                     }
                 }
-            }
 
-            if (requiredMt && actualMt) {
-                if (actualMt !== requiredMt) {
-                    messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${parcelId}] Ошибка Mt:</strong> Указанная погрешность точек <strong>${actualMt}</strong> не соответствует нормативу <strong>${requiredMt}</strong> для категории "${landCategories[categoryCode]}".</div>`);
+                const accuracies = new Set();
+                let allFixingsFilled = true;
+
+                ordinates.forEach(ord => {
+                    const delta = A(ord, 'DeltaGeopoint');
+                    if (delta && delta !== '—') accuracies.add(parseFloat(delta));
+                    if (A(ord, 'GeopointZacrep') === '—') allFixingsFilled = false;
+                });
+
+                if (!allFixingsFilled) {
+                    messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>[${parcelId}] Предупреждение:</strong> Не для всех точек указан метод закрепления на местности.</div>`);
+                }
+
+                if (accuracies.size > 1) {
+                    messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>[${parcelId}] Предупреждение:</strong> У точек участка разные значения погрешности (${Array.from(accuracies).join(', ')}).</div>`);
+                }
+
+                const actualMt = accuracies.size > 0 ? accuracies.values().next().value : null;
+
+                const minAreaNode = parcel.querySelector('MinArea > Area');
+                const maxAreaNode = parcel.querySelector('MaxArea > Area');
+
+                const minAreaVal = minAreaNode ? parseFloat(minAreaNode.textContent.trim()) : null;
+                const maxAreaVal = maxAreaNode ? parseFloat(maxAreaNode.textContent.trim()) : null;
+
+                if ((minAreaVal === null || isNaN(minAreaVal)) && (maxAreaVal === null || isNaN(maxAreaVal))) {
+                    messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>[${parcelId}] Предупреждение:</strong> Не указаны предельные минимальный и максимальный размеры земельного участка (&lt;MinArea&gt; и &lt;MaxArea&gt;).</div>`);
                 } else {
-                    messages.push(`<div class="validation-message validation-success">${sectionIcons.successIcon} <strong>[${parcelId}] Проверка Mt:</strong> Погрешность точек <strong>${actualMt}</strong> соответствует нормативу для данной категории земель.</div>`);
-                }
-            } else if (!requiredMt && actualMt) {
-                messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>[${parcelId}] Проверка Mt:</strong> Не удалось определить норматив погрешности, так как категория земель не указана в XML.</div>`);
-            }
-
-            if (area && actualMt && statedAreaInaccuracy) {
-                const calculatedAreaInaccuracy = Math.round(3.5 * actualMt * Math.sqrt(area));
-                if (calculatedAreaInaccuracy !== statedAreaInaccuracy) {
-                    messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${parcelId}] Ошибка ΔP:</strong> Расчетная погрешность площади <strong>(${calculatedAreaInaccuracy} м²)</strong> не совпадает с указанной в XML <strong>(${statedAreaInaccuracy} м²)</strong>.</div>`);
-                } else {
-                    messages.push(`<div class="validation-message validation-success">${sectionIcons.successIcon} <strong>[${parcelId}] Проверка ΔP:</strong> Расчетная погрешность площади <strong>(${calculatedAreaInaccuracy} м²)</strong> совпадает с указанной в XML.</div>`);
-                }
-            }
-
-            
-            const formulaNode = parcel.querySelector('Area > Formula, :scope > Formula, ExistEZParcels > Area > Formula');
-            const formulaText = formulaNode ? formulaNode.textContent.trim() : '';
-
-            if (formulaText) {
-                let formulaErrors = [];
-
-                
-                const sqrtMatch = formulaText.match(/(?:√|sqrt|корень\s*\(?)\s*(\d+(?:[.,]\d+)?)/i);
-                if (sqrtMatch) {
-                    const formulaArea = parseFloat(sqrtMatch[1].replace(',', '.'));
-                    if (area && Math.abs(formulaArea - area) > 0.01) {
-                        formulaErrors.push(`в формуле под корнем подставлена площадь <b>P = ${formulaArea}</b>, а фактическая площадь участка <b>${area} кв.м.</b> (должно быть <code>√${area}</code>)`);
+                    if (area && !isNaN(area)) {
+                        let sizeMismatch = false;
+                        if (minAreaVal !== null && !isNaN(minAreaVal) && area < minAreaVal) {
+                            messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${parcelId}] Ошибка размера:</strong> Фактическая площадь участка <strong>(${area} кв.м.)</strong> меньше установленного минимального размера <strong>(${minAreaVal} кв.м.)</strong>.</div>`);
+                            sizeMismatch = true;
+                        }
+                        if (maxAreaVal !== null && !isNaN(maxAreaVal) && area > maxAreaVal) {
+                            messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${parcelId}] Ошибка размера:</strong> Фактическая площадь участка <strong>(${area} кв.м.)</strong> превышает установленный максимальный размер <strong>(${maxAreaVal} кв.м.)</strong>.</div>`);
+                            sizeMismatch = true;
+                        }
+                        if (!sizeMismatch) {
+                            messages.push(`<div class="validation-message validation-success">${sectionIcons.successIcon} <strong>[${parcelId}] Проверка размера:</strong> Площадь участка <strong>(${area} кв.м.)</strong> находится в допустимых пределах [${minAreaVal !== null ? minAreaVal : '—'} ; ${maxAreaVal !== null ? maxAreaVal : '—'}] кв.м.</div>`);
+                        }
                     }
                 }
 
-                
-                const mtMatch = formulaText.match(/(?:3[.,]5|2)\s*[*xX·*]\s*(\d+(?:[.,]\d+)?)\s*[*xX·*]\s*(?:√|sqrt|корень)/i);
-                if (mtMatch && actualMt) {
-                    const formulaMt = parseFloat(mtMatch[1].replace(',', '.'));
-                    if (Math.abs(formulaMt - actualMt) > 0.001) {
-                        formulaErrors.push(`в формуле подставлено значение <b>Mt = ${formulaMt}</b>, а нормативная/фактическая погрешность точек <b>${actualMt} м</b>`);
+                if (requiredMt && actualMt) {
+                    if (actualMt !== requiredMt) {
+                        messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${parcelId}] Ошибка Mt:</strong> Указанная погрешность точек <strong>${actualMt}</strong> не соответствует нормативу <strong>${requiredMt}</strong> для категории "${landCategories[categoryCode]}".</div>`);
+                    } else {
+                        messages.push(`<div class="validation-message validation-success">${sectionIcons.successIcon} <strong>[${parcelId}] Проверка Mt:</strong> Погрешность точек <strong>${actualMt}</strong> соответствует нормативу для данной категории земель.</div>`);
+                    }
+                } else if (!requiredMt && actualMt) {
+                    messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>[${parcelId}] Проверка Mt:</strong> Не удалось определить норматив погрешности, так как категория земель не указана в XML.</div>`);
+                }
+
+                if (area && actualMt && statedAreaInaccuracy) {
+                    const calculatedAreaInaccuracy = Math.round(3.5 * actualMt * Math.sqrt(area));
+                    if (calculatedAreaInaccuracy !== statedAreaInaccuracy) {
+                        messages.push(`<div class="validation-message validation-error">${sectionIcons.errorIcon} <strong>[${parcelId}] Ошибка ΔP:</strong> Расчетная погрешность площади <strong>(${calculatedAreaInaccuracy} м²)</strong> не совпадает с указанной в XML <strong>(${statedAreaInaccuracy} м²)</strong>.</div>`);
+                    } else {
+                        messages.push(`<div class="validation-message validation-success">${sectionIcons.successIcon} <strong>[${parcelId}] Проверка ΔP:</strong> Расчетная погрешность площади <strong>(${calculatedAreaInaccuracy} м²)</strong> совпадает с указанной в XML.</div>`);
                     }
                 }
 
-                
-                const resultMatch = formulaText.match(/=\s*(\d+(?:[.,]\d+)?)\s*(?:кв\.?\s*м\.?|м2|м²)?$/);
-                if (resultMatch && statedAreaInaccuracy) {
-                    const formulaRes = parseFloat(resultMatch[1].replace(',', '.'));
-                    if (Math.abs(formulaRes - statedAreaInaccuracy) > 0.01) {
-                        formulaErrors.push(`итоговое значение в формуле <b>(${formulaRes})</b> не совпадает со значением &lt;Inaccuracy&gt; <b>(${statedAreaInaccuracy})</b>`);
-                    }
-                }
+             // Анализ формулы
+                const formulaNode = parcel.querySelector('Area > Formula, :scope > Formula, ExistEZParcels > Area > Formula, AllBorder > Area > Formula');
+                const formulaText = formulaNode ? formulaNode.textContent.trim() : '';
 
-                if (formulaErrors.length > 0) {
-                    messages.push(`<div class="validation-message validation-error" style="align-items:flex-start;">
-                        ${sectionIcons.errorIcon}
-                        <div>
-                            <strong>[${parcelId}] Ошибка в формуле расчета погрешности площади:</strong><br>
-                            <code>${escapeHtml(formulaText)}</code>
-                            <div style="font-size:0.9em; margin-top:6px; color:#991b1b;">
-                                • ${formulaErrors.join('<br>• ')}
+                // Подготовка подсказки с расчетом для ЗУ и образца на 1000 м²
+               const calcMt = actualMt || 0.1;
+                const calcArea = (area && !isNaN(area) && area > 0) ? area : 0;
+                const calcRes = calcArea > 0 ? Math.round(3.5 * calcMt * Math.sqrt(calcArea)) : 0;
+                const formulaHintHtml = calcArea > 0 ? `
+                    <div style="margin-top:8px; padding:8px 10px; background:#fff; border-radius:6px; border:1px dashed #cbd5e1; font-size:0.85em; color:var(--text-primary); line-height:1.4;">
+                        <div style="font-weight:600; color:#1e40af; margin-bottom:4px;">
+                            <i class="fas fa-info-circle"></i> Рекомендуемый вид формулы для данного ЗУ (${calcArea} м²):
+                        </div>
+                        <code>∆P = 3.5 * Mt * √P = 3.5 * ${calcMt} * √${calcArea} = ${calcRes}</code>
+                    </div>` : '';
+
+                if (formulaText && formulaText !== '—') {
+                    let formulaErrors = [];
+
+                    // 1. Проверка подставленной площади (P) под корнем
+                    const sqrtMatch = formulaText.match(/(?:√|sqrt|корень)\s*\(?\s*(\d+(?:[.,]\d+)?)/i);
+                    if (sqrtMatch) {
+                        const formulaArea = parseFloat(sqrtMatch[1].replace(',', '.'));
+                        if (area && Math.abs(formulaArea - area) > 0.01) {
+                            formulaErrors.push(`в формуле под корнем подставлена неверная площадь <b>P = ${formulaArea}</b>, а фактическая площадь участка <b>${area} кв.м.</b> (должно быть <code>√${area}</code>)`);
+                        }
+                    } else {
+                        formulaErrors.push(`в формулу не подставлено числовое значение площади под знаком корня (ожидалось <code>√${area || 'P'}</code>)`);
+                    }
+
+                    // 2. Проверка значения Mt в формуле
+                    const mtMatch = formulaText.match(/(?:3[.,]5|2)\s*[*xX·*]\s*(\d+(?:[.,]\d+)?)\s*[*xX·*]\s*(?:√|sqrt|корень)/i);
+                    if (mtMatch) {
+                        if (actualMt) {
+                            const formulaMt = parseFloat(mtMatch[1].replace(',', '.'));
+                            if (Math.abs(formulaMt - actualMt) > 0.001) {
+                                formulaErrors.push(`в формуле подставлено значение <b>Mt = ${formulaMt}</b>, а нормативная/фактическая погрешность точек <b>${actualMt} м</b>`);
+                            }
+                        }
+                    } else {
+                        formulaErrors.push(`в формулу не подставлено числовое значение погрешности точек <b>Mt</b> (ожидалось <code>${actualMt || '0.1'}</code>)`);
+                    }
+
+                    // 3. Проверка итогового вычисленного значения
+                    const resultMatch = formulaText.match(/=\s*(\d+(?:[.,]\d+)?)\s*(?:кв\.?\s*м\.?|м2|м²)?$/);
+                    if (resultMatch) {
+                        if (statedAreaInaccuracy) {
+                            const formulaRes = parseFloat(resultMatch[1].replace(',', '.'));
+                            if (Math.abs(formulaRes - statedAreaInaccuracy) > 0.01) {
+                                formulaErrors.push(`итоговое значение в формуле <b>(${formulaRes})</b> не совпадает со значением &lt;Inaccuracy&gt; <b>(${statedAreaInaccuracy})</b>`);
+                            }
+                        }
+                    } else {
+                        formulaErrors.push(`в формуле отсутствует знак равенства и итоговое вычисленное значение (ожидалось в конце <code>=${statedAreaInaccuracy || calcRes}</code>)`);
+                    }
+
+                    if (formulaErrors.length > 0) {
+                        messages.push(`<div class="validation-message validation-error" style="align-items:flex-start;">
+                            ${sectionIcons.errorIcon}
+                            <div style="width:100%;">
+                                <strong>[${parcelId}] Ошибка в формуле расчета погрешности площади:</strong><br>
+                                <code>${escapeHtml(formulaText)}</code>
+                                <div style="font-size:0.9em; margin-top:6px; color:#991b1b;">
+                                    • ${formulaErrors.join('<br>• ')}
+                                </div>
+                                ${formulaHintHtml}
                             </div>
+                        </div>`);
+                    } else {
+                        messages.push(`<div class="validation-message validation-success">${sectionIcons.successIcon} <strong>[${parcelId}] Анализ формулы:</strong> Формула <code>${escapeHtml(formulaText)}</code> составлена корректно (подставлены верные P = ${area}, Mt = ${actualMt || '0.1'}, результат = ${statedAreaInaccuracy}).</div>`);
+                    }
+                } else {
+                    messages.push(`<div class="validation-message validation-warning" style="align-items:flex-start;">
+                        ${sectionIcons.warningIcon}
+                        <div style="width:100%;">
+                            <strong>[${parcelId}] Предупреждение:</strong> Тег формулы расчета погрешности площади (&lt;Formula&gt;) не заполнен.
+                            ${formulaHintHtml}
                         </div>
                     </div>`);
-                } else if (sqrtMatch || mtMatch) {
-                    messages.push(`<div class="validation-message validation-success">${sectionIcons.successIcon} <strong>[${parcelId}] Анализ формулы:</strong> Формула <code>${escapeHtml(formulaText)}</code> составлена корректно (подставлены верные P = ${area}, Mt = ${actualMt || '0.1'}, результат = ${statedAreaInaccuracy}).</div>`);
                 }
-            } else {
-                messages.push(`<div class="validation-message validation-warning">${sectionIcons.warningIcon} <strong>[${parcelId}] Предупреждение:</strong> Тег формулы расчета погрешности площади (&lt;Formula&gt;) не заполнен.</div>`);
             }
-        }
-    });
+        });
 
     
     const contradictionHtml = `
