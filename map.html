@@ -9242,6 +9242,180 @@ function generateKmlForPolyline(polylineObject, placemarkName) {
 
 
 
+
+async function captureMapRasterDirectly(mapElement, targetScale) {
+    const mapRect = mapElement.getBoundingClientRect();
+    const width = Math.round(mapRect.width);
+    const height = Math.round(mapRect.height);
+
+    const outCanvas = document.createElement('canvas');
+    outCanvas.width = Math.round(width * targetScale);
+    outCanvas.height = Math.round(height * targetScale);
+    const ctx = outCanvas.getContext('2d');
+
+    ctx.imageSmoothingEnabled = true;
+    ctx.imageSmoothingQuality = 'high';
+
+    ctx.fillStyle = '#ffffff';
+    ctx.fillRect(0, 0, outCanvas.width, outCanvas.height);
+
+    const mediaElements = Array.from(mapElement.querySelectorAll('img, canvas'));
+
+    const loadCorsImage = (imgEl) => {
+        return new Promise((resolve) => {
+            if (imgEl.src.startsWith('data:') || imgEl.crossOrigin === 'anonymous') {
+                if (imgEl.complete && imgEl.naturalWidth > 0) {
+                    return resolve(imgEl);
+                }
+            }
+            const tempImg = new Image();
+            tempImg.crossOrigin = 'anonymous';
+            tempImg.onload = () => resolve(tempImg);
+            tempImg.onerror = () => resolve(imgEl);
+            tempImg.src = imgEl.src;
+        });
+    };
+
+    for (const el of mediaElements) {
+        const style = window.getComputedStyle(el);
+        if (style.display === 'none' || style.visibility === 'hidden' || parseFloat(style.opacity) === 0) {
+            continue;
+        }
+        if (el.closest('[class*="-copyright"], [class*="-controls"], [class*="-gototech"], [class*="-gotoymaps"]')) {
+            continue;
+        }
+
+        const rect = el.getBoundingClientRect();
+        if (
+            rect.width <= 0 || rect.height <= 0 ||
+            rect.right <= mapRect.left || rect.left >= mapRect.right ||
+            rect.bottom <= mapRect.top || rect.top >= mapRect.bottom
+        ) {
+            continue;
+        }
+
+        const dx = (rect.left - mapRect.left) * targetScale;
+        const dy = (rect.top - mapRect.top) * targetScale;
+        const dw = rect.width * targetScale;
+        const dh = rect.height * targetScale;
+
+        try {
+            const opacity = parseFloat(style.opacity) || 1;
+            ctx.save();
+            ctx.globalAlpha = opacity;
+
+            if (el.tagName.toLowerCase() === 'img') {
+                const drawableImg = await loadCorsImage(el);
+                ctx.drawImage(drawableImg, dx, dy, dw, dh);
+            } else if (el.tagName.toLowerCase() === 'canvas') {
+                ctx.drawImage(el, dx, dy, dw, dh);
+            }
+            ctx.restore();
+        } catch (drawErr) {
+            console.warn('[МСК + РАСТР] Ошибка отрисовки тайла:', drawErr);
+        }
+    }
+
+    return outCanvas;
+}
+
+
+function waitForTilesLoaded(container, timeoutMs = 3500) {
+    return new Promise((resolve) => {
+        const startTime = Date.now();
+        const check = () => {
+            const imgs = Array.from(container.querySelectorAll('img'));
+            const allLoaded = imgs.length > 0 && imgs.every(img => img.complete && img.naturalWidth > 0);
+
+            if (allLoaded || (Date.now() - startTime) > timeoutMs) {
+                setTimeout(resolve, 150);
+            } else {
+                setTimeout(check, 100);
+            }
+        };
+        setTimeout(check, 200);
+    });
+}
+
+
+async function captureHiResMapRaster(mapElement, scale) {
+    if (scale <= 1) {
+        return await captureMapRasterDirectly(mapElement, 1);
+    }
+
+    const origRect = mapElement.getBoundingClientRect();
+    const baseW = Math.round(origRect.width);
+    const baseH = Math.round(origRect.height);
+
+    const maxSafeDimension = 8192;
+    const effectiveScale = Math.min(scale, maxSafeDimension / Math.max(baseW, baseH));
+
+    const currentZoom = map.getZoom();
+    const currentCenter = map.getCenter();
+    const zoomStep = Math.floor(Math.log2(scale));
+    
+    let maxAvailableZoom = 21;
+    try {
+        const zoomRange = await map.zoomRange.get(currentCenter);
+        if (zoomRange && zoomRange[1]) maxAvailableZoom = zoomRange[1];
+    } catch(e) {}
+
+    const targetZoom = Math.min(currentZoom + zoomStep, maxAvailableZoom);
+    const actualZoomGain = Math.max(0, targetZoom - currentZoom);
+    const containerMultiplier = Math.pow(2, actualZoomGain);
+
+    if (actualZoomGain <= 0) {
+        return await captureMapRasterDirectly(mapElement, effectiveScale);
+    }
+
+    const origStyles = {
+        position: mapElement.style.position,
+        width: mapElement.style.width,
+        height: mapElement.style.height,
+        top: mapElement.style.top,
+        left: mapElement.style.left,
+        zIndex: mapElement.style.zIndex,
+        transform: mapElement.style.transform,
+        transformOrigin: mapElement.style.transformOrigin
+    };
+
+    try {
+        mapElement.style.position = 'fixed';
+        mapElement.style.top = '0px';
+        mapElement.style.left = '0px';
+        mapElement.style.width = `${baseW * containerMultiplier}px`;
+        mapElement.style.height = `${baseH * containerMultiplier}px`;
+        mapElement.style.zIndex = '9999';
+        mapElement.style.transformOrigin = '0 0';
+        mapElement.style.transform = `scale(${1 / containerMultiplier})`;
+
+        map.container.fitToViewport();
+        await map.setCenter(currentCenter, targetZoom, { duration: 0, checkZoomRange: false });
+
+        if (typeof applyGoogleOffsetCSS === 'function') {
+            applyGoogleOffsetCSS();
+        }
+
+        await waitForTilesLoaded(mapElement, 3500);
+
+        mapElement.style.transform = 'none';
+        await new Promise(r => requestAnimationFrame(r));
+
+        const remainingScale = effectiveScale / containerMultiplier;
+        const hiResCanvas = await captureMapRasterDirectly(mapElement, remainingScale);
+
+        return hiResCanvas;
+    } finally {
+        Object.assign(mapElement.style, origStyles);
+        map.container.fitToViewport();
+        await map.setCenter(currentCenter, currentZoom, { duration: 0 });
+        if (typeof applyGoogleOffsetCSS === 'function') {
+            applyGoogleOffsetCSS();
+        }
+    }
+}
+
+
 function showGeoredactorRasterOptions() {
     const existingModal = document.getElementById('georedactor-raster-modal');
     if (existingModal) existingModal.remove();
@@ -9249,32 +9423,38 @@ function showGeoredactorRasterOptions() {
     const modal = document.createElement('div');
     modal.id = 'georedactor-raster-modal';
     modal.className = 'color-modal';
-    modal.style.width = '390px';
+    modal.style.width = '410px';
     modal.style.zIndex = '20000';
 
     const qualityLabels = {
-        '1': 'x1 (Оригинал, быстро)',
+        '1': 'x1 (Оригинал экрана)',
         '2': 'x2 (Высокое, Зум +1)',
-        '3': 'x3 (Максимальное, Зум +2)'
+        '3': 'x3 (Сверхвысокое, Зум +1.5)',
+        '4': 'x4 (Ultra HD, Зум +2)',
+        '5': 'x5 (Максимальное, Зум +2.3)'
     };
+
+    const savedScale = localStorage.getItem('georedactor_scale') || '1';
 
     modal.innerHTML = `
         <div class="color-modal-content">
             <h3 style="margin-top: 0; color: #1e3a8a;">Качество геоснимка</h3>
             <p style="font-size: 0.85rem; color: #555; margin-bottom: 15px; line-height: 1.4;">
-                При увеличении масштаба карта подгружает тайлы повышенного зума, сохраняя точную геопривязку к координатам.
+                Формирование детальной спутниковой подложки с автоматической синхронизацией координат МСК.
             </p>
             
             <div style="display: flex; flex-direction: column; align-items: center; width: 100%; margin-bottom: 20px;">
                 <label for="georedactor-scale-slider" style="font-weight: bold; margin-bottom: 10px; color: #2563eb; font-size: 1rem;">
-                    Качество: <span id="georedactor-scale-value">${qualityLabels['1']}</span>
+                    Качество: <span id="georedactor-scale-value">${qualityLabels[savedScale] || `x${savedScale}`}</span>
                 </label>
-                <input type="range" id="georedactor-scale-slider" min="1" max="3" step="1" value="1" 
+                <input type="range" id="georedactor-scale-slider" min="1" max="5" step="1" value="${savedScale}" 
                        style="width: 100%; accent-color: #2563eb; cursor: pointer;">
-                <div style="display: flex; justify-content: space-between; width: 100%; font-size: 0.8rem; color: #888; margin-top: 5px;">
+                <div style="display: flex; justify-content: space-between; width: 100%; font-size: 0.78rem; color: #888; margin-top: 5px;">
                     <span>x1</span>
-                    <span>x2 (HD)</span>
-                    <span>x3 (Ultra)</span>
+                    <span>x2</span>
+                    <span>x3</span>
+                    <span>x4</span>
+                    <span>x5</span>
                 </div>
             </div>
             
@@ -9298,6 +9478,7 @@ function showGeoredactorRasterOptions() {
 
     slider.addEventListener('input', (e) => {
         valueDisplay.textContent = qualityLabels[e.target.value] || `x${e.target.value}`;
+        localStorage.setItem('georedactor_scale', e.target.value);
     });
 
     const closeModal = () => document.body.removeChild(modal);
@@ -9317,582 +9498,340 @@ function showGeoredactorRasterOptions() {
     document.getElementById('btn-georedactor-cancel').onclick = closeModal;
 }
 
+
 async function exportVisibleToGeoredaсtorWithRaster(scale = 1, saveToFile = false) {
-    console.log(`=== [МСК + РАСТР] Экспорт (Качество x${scale}, В файл: ${saveToFile}) ===`);
-    try {
-        if (!map) {
-            showNotification('Карта не инициализирована', 'error');
-            return;
-        }
+    console.log(`%c=== [МСК + РАСТР] Старт экспорта (Масштаб x${scale}, В файл: ${saveToFile}) ===`, "color: #2563eb; font-weight: bold;");
 
-        const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
-        const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destSc);
-        if (!destSystem || !destSystem.def) {
-            throw new Error(`Определение для ${destSc} не найдено в sk.js`);
-        }
-
-        let offsetX = 0, offsetY = 0;
-        if (localStorage.getItem('autoLoadMskOffset') !== 'false') {
-            offsetX = destSystem.offsetX || 0;
-            offsetY = destSystem.offsetY || 0;
-        } else {
-            offsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
-            offsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
-        }
-
-        proj4.defs(destSc, destSystem.def);
-
-        const convertWgsToMskSingle = (lat, lon) => {
-            const [trueLat, trueLon] = getTrueWgs84Coords(lat, lon);
-            const mskPoint = proj4("EPSG:4326", destSc, [trueLon, trueLat]);
-            const x = mskPoint[1] + offsetX;
-            const y = mskPoint[0] + offsetY;
-            return [x, y];
-        };
-
-        showLoader(`Снимок подложки (качество x${scale})...`);
-
-        // 1. Скрываем вспомогательные слои и векторные объекты с карты
-        const hiddenObjects = [];
-        if (map.balloon) map.balloon.close();
-        if (map.hint) map.hint.close(true);
-
-        const hideRecursively = (collection) => {
-            collection.each(obj => {
-                if (obj === rasterOverlay) return; 
-                if (obj.each && typeof obj.each === 'function') {
-                    hideRecursively(obj);
-                } else if (obj.options) {
-                    if (obj.options.get('visible') !== false) {
-                        obj.options.set('visible', false);
-                        hiddenObjects.push(obj);
-                    }
-                }
-            });
-        };
-        hideRecursively(map.geoObjects);
-
-        let panoLayerActive = false;
-        if (yandexPanoLayer && map.layers.indexOf(yandexPanoLayer) !== -1) {
-            map.layers.remove(yandexPanoLayer);
-            panoLayerActive = true;
-        }
-
-        const panesToHide = ['overlays', 'outerOverlays', 'controls', 'copyrights'];
-        const hiddenPanes = [];
-        panesToHide.forEach(paneName => {
-            try {
-                const pane = map.panes.get(paneName);
-                if (pane) {
-                    const el = pane.getElement();
-                    if (el && el.style.display !== 'none') {
-                        el.style.oldDisplay = el.style.display;
-                        el.style.display = 'none';
-                        hiddenPanes.push(el);
-                    }
-                }
-            } catch (e) {}
-        });
-
-        // 2. Исходные параметры карты
-        const mapElement = document.getElementById('map');
-        const origWidth = mapElement.clientWidth;
-        const origHeight = mapElement.clientHeight;
-        const origCenter = map.getCenter();
-        const origZoom = map.getZoom();
-
-        // Коэффициент увеличения зума (кратен степеням 2, чтобы географический охват совпадал с экраном)
-        const zoomOffset = Math.max(0, parseInt(scale, 10) - 1);
-        const multiplier = Math.pow(2, zoomOffset); // x1 -> 1, x2 -> 2, x3 -> 4
-        const newWidth = origWidth * multiplier;
-        const newHeight = origHeight * multiplier;
-        const newZoom = Math.min(23, origZoom + zoomOffset);
-
-        let base64Image = null;
-        let mskTL = null;
-        let mskBR = null;
-        let screenBbox = null;
-
-        try {
-            if (zoomOffset > 0) {
-                mapElement.style.position = 'fixed';
-                mapElement.style.top = '0';
-                mapElement.style.left = '0';
-                mapElement.style.width = `${newWidth}px`;
-                mapElement.style.height = `${newHeight}px`;
-                mapElement.style.zIndex = '9998';
-
-                map.container.fitToViewport();
-                map.setCenter(origCenter, newZoom);
-
-                if (typeof applyGoogleOffsetCSS === 'function') {
-                    applyGoogleOffsetCSS();
-                }
-
-                // Ожидание подгрузки тайлов высокого разрешения
-                await new Promise(r => setTimeout(r, 1200 + (zoomOffset * 900)));
-            } else {
-                await new Promise(r => setTimeout(r, 200));
-            }
-
-            // 3. Точнейший расчет географических координат углов полученного снимка
-            const proj = map.options.get('projection');
-            const actualZoom = map.getZoom();
-            const actualCenter = map.getCenter();
-            const centerGlobalPx = proj.toGlobalPixels(actualCenter, actualZoom);
-
-            const curW = zoomOffset > 0 ? newWidth : origWidth;
-            const curH = zoomOffset > 0 ? newHeight : origHeight;
-
-            // Глобальные пиксели верхнего левого (0,0) и правого нижнего (W,H) углов холста
-            const tlGlobalPx = [centerGlobalPx[0] - curW / 2, centerGlobalPx[1] - curH / 2];
-            const brGlobalPx = [centerGlobalPx[0] + curW / 2, centerGlobalPx[1] + curH / 2];
-
-            const tlGeo = proj.fromGlobalPixels(tlGlobalPx, actualZoom);
-            const brGeo = proj.fromGlobalPixels(brGlobalPx, actualZoom);
-
-            // Координаты углов растра в МСК
-            mskTL = convertWgsToMskSingle(tlGeo[0], tlGeo[1]);
-            mskBR = convertWgsToMskSingle(brGeo[0], brGeo[1]);
-
-            // Границы для точной обрезки векторов строго под размер снимка
-            screenBbox = [
-                Math.min(tlGeo[1], brGeo[1]), // minLon
-                Math.min(tlGeo[0], brGeo[0]), // minLat
-                Math.max(tlGeo[1], brGeo[1]), // maxLon
-                Math.max(tlGeo[0], brGeo[0])  // maxLat
-            ];
-
-            const canvas = await html2canvas(mapElement, {
-                useCORS: true,
-                allowTaint: true,
-                logging: false,
-                scale: 1,
-                width: curW,
-                height: curH,
-                scrollX: 0,
-                scrollY: 0,
-                ignoreElements: (element) => {
-                    if (typeof element.className === 'string') {
-                        return element.className.includes('-copyright') || 
-                               element.className.includes('-gototech') || 
-                               element.className.includes('-gotoymaps');
-                    }
-                    return false;
-                }
-            });
-            base64Image = canvas.toDataURL('image/jpeg', 0.90);
-        } catch (canvasErr) {
-            console.error("[МСК + РАСТР] Ошибка при создании снимка карты:", canvasErr);
-        } finally {
-            if (zoomOffset > 0) {
-                mapElement.style.position = '';
-                mapElement.style.top = '';
-                mapElement.style.left = '';
-                mapElement.style.width = '';
-                mapElement.style.height = '';
-                mapElement.style.zIndex = '';
-
-                map.container.fitToViewport();
-                map.setCenter(origCenter, origZoom);
-
-                if (typeof applyGoogleOffsetCSS === 'function') {
-                    applyGoogleOffsetCSS();
-                }
-                await new Promise(r => setTimeout(r, 250));
-            }
-
-            // Восстановление видимости векторов
-            hiddenObjects.forEach(obj => obj.options.set('visible', true));
-            if (panoLayerActive && yandexPanoLayer) {
-                map.layers.add(yandexPanoLayer);
-            }
-            hiddenPanes.forEach(el => {
-                el.style.display = el.style.oldDisplay || '';
-                delete el.style.oldDisplay;
-            });
-        }
-
-        // 4. Сбор и обрезка векторов строго по рассчитанным границам снимка
-        const allDrawableObjects = new Set([...polygons, ...areaObjects]);
-        const objectsToConvert = Array.from(allDrawableObjects).filter(obj => 
-            obj instanceof ymaps.Polygon || obj instanceof ymaps.Polyline
-        );
-
-        const vectorsList = [];
-        let objectCounter = 1;
-
-        for (const targetObject of objectsToConvert) {
-            let identifier = null;
-            let turfFeature;
-
-            if (targetObject instanceof ymaps.Polygon) {
-                const rings = targetObject.geometry.getCoordinates();
-                const geoJsonCoords = rings.map(ring => ring.map(c => [c[1], c[0]])); 
-                turfFeature = turf.polygon(geoJsonCoords);
-            } else { 
-                const coords = targetObject.geometry.getCoordinates();
-                const geoJsonCoords = coords.map(c => [c[1], c[0]]);
-                turfFeature = turf.lineString(geoJsonCoords);
-            }
-
-            const clipped = turf.bboxClip(turfFeature, screenBbox);
-            const geometry = clipped.geometry;
-            if (!geometry || geometry.coordinates.length === 0) continue; 
-
-            identifier = targetObject.properties.get('cadastralNumber');
-            if (!identifier) {
-                const featureData = targetObject.properties.get('featureData');
-                if (featureData && featureData.properties) {
-                    identifier = featureData.properties.descr || 
-                                 featureData.properties.options?.reg_numb_border || 
-                                 featureData.properties.options?.cad_num || 
-                                 featureData.properties.options?.cad_number;
-                }
-            }
-            if (!identifier) {
-                let hint = targetObject.properties.get('hintContent');
-                if (hint) {
-                    if (typeof hint === 'object' && hint.cadastralNumber) identifier = hint.cadastralNumber;
-                    else if (typeof hint === 'string') identifier = hint.replace(/<[^>]*>?/gm, '').trim();
-                }
-            }
-            if (!identifier) {
-                identifier = (targetObject instanceof ymaps.Polygon) ? `Объект_${objectCounter++}` : `Линия_${objectCounter++}`;
-            }
-            identifier = String(identifier).replace(/[\r\n]+/g, ' ').trim();
-
-            let coordsToProcess = [];
-            if (geometry.type === 'Polygon') coordsToProcess = geometry.coordinates;
-            else if (geometry.type === 'MultiPolygon') geometry.coordinates.forEach(p => coordsToProcess.push(...p));
-            else if (geometry.type === 'LineString') coordsToProcess = [geometry.coordinates];
-            else if (geometry.type === 'MultiLineString') coordsToProcess = geometry.coordinates;
-
-            for (const ring of coordsToProcess) {
-                if (ring.length === 0) continue;
-
-                const wgs84Coords = ring.map(coord => {
-                    const [trueLat, trueLon] = getTrueWgs84Coords(coord[1], coord[0]);
-                    return [trueLon, trueLat];
-                });
-
-                const mskCoordsText = convertWgs84ToMskWithOffset(wgs84Coords, destSc, destSystem.def, offsetX, offsetY);
-                if (mskCoordsText) {
-                    vectorsList.push({
-                        name: identifier,
-                        coords: mskCoordsText
-                    });
-                }
-            }
-        }
-
-        const payload = {
-            type: "GeoredactorWithRaster",
-            mskSystem: destSystem.text,
-            vectors: vectorsList,
-            raster: base64Image ? {
-                image: base64Image,
-                boundsMsk: {
-                    topLeft: mskTL,
-                    bottomRight: mskBR
-                }
-            } : null
-        };
-
-        const jsonString = JSON.stringify(payload, null, 2);
-
-        if (saveToFile) {
-            const blob = new Blob([jsonString], { type: "application/json;charset=utf-8" });
-            const dateStr = new Date().toISOString().slice(0, 10);
-            saveAs(blob, `Геоснимок_x${scale}_${dateStr}.json`);
-            showNotification(`Геоснимок x${scale} сохранен в файл JSON`, 'success', 'check-circle');
-        } else {
-            await navigator.clipboard.writeText(JSON.stringify(payload));
-            showNotification(`Геоснимок x${scale} и данные векторов скопированы!`, 'success', 'check-circle');
-            window.open('editor.html', '_blank');
-        }
-
-    } catch (error) {
-        console.error("[МСК + РАСТР] Критическая ошибка:", error);
-        showNotification(`Ошибка: ${error.message}`, 'error', 'exclamation-circle');
-    } finally {
-        hideLoader();
+    const mapElement = document.getElementById('map');
+    if (!map || !mapElement) {
+        showNotification('Карта не найдена', 'error');
+        return;
     }
-}
 
-async function exportVisibleToGeoredaсtorWithRaster(scale = 1, saveToFile = false) {
-    console.log(`=== [МСК + РАСТР] Экспорт (Качество x${scale}, В файл: ${saveToFile}) ===`);
+    showLoader(`Подготовка геоснимка x${scale}...`);
+
+    
+    const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
+    const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destSc);
+    if (!destSystem || !destSystem.def) {
+        hideLoader();
+        showNotification(`Определение СК ${destSc} не найдено`, 'error');
+        return;
+    }
+
+    let offsetX = 0, offsetY = 0;
+    if (localStorage.getItem('autoLoadMskOffset') !== 'false') {
+        offsetX = destSystem.offsetX || 0;
+        offsetY = destSystem.offsetY || 0;
+    } else {
+        offsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
+        offsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
+    }
+    proj4.defs(destSc, destSystem.def);
+
+    const convertWgsToMskSingle = (lat, lon) => {
+        const [trueLat, trueLon] = getTrueWgs84Coords(lat, lon);
+        const mskPoint = proj4("EPSG:4326", destSc, [trueLon, trueLat]);
+        return [
+            mskPoint[1] + offsetX, 
+            mskPoint[0] + offsetY  
+        ];
+    };
+
+    
+    const hiddenObjects = [];
+    if (map.balloon) map.balloon.close();
+    if (map.hint) map.hint.close(true);
+
+    const hideRecursively = (collection) => {
+        collection.each(obj => {
+            if (typeof rasterOverlay !== 'undefined' && obj === rasterOverlay) return;
+            if (obj.each && typeof obj.each === 'function') {
+                hideRecursively(obj);
+            } else if (obj.options && obj.options.get('visible') !== false) {
+                obj.options.set('visible', false);
+                hiddenObjects.push(obj);
+            }
+        });
+    };
+    hideRecursively(map.geoObjects);
+
+    let panoLayerActive = false;
+    if (yandexPanoLayer && map.layers.indexOf(yandexPanoLayer) !== -1) {
+        map.layers.remove(yandexPanoLayer);
+        panoLayerActive = true;
+    }
+
+    const panesToHide = ['overlays', 'outerOverlays', 'controls', 'copyrights'];
+    const hiddenPanes = [];
+    panesToHide.forEach(paneName => {
+        try {
+            const pane = map.panes.get(paneName);
+            if (pane) {
+                const el = pane.getElement();
+                if (el && el.style.display !== 'none') {
+                    el.style.oldDisplay = el.style.display;
+                    el.style.display = 'none';
+                    hiddenPanes.push(el);
+                }
+            }
+        } catch (e) {}
+    });
+
+    const origBorder = mapElement.style.border;
+    const origBorderRadius = mapElement.style.borderRadius;
+    const origBoxShadow = mapElement.style.boxShadow;
+
+    mapElement.style.border = 'none';
+    mapElement.style.borderRadius = '0px';
+    mapElement.style.boxShadow = 'none';
+
+    
+    const origWidth = mapElement.clientWidth;
+    const origHeight = mapElement.clientHeight;
+    const origCenter = map.getCenter();
+    const origZoom = map.getZoom();
+
+    const zoomOffset = Math.round(Math.log2(scale));
+    const newZoom = Math.min(21, origZoom + zoomOffset);
+
+    
+    const newWidth = Math.round(origWidth * scale);
+    const newHeight = Math.round(origHeight * scale);
+
+    let base64Image = null;
+    let mskTL = null;
+    let mskBR = null;
+    let screenBbox = null;
+
     try {
-        const bounds = map.getBounds();
-        if (!bounds) {
-            showNotification('Не удалось определить границы экрана', 'error');
-            return;
+        if (scale > 1) {
+            mapElement.style.position = 'fixed';
+            mapElement.style.top = '0px';
+            mapElement.style.left = '0px';
+            mapElement.style.width = `${newWidth}px`;
+            mapElement.style.height = `${newHeight}px`;
+            mapElement.style.zIndex = '9998';
+
+            map.container.fitToViewport();
+            await map.setCenter(origCenter, newZoom, { duration: 0, checkZoomRange: false });
+
+            if (typeof applyGoogleOffsetCSS === 'function') {
+                applyGoogleOffsetCSS();
+            }
+
+            
+            await new Promise(r => setTimeout(r, 1400 + (scale * 700)));
+        } else {
+            await new Promise(r => setTimeout(r, 200));
         }
 
-        const screenBbox = [
-            Math.min(bounds[0][1], bounds[1][1]), 
-            Math.min(bounds[0][0], bounds[1][0]), 
-            Math.max(bounds[0][1], bounds[1][1]), 
-            Math.max(bounds[0][0], bounds[1][0])
+        
+        const actualWidth = scale > 1 ? newWidth : origWidth;
+        const actualHeight = scale > 1 ? newHeight : origHeight;
+        const actualZoom = map.getZoom();
+        const actualCenter = map.getCenter();
+
+        const proj = map.options.get('projection');
+        const centerGlobalPx = proj.toGlobalPixels(actualCenter, actualZoom);
+
+        
+        const tlGlobalPx = [centerGlobalPx[0] - actualWidth / 2, centerGlobalPx[1] - actualHeight / 2];
+        const brGlobalPx = [centerGlobalPx[0] + actualWidth / 2, centerGlobalPx[1] + actualHeight / 2];
+
+        const tlGeo = proj.fromGlobalPixels(tlGlobalPx, actualZoom);
+        const brGeo = proj.fromGlobalPixels(brGlobalPx, actualZoom);
+
+        mskTL = convertWgsToMskSingle(tlGeo[0], tlGeo[1]);
+        mskBR = convertWgsToMskSingle(brGeo[0], brGeo[1]);
+
+        screenBbox = [
+            Math.min(tlGeo[1], brGeo[1]),
+            Math.min(tlGeo[0], brGeo[0]),
+            Math.max(tlGeo[1], brGeo[1]),
+            Math.max(tlGeo[0], brGeo[0])
         ];
 
-        const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
-        const destSystem = COORDINATE_SYSTEMS.find(s => s.value === destSc);
-        if (!destSystem || !destSystem.def) {
-            throw new Error(`Определение для ${destSc} не найдено в sk.js`);
-        }
-
-        let offsetX = 0, offsetY = 0;
-        if (localStorage.getItem('autoLoadMskOffset') !== 'false') {
-            offsetX = destSystem.offsetX || 0;
-            offsetY = destSystem.offsetY || 0;
-        } else {
-            offsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
-            offsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
-        }
-
-        proj4.defs(destSc, destSystem.def);
-
-        const convertWgsToMskSingle = (lat, lon) => {
-            const [trueLat, trueLon] = getTrueWgs84Coords(lat, lon);
-            const mskPoint = proj4("EPSG:4326", destSc, [trueLon, trueLat]);
-            const x = mskPoint[1] + offsetX;
-            const y = mskPoint[0] + offsetY;
-            return [x, y];
-        };
-
-        const mskTL = convertWgsToMskSingle(bounds[1][0], bounds[0][1]);
-        const mskBR = convertWgsToMskSingle(bounds[0][0], bounds[1][1]);
-
-        showLoader(`Снимок подложки (качество x${scale})...`);
-
-        // Скрытие векторных объектов карты для чистого снимка подложки
-        const hiddenObjects = [];
-        if (map.balloon) map.balloon.close();
-        if (map.hint) map.hint.close(true);
-
-        const hideRecursively = (collection) => {
-            collection.each(obj => {
-                if (obj === rasterOverlay) return; 
-                if (obj.each && typeof obj.each === 'function') {
-                    hideRecursively(obj);
-                } else if (obj.options) {
-                    if (obj.options.get('visible') !== false) {
-                        obj.options.set('visible', false);
-                        hiddenObjects.push(obj);
-                    }
+        
+        const canvas = await html2canvas(mapElement, {
+            useCORS: true,
+            allowTaint: true,
+            logging: false,
+            scale: 1,
+            width: actualWidth,
+            height: actualHeight,
+            scrollX: 0,
+            scrollY: 0,
+            ignoreElements: (el) => {
+                if (typeof el.className === 'string') {
+                    return el.className.includes('-copyright') || 
+                           el.className.includes('-gototech') || 
+                           el.className.includes('-gotoymaps') ||
+                           el.id === 'map-grid-canvas' ||
+                           el.id === 'pip-map-resize-handle';
                 }
-            });
-        };
-        hideRecursively(map.geoObjects);
-
-        let panoLayerActive = false;
-        if (yandexPanoLayer && map.layers.indexOf(yandexPanoLayer) !== -1) {
-            map.layers.remove(yandexPanoLayer);
-            panoLayerActive = true;
-        }
-
-        const panesToHide = ['overlays', 'outerOverlays', 'controls', 'copyrights'];
-        const hiddenPanes = [];
-        panesToHide.forEach(paneName => {
-            try {
-                const pane = map.panes.get(paneName);
-                if (pane) {
-                    const el = pane.getElement();
-                    if (el && el.style.display !== 'none') {
-                        el.style.oldDisplay = el.style.display;
-                        el.style.display = 'none';
-                        hiddenPanes.push(el);
-                    }
-                }
-            } catch (e) {}
+                return false;
+            }
         });
 
-        const mapElement = document.getElementById('map');
-        const origWidth = mapElement.clientWidth;
-        const origHeight = mapElement.clientHeight;
-        const origCenter = map.getCenter();
-        const origZoom = map.getZoom();
+        base64Image = canvas.toDataURL('image/jpeg', scale >= 4 ? 0.85 : 0.90);
 
-        const newWidth = origWidth * scale;
-        const newHeight = origHeight * scale;
-        const zoomOffset = Math.round(Math.log2(scale));
-        const newZoom = origZoom + zoomOffset;
+        console.log(`[МСК + РАСТР] Размер холста: ${canvas.width} x ${canvas.height} px`);
+        console.log("[МСК + РАСТР] TopLeft МСК:", mskTL);
+        console.log("[МСК + РАСТР] BottomRight МСК:", mskBR);
 
-        let base64Image = null;
-
-        try {
-            if (scale > 1) {
-                mapElement.style.position = 'fixed';
-                mapElement.style.top = '0';
-                mapElement.style.left = '0';
-                mapElement.style.width = `${newWidth}px`;
-                mapElement.style.height = `${newHeight}px`;
-                mapElement.style.zIndex = '9998';
-
-                map.container.fitToViewport();
-                map.setCenter(origCenter, newZoom);
-
-                // Ожидание подгрузки тайлов высокого разрешения
-                await new Promise(r => setTimeout(r, 1200 + (scale * 800)));
-            } else {
-                await new Promise(resolve => setTimeout(resolve, 200));
-            }
-
-            const canvas = await html2canvas(mapElement, {
-                useCORS: true,
-                allowTaint: true,
-                logging: false,
-                scale: 1,
-                width: scale > 1 ? newWidth : origWidth,
-                height: scale > 1 ? newHeight : origHeight,
-                scrollX: 0,
-                scrollY: 0,
-                ignoreElements: (element) => {
-                    if (typeof element.className === 'string') {
-                        return element.className.includes('-copyright') || 
-                               element.className.includes('-gototech') || 
-                               element.className.includes('-gotoymaps');
-                    }
-                    return false;
-                }
-            });
-            base64Image = canvas.toDataURL('image/jpeg', 0.88);
-        } catch (canvasErr) {
-            console.error("[МСК + РАСТР] Ошибка при создании снимка карты:", canvasErr);
-        } finally {
-            if (scale > 1) {
-                mapElement.style.position = '';
-                mapElement.style.top = '';
-                mapElement.style.left = '';
-                mapElement.style.width = '';
-                mapElement.style.height = '';
-                mapElement.style.zIndex = '';
-
-                map.container.fitToViewport();
-                map.setCenter(origCenter, origZoom);
-                await new Promise(r => setTimeout(r, 300));
-            }
-
-            // Восстановление видимости векторов и панелей
-            hiddenObjects.forEach(obj => obj.options.set('visible', true));
-            if (panoLayerActive && yandexPanoLayer) {
-                map.layers.add(yandexPanoLayer);
-            }
-            hiddenPanes.forEach(el => {
-                el.style.display = el.style.oldDisplay || '';
-                delete el.style.oldDisplay;
-            });
-        }
-
-        // Сбор и обрезка видимых векторов
-        const allDrawableObjects = new Set([...polygons, ...areaObjects]);
-        const objectsToConvert = Array.from(allDrawableObjects).filter(obj => 
-            obj instanceof ymaps.Polygon || obj instanceof ymaps.Polyline
-        );
-
-        const vectorsList = [];
-        let objectCounter = 1;
-
-        for (const targetObject of objectsToConvert) {
-            let identifier = null;
-            let turfFeature;
-
-            if (targetObject instanceof ymaps.Polygon) {
-                const rings = targetObject.geometry.getCoordinates();
-                const geoJsonCoords = rings.map(ring => ring.map(c => [c[1], c[0]])); 
-                turfFeature = turf.polygon(geoJsonCoords);
-            } else { 
-                const coords = targetObject.geometry.getCoordinates();
-                const geoJsonCoords = coords.map(c => [c[1], c[0]]);
-                turfFeature = turf.lineString(geoJsonCoords);
-            }
-
-            const clipped = turf.bboxClip(turfFeature, screenBbox);
-            const geometry = clipped.geometry;
-            if (!geometry || geometry.coordinates.length === 0) continue; 
-
-            identifier = targetObject.properties.get('cadastralNumber');
-            if (!identifier) {
-                const featureData = targetObject.properties.get('featureData');
-                if (featureData && featureData.properties) {
-                    identifier = featureData.properties.descr || 
-                                 featureData.properties.options?.reg_numb_border || 
-                                 featureData.properties.options?.cad_num || 
-                                 featureData.properties.options?.cad_number;
-                }
-            }
-            if (!identifier) {
-                let hint = targetObject.properties.get('hintContent');
-                if (hint) {
-                    if (typeof hint === 'object' && hint.cadastralNumber) identifier = hint.cadastralNumber;
-                    else if (typeof hint === 'string') identifier = hint.replace(/<[^>]*>?/gm, '').trim();
-                }
-            }
-            if (!identifier) {
-                identifier = (targetObject instanceof ymaps.Polygon) ? `Объект_${objectCounter++}` : `Линия_${objectCounter++}`;
-            }
-            identifier = String(identifier).replace(/[\r\n]+/g, ' ').trim();
-
-            let coordsToProcess = [];
-            if (geometry.type === 'Polygon') coordsToProcess = geometry.coordinates;
-            else if (geometry.type === 'MultiPolygon') geometry.coordinates.forEach(p => coordsToProcess.push(...p));
-            else if (geometry.type === 'LineString') coordsToProcess = [geometry.coordinates];
-            else if (geometry.type === 'MultiLineString') coordsToProcess = geometry.coordinates;
-
-            for (const ring of coordsToProcess) {
-                if (ring.length === 0) continue;
-
-                const wgs84Coords = ring.map(coord => {
-                    const [trueLat, trueLon] = getTrueWgs84Coords(coord[1], coord[0]);
-                    return [trueLon, trueLat];
-                });
-
-                const mskCoordsText = convertWgs84ToMskWithOffset(wgs84Coords, destSc, destSystem.def, offsetX, offsetY);
-                if (mskCoordsText) {
-                    vectorsList.push({
-                        name: identifier,
-                        coords: mskCoordsText
-                    });
-                }
-            }
-        }
-
-        const payload = {
-            type: "GeoredactorWithRaster",
-            mskSystem: destSystem.text,
-            vectors: vectorsList,
-            raster: base64Image ? {
-                image: base64Image,
-                boundsMsk: {
-                    topLeft: mskTL,
-                    bottomRight: mskBR
-                }
-            } : null
-        };
-
-        const jsonString = JSON.stringify(payload, null, 2);
-
-        if (saveToFile) {
-            // Сохранение в JSON-файл для ручного открытия в Георедакторе
-            const blob = new Blob([jsonString], { type: "application/json;charset=utf-8" });
-            const dateStr = new Date().toISOString().slice(0, 10);
-            saveAs(blob, `Геоснимок_x${scale}_${dateStr}.json`);
-            showNotification(`Геоснимок x${scale} сохранен в файл JSON`, 'success', 'check-circle');
-        } else {
-            // Копирование в буфер обмена и открытие Георедактора
-            await navigator.clipboard.writeText(JSON.stringify(payload));
-            showNotification(`Геоснимок x${scale} и данные векторов скопированы!`, 'success', 'check-circle');
-            window.open('editor.html', '_blank');
-        }
-
-    } catch (error) {
-        console.error("[МСК + РАСТР] Критическая ошибка в функции экспорта:", error);
-        showNotification(`Ошибка: ${error.message}`, 'error', 'exclamation-circle');
+    } catch (canvasErr) {
+        console.error("[МСК + РАСТР] Ошибка снимка:", canvasErr);
     } finally {
-        hideLoader();
+        
+        if (scale > 1) {
+            mapElement.style.position = '';
+            mapElement.style.top = '';
+            mapElement.style.left = '';
+            mapElement.style.width = '';
+            mapElement.style.height = '';
+            mapElement.style.zIndex = '';
+
+            map.container.fitToViewport();
+            await map.setCenter(origCenter, origZoom, { duration: 0 });
+
+            if (typeof applyGoogleOffsetCSS === 'function') {
+                applyGoogleOffsetCSS();
+            }
+        }
+
+        mapElement.style.border = origBorder;
+        mapElement.style.borderRadius = origBorderRadius;
+        mapElement.style.boxShadow = origBoxShadow;
+
+        hiddenObjects.forEach(obj => obj.options.set('visible', true));
+        if (panoLayerActive && yandexPanoLayer) {
+            map.layers.add(yandexPanoLayer);
+        }
+        hiddenPanes.forEach(el => {
+            el.style.display = el.style.oldDisplay || '';
+            delete el.style.oldDisplay;
+        });
     }
+
+    if (!base64Image) {
+        hideLoader();
+        showNotification('Не удалось сформировать изображение подложки', 'error');
+        return;
+    }
+
+    
+    const allDrawableObjects = new Set([
+        ...(typeof polygons !== 'undefined' ? polygons : []),
+        ...(typeof areaObjects !== 'undefined' ? areaObjects : [])
+    ]);
+    const objectsToConvert = Array.from(allDrawableObjects).filter(obj => 
+        obj instanceof ymaps.Polygon || obj instanceof ymaps.Polyline
+    );
+
+    const vectorsList = [];
+    let objectCounter = 1;
+
+    for (const targetObject of objectsToConvert) {
+        let identifier = targetObject.properties.get('cadastralNumber');
+        if (!identifier) {
+            const featureData = targetObject.properties.get('featureData');
+            if (featureData && featureData.properties) {
+                identifier = featureData.properties.descr || 
+                             featureData.properties.options?.reg_numb_border || 
+                             featureData.properties.options?.cad_num || 
+                             featureData.properties.options?.cad_number;
+            }
+        }
+        if (!identifier) {
+            let hint = targetObject.properties.get('hintContent');
+            if (hint) {
+                if (typeof hint === 'object' && hint.cadastralNumber) identifier = hint.cadastralNumber;
+                else if (typeof hint === 'string') identifier = hint.replace(/<[^>]*>?/gm, '').trim();
+            }
+        }
+        if (!identifier) {
+            identifier = (targetObject instanceof ymaps.Polygon) ? `Объект_${objectCounter++}` : `Линия_${objectCounter++}`;
+        }
+        identifier = String(identifier).replace(/[\r\n]+/g, ' ').trim();
+
+        let turfFeature;
+        if (targetObject instanceof ymaps.Polygon) {
+            const rings = targetObject.geometry.getCoordinates();
+            turfFeature = turf.polygon(rings.map(ring => ring.map(c => [c[1], c[0]])));
+        } else { 
+            const coords = targetObject.geometry.getCoordinates();
+            turfFeature = turf.lineString(coords.map(c => [c[1], c[0]]));
+        }
+
+        const clipped = turf.bboxClip(turfFeature, screenBbox);
+        const geometry = clipped.geometry;
+        if (!geometry || geometry.coordinates.length === 0) continue; 
+
+        let coordsToProcess = [];
+        if (geometry.type === 'Polygon') coordsToProcess = geometry.coordinates;
+        else if (geometry.type === 'MultiPolygon') geometry.coordinates.forEach(p => coordsToProcess.push(...p));
+        else if (geometry.type === 'LineString') coordsToProcess = [geometry.coordinates];
+        else if (geometry.type === 'MultiLineString') coordsToProcess = geometry.coordinates;
+
+        for (const ring of coordsToProcess) {
+            if (ring.length === 0) continue;
+            const wgs84Coords = ring.map(coord => {
+                const [trueLat, trueLon] = getTrueWgs84Coords(coord[1], coord[0]);
+                return [trueLon, trueLat];
+            });
+            const mskCoordsText = convertWgs84ToMskWithOffset(wgs84Coords, destSc, destSystem.def, offsetX, offsetY);
+            if (mskCoordsText) {
+                vectorsList.push({ name: identifier, coords: mskCoordsText });
+            }
+        }
+    }
+
+    const payload = {
+        type: "GeoredactorWithRaster",
+        mskSystem: destSystem.text,
+        vectors: vectorsList,
+        raster: {
+            image: base64Image,
+            boundsMsk: {
+                topLeft: mskTL,
+                bottomRight: mskBR
+            }
+        }
+    };
+
+    const jsonString = JSON.stringify(payload, null, 2);
+
+    
+    if (saveToFile) {
+        const blob = new Blob([jsonString], { type: "application/json;charset=utf-8" });
+        const dateStr = new Date().toISOString().slice(0, 10);
+        saveAs(blob, `Геоснимок_x${scale}_${dateStr}.json`);
+        showNotification(`Геоснимок x${scale} сохранен в файл`, 'success', 'check-circle');
+    } else {
+        let clipboardOk = false;
+        try {
+            await navigator.clipboard.writeText(jsonString);
+            clipboardOk = true;
+        } catch (clipErr) {
+            console.warn("[МСК + РАСТР] Буфер обмена отклонил большой объем данных, скачиваем файлом:", clipErr);
+        }
+
+        window.open('editor.html', '_blank');
+
+        if (!clipboardOk) {
+            const blob = new Blob([jsonString], { type: "application/json;charset=utf-8" });
+            saveAs(blob, `Геоснимок_x${scale}.json`);
+            showNotification(`Снимок x${scale} скачан в файл (буфер браузера переполнен)`, 'info', 'download', 6000);
+        } else {
+            showNotification(`Геоснимок x${scale} и векторы скопированы!`, 'success', 'check-circle');
+        }
+    }
+
+    hideLoader();
 }
+
+
 
 
 function exportAllMapObjectsToKml() {
@@ -19436,7 +19375,7 @@ function initDashboardPopover() {
     dashPopover.id = 'dashboard-popover';
     document.body.appendChild(dashPopover);
 
-    // Закрытие при клике мимо
+    
     document.body.addEventListener('click', (e) => {
         if (e.target.closest('#object-picker-modal')) return;
         if (!e.target.closest('.bd-item') && !e.target.closest('#dashboard-popover') && !e.target.closest('#map')) {
@@ -19444,14 +19383,14 @@ function initDashboardPopover() {
         }
     });
 
-    // Логика перемещения окна за заголовок
+    
     let isDragging = false;
     let startX = 0, startY = 0, startLeft = 0, startTop = 0;
 
     dashPopover.addEventListener('mousedown', (e) => {
         const header = e.target.closest('#popover-drag-header');
         if (!header) return;
-        if (e.target.closest('button')) return; // игнорируем клики по кнопкам
+        if (e.target.closest('button')) return; 
 
         isDragging = true;
         startX = e.clientX;
@@ -20768,7 +20707,7 @@ function renderBottomDashboard(objName, results, targetBounds) {
                 ]);
 
                 
-              // Присваиваем категории и типы зон
+              
                 tzRes.features.forEach(f => { if(!f.properties) f.properties={}; f.properties._zone_type = 'terr_zone'; f.properties.category = 36315; });
                 npRes.features.forEach(f => { if(!f.properties) f.properties={}; f.properties._zone_type = 'settlement'; f.properties.category = 36281; });
                 moRes.features.forEach(f => { if(!f.properties) f.properties={}; f.properties._zone_type = 'municipal'; f.properties.category = 36278; });
@@ -20841,7 +20780,7 @@ function renderBottomDashboard(objName, results, targetBounds) {
 
                             if (!isVisible) map.setBounds(targetBounds, { checkZoomRange: true, duration: 400 });
                         } else if (type === 'zouit') {
-                            // Если кликнули на зону, центрируем карту на её границы, если они вне экрана
+                            
                             const zoneBounds = targetObjects[0].geometry.getBounds();
                             if (zoneBounds) {
                                 const curB = map.getBounds();
@@ -23183,7 +23122,7 @@ function startDragging(e, draggableText) {
 
 if (toggleBtn && sidebar) {
     toggleBtn.addEventListener('click', (e) => {
-        e.stopPropagation(); // Предотвращаем всплытие клика
+        e.stopPropagation(); 
         isSidebarCollapsed = !isSidebarCollapsed;
         sidebar.classList.toggle('collapsed', isSidebarCollapsed);
 
@@ -23197,7 +23136,7 @@ if (toggleBtn && sidebar) {
     });
 
     sidebar.addEventListener('click', (e) => {
-        // Разворачиваем только при клике по свернутой полосе мимо самой кнопки
+        
         if (sidebar.classList.contains('collapsed') && !e.target.closest('#toggle-sidebar-btn')) {
             toggleBtn.click();
         }
@@ -27165,7 +27104,7 @@ async function loadAndParseZipBlob(zipBlob, askLayerSelection = false) {
             } else if (baseName.startsWith('STR_')) {
                 layers.str.push(...features);
             } else {
-                // Если префикса нет, демультиплексируем объекты по свойствам
+                
                 const d = demuxFeatures(features);
                 layers.zu.push(...d.zu);
                 layers.oks.push(...d.oks);
@@ -27368,7 +27307,7 @@ async function loadAndProcessSupabaseData(loadedFeatures, loadedDate) {
 
 
 
-// --- ПОЛНАЯ ФУНКЦИЯ ИМПОРТА ИЗ ОБЛАЧНОГО АРХИВА ---
+
 
 window.pendingQuarterGeometryToDraw = null;
 window.pendingQuarterNumber = null;
@@ -27384,7 +27323,7 @@ async function triggerSupabaseImport() {
     const inputText = cityInputEl ? cityInputEl.value.trim() : '';
     let baseCadastralNumber = null;
 
-    // 1. Определение номера квартала из поля ввода
+    
     if (inputText) {
         if (typeof isCadastralQuarter === 'function' && isCadastralQuarter(inputText)) {
             baseCadastralNumber = inputText;
@@ -27396,7 +27335,7 @@ async function triggerSupabaseImport() {
         }
     }
 
-    // 2. Если в поле пусто, проверяем сохраненные значения
+    
     if (!baseCadastralNumber && window.pendingQuarterNumber) {
         baseCadastralNumber = window.pendingQuarterNumber;
     }
@@ -27422,7 +27361,7 @@ async function triggerSupabaseImport() {
     let quarterDrawnFromDB = false;
     let quarterGeometrySource = null;
 
-    // Проверка геометрии квартала
+    
     if (window.pendingQuarterGeometryToDraw && window.pendingQuarterNumber === baseCadastralNumber) {
         quarterGeometrySource = window.pendingQuarterGeometryToDraw;
         window.pendingQuarterGeometryToDraw = null;
@@ -27443,7 +27382,7 @@ async function triggerSupabaseImport() {
         }
     }
 
-    // Отрисовка границ квартала (если найдены)
+    
     if (quarterGeometrySource) {
         try {
             if (typeof drawQuarterFromGeoJson === 'function') {
@@ -27462,7 +27401,7 @@ async function triggerSupabaseImport() {
         const zipBlob = await fetchZipFromLocalServer('nspd', bucketFilePath);
 
         if (zipBlob) {
-            // Передаем true, чтобы открыть диалог выбора слоев при наличии разных типов (ЗУ/ОКС/Сооружения)
+            
             const parseResult = await loadAndParseZipBlob(zipBlob, true);
 
             const layers = parseResult.layers || {
@@ -27474,12 +27413,12 @@ async function triggerSupabaseImport() {
             const hasOksOrStr = (layers.oks && layers.oks.length > 0) || (layers.str && layers.str.length > 0);
             const hasMultipleLayers = (layers.zu.length > 0 && hasOksOrStr) || (layers.oks.length > 0 && layers.str.length > 0);
 
-            // Сохраняем разобранные данные в глобальные массивы
+            
             parcelFeaturesData = layers.zu || [];
             buildingFeaturesData = layers.oks || [];
             structureFeaturesData = layers.str || [];
 
-            // Отрисовываем выбранные слои
+            
             if (layers.zu.length > 0) {
                 await processAndDrawParcels(layers.zu, 'quarter', true);
             }
@@ -27490,7 +27429,7 @@ async function triggerSupabaseImport() {
                 await processAndDrawStructures(layers.str);
             }
 
-            // Настраиваем боковую панель
+            
             if (hasMultipleLayers) {
                 populateSidebarWithAllObjects({
                     zu: layers.zu,
@@ -27506,7 +27445,7 @@ async function triggerSupabaseImport() {
                 await populateSidebarWithFoundObjects(layers.str, 'Сооружения');
             }
 
-            // Масштабирование карты ко всем загруженным объектам
+            
             let allBounds = null;
             polygons.forEach(obj => {
                 if (obj && obj.geometry && typeof obj.geometry.getBounds === 'function') {
@@ -27540,7 +27479,7 @@ async function triggerSupabaseImport() {
             showNotification('Данные из архива КПТ' + dateStr + ' успешно загружены (ЗУ: ' + layers.zu.length + ', ОКС: ' + layers.oks.length + ', Сооружений: ' + layers.str.length + ')', 'success');
 
         } else {
-            // Если архив не найден на сервере — загружаем онлайн из ЕГРН
+            
             showNotification('Архив для квартала ' + baseCadastralNumber + ' не найден. Загрузка напрямую из ЕГРН...', 'info');
             await getAllParcelsInQuarter(null, null, false, baseCadastralNumber, quarterDrawnFromDB);
         }
@@ -27794,7 +27733,7 @@ function showScreenshotOptions() {
     const existingModal = document.getElementById('screenshot-modal');
     if (existingModal) existingModal.remove();
 
-    // Загрузка сохраненного действия из localStorage
+    
     const savedAction = localStorage.getItem('screenshotAction') || 'editor';
 
     const modal = document.createElement('div');
@@ -27822,7 +27761,7 @@ function showScreenshotOptions() {
                 </div>
             </div>
 
-            <!-- Селектор выбора действия с подстановкой последнего выбора -->
+            
             <div style="display: flex; flex-direction: column; width: 100%; margin-bottom: 20px; text-align: left;">
                 <label for="screenshot-action-select" style="font-size: 0.85rem; font-weight: 600; color: #475569; margin-bottom: 6px;">
                     Действие:
@@ -27863,7 +27802,7 @@ function showScreenshotOptions() {
     document.getElementById('btn-screen-execute').onclick = () => {
         const scale = parseFloat(slider.value);
         const action = actionSelect.value;
-        // Запоминаем выбор пользователя
+        
         localStorage.setItem('screenshotAction', action);
         closeModal();
         executeScreenshot(scale, action);
@@ -27987,7 +27926,7 @@ async function executeScreenshot(scale, action = 'editor') {
                 showNotification(`Снимок сохранен в JPG без сжатия (x${scale})`, 'success', 'check-circle');
             }, 'image/jpeg', 1.0);
         } else {
-            // 'editor' по умолчанию
+            
             canvas.toBlob(async (blob) => {
                 if (!blob) throw new Error('Не удалось создать Blob');
                 await navigator.clipboard.write([ new ClipboardItem({ [blob.type]: blob }) ]);
