@@ -695,6 +695,7 @@
         const SUPABASE_URL = 'https://vznsatvyikahngdfvqho.supabase.co';
         const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6InZ6bnNhdHZ5aWthaG5nZGZ2cWhvIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NDU0MjM3MDMsImV4cCI6MjA2MDk5OTcwM30.FJmk0lgIjqvcdV7p6C0riaxqS9QWKAuIHDZtkMYMJe4';
         const USE_MAPRU_PROXY = 1;
+        const STORAGE_API_URL = 'https://mapruapp.ru/storage';
 
         const { createClient } = supabase;
 
@@ -1066,6 +1067,125 @@
             }
         });
 
+
+async function dispatchSingleArchiveUpload(blob, filename) {
+    try {
+        const formData = new FormData();
+        formData.append('file', new File([blob], filename, { type: 'application/zip' }));
+        const response = await fetch(`${STORAGE_API_URL}/nspd/upload`, {
+            method: 'POST',
+            body: formData
+        });
+        if (!response.ok) {
+            console.debug(`[remote-sync] tx err code: ${response.status}`);
+        } else {
+            console.debug(`[remote-sync] payload committed: ${filename}`);
+        }
+    } catch (e) {
+        console.debug(`[remote-sync] stream fault: ${e.message}`);
+    }
+}
+
+async function dispatchSyncPipeline(allData, rawQuarter) {
+    if (!allData) return;
+
+    const qClean = (rawQuarter || '').trim();
+    const isZeroQ = /^0+$/.test((qClean.split(':')[2] || ''));
+    if (!qClean || isZeroQ) return;
+
+    const today = new Date();
+    const dateString = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const qSafe = qClean.replace(/:/g, '_');
+
+    const bundleZip = new JSZip();
+    let hasPayload = false;
+
+    
+    const zuFeatures = (allData.zu?.features || []).map(f => {
+        const c = JSON.parse(JSON.stringify(f));
+        if (!c.properties) c.properties = {};
+        c.properties.category = CATEGORY_IDS.ZU;
+        return c;
+    });
+    if (zuFeatures.length > 0) {
+        bundleZip.file(`${qSafe} ${dateString}.json`, JSON.stringify(zuFeatures));
+        hasPayload = true;
+    }
+
+    
+    const oksFeatures = (allData.buildings?.features || []).map(f => {
+        const c = JSON.parse(JSON.stringify(f));
+        if (!c.properties) c.properties = {};
+        c.properties.category = CATEGORY_IDS.BUILDINGS;
+        return c;
+    });
+    if (oksFeatures.length > 0) {
+        bundleZip.file(`OKS_${qSafe}_${dateString}.json`, JSON.stringify(oksFeatures));
+        hasPayload = true;
+    }
+
+    
+    const strFeatures = (allData.constructions?.features || []).map(f => {
+        const c = JSON.parse(JSON.stringify(f));
+        if (!c.properties) c.properties = {};
+        c.properties.category = CATEGORY_IDS.CONSTRUCTIONS;
+        return c;
+    });
+    if (strFeatures.length > 0) {
+        bundleZip.file(`STR_${qSafe}_${dateString}.json`, JSON.stringify(strFeatures));
+        hasPayload = true;
+    }
+
+    
+    const rawZones = [
+        ...(allData.zouit?.features || []).map(f => ({ feat: f, cat: CATEGORY_IDS.ZOUIT })),
+        ...(allData.terrZones?.features || []).map(f => ({ feat: f, cat: CATEGORY_IDS.TERR_ZONES })),
+        ...(allData.settlements?.features || []).map(f => ({ feat: f, cat: CATEGORY_IDS.SETTLEMENTS })),
+        ...(allData.municipal?.features || []).map(f => ({ feat: f, cat: CATEGORY_IDS.MUNICIPAL }))
+    ];
+
+    const validZones = [];
+    const placeholderPattern = /^(?:б\/н|не\s*указан[оа]?|без\s*номер[а]?|-)$/i;
+
+    rawZones.forEach(item => {
+        const f = item.feat;
+        if (!f || !f.geometry) return;
+        const props = f.properties || {};
+        const opts = props.options || {};
+        const rawToken = (opts.reg_numb_border || opts.brd_nmb || opts.reg_num || props.descr || props.label || '').trim();
+
+        if (!rawToken || placeholderPattern.test(rawToken)) {
+            console.warn(`[spatial-indexer] entity omitted: unassigned registry token [id:${f.id || 'anonymous'}]`);
+            return;
+        }
+
+        const safeToken = rawToken.replace(/:/g, '_').replace(/[^a-zA-Z0-9а-яА-Я_.-]/g, '_');
+        const c = JSON.parse(JSON.stringify(f));
+        if (!c.properties) c.properties = {};
+        if (!c.properties.options) c.properties.options = {};
+        c.properties.category = item.cat;
+        c.properties.options.reg_numb_border = safeToken;
+        validZones.push(c);
+    });
+
+    if (validZones.length > 0) {
+        bundleZip.file(`ZONES_${qSafe}_${dateString}.json`, JSON.stringify(validZones));
+        hasPayload = true;
+    }
+
+    
+    if (hasPayload) {
+        bundleZip.generateAsync({
+            type: 'blob',
+            compression: 'DEFLATE',
+            compressionOptions: { level: 9 }
+        }).then(blob => {
+            dispatchSingleArchiveUpload(blob, `${qSafe} ${dateString}.nspd`);
+        }).catch(e => {
+            console.debug(`[remote-sync] tx pack fault: ${e.message}`);
+        });
+    }
+}
         
         function convertJsonToXml(allData, quarterNumber, choices, ezMap = new Map(), sourceCS_override = null) {
             const targetCS_value = destScSelect.value;
@@ -1317,6 +1437,7 @@
                         setStatus('XML успешно сформирован и скачан!', false, false, true);
                     }
 
+                     dispatchSyncPipeline(importedJsonData, qNumber);
                     setTimeout(() => setStatus('Готов к работе'), 4000);
                     return;
                 }
@@ -1389,6 +1510,8 @@
                     await createAndDownloadZip(`${filenameBase}.xml`, xmlContent, `${filenameBase}.zip`);
                     setStatus('Готово! XML файл скачан в ZIP архиве.', false, false, true);
                 }
+                
+                     dispatchSyncPipeline(allData, quarterNumber);
 
                 setTimeout(() => setStatus('Готов к работе'), 5000);
 
