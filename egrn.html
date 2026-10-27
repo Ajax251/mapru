@@ -1451,6 +1451,51 @@ button.search-button:hover {
                 width: 100%;
             }
         }
+        
+        
+.context-menu {
+    position: fixed;
+    z-index: 3000;
+    background: var(--bg-surface);
+    border: 1px solid var(--border-color);
+    border-radius: var(--radius-md);
+    box-shadow: var(--shadow-lg);
+    padding: 6px 0;
+    min-width: 180px;
+}
+
+.context-menu-item {
+    padding: 10px 16px;
+    font-size: 14px;
+    color: var(--text-color);
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    cursor: pointer;
+    transition: var(--transition);
+}
+
+.context-menu-item:hover {
+    background: var(--primary-light);
+    color: var(--primary-color);
+}
+
+.context-menu-item i {
+    width: 16px;
+    text-align: center;
+    color: var(--text-secondary);
+}
+
+.context-menu-item:hover i {
+    color: var(--primary-color);
+}
+
+.context-menu-divider {
+    height: 1px;
+    background: var(--border-color);
+    margin: 4px 0;
+}
+
     </style>
 </head>
 <body>
@@ -1466,7 +1511,7 @@ button.search-button:hover {
                 <div class="icon-container-print" onclick="copyAndOpenOt()" title="Печать / Отчет">
                     <img src="img/print.png" alt="Print" class="site-icon">
                 </div>
-                <div class="icon-container" onclick="fetchDataFromArchive()" title="Поиск в архиве">
+                <div class="icon-container" id="archiveIconBtn" onclick="fetchDataFromArchive('auto')" oncontextmenu="handleArchiveContextMenu(event)" title="Поиск в архиве (ПКМ — меню)">
                     <img src="img/his.png" alt="Open Site" class="site-icon">
                 </div>
             </div>
@@ -1756,6 +1801,49 @@ button.search-button:hover {
     </div>
 
  
+ 
+<div id="archiveContextMenu" class="context-menu" style="display: none;">
+    <div class="context-menu-item" onclick="triggerArchiveSearch('cloud')">
+        <i class="fas fa-cloud"></i> Облачный архив
+    </div>
+    <div class="context-menu-item" onclick="triggerArchiveSearch('local')">
+        <i class="fas fa-database"></i> Локальный архив
+    </div>
+    <div class="context-menu-divider"></div>
+    <div class="context-menu-item" onclick="openDbManagerModal()">
+        <i class="fas fa-tools"></i> Управление БД
+    </div>
+</div>
+
+
+<div id="dbManagerModal" class="modal">
+    <div class="modal-content" style="max-width: 480px; text-align: left;">
+        <span class="close-modal" onclick="closeSpecificModal('dbManagerModal')">×</span>
+        <h4 style="margin-top: 0; margin-bottom: 16px; font-size: 19px; color: var(--text-color); display: flex; align-items: center; gap: 8px;">
+            <i class="fas fa-database" style="color: var(--primary-color);"></i> Управление локальной БД
+        </h4>
+
+        <div style="background: var(--bg-subtle); padding: 14px; border-radius: var(--radius-md); border: 1px solid var(--border-color); margin-bottom: 18px; font-size: 14px; line-height: 1.6;">
+            <div>Объектов в базе: <strong id="dbObjectsCount" style="color: var(--primary-color);">0</strong></div>
+            <div>Приблизительный объем: <strong id="dbStorageSize" style="color: var(--primary-color);">0 КБ</strong></div>
+        </div>
+
+        <div style="display: flex; flex-direction: column; gap: 10px;">
+            <button onclick="exportDbToJson()" class="btn-confirm" style="width: 100%; height: 42px; display: flex; align-items: center; justify-content: center; gap: 8px; background: var(--primary-color);">
+                <i class="fas fa-file-download"></i> Выгрузить БД в JSON
+            </button>
+
+            <button onclick="document.getElementById('dbImportInput').click()" class="btn-confirm" style="width: 100%; height: 42px; display: flex; align-items: center; justify-content: center; gap: 8px; background: var(--purple);">
+                <i class="fas fa-file-upload"></i> Загрузить из JSON
+            </button>
+            <input type="file" id="dbImportInput" accept=".json" style="display: none;" onchange="importDbFromJson(event)">
+
+            <button onclick="confirmClearDb()" class="btn-cancel" style="width: 100%; height: 42px; display: flex; align-items: center; justify-content: center; gap: 8px; margin-top: 6px;">
+                <i class="fas fa-trash-alt"></i> Удалить БД
+            </button>
+        </div>
+    </div>
+</div>
       
     <script>
         
@@ -1768,6 +1856,309 @@ button.search-button:hover {
     
     let currentFeature = null;
 let currentLandParcelList = null;
+
+
+
+
+
+
+const IDB_NAME = 'EgrnCacheDB';
+const IDB_STORE = 'cadastral_objects';
+const IDB_VERSION = 1;
+
+
+function openCacheDB() {
+    return new Promise((resolve, reject) => {
+        const req = indexedDB.open(IDB_NAME, IDB_VERSION);
+        req.onupgradeneeded = (e) => {
+            const db = e.target.result;
+            if (!db.objectStoreNames.contains(IDB_STORE)) {
+                db.createObjectStore(IDB_STORE, { keyPath: 'cadNum' });
+            }
+        };
+        req.onsuccess = () => resolve(req.result);
+        req.onerror = () => reject(req.error);
+    });
+}
+
+
+async function saveToLocalCache(cadNum, record) {
+    if (!cadNum) return;
+    try {
+        const cleanCadNum = cadNum.trim();
+        const fullPayload = {
+            cadNum: cleanCadNum,
+            ...record,
+            cachedAt: new Date().toISOString() 
+        };
+
+        
+        const zip = new JSZip();
+        zip.file('data.json', JSON.stringify(fullPayload));
+        const zipBlob = await zip.generateAsync({
+            type: 'blob',
+            compression: 'DEFLATE',
+            compressionOptions: { level: 9 }
+        });
+
+        const db = await openCacheDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(IDB_STORE, 'readwrite');
+            const store = tx.objectStore(IDB_STORE);
+            store.put({
+                cadNum: cleanCadNum,
+                zipBlob: zipBlob,
+                cachedAt: fullPayload.cachedAt
+            });
+            tx.oncomplete = () => resolve();
+            tx.onerror = () => reject(tx.error);
+        });
+    } catch (err) {
+        console.warn('Ошибка сохранения объекта в IndexedDB:', err);
+    }
+}
+
+
+async function getFromLocalCache(cadNum) {
+    if (!cadNum) return null;
+    try {
+        const db = await openCacheDB();
+        const rawEntry = await new Promise((resolve, reject) => {
+            const tx = db.transaction(IDB_STORE, 'readonly');
+            const store = tx.objectStore(IDB_STORE);
+            const req = store.get(cadNum.trim());
+            req.onsuccess = () => resolve(req.result || null);
+            req.onerror = () => reject(req.error);
+        });
+
+        if (!rawEntry || !rawEntry.zipBlob) return null;
+
+        
+        const zip = await JSZip.loadAsync(rawEntry.zipBlob);
+        const jsonText = await zip.file('data.json').async('string');
+        return JSON.parse(jsonText);
+    } catch (err) {
+        console.warn('Ошибка чтения/распаковки из IndexedDB:', err);
+        return null;
+    }
+}
+
+
+async function getRawEntriesFromLocalCache() {
+    try {
+        const db = await openCacheDB();
+        return new Promise((resolve, reject) => {
+            const tx = db.transaction(IDB_STORE, 'readonly');
+            const store = tx.objectStore(IDB_STORE);
+            const req = store.getAll();
+            req.onsuccess = () => resolve(req.result || []);
+            req.onerror = () => reject(req.error);
+        });
+    } catch (err) {
+        console.warn('Ошибка получения сырых записей IndexedDB:', err);
+        return [];
+    }
+}
+
+
+async function getAllFromLocalCache() {
+    const entries = await getRawEntriesFromLocalCache();
+    const result = [];
+    for (const entry of entries) {
+        if (entry.zipBlob) {
+            try {
+                const zip = await JSZip.loadAsync(entry.zipBlob);
+                const jsonText = await zip.file('data.json').async('string');
+                result.push(JSON.parse(jsonText));
+            } catch (e) {
+                console.error(`Ошибка распаковки объекта ${entry.cadNum}:`, e);
+            }
+        }
+    }
+    return result;
+}
+
+
+async function clearLocalCacheDB() {
+    const db = await openCacheDB();
+    return new Promise((resolve, reject) => {
+        const tx = db.transaction(IDB_STORE, 'readwrite');
+        const store = tx.objectStore(IDB_STORE);
+        const req = store.clear();
+        tx.oncomplete = () => resolve();
+        tx.onerror = () => reject(tx.error);
+    });
+}
+
+
+function renderCachedObject(record) {
+    if (!record) return;
+
+    document.title = `${record.cadNum}`;
+    currentFeature = record.feature;
+    currentLandParcelList = record.landParcelList || null;
+
+    updatePropertyData(
+        record.options,
+        record.properties,
+        record.oknList || null,
+        record.landParcelList || null,
+        record.geometry,
+        record.roomsList || null
+    );
+
+    const geometry = record.geometry;
+    if (geometry && geometry.coordinates && geometry.type !== "Point") {
+        currentCoords = geometry.coordinates;
+        document.querySelector('.content-container').style.display = 'grid';
+        document.querySelector('.scheme-container').style.display = 'block';
+        drawScheme();
+    } else {
+        document.querySelector('.content-container').style.display = 'block';
+        document.querySelector('.scheme-container').style.display = 'none';
+        clearCanvas();
+        if (geometry && geometry.type === "Point") {
+            showNotification('Объект найден, но не имеет контура (геометрия-точка).', 'warning');
+        }
+    }
+    document.getElementById('resultTable').style.display = 'table';
+}
+
+
+
+
+function handleArchiveContextMenu(e) {
+    e.preventDefault();
+    e.stopPropagation();
+
+    const menu = document.getElementById('archiveContextMenu');
+    if (!menu) return;
+
+    
+    menu.style.left = `${e.clientX}px`;
+    menu.style.top = `${e.clientY}px`;
+    menu.style.display = 'block';
+}
+
+
+document.addEventListener('click', (e) => {
+    const menu = document.getElementById('archiveContextMenu');
+    if (menu && !menu.contains(e.target)) {
+        menu.style.display = 'none';
+    }
+});
+
+
+function triggerArchiveSearch(mode) {
+    const menu = document.getElementById('archiveContextMenu');
+    if (menu) menu.style.display = 'none';
+    fetchDataFromArchive(mode);
+}
+
+
+async function openDbManagerModal() {
+    const menu = document.getElementById('archiveContextMenu');
+    if (menu) menu.style.display = 'none';
+
+    const modal = document.getElementById('dbManagerModal');
+    if (!modal) return;
+    modal.style.display = 'block';
+
+    const entries = await getRawEntriesFromLocalCache();
+    const countEl = document.getElementById('dbObjectsCount');
+    const sizeEl = document.getElementById('dbStorageSize');
+
+    if (countEl) countEl.textContent = entries.length;
+
+    
+    let totalBytes = 0;
+    entries.forEach(entry => {
+        if (entry.zipBlob) totalBytes += entry.zipBlob.size;
+    });
+
+    let sizeText = (totalBytes / 1024).toFixed(1) + ' КБ';
+    if (totalBytes > 1024 * 1024) {
+        sizeText = (totalBytes / (1024 * 1024)).toFixed(2) + ' МБ';
+    }
+
+    if (sizeEl) sizeEl.textContent = `${sizeText} `;
+}
+
+
+async function exportDbToJson() {
+    showLoader('Распаковка и экспорт базы...');
+    try {
+        const items = await getAllFromLocalCache();
+        if (items.length === 0) {
+            showNotification('Локальная база данных пуста', 'warning');
+            return;
+        }
+
+        const jsonString = JSON.stringify(items, null, 2);
+        const blob = new Blob([jsonString], { type: 'application/json;charset=utf-8' });
+        const dateStr = new Date().toISOString().slice(0, 10);
+
+        const link = document.createElement('a');
+        link.href = URL.createObjectURL(blob);
+        link.download = `egrn_local_db_${dateStr}.json`;
+        document.body.appendChild(link);
+        link.click();
+        document.body.removeChild(link);
+        URL.revokeObjectURL(link.href);
+
+        showNotification(`База данных (${items.length} объектов) выгружена в JSON`, 'success');
+    } catch (err) {
+        console.error('Ошибка экспорта:', err);
+        showNotification('Не удалось выгрузить базу данных', 'error');
+    } finally {
+        hideLoader();
+    }
+}
+
+
+async function importDbFromJson(event) {
+    const file = event.target.files[0];
+    if (!file) return;
+
+    showLoader('Импорт  объектов в ZIP...');
+    try {
+        const text = await file.text();
+        const data = JSON.parse(text);
+
+        if (!Array.isArray(data)) {
+            throw new Error('Файл должен содержать массив объектов');
+        }
+
+        let count = 0;
+        for (const item of data) {
+            if (item.cadNum) {
+                await saveToLocalCache(item.cadNum, item);
+                count++;
+            }
+        }
+
+        showNotification(`Успешно импортировано объектов: ${count}`, 'success');
+        await openDbManagerModal();
+    } catch (err) {
+        console.error('Ошибка импорта:', err);
+        showNotification(`Ошибка импорта: ${err.message}`, 'error');
+    } finally {
+        event.target.value = '';
+        hideLoader();
+    }
+}
+
+
+async function confirmClearDb() {
+    if (confirm('БД будет удалена, продолжить ?')) {
+        await clearLocalCacheDB();
+        showNotification('Локальная база данных полностью очищена', 'info');
+        await openDbManagerModal();
+    }
+}
+
+
+
 
     const fallbackFetch = async (url, options) => {
         if (FORCE_SUPABASE_PROXY === 1) {
@@ -4641,12 +5032,24 @@ function handleSuccessfulResponse(data) {
         }
 
         
-        currentFeature = feature;
+      currentFeature = feature;
         currentLandParcelList = landParcelList;
 
-        
         updatePropertyData(options, properties, oknList, landParcelList, geometry, roomsList);
 
+       
+        const currentCadNum = options.cad_num || options.cad_number || properties.descr;
+        if (currentCadNum) {
+            saveToLocalCache(currentCadNum, {
+                feature: feature,
+                properties: properties,
+                options: options,
+                geometry: geometry,
+                oknList: oknList,
+                landParcelList: landParcelList,
+                roomsList: roomsList
+            });
+        }
         
         if (geometry && geometry.type) {
             switch (geometry.type) {
@@ -4823,18 +5226,37 @@ if (svContainer) {
             const data = await response.json();
             handleSuccessfulResponse(data);
 
-        } catch (finalError) {
-            if (finalError.name === 'AbortError') {
+} catch (finalError) {
+            if (finalError.name === 'AbortError') return;
+
+            console.warn("API недоступно, попытка загрузить из локального кэша...", finalError);
+
+           
+            const cached = await getFromLocalCache(inputValue);
+            if (cached) {
+                renderCachedObject(cached);
+                const d = new Date(cached.cachedAt);
+                const dateStr = `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.${d.getFullYear()}`;
+
+                const archiveInfoDiv = document.getElementById('archiveInfo');
+                if (archiveInfoDiv) {
+                    archiveInfoDiv.innerHTML = `
+                        <i class="fas fa-wifi" style="margin-right: 8px; color: #ef4444;"></i>
+                        <span style="font-size: 15px; font-weight: 600; color: #991b1b;">
+                            Офлайн-режим: данные загружены из локального кэша (сохранены: ${dateStr})
+                        </span>
+                    `;
+                    archiveInfoDiv.style.display = 'block';
+                }
+                showNotification(`Сеть недоступна. Загружено из локального кэша (${dateStr})`, 'warning');
                 return;
             }
 
-            console.warn("API error, trying archive...", finalError);
-            showNotification('Основные сервисы недоступны. Попытка загрузить из архива...', 'warning');
-            
-            await fetchDataFromArchive(); 
+            showNotification('Основные сервисы недоступны. Попытка загрузить из облачного архива...', 'warning');
+            await fetchDataFromArchive('cloud');
             return;
         } finally {
-             hideLoader();
+            hideLoader();
         }
 
     } else {
@@ -6605,14 +7027,46 @@ document.getElementById('schemeCanvas').addEventListener('dblclick', function(ev
 const STORAGE_API_URL = 'https://mapruapp.ru/storage';
 
 
-async function fetchDataFromArchive() {
+
+function renderCachedObject(record) {
+    document.title = `${record.cadNum}`;
+    currentFeature = record.feature;
+    currentLandParcelList = record.landParcelList;
+
+    updatePropertyData(
+        record.options,
+        record.properties,
+        record.oknList || null,
+        record.landParcelList || null,
+        record.geometry,
+        record.roomsList || null
+    );
+
+    const geometry = record.geometry;
+    if (geometry && geometry.coordinates && geometry.type !== "Point") {
+        currentCoords = geometry.coordinates;
+        document.querySelector('.content-container').style.display = 'grid';
+        document.querySelector('.scheme-container').style.display = 'block';
+        drawScheme();
+    } else {
+        document.querySelector('.content-container').style.display = 'block';
+        document.querySelector('.scheme-container').style.display = 'none';
+        clearCanvas();
+        if (geometry && geometry.type === "Point") {
+            showNotification('Объект найден, но не имеет контура (геометрия-точка).', 'warning');
+        }
+    }
+    document.getElementById('resultTable').style.display = 'table';
+}
+
+async function fetchDataFromArchive(mode = 'auto') {
     const cadastralNumberInput = document.getElementById('cadastralNumber');
     const targetCadastralNumber = cadastralNumberInput.value.trim();
     const archiveInfoDiv = document.getElementById('archiveInfo');
 
     if (archiveInfoDiv) {
         archiveInfoDiv.style.display = 'none';
-        archiveInfoDiv.innerHTML = ''; 
+        archiveInfoDiv.innerHTML = '';
     }
 
     if (!isValidCadastralNumber(targetCadastralNumber)) {
@@ -6620,91 +7074,111 @@ async function fetchDataFromArchive() {
         return;
     }
 
-    
-    showLoader(`Загрузка из архива: ${targetCadastralNumber}`);
+    showLoader(`Поиск в архиве (${mode}): ${targetCadastralNumber}`);
 
     try {
-        const quarterNumber = targetCadastralNumber.split(':').slice(0, 3).join(':');
-        const filename = quarterNumber.replace(/:/g, '_') + '.nspd';
+        let localCached = null;
+        if (mode === 'auto' || mode === 'local') {
+            localCached = await getFromLocalCache(targetCadastralNumber);
+        }
 
-        
-        
-        
+        let cloudFeature = null;
+        let cloudArchiveDate = null;
 
-        const zipBlob = await fetchZipFromLocalServer('nspd', filename);
-        
-        
-        if (searchAbortController && searchAbortController.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+        if (mode === 'auto' || mode === 'cloud') {
+            const quarterNumber = targetCadastralNumber.split(':').slice(0, 3).join(':');
+            const filename = quarterNumber.replace(/:/g, '_') + '.nspd';
+            try {
+                const zipBlob = await fetchZipFromLocalServer('nspd', filename);
+                if (zipBlob) {
+                    const parsed = await loadAndParseZipBlob(zipBlob);
+                    cloudArchiveDate = parsed.date; 
+                    cloudFeature = parsed.features.find(f => f.properties && f.properties.descr === targetCadastralNumber);
+                }
+            } catch (cloudErr) {
+                console.warn('Облачный архив недоступен:', cloudErr);
+            }
+        }
 
-        if (!zipBlob) {
-            showNotification(`Архив для квартала ${quarterNumber} не найден. Попробуйте обычный поиск.`, 'warning');
+        if (searchAbortController && searchAbortController.signal.aborted) {
+            throw new DOMException('Aborted', 'AbortError');
+        }
+
+        if (!localCached && !cloudFeature) {
+            const where = mode === 'local' ? 'локальной БД' : mode === 'cloud' ? 'облачном архиве' : 'архивах';
+            showNotification(`Объект ${targetCadastralNumber} не найден в ${where}.`, 'error');
             return;
         }
 
-        const { features, date: archiveDate } = await loadAndParseZipBlob(zipBlob);
-
         
-        if (searchAbortController && searchAbortController.signal.aborted) throw new DOMException('Aborted', 'AbortError');
+        let localDateObj = null;
+        let localDateStr = '';
+        if (localCached && localCached.cachedAt) {
+            localDateObj = new Date(localCached.cachedAt);
+            const d = localDateObj;
+            localDateStr = `${String(d.getDate()).padStart(2, '0')}.${String(d.getMonth() + 1).padStart(2, '0')}.${d.getFullYear()}`;
+        }
 
-        const targetFeature = features.find(f => f.properties && f.properties.descr === targetCadastralNumber);
-
-        if (!targetFeature) {
-            showNotification(`Участок ${targetCadastralNumber} не найден в архиве квартала.`, 'error');
-            return;
+        let cloudDateObj = null;
+        let cloudDateStr = '';
+        if (cloudArchiveDate) {
+            cloudDateObj = new Date(cloudArchiveDate);
+            const [y, m, d] = cloudArchiveDate.split('-');
+            cloudDateStr = `${d}.${m}.${y}`;
         }
 
         
-        const properties = targetFeature.properties;
-        const options = targetFeature.properties ? targetFeature.properties.options : {};
-        const geometry = targetFeature.geometry;
-        
-        document.title = `${targetCadastralNumber}`;
-        updatePropertyData(options, properties, null, null, geometry);
+        const useLocal = mode === 'local' || 
+            (mode === 'auto' && localCached && (!cloudFeature || (localDateObj && cloudDateObj && localDateObj >= cloudDateObj)));
 
-        if (geometry && geometry.coordinates && geometry.type !== "Point") {
-            currentCoords = geometry.coordinates;
-            document.querySelector('.content-container').style.display = 'grid';
-            document.querySelector('.scheme-container').style.display = 'block';
-            drawScheme();
+        if (useLocal) {
+            renderCachedObject(localCached);
+
+            if (archiveInfoDiv) {
+                const note = !cloudFeature 
+                    ? `(облачный архив недоступен, дата сведений: ${localDateStr})` 
+                    : `(локальные сведения новее: ${localDateStr} против ${cloudDateStr})`;
+
+                archiveInfoDiv.innerHTML = `
+                    <i class="fas fa-database" style="margin-right: 8px; color: #10b981;"></i>
+                    <span style="font-size: 15px; font-weight: 600; color: #047857;">
+                        Загружено из локальной БД ${note}
+                    </span>
+                `;
+                archiveInfoDiv.style.display = 'block';
+            }
+            showNotification(`Загружено из локальной базы (сохранено: ${localDateStr})`, 'success');
+
         } else {
-            document.querySelector('.content-container').style.display = 'block';
-            document.querySelector('.scheme-container').style.display = 'none';
-            clearCanvas();
-            const warningMsg = (geometry && geometry.type === "Point") 
-                ? 'Участок найден, но не имеет координат для отрисовки (геометрия-точка).'
-                : 'Участок найден, но не имеет координат для отрисовки.';
-            showNotification(warningMsg, 'warning');
-        }
-        
-        let formattedDate = '';
-        if (archiveDate) {
-            const [year, month, day] = archiveDate.split('-');
-            formattedDate = `${day}.${month}.${year}`;
-        }
+            
+            const props = cloudFeature.properties || {};
+            const opts = props.options || {};
+            renderCachedObject({
+                cadNum: targetCadastralNumber,
+                feature: cloudFeature,
+                properties: props,
+                options: opts,
+                geometry: cloudFeature.geometry
+            });
 
-        if (archiveInfoDiv && formattedDate) {
-            archiveInfoDiv.innerHTML = `
-                <i class="fas fa-exclamation-triangle" style="margin-right: 8px; color: #ffa726;"></i>
-                <span style="font-size: 16px; font-weight: 500; color: #ef6c00;">
-                    Данные из архива (актуальность: ${formattedDate})
-                </span>
-            `;
-            archiveInfoDiv.style.display = 'block';
+            if (archiveInfoDiv && cloudDateStr) {
+                archiveInfoDiv.innerHTML = `
+                    <i class="fas fa-archive" style="margin-right: 8px; color: #ffa726;"></i>
+                    <span style="font-size: 15px; font-weight: 500; color: #ef6c00;">
+                        Данные из облачного архива КПТ (актуальность: ${cloudDateStr})
+                    </span>
+                `;
+                archiveInfoDiv.style.display = 'block';
+            }
+            showNotification(`Загружено из облачного архива КПТ (${cloudDateStr})`, 'info');
         }
-        
-        const notificationMessage = formattedDate
-            ? `Данные из архива КПТ загружены (на ${formattedDate})`
-            : 'Данные из архива КПТ успешно загружены!';
-        showNotification(notificationMessage, 'success');
-        
-        document.getElementById('resultTable').style.display = 'table';
 
     } catch (error) {
         if (error.name === 'AbortError') return;
-        console.error("Ошибка при работе с архивом:", error);
+        console.error("Ошибка при поиске в архиве:", error);
         showNotification(`Ошибка: ${error.message}`, 'error');
     } finally {
-        hideLoader(); 
+        hideLoader();
     }
 }
 
