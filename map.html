@@ -7790,13 +7790,64 @@ function findAndConvert() {
 
 
 
-function handleBindingKeyDown(e) {
-    if (e.key === 'Escape') {
-        stopBindingProcess();
-    }
+
+
+
+
+const RASTER_CALC_ZOOM = 23;
+
+
+function geoToMapPlane(geoCoord) {
+    const proj = map.options.get('projection');
+    const px = proj.toGlobalPixels(geoCoord, RASTER_CALC_ZOOM);
+    return [px[0], -px[1]]; 
 }
 
 
+function mapPlaneToGeo(planePt) {
+    const proj = map.options.get('projection');
+    return proj.fromGlobalPixels([planePt[0], -planePt[1]], RASTER_CALC_ZOOM);
+}
+
+function getRasterCorners() {
+    if (!rasterOverlay) return null;
+
+    
+    if (
+        rasterOverlay._rasterCornersGeo &&
+        Array.isArray(rasterOverlay._rasterCornersGeo) &&
+        rasterOverlay._rasterCornersGeo.length === 4
+    ) {
+        return rasterOverlay._rasterCornersGeo.map(pt => [...pt]);
+    }
+
+    const geometry = rasterOverlay.geometry;
+    if (!geometry) return null;
+    const type = geometry.getType();
+
+    if (type === 'Rectangle') {
+        const bounds = geometry.getBounds ? geometry.getBounds() : geometry.getCoordinates();
+        if (!bounds || bounds.length < 2) return null;
+
+        const south = Math.min(bounds[0][0], bounds[1][0]);
+        const north = Math.max(bounds[0][0], bounds[1][0]);
+        const west = Math.min(bounds[0][1], bounds[1][1]);
+        const east = Math.max(bounds[0][1], bounds[1][1]);
+
+        return [
+            [north, west], 
+            [north, east], 
+            [south, east], 
+            [south, west]  
+        ];
+    } else if (type === 'Polygon') {
+        const coords = geometry.getCoordinates();
+        if (coords && coords[0] && coords[0].length >= 4) {
+            return coords[0].slice(0, 4).map(pt => [...pt]);
+        }
+    }
+    return null;
+}
 
 
 function updateBindingHud() {
@@ -7818,7 +7869,7 @@ function updateBindingHud() {
             z-index: 100050;
             display: flex;
             align-items: center;
-            gap: 14px;
+            gap: 12px;
             font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
             font-size: 13px;
             backdrop-filter: blur(8px);
@@ -7831,7 +7882,8 @@ function updateBindingHud() {
     const rCount = bindingPoints.raster.length;
     const mCount = bindingPoints.map.length;
     const total = bindingTargetCount;
-    const modeTitle = total === 3 ? 'Аффинная (3 точки)' : 'Подобие (2 точки)';
+    const modeTitle = total === 3 ? 'Аффинная (3 т.)' : 'Подобие (2 т.)';
+    const hasPoints = (rCount + mCount) > 0;
 
     let iconHtml = '';
     let textHtml = '';
@@ -7839,11 +7891,11 @@ function updateBindingHud() {
     if (rCount < total) {
         const cur = rCount + 1;
         iconHtml = '<i class="fas fa-crosshairs" style="color: #f59e0b; font-size: 16px;"></i>';
-        textHtml = `[${modeTitle}] <b>Шаг ${cur} из ${total}</b>: Укажите точку <b>Р${cur} на РАСТРЕ</b>`;
+        textHtml = `[${modeTitle}] <b>Шаг ${cur}/${total}</b>: Укажите точку <b>Р${cur} на РАСТРЕ</b>`;
     } else {
         const cur = mCount + 1;
         iconHtml = '<i class="fas fa-map-marker-alt" style="color: #10b981; font-size: 16px;"></i>';
-        textHtml = `[${modeTitle}] <b>Шаг ${cur} из ${total}</b>: Укажите точку <b>К${cur} на КАРТЕ</b> (куда сместить Р${cur})`;
+        textHtml = `[${modeTitle}] <b>Шаг ${cur}/${total}</b>: Укажите точку <b>К${cur} на КАРТЕ</b> (для Р${cur})`;
     }
 
     hud.innerHTML = `
@@ -7851,6 +7903,23 @@ function updateBindingHud() {
             ${iconHtml}
             <span>${textHtml}</span>
         </div>
+        ${hasPoints ? `
+        <button id="hud-binding-undo-btn" title="Отменить последнюю точку (Backspace)" style="
+            background: #475569;
+            color: white;
+            border: none;
+            border-radius: 20px;
+            padding: 4px 10px;
+            font-size: 11px;
+            font-weight: 600;
+            cursor: pointer;
+            display: flex;
+            align-items: center;
+            gap: 4px;
+            transition: background 0.15s;
+        " onmouseenter="this.style.background='#334155'" onmouseleave="this.style.background='#475569'">
+            <i class="fas fa-undo"></i> Назад
+        </button>` : ''}
         <button id="hud-binding-cancel-btn" style="
             background: #ef4444;
             color: white;
@@ -7869,16 +7938,46 @@ function updateBindingHud() {
         </button>
     `;
 
+    const undoBtn = hud.querySelector('#hud-binding-undo-btn');
+    if (undoBtn) {
+        undoBtn.onclick = (e) => {
+            e.stopPropagation();
+            undoLastBindingPoint();
+        };
+    }
+
     hud.querySelector('#hud-binding-cancel-btn').onclick = (e) => {
         e.stopPropagation();
         stopBindingProcess();
+        showNotification('Привязка растра отменена', 'info');
     };
+
     hud.style.display = 'flex';
 }
 
 function hideBindingHud() {
     const hud = document.getElementById('raster-binding-hud');
     if (hud) hud.style.display = 'none';
+}
+
+
+function undoLastBindingPoint() {
+    if (!bindingState) return;
+
+    if (bindingPoints.map.length > 0) {
+        bindingPoints.map.pop();
+    } else if (bindingPoints.raster.length > 0) {
+        bindingPoints.raster.pop();
+    } else {
+        return;
+    }
+
+    const lastMarker = bindingVisualMarkers.pop();
+    if (lastMarker) {
+        map.geoObjects.remove(lastMarker);
+    }
+
+    updateBindingHud();
 }
 
 
@@ -7958,12 +8057,12 @@ function startBindingProcess(targetCount = 2) {
     bindingPoints = { raster: [], map: [] };
     bindingVisualMarkers = [];
 
-    
     disableMapInteractivity();
     if (rasterOverlay) {
         rasterOverlay.options.set('interactivityModel', 'default#silent');
     }
 
+    
     map.behaviors.disable('drag');
     map.options.set('cursor', 'crosshair');
 
@@ -7980,7 +8079,6 @@ function stopBindingProcess() {
         rasterOverlay.options.set('interactivityModel', 'default#transparent');
     }
 
-    
     if (bindingVisualMarkers && bindingVisualMarkers.length > 0) {
         bindingVisualMarkers.forEach(m => map.geoObjects.remove(m));
         bindingVisualMarkers = [];
@@ -7991,7 +8089,6 @@ function stopBindingProcess() {
     map.events.remove('click', handleBindingClick);
     document.removeEventListener('keydown', handleBindingKeyDown);
 
-    
     restoreMapInteractivity();
 }
 
@@ -7999,45 +8096,55 @@ function handleBindingKeyDown(e) {
     if (e.key === 'Escape') {
         stopBindingProcess();
         showNotification('Привязка растра отменена', 'info');
+    } else if (e.key === 'Backspace' || ((e.ctrlKey || e.metaKey) && e.key.toLowerCase() === 'z')) {
+        e.preventDefault();
+        undoLastBindingPoint();
     }
 }
 
 
 let bindingMarkerLayout = null;
 
-function handleBindingClick(e) {
-    e.preventDefault();
-    const clickCoords = e.get('coords');
-    const projection = map.options.get('projection');
-    const zoom = map.getZoom();
-
-    
-    if (!bindingMarkerLayout && ymaps && ymaps.templateLayoutFactory) {
+function ensureBindingMarkerLayout() {
+    if (!bindingMarkerLayout && window.ymaps && ymaps.templateLayoutFactory) {
         bindingMarkerLayout = ymaps.templateLayoutFactory.createClass(
-            '<div style="' +
-                'position: absolute;' +
-                'transform: translate(-50%, -50%);' +
-                'width: 28px;' +
-                'height: 28px;' +
-                'border-radius: 50%;' +
-                'background: $[properties.bg];' +
-                'color: #ffffff;' +
-                'font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif;' +
-                'font-size: 12px;' +
-                'font-weight: 800;' +
-                'display: flex;' +
-                'align-items: center;' +
-                'justify-content: center;' +
-                'border: 2px solid #ffffff;' +
-                'box-shadow: 0 3px 8px rgba(0,0,0,0.5);' +
-                'pointer-events: none;' +
-                'user-select: none;' +
-                'white-space: nowrap;' +
-            '">' +
-                '$[properties.iconContent]' +
+            '<div style="position: absolute; width: 0; height: 0; pointer-events: none; user-select: none;">' +
+                
+                '<div style="' +
+                    'position: absolute;' +
+                    'transform: translate(-50%, -50%);' +
+                    'width: 6px; height: 6px;' +
+                    'border-radius: 50%;' +
+                    'background: $[properties.bg];' +
+                    'border: 1.5px solid #ffffff;' +
+                    'box-shadow: 0 0 4px rgba(0,0,0,0.8);' +
+                '"></div>' +
+                
+                '<div style="' +
+                    'position: absolute;' +
+                    'transform: translate(6px, -28px);' +
+                    'padding: 2px 6px;' +
+                    'border-radius: 10px;' +
+                    'background: $[properties.bg];' +
+                    'color: #ffffff;' +
+                    'font-family: -apple-system, BlinkMacSystemFont, Arial, sans-serif;' +
+                    'font-size: 11px;' +
+                    'font-weight: 800;' +
+                    'border: 1.5px solid #ffffff;' +
+                    'box-shadow: 0 2px 6px rgba(0,0,0,0.45);' +
+                    'white-space: nowrap;' +
+                '">' +
+                    '$[properties.iconContent]' +
+                '</div>' +
             '</div>'
         );
     }
+}
+
+function handleBindingClick(e) {
+    e.preventDefault();
+    const clickCoords = e.get('coords'); 
+    ensureBindingMarkerLayout();
 
     
     if (bindingPoints.raster.length < bindingTargetCount) {
@@ -8048,23 +8155,26 @@ function handleBindingClick(e) {
             return;
         }
 
-        const p0 = projection.toGlobalPixels(cornersGeo[0], zoom); 
-        const p1 = projection.toGlobalPixels(cornersGeo[1], zoom); 
-        const p3 = projection.toGlobalPixels(cornersGeo[3], zoom); 
-        const clickPx = projection.toGlobalPixels(clickCoords, zoom);
+        
+        const p0 = geoToMapPlane(cornersGeo[0]); 
+        const p1 = geoToMapPlane(cornersGeo[1]); 
+        const p3 = geoToMapPlane(cornersGeo[3]); 
+        const click = geoToMapPlane(clickCoords);
 
-        const vux = p1[0] - p0[0], vuy = p1[1] - p0[1];
-        const vvx = p3[0] - p0[0], vvy = p3[1] - p0[1];
+        const vux = p1[0] - p0[0], vuy = p1[1] - p0[1]; 
+        const vvx = p3[0] - p0[0], vvy = p3[1] - p0[1]; 
         const det = vux * vvy - vuy * vvx;
 
-        if (Math.abs(det) < 1e-5) {
+        if (Math.abs(det) < 1e-7) {
             showNotification('Растр вырожден. Попробуйте сбросить его положение.', 'error');
             stopBindingProcess();
             return;
         }
 
-        const dx = clickPx[0] - p0[0];
-        const dy = clickPx[1] - p0[1];
+        const dx = click[0] - p0[0];
+        const dy = click[1] - p0[1];
+
+        
         const u = (dx * vvy - dy * vvx) / det;
         const v = (vux * dy - vuy * dx) / det;
 
@@ -8073,10 +8183,18 @@ function handleBindingClick(e) {
             return;
         }
 
-        const ptIndex = bindingPoints.raster.length + 1;
-        bindingPoints.raster.push([Math.max(0, Math.min(1, u)), Math.max(0, Math.min(1, v))]);
+        
+        const isTooClose = bindingPoints.raster.some(([ru, rv]) => Math.hypot(u - ru, v - rv) < 0.01);
+        if (isTooClose) {
+            showNotification('Эта точка слишком близка к уже выбранной на растре!', 'warning');
+            return;
+        }
 
         
+        
+        const ptIndex = bindingPoints.raster.length + 1;
+        bindingPoints.raster.push([u, v]);
+
         const marker = new ymaps.Placemark(clickCoords, {
             iconContent: `Р${ptIndex}`,
             bg: '#ef4444'
@@ -8099,7 +8217,6 @@ function handleBindingClick(e) {
         const ptIndex = bindingPoints.map.length + 1;
         bindingPoints.map.push(clickCoords);
 
-        
         const marker = new ymaps.Placemark(clickCoords, {
             iconContent: `К${ptIndex}`,
             bg: '#10b981'
@@ -8122,35 +8239,60 @@ function handleBindingClick(e) {
     }
 }
 
-function performRasterBinding() {
+async function performRasterBinding() {
     showLoader('Трансформация растра...');
     try {
         const { raster, map: mapPoints } = bindingPoints;
-        const projection = map.options.get('projection');
-        const zoom = map.getZoom();
-        let newCornersGeo = [];
+        const rawImageHref = rasterOverlay._rawImageHref || rasterOverlay.options.get('fillImageHref');
+        const currentOpacity = rasterOverlay.options.get('opacity') !== undefined
+            ? rasterOverlay.options.get('opacity')
+            : 0.8;
+
+        
+        const img = new Image();
+        img.crossOrigin = 'anonymous';
+        img.src = rawImageHref;
+        await new Promise((resolve, reject) => {
+            if (img.complete && img.naturalWidth > 0) return resolve();
+            img.onload = () => resolve();
+            img.onerror = () => reject(new Error('Не удалось прочитать исходное изображение растра'));
+        });
+
+        const W_img = img.naturalWidth || img.width;
+        const H_img = img.naturalHeight || img.height;
+        rasterImageSize = { width: W_img, height: H_img };
+
+        
+        const mPtsPlane = mapPoints.map(p => geoToMapPlane(p));
+
+        let cornersPlane = []; 
 
         if (bindingTargetCount === 3) {
             
-            const u1 = raster[0][0], v1 = raster[0][1];
-            const u2 = raster[1][0], v2 = raster[1][1];
-            const u3 = raster[2][0], v3 = raster[2][1];
+            const [u1, v1] = raster[0];
+            const [u2, v2] = raster[1];
+            const [u3, v3] = raster[2];
 
-            const p1 = projection.toGlobalPixels(mapPoints[0], zoom);
-            const p2 = projection.toGlobalPixels(mapPoints[1], zoom);
-            const p3 = projection.toGlobalPixels(mapPoints[2], zoom);
+            const [X1, Y1] = mPtsPlane[0];
+            const [X2, Y2] = mPtsPlane[1];
+            const [X3, Y3] = mPtsPlane[2];
 
-            const X1 = p1[0], Y1 = p1[1];
-            const X2 = p2[0], Y2 = p2[1];
-            const X3 = p3[0], Y3 = p3[1];
-
+            
             const D = u1 * (v2 - v3) + u2 * (v3 - v1) + u3 * (v1 - v2);
-            if (Math.abs(D) < 1e-7) {
-                showNotification('Выбранные 3 точки лежат на одной прямой! Выберите точки в форме треугольника.', 'error', 'exclamation-triangle', 6000);
+            if (Math.abs(D) < 1e-6) {
+                showNotification(
+                    'Выбранные 3 точки лежат почти на одной прямой! Выберите точки треугольником.',
+                    'error',
+                    'exclamation-triangle',
+                    6000
+                );
                 stopBindingProcess();
                 return;
             }
 
+            
+            
+            
             const a = (X1 * (v2 - v3) + X2 * (v3 - v1) + X3 * (v1 - v2)) / D;
             const b = (u1 * (X2 - X3) + u2 * (X3 - X1) + u3 * (X1 - X2)) / D;
             const e_param = (X1 * (u2 * v3 - u3 * v2) + X2 * (u3 * v1 - u1 * v3) + X3 * (u1 * v2 - u2 * v1)) / D;
@@ -8159,100 +8301,305 @@ function performRasterBinding() {
             const d = (u1 * (Y2 - Y3) + u2 * (Y3 - Y1) + u3 * (Y1 - Y2)) / D;
             const f_param = (Y1 * (u2 * v3 - u3 * v2) + Y2 * (u3 * v1 - u1 * v3) + Y3 * (u1 * v2 - u2 * v1)) / D;
 
-            const cornersPx = [
-                [e_param, f_param],
-                [a + e_param, c + f_param],
-                [a + b + e_param, c + d + f_param],
-                [b + e_param, d + f_param]
+            
+            cornersPlane = [
+                [e_param, f_param],                 
+                [a + e_param, c + f_param],         
+                [a + b + e_param, c + d + f_param], 
+                [b + e_param, d + f_param]          
             ];
-            newCornersGeo = cornersPx.map(px => projection.fromGlobalPixels(px, zoom));
-
         } else {
             
-            const u1 = raster[0][0], v1 = raster[0][1];
-            const u2 = raster[1][0], v2 = raster[1][1];
+            const [u1, v1] = raster[0];
+            const [u2, v2] = raster[1];
 
-            const p1 = projection.toGlobalPixels(mapPoints[0], zoom);
-            const p2 = projection.toGlobalPixels(mapPoints[1], zoom);
+            const p1 = mPtsPlane[0];
+            const p2 = mPtsPlane[1];
 
             const dX = p2[0] - p1[0];
             const dY = p2[1] - p1[1];
             const mapVectorLen = Math.hypot(dX, dY);
 
-            const duPx = (u2 - u1) * rasterImageSize.width;
-            const dvPx = (v2 - v1) * rasterImageSize.height;
-            const imgVectorLen = Math.hypot(duPx, dvPx);
+            const dxImg = (u2 - u1) * W_img;
+            const dyImg = (v2 - v1) * H_img;
+            const imgVectorLen = Math.hypot(dxImg, dyImg);
 
-            if (imgVectorLen < 1e-4) {
-                showNotification('Точки на растре поставлены слишком близко друг к другу', 'error');
+            if (imgVectorLen < 1e-4 || mapVectorLen < 1e-4) {
+                showNotification('Точки привязки расположены слишком близко друг к другу', 'error');
                 stopBindingProcess();
                 return;
             }
 
             const scale = mapVectorLen / imgVectorLen;
-            const deltaRot = Math.atan2(dY, dX) - Math.atan2(dvPx, duPx);
-            const cosRot = Math.cos(deltaRot);
-            const sinRot = Math.sin(deltaRot);
 
-            const cornersRel = [[0, 0], [1, 0], [1, 1], [0, 1]];
-            newCornersGeo = cornersRel.map(corner => {
-                const vx = (corner[0] - u1) * rasterImageSize.width * scale;
-                const vy = (corner[1] - v1) * rasterImageSize.height * scale;
-                const rx = vx * cosRot - vy * sinRot;
-                const ry = vx * sinRot + vy * cosRot;
-                return projection.fromGlobalPixels([p1[0] + rx, p1[1] + ry], zoom);
+            
+            const thetaImg = Math.atan2(-dyImg, dxImg);
+            const thetaMap = Math.atan2(dY, dX);
+            const rot = thetaMap - thetaImg;
+            const cosR = Math.cos(rot);
+            const sinR = Math.sin(rot);
+
+            const cornersImgPx = [
+                [0, 0],         
+                [W_img, 0],     
+                [W_img, H_img], 
+                [0, H_img]      
+            ];
+
+            cornersPlane = cornersImgPx.map(([cx, cy]) => {
+                const dx = (cx - u1 * W_img) * scale;
+                const dy = -(cy - v1 * H_img) * scale;
+                const rx = dx * cosR - dy * sinR;
+                const ry = dx * sinR + dy * cosR;
+                return [p1[0] + rx, p1[1] + ry];
             });
         }
 
-        const newPolygonOverlay = new ymaps.Polygon([newCornersGeo], {}, {
-            fillImageHref: rasterOverlay.options.get('fillImageHref'),
+        
+        const newCornersGeo = cornersPlane.map(pt => mapPlaneToGeo(pt));
+
+        
+        const minX = Math.min(cornersPlane[0][0], cornersPlane[1][0], cornersPlane[2][0], cornersPlane[3][0]);
+        const maxX = Math.max(cornersPlane[0][0], cornersPlane[1][0], cornersPlane[2][0], cornersPlane[3][0]);
+        const minY = Math.min(cornersPlane[0][1], cornersPlane[1][1], cornersPlane[2][1], cornersPlane[3][1]);
+        const maxY = Math.max(cornersPlane[0][1], cornersPlane[1][1], cornersPlane[2][1], cornersPlane[3][1]);
+
+        const bboxW = maxX - minX;
+        const bboxH = maxY - minY;
+
+        if (bboxW < 1e-3 || bboxH < 1e-3) {
+            throw new Error('Вырожденные размеры растра после расчета');
+        }
+
+        
+        const MAX_CANVAS_DIM = 4096;
+        const targetMaxDim = Math.min(MAX_CANVAS_DIM, Math.max(1200, Math.round(Math.max(W_img, H_img) * 1.5)));
+
+        let canW, canH;
+        if (bboxW >= bboxH) {
+            canW = targetMaxDim;
+            canH = Math.max(1, Math.round(targetMaxDim * (bboxH / bboxW)));
+        } else {
+            canH = targetMaxDim;
+            canW = Math.max(1, Math.round(targetMaxDim * (bboxW / bboxH)));
+        }
+
+        const warpCanvas = document.createElement('canvas');
+        warpCanvas.width = canW;
+        warpCanvas.height = canH;
+        const ctx = warpCanvas.getContext('2d');
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+
+        
+        const toCanvasPx = (ptPlane) => [
+            ((ptPlane[0] - minX) / bboxW) * canW,
+            ((maxY - ptPlane[1]) / bboxH) * canH
+        ];
+
+        const T0 = toCanvasPx(cornersPlane[0]); 
+        const T1 = toCanvasPx(cornersPlane[1]); 
+        const T3 = toCanvasPx(cornersPlane[3]); 
+
+        
+        const m11 = (T1[0] - T0[0]) / W_img;
+        const m12 = (T1[1] - T0[1]) / W_img;
+        const m21 = (T3[0] - T0[0]) / H_img;
+        const m22 = (T3[1] - T0[1]) / H_img;
+
+        ctx.clearRect(0, 0, canW, canH);
+        ctx.setTransform(m11, m12, m21, m22, T0[0], T0[1]);
+        ctx.drawImage(img, 0, 0);
+
+        const warpedDataUrl = warpCanvas.toDataURL('image/png');
+
+        
+        
+        const swGeo = mapPlaneToGeo([minX, minY]); 
+        const neGeo = mapPlaneToGeo([maxX, maxY]); 
+        const bboxBounds = [swGeo, neGeo];
+
+        const newOverlay = new ymaps.Rectangle(bboxBounds, {}, {
+            fillImageHref: warpedDataUrl,
             fillMethod: 'stretch',
             stroke: false,
-            opacity: rasterOverlay.options.get('opacity'),
+            opacity: currentOpacity,
             interactivityModel: 'default#transparent',
             zIndex: 400
         });
 
+        
+        newOverlay._rasterCornersGeo = newCornersGeo;
+        newOverlay._rawImageHref = rawImageHref;
+        newOverlay._bboxBounds = bboxBounds;
+
         map.geoObjects.remove(rasterOverlay);
-        rasterOverlay = newPolygonOverlay;
+        rasterOverlay = newOverlay;
         map.geoObjects.add(rasterOverlay);
 
-        showNotification(`Растр успешно привязан (${bindingTargetCount === 3 ? 'по 3 точкам' : 'по 2 точкам'})!`, 'success');
-
+        showNotification(
+            `Растр успешно привязан (${bindingTargetCount === 3 ? 'по 3 точкам' : 'по 2 точкам'})!`,
+            'success'
+        );
     } catch (error) {
-        console.error("Ошибка привязки растра:", error);
-        showNotification('Ошибка при расчете трансформации растра', 'error');
+        console.error('Ошибка привязки растра:', error);
+        showNotification(`Ошибка трансформации: ${error.message}`, 'error');
     } finally {
         stopBindingProcess();
         hideLoader();
     }
 }
 
+async function createRasterOverlay(imageBlob) {
+    return new Promise((resolve, reject) => {
+        const reader = new FileReader();
+        reader.onload = (event) => {
+            const img = new Image();
+            img.onload = () => {
+                if (rasterOverlay) {
+                    map.geoObjects.remove(rasterOverlay);
+                }
 
+                rasterImageSize = {
+                    width: img.naturalWidth || img.width,
+                    height: img.naturalHeight || img.height
+                };
+                const mapSize = map.container.getSize();
+                const mapAspectRatio = mapSize[0] / mapSize[1];
+                const imageAspectRatio = rasterImageSize.width / rasterImageSize.height;
 
+                let overlayWidth, overlayHeight;
+                if (mapAspectRatio > imageAspectRatio) {
+                    overlayHeight = mapSize[1] * 0.8;
+                    overlayWidth = overlayHeight * imageAspectRatio;
+                } else {
+                    overlayWidth = mapSize[0] * 0.8;
+                    overlayHeight = overlayWidth / imageAspectRatio;
+                }
 
+                const center = map.getCenter();
+                const projection = map.options.get('projection');
+                const zoom = map.getZoom();
+                const centerPixel = projection.toGlobalPixels(center, zoom);
 
+                const halfWidthPixel = overlayWidth / 2;
+                const halfHeightPixel = overlayHeight / 2;
 
-function getRasterCorners() {
-    if (!rasterOverlay) return null;
+                const topLeftPixel = [centerPixel[0] - halfWidthPixel, centerPixel[1] - halfHeightPixel];
+                const bottomRightPixel = [centerPixel[0] + halfWidthPixel, centerPixel[1] + halfHeightPixel];
 
-    const geometry = rasterOverlay.geometry;
-    const coords = geometry.getCoordinates();
-    const type = geometry.getType();
+                const topLeftGeo = projection.fromGlobalPixels(topLeftPixel, zoom);
+                const bottomRightGeo = projection.fromGlobalPixels(bottomRightPixel, zoom);
 
-    if (type === 'Rectangle') {
-        const topLeft = coords[0];
-        const bottomRight = coords[1];
-        
-        const topRight = [topLeft[0], bottomRight[1]]; 
-        const bottomLeft = [bottomRight[0], topLeft[1]]; 
-        return [topLeft, topRight, bottomRight, bottomLeft]; 
-    } else if (type === 'Polygon') {
-        
-        return coords[0].slice(0, 4); 
-    }
-    return null;
+                const maxLat = topLeftGeo[0];
+                const minLon = topLeftGeo[1];
+                const minLat = bottomRightGeo[0];
+                const maxLon = bottomRightGeo[1];
+
+                const bounds = [[minLat, minLon], [maxLat, maxLon]];
+
+                rasterOverlay = new ymaps.Rectangle(bounds, {}, {
+                    fillImageHref: event.target.result,
+                    fillMethod: 'stretch',
+                    stroke: false,
+                    opacity: 0.8,
+                    interactivityModel: 'default#transparent',
+                    zIndex: 400
+                });
+
+                rasterOverlay._rasterCornersGeo = [
+                    [maxLat, minLon], 
+                    [maxLat, maxLon], 
+                    [minLat, maxLon], 
+                    [minLat, minLon]  
+                ];
+                rasterOverlay._rawImageHref = event.target.result;
+                rasterOverlay._bboxBounds = bounds;
+
+                map.geoObjects.add(rasterOverlay);
+                resolve();
+            };
+            img.onerror = () => reject(new Error('Не удалось загрузить изображение.'));
+            img.src = event.target.result;
+        };
+        reader.onerror = () => reject(new Error('Не удалось прочитать данные изображения.'));
+        reader.readAsDataURL(imageBlob);
+    });
 }
+
+function moveRaster(dx, dy) {
+    if (!rasterOverlay) return;
+    const moveStep = 3;
+    const projection = map.options.get('projection');
+    const zoom = map.getZoom();
+
+    const currentCornersGeo = getRasterCorners();
+    if (!currentCornersGeo) return;
+
+    const shiftGeo = (geoCoord) => {
+        const px = projection.toGlobalPixels(geoCoord, zoom);
+        return projection.fromGlobalPixels([px[0] + dx * moveStep, px[1] + dy * moveStep], zoom);
+    };
+
+    const newCornersGeo = currentCornersGeo.map(shiftGeo);
+
+    if (rasterOverlay.geometry.getType() === 'Rectangle') {
+        const bounds = rasterOverlay.geometry.getBounds();
+        const newBounds = [shiftGeo(bounds[0]), shiftGeo(bounds[1])];
+        rasterOverlay.geometry.setBounds(newBounds);
+        rasterOverlay._bboxBounds = newBounds;
+    } else {
+        rasterOverlay.geometry.setCoordinates([[...newCornersGeo, newCornersGeo[0]]]);
+    }
+
+    rasterOverlay._rasterCornersGeo = newCornersGeo;
+}
+
+function zoomRaster(scale) {
+    if (!rasterOverlay) return;
+    const projection = map.options.get('projection');
+    const zoom = map.getZoom();
+    const bounds = rasterOverlay.geometry.getBounds();
+
+    const corners = getRasterCorners();
+    if (!corners) return;
+
+    
+    
+    const cornersPx = corners.map(pt => projection.toGlobalPixels(pt, zoom));
+    const centerPx = [
+        (cornersPx[0][0] + cornersPx[1][0] + cornersPx[2][0] + cornersPx[3][0]) / 4,
+        (cornersPx[0][1] + cornersPx[1][1] + cornersPx[2][1] + cornersPx[3][1]) / 4
+    ];
+
+    const scaleGeoPoint = (geoPt) => {
+        const px = projection.toGlobalPixels(geoPt, zoom);
+        return projection.fromGlobalPixels([
+            centerPx[0] + (px[0] - centerPx[0]) * scale,
+            centerPx[1] + (px[1] - centerPx[1]) * scale
+        ], zoom);
+    };
+
+    const newCornersGeo = corners.map(scaleGeoPoint);
+
+    if (rasterOverlay.geometry.getType() === 'Rectangle') {
+        const newBounds = [scaleGeoPoint(bounds[0]), scaleGeoPoint(bounds[1])];
+        rasterOverlay.geometry.setBounds(newBounds);
+        rasterOverlay._bboxBounds = newBounds;
+    } else {
+        rasterOverlay.geometry.setCoordinates([[...newCornersGeo, newCornersGeo[0]]]);
+    }
+
+    rasterOverlay._rasterCornersGeo = newCornersGeo;
+}
+
+
+
+
+
+
+
+
 
 
 
@@ -41599,65 +41946,6 @@ function filterSidebarByAccessLegend(key, isEz = false) {
 }
 
 
-async function createRasterOverlay(imageBlob) {
-    return new Promise((resolve, reject) => {
-        const reader = new FileReader();
-        reader.onload = (event) => {
-            const img = new Image();
-            img.onload = () => {
-                if (rasterOverlay) {
-                    map.geoObjects.remove(rasterOverlay);
-                }
-
-                rasterImageSize = { width: img.width, height: img.height };
-                const mapSize = map.container.getSize();
-                const mapAspectRatio = mapSize[0] / mapSize[1];
-                const imageAspectRatio = img.width / img.height;
-
-                let overlayWidth, overlayHeight;
-                if (mapAspectRatio > imageAspectRatio) {
-                    overlayHeight = mapSize[1] * 0.8;
-                    overlayWidth = overlayHeight * imageAspectRatio;
-                } else {
-                    overlayWidth = mapSize[0] * 0.8;
-                    overlayHeight = overlayWidth / imageAspectRatio;
-                }
-
-                const center = map.getCenter();
-                const projection = map.options.get('projection');
-                const zoom = map.getZoom();
-                const centerPixel = projection.toGlobalPixels(center, zoom);
-
-                const halfWidthPixel = overlayWidth / 2;
-                const halfHeightPixel = overlayHeight / 2;
-
-                const topLeftPixel = [centerPixel[0] - halfWidthPixel, centerPixel[1] - halfHeightPixel];
-                const bottomRightPixel = [centerPixel[0] + halfWidthPixel, centerPixel[1] + halfHeightPixel];
-
-                const topLeftGeo = projection.fromGlobalPixels(topLeftPixel, zoom);
-                const bottomRightGeo = projection.fromGlobalPixels(bottomRightPixel, zoom);
-
-                const bounds = [topLeftGeo, bottomRightGeo];
-
-                rasterOverlay = new ymaps.Rectangle(bounds, {}, {
-                    fillImageHref: event.target.result,
-                    fillMethod: 'stretch',
-                    stroke: false,
-                    opacity: 0.8,
-                  interactivityModel: 'default#transparent',
-zIndex: 400
-                });
-
-                map.geoObjects.add(rasterOverlay);
-                resolve();
-            };
-            img.onerror = () => reject(new Error('Не удалось загрузить изображение.'));
-            img.src = event.target.result;
-        };
-        reader.onerror = () => reject(new Error('Не удалось прочитать данные изображения.'));
-        reader.readAsDataURL(imageBlob);
-    });
-}
 
 
 
@@ -42267,113 +42555,8 @@ rasterControlsPanel.querySelector('.close-btn').addEventListener('click', (e) =>
 }
 
 
-function moveRaster(dx, dy) {
-    if (!rasterOverlay) return;
-    const moveStep = 2; 
-    const projection = map.options.get('projection');
-    const zoom = map.getZoom();
-    
-    
-    const currentCornersGeo = getRasterCorners(); 
-    if (!currentCornersGeo) {
-        console.error("Не удалось получить углы растра для перемещения.");
-        return;
-    }
-
-    
-    const newCornersPixel = currentCornersGeo.map(geoCoord => {
-        const pixelCoord = projection.toGlobalPixels(geoCoord, zoom);
-        return [pixelCoord[0] + dx * moveStep, pixelCoord[1] + dy * moveStep];
-    });
-
-    
-    const newCornersGeo = newCornersPixel.map(pixelCoord => {
-        return projection.fromGlobalPixels(pixelCoord, zoom);
-    });
-
-    
-    
-    const newOverlay = new ymaps.Polygon([newCornersGeo], {}, {
-        fillImageHref: rasterOverlay.options.get('fillImageHref'),
-        fillMethod: 'stretch',
-        stroke: false,
-        opacity: rasterOverlay.options.get('opacity'),
-      interactivityModel: 'default#transparent',
-zIndex: 400
-    });
-    
-    map.geoObjects.remove(rasterOverlay);
-    rasterOverlay = newOverlay;
-    map.geoObjects.add(rasterOverlay);
-}
 
 
-function zoomRaster(scale) {
-    if (!rasterOverlay) return;
-    const projection = map.options.get('projection');
-    const zoom = map.getZoom();
-    const bounds = rasterOverlay.geometry.getBounds(); 
-
-    
-    
-    const minLat = bounds[0][0], minLon = bounds[0][1];
-    const maxLat = bounds[1][0], maxLon = bounds[1][1];
-    
-    
-    const topLeftGeo = [maxLat, minLon];     
-    const bottomRightGeo = [minLat, maxLon]; 
-    
-
-    const topLeftPixel = projection.toGlobalPixels(topLeftGeo, zoom);
-    const bottomRightPixel = projection.toGlobalPixels(bottomRightGeo, zoom);
-
-    const centerPixelX = (topLeftPixel[0] + bottomRightPixel[0]) / 2;
-    const centerPixelY = (topLeftPixel[1] + bottomRightPixel[1]) / 2;
-
-    const mapSize = map.container.getSize();
-    const mapAspectRatio = mapSize[0] / mapSize[1];
-    const imageAspectRatio = rasterImageSize.width / rasterImageSize.height;
-
-    let baseSize;
-    if(mapAspectRatio > imageAspectRatio) {
-        baseSize = mapSize[1] * 0.8;
-    } else {
-        baseSize = mapSize[0] * 0.8;
-    }
-
-    const newWidth = (baseSize * imageAspectRatio) * scale;
-    const newHeight = baseSize * scale;
-
-    const newTopLeftPixel = [centerPixelX - newWidth / 2, centerPixelY - newHeight / 2];
-    const newBottomRightPixel = [centerPixelX + newWidth / 2, centerPixelY + newHeight / 2];
-
-    const newTopLeftGeo = projection.fromGlobalPixels(newTopLeftPixel, zoom);
-    const newBottomRightGeo = projection.fromGlobalPixels(newBottomRightPixel, zoom);
-
-    
-    
-    const newCornersGeo = [
-        newTopLeftGeo, 
-        [newTopLeftGeo[0], newBottomRightGeo[1]], 
-        newBottomRightGeo, 
-        [newBottomRightGeo[0], newTopLeftGeo[1]]  
-    ];
-
-    
-    const newPolygonOverlay = new ymaps.Polygon([newCornersGeo], {}, {
-        fillImageHref: rasterOverlay.options.get('fillImageHref'),
-        fillMethod: 'stretch',
-        stroke: false,
-        opacity: rasterOverlay.options.get('opacity'),
-     interactivityModel: 'default#transparent',
-zIndex: 400
-    });
-    
-    
-    map.geoObjects.remove(rasterOverlay);
-    rasterOverlay = newPolygonOverlay;
-    map.geoObjects.add(rasterOverlay);
-}
 
 
 
