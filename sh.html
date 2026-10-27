@@ -751,6 +751,33 @@
                 left: 15px;
             }
         }
+        
+        #eyeButton.grid-mode {
+            background: linear-gradient(135deg, #10b981 0%, #059669 100%);
+            box-shadow: 0 6px 20px rgba(16, 185, 129, 0.45);
+        }
+        #eyeButton.grid-mode::after {
+            content: '';
+            position: absolute;
+            width: 22px;
+            height: 22px;
+            border: 2px dashed rgba(255, 255, 255, 0.95);
+            border-radius: 6px;
+        }
+
+        #eyeButton.grid-points-mode {
+            background: linear-gradient(135deg, #0ea5e9 0%, #2563eb 100%);
+            box-shadow: 0 6px 20px rgba(37, 99, 235, 0.45);
+        }
+        #eyeButton.grid-points-mode::after {
+            content: '●';
+            position: absolute;
+            color: #ffffff;
+            font-size: 14px;
+            font-weight: bold;
+            line-height: 1;
+        }
+        
     </style>
 </head>
 <body>
@@ -998,6 +1025,112 @@ let lastY = 0;
 let showLabels = true;
 let showPoints = true;
 let eyeState = 0; 
+
+
+
+let isGridMode = false;
+let selectedContourIndex = -1; 
+const objectColors = [
+    '#4a69bd', '#e74c3c', '#2ecc71', '#f39c12', '#9b59b6',
+    '#1abc9c', '#3498db', '#e67e22', '#16a085', '#d35400',
+    '#27ae60', '#2980b9', '#8e44ad', '#009688', '#c0392b'
+];
+
+function hexToRgba(hex, alpha = 0.2) {
+    let c = (hex || '#4a69bd').replace('#', '');
+    if (c.length === 3) c = c[0] + c[0] + c[1] + c[1] + c[2] + c[2];
+    const num = parseInt(c, 16);
+    return `rgba(${(num >> 16) & 255}, ${(num >> 8) & 255}, ${num & 255}, ${alpha})`;
+}
+
+
+function determineGridStep(effectiveScale) {
+    const possibleSteps = [0.01, 0.05, 0.1, 0.5, 1, 5, 10, 50, 100, 200, 500, 1000, 5000, 10000, 50000];
+    const targetPixelSize = 45;
+    let bestStep = 100;
+    if (effectiveScale <= 0) return bestStep;
+    for (const step of possibleSteps) {
+        if (step * effectiveScale >= targetPixelSize) {
+            bestStep = step;
+            break;
+        }
+        bestStep = step;
+    }
+    return bestStep;
+}
+
+
+function drawAdaptiveGrid(ctx, minX, minY, scale, offsetX, offsetY, canvasWidth, canvasHeight) {
+    const effScale = scale * zoomLevel;
+    const gridStep = determineGridStep(effScale);
+
+    
+    const screenToWorld = (sx, sy) => {
+        const cx = (sx - canvasWidth / 2) / zoomLevel + canvasWidth / 2 - panX;
+        const cy = (sy - canvasHeight / 2) / zoomLevel + canvasHeight / 2 - panY;
+        const wY = minY + (cx - offsetX) / scale;
+        const wX = minX + (canvasHeight - offsetY - cy) / scale;
+        return { wX, wY };
+    };
+
+    const worldToScreen = (wX, wY) => {
+        const cx = offsetX + (wY - minY) * scale;
+        const cy = canvasHeight - (offsetY + (wX - minX) * scale);
+        const sx = (cx - canvasWidth / 2 + panX) * zoomLevel + canvasWidth / 2;
+        const sy = (cy - canvasHeight / 2 + panY) * zoomLevel + canvasHeight / 2;
+        return { sx, sy };
+    };
+
+    const tl = screenToWorld(0, 0);
+    const br = screenToWorld(canvasWidth, canvasHeight);
+
+    const minWX = Math.min(tl.wX, br.wX);
+    const maxWX = Math.max(tl.wX, br.wX);
+    const minWY = Math.min(tl.wY, br.wY);
+    const maxWY = Math.max(tl.wY, br.wY);
+
+    const startX = Math.floor(minWX / gridStep) * gridStep;
+    const endX = Math.ceil(maxWX / gridStep) * gridStep;
+    const startY = Math.floor(minWY / gridStep) * gridStep;
+    const endY = Math.ceil(maxWY / gridStep) * gridStep;
+
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0); 
+    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(180, 195, 215, 0.65)';
+    ctx.beginPath();
+
+    
+    for (let gx = startX; gx <= endX; gx += gridStep) {
+        const { sy } = worldToScreen(gx, minWY);
+        if (sy >= -2 && sy <= canvasHeight + 2) {
+            ctx.moveTo(0, sy);
+            ctx.lineTo(canvasWidth, sy);
+        }
+    }
+
+    
+    for (let gy = startY; gy <= endY; gy += gridStep) {
+        const { sx } = worldToScreen(minWX, gy);
+        if (sx >= -2 && sx <= canvasWidth + 2) {
+            ctx.moveTo(sx, 0);
+            ctx.lineTo(sx, canvasHeight);
+        }
+    }
+    ctx.stroke();
+
+    
+    let stepLabel = gridStep < 0.1 ? `${(gridStep * 100).toFixed(0)} см` : 
+                    (gridStep < 1 ? `${gridStep.toFixed(1)} м` : 
+                    (gridStep >= 1000 ? `${(gridStep / 1000).toFixed(1)} км` : `${gridStep.toFixed(0)} м`));
+    ctx.font = 'bold 11px sans-serif';
+    ctx.fillStyle = 'rgba(71, 85, 105, 0.85)';
+    ctx.fillText(`Сетка: ${stepLabel}`, 25, canvasHeight - 20);
+
+    ctx.restore();
+}
+
+
 
 let showRulers = true;
 
@@ -2654,6 +2787,7 @@ if (schemeButton && schemeMenu) {
 if (canvasEl) {
        canvasEl.addEventListener('click', handleCanvasClick);
     canvasEl.addEventListener('dblclick', () => {
+            if (isGridMode) return;
         const input = document.getElementById('coordsInput').value.trim();
         const contoursData = input.split('\n\n').filter(contour => contour.trim() !== '');
 
@@ -2937,52 +3071,97 @@ function cleanAndFormatAICoordinates(aiText) {
 }
 
 
+
+function applyEyeState(state) {
+    const eyeButton = document.getElementById('eyeButton');
+    showLabels = true;
+    showPoints = true;
+    showRulers = true;
+    showDistances = true;
+    showContourNames = false;
+    isGridMode = false;
+    if (eyeButton) eyeButton.className = '';
+
+    switch(state) {
+        case 0:
+            break;
+        case 1:
+            showLabels = false;
+            if (eyeButton) eyeButton.className = 'no-labels';
+            break;
+        case 2:
+            showPoints = false;
+            if (eyeButton) eyeButton.className = 'no-points';
+            break;
+        case 3:
+            showDistances = false;
+            if (eyeButton) eyeButton.className = 'no-distances';
+            break;
+        case 4:
+            showLabels = false;
+            showPoints = false;
+            showRulers = false;
+            showDistances = false;
+            if (eyeButton) eyeButton.className = 'only-drawing';
+            break;
+        case 5:
+            showLabels = false;
+            if (eyeButton) eyeButton.className = 'points-distances-only';
+            break;
+        case 6:
+            showContourNames = true;
+            if (eyeButton) eyeButton.className = 'with-names';
+            break;
+        case 7:
+            isGridMode = true;
+            showLabels = false;
+            showPoints = false;
+            showRulers = false;
+            showDistances = false;
+            if (eyeButton) eyeButton.className = 'grid-mode';
+            break;
+        case 8:
+            isGridMode = true;
+            showLabels = false;
+            showPoints = true;
+            showRulers = false;
+            showDistances = false;
+            if (eyeButton) eyeButton.className = 'grid-points-mode';
+            break;
+    }
+}
+
 function initializeEyeButton() {
     const eyeButton = document.getElementById('eyeButton');
-    
-    eyeButton.addEventListener('click', () => {
-        eyeState = (eyeState + 1) % 7; 
-        
-        
-        showLabels = true;
-        showPoints = true;
-        showRulers = true;
-        showDistances = true;
-        showContourNames = false; 
-        eyeButton.className = ''; 
 
-        switch(eyeState) {
-            case 0: 
-                
-                break;
-            case 1: 
-                showLabels = false;
-                eyeButton.className = 'no-labels';
-                break;
-            case 2: 
-                showPoints = false;
-                eyeButton.className = 'no-points';
-                break;
-            case 3: 
-                showDistances = false;
-                eyeButton.className = 'no-distances';
-                break;
-            case 4: 
-                showLabels = false;
-                showPoints = false;
-                showRulers = false;
-                showDistances = false;
-                eyeButton.className = 'only-drawing';
-                break;
-            case 5: 
-                showLabels = false;
-                eyeButton.className = 'points-distances-only';
-                break;
-            case 6: 
-                showContourNames = true;
-                eyeButton.className = 'with-names'; 
-                break;
+    
+    const saved = localStorage.getItem('savedEyeState');
+    if (saved !== null) {
+        const parsed = parseInt(saved, 10);
+        if (!isNaN(parsed) && parsed >= 0 && parsed <= 8) {
+            eyeState = parsed;
         }
+    }
+    applyEyeState(eyeState);
+
+    eyeButton.addEventListener('click', () => {
+        eyeState = (eyeState + 1) % 9;
+        localStorage.setItem('savedEyeState', eyeState); 
+
+        applyEyeState(eyeState);
+
+        const titles = [
+            'Классический (все элементы)',
+            'Без подписей',
+            'Без точек',
+            'Без расстояний',
+            'Только контуры',
+            'Точки и расстояния',
+            'С именами контуров',
+            'Сетка (заливка объектов)',
+            'Сетка с точками'
+        ];
+        showNotification(`Режим: ${titles[eyeState]}`);
 
         drawContour(savedContours);
     });
@@ -3698,7 +3877,7 @@ function resetZoom() {
 
 
 function zoomIn() {
-    const targetZoom = Math.min(zoomLevel * 1.2, 10);
+    const targetZoom = Math.min(zoomLevel * 1.2, 25000);
     smoothZoom(targetZoom);
 }
 
@@ -3757,6 +3936,7 @@ function checkAndApplyPointsThreshold(contours) {
         showRulers = false;
         showDistances = false;
         showContourNames = false;
+        isGridMode = false;
         if (eyeBtn) eyeBtn.className = 'only-drawing';
     } else if (eyeState === 4) {
    
@@ -3766,6 +3946,7 @@ function checkAndApplyPointsThreshold(contours) {
         showRulers = true;
         showDistances = true;
         showContourNames = false;
+     
         if (eyeBtn) eyeBtn.className = '';
     }
 }
@@ -4267,6 +4448,10 @@ function drawContour(coords) {
     ctx.translate(-canvas.width / 2 + panX, -canvas.height / 2 + panY);
 
  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+ 
+ window.maxXGlobal = maxX;
+window.maxYGlobal = maxY;
+
     for (let i = 0; i < coords.length; i++) {
         const c = coords[i];
         for (let j = 0; j < c.length; j++) {
@@ -4295,12 +4480,20 @@ function drawContour(coords) {
 
     const offsetX = padding + (canvas.width - padding * 2 - diffY * scale) / 2;
     const offsetY = padding + (canvas.height - padding * 2 - diffX * scale) / 2;
+    
+    window.minXGlobal = minX;
+    window.minYGlobal = minY;
+    window.scaleGlobal = scale;
+    window.offsetXGlobal = offsetX;
+    window.offsetYGlobal = offsetY;
 
     const pointRadius = 3 / zoomLevel;
     const fontSize = 12 / zoomLevel;
     const textOffset = 5 / zoomLevel;
 
-    if (showRulers) {
+if (isGridMode) {
+        drawAdaptiveGrid(ctx, minX, minY, scale, offsetX, offsetY, canvas.width, canvas.height);
+    } else if (showRulers) {
         drawRulers(ctx, minX, minY, maxX, maxY, offsetX, offsetY, scale, canvas.width, canvas.height);
     }
 
@@ -4308,11 +4501,38 @@ function drawContour(coords) {
         return x >= 0 && x <= canvas.width && y >= 0 && y <= canvas.height;
     };
 
-    coords.forEach((points, objectIndex) => {
+ coords.forEach((points, objectIndex) => {
         ctx.beginPath();
-        ctx.strokeStyle = getRandomColor();
-
         const isClosedContour = isContourClosed(points);
+
+        
+       const isSelected = (objectIndex === selectedContourIndex);
+        const color = isGridMode ? objectColors[objectIndex % objectColors.length] : (isSelected ? '#2563eb' : getRandomColor());
+        
+        ctx.strokeStyle = isSelected ? '#2563eb' : color;
+        ctx.lineWidth = (isSelected ? 3.5 : (isGridMode ? (isClosedContour ? 1.8 : 2.4) : 1)) / zoomLevel;
+
+        points.forEach((coord, index) => {
+            const [x, y] = coord.split('\t').map(Number);
+            const canvasX = offsetX + (y - minY) * scale;
+            const canvasY = canvas.height - (offsetY + (x - minX) * scale);
+
+            if (index === 0) {
+                ctx.moveTo(canvasX, canvasY);
+            } else {
+                ctx.lineTo(canvasX, canvasY);
+            }
+        });
+
+        if (isClosedContour) {
+            ctx.closePath();
+            
+            if (isGridMode) {
+                ctx.fillStyle = hexToRgba(color, 0.22);
+                ctx.fill();
+            }
+        }
+        ctx.stroke();
 
         let firstCanvasX, firstCanvasY;
 
@@ -4330,8 +4550,13 @@ function drawContour(coords) {
             }
         });
 
-        if (isClosedContour) {
+     if (isClosedContour) {
             ctx.closePath();
+            if (isGridMode) {
+                
+                ctx.fillStyle = hexToRgba(color, isSelected ? 0.42 : 0.22);
+                ctx.fill();
+            }
         }
         ctx.stroke();
         
@@ -4361,17 +4586,28 @@ function drawContour(coords) {
         }
         
 
-        if (showPoints) {
-            ctx.fillStyle = 'red';
-            points.forEach((coord, index) => {
+       if (showPoints) {
+            points.forEach((coord) => {
                 const [x, y] = coord.split('\t').map(Number);
                 const canvasX = offsetX + (y - minY) * scale;
                 const canvasY = canvas.height - (offsetY + (x - minX) * scale);
                 if (isPointVisible(canvasX, canvasY)) {
-                     ctx.beginPath();
-                    ctx.arc(canvasX, canvasY, pointRadius, 0, 2 * Math.PI);
-                    ctx.fill();
-               }
+                    ctx.beginPath();
+                    if (isGridMode) {
+                        
+                        ctx.arc(canvasX, canvasY, 4 / zoomLevel, 0, 2 * Math.PI);
+                        ctx.fillStyle = color;
+                        ctx.fill();
+                        ctx.strokeStyle = '#ffffff';
+                        ctx.lineWidth = 1.2 / zoomLevel;
+                        ctx.stroke();
+                    } else {
+                        
+                        ctx.fillStyle = 'red';
+                        ctx.arc(canvasX, canvasY, pointRadius, 0, 2 * Math.PI);
+                        ctx.fill();
+                    }
+                }
             });
         }
 
@@ -4488,32 +4724,27 @@ function isContourClosed(contour) {
 function initializeZoom() {
     const canvas = document.getElementById('canvas');
 
-    
-      canvas.addEventListener('wheel', function(e) {
+    canvas.addEventListener('wheel', function(e) {
         e.preventDefault();
         const rect = canvas.getBoundingClientRect();
         const mouseX = e.clientX - rect.left;
         const mouseY = e.clientY - rect.top;
 
-        
         const delta = Math.sign(e.deltaY);
         const zoomFactor = delta > 0 ? 0.9 : 1.1;
 
-        
         const oldZoom = zoomLevel;
         zoomLevel *= zoomFactor;
-        zoomLevel = Math.min(Math.max(zoomLevel, 0.1), 10); 
+        zoomLevel = Math.min(Math.max(zoomLevel, 0.05), 25000);
 
-        
         panX += (mouseX / oldZoom - mouseX / zoomLevel);
         panY += (mouseY / oldZoom - mouseY / zoomLevel);
 
-        
-         drawContour(savedContours); 
+        drawContour(savedContours); 
     });
-    
-     
+
     canvas.addEventListener('mousedown', function(e) {
+        if (e.button !== 0) return; 
         isDragging = true;
         lastX = e.clientX;
         lastY = e.clientY;
@@ -4524,7 +4755,7 @@ function initializeZoom() {
         if (isDragging) {
             const dx = e.clientX - lastX;
             const dy = e.clientY - lastY;
-            
+
             panX += dx / zoomLevel;
             panY += dy / zoomLevel;
 
@@ -4532,17 +4763,52 @@ function initializeZoom() {
             lastY = e.clientY;
 
             drawContour(savedContours); 
+        } else {
+            
+            if (!savedContours || savedContours.length === 0) return;
+            if (minXGlobal === undefined || scaleGlobal === undefined) return;
+
+            const rect = canvas.getBoundingClientRect();
+            const mouseX = e.clientX - rect.left;
+            const mouseY = e.clientY - rect.top;
+
+            let isOverPoint = false;
+            const POINT_HOVER_RADIUS_SQ = 144; 
+
+            for (let c = 0; c < savedContours.length; c++) {
+                const contour = savedContours[c];
+                for (let p = 0; p < contour.length; p++) {
+                    const [x, y] = contour[p].split('\t').map(Number);
+                    if (isNaN(x) || isNaN(y)) continue;
+
+                    const sx = (offsetXGlobal + (y - minYGlobal) * scaleGlobal - canvas.width / 2 + panX) * zoomLevel + canvas.width / 2;
+                    const sy = (canvas.height - (offsetYGlobal + (x - minXGlobal) * scaleGlobal) - canvas.height / 2 + panY) * zoomLevel + canvas.height / 2;
+
+                    if ((sx - mouseX) ** 2 + (sy - mouseY) ** 2 <= POINT_HOVER_RADIUS_SQ) {
+                        isOverPoint = true;
+                        break;
+                    }
+                }
+                if (isOverPoint) break;
+            }
+
+            canvas.style.cursor = isOverPoint ? 'pointer' : 'grab';
         }
     });
 
-    canvas.addEventListener('mouseup', function() {
-        isDragging = false;
-        canvas.style.cursor = 'grab';
+    
+    window.addEventListener('mouseup', function() {
+        if (isDragging) {
+            isDragging = false;
+            canvas.style.cursor = 'grab';
+        }
     });
 
     canvas.addEventListener('mouseleave', function() {
-        isDragging = false;
-        canvas.style.cursor = 'grab';
+        if (isDragging) {
+            isDragging = false;
+            canvas.style.cursor = 'grab';
+        }
     });
 }
 
@@ -4571,7 +4837,7 @@ function initializeTouchZoom() {
             );
             
             const scale = currentDistance / initialDistance;
-            zoomLevel = Math.min(Math.max(initialZoom * scale, 0.1), 10);
+            zoomLevel = Math.min(Math.max(initialZoom * scale, 0.05), 25000);
             drawContour(savedContours);
         }
     });
@@ -4759,121 +5025,203 @@ function handleTextareaClick(event) {
     }
 }
 
+
+function pointSegmentDistSq(px, py, x1, y1, x2, y2) {
+    const dx = x2 - x1, dy = y2 - y1;
+    const lenSq = dx * dx + dy * dy;
+    if (lenSq === 0) return (px - x1) ** 2 + (py - y1) ** 2;
+    let t = ((px - x1) * dx + (py - y1) * dy) / lenSq;
+    t = Math.max(0, Math.min(1, t));
+    return (px - (x1 + t * dx)) ** 2 + (py - (y1 + t * dy)) ** 2;
+}
+
+
+
+function getPointTextRange(text, targetContourIndex, targetPointIndex) {
+    const blockRange = getContourTextRange(text, targetContourIndex);
+    if (!blockRange) return null;
+    const blockText = text.substring(blockRange.start, blockRange.end);
+    const lines = blockText.split('\n');
+    let currentPtIdx = 0;
+    let lineStartInBlock = 0;
+
+    for (let i = 0; i < lines.length; i++) {
+        const line = lines[i];
+        if (line.trim().length > 0) {
+            if (currentPtIdx === targetPointIndex) {
+                const start = blockRange.start + lineStartInBlock;
+                return { start, end: start + line.length };
+            }
+            currentPtIdx++;
+        }
+        lineStartInBlock += line.length + 1; 
+    }
+    return null;
+}
+
+
+function getContourTextRange(text, targetIndex) {
+    if (!text) return null;
+    const regex = /(?:^|\n\s*\n)([\s\S]*?)(?=(?:\n\s*\n)|$)/g;
+    let match, index = 0;
+    while ((match = regex.exec(text)) !== null) {
+        const blockContent = match[1].trim();
+        if (blockContent.length > 0) {
+            if (index === targetIndex) {
+                const blockStart = match.index + match[0].indexOf(match[1]);
+                return { start: blockStart, end: blockStart + match[1].length };
+            }
+            index++;
+        }
+    }
+    return null;
+}
+
 function handleCanvasClick(event) {
     const canvas = event.target;
-    if (!savedContours || savedContours.length === 0 || savedContours.every(c => c.length === 0)) {
-        return;
-    }
+    if (!savedContours || savedContours.length === 0 || savedContours.every(c => c.length === 0)) return;
 
     const rect = canvas.getBoundingClientRect();
     const mouseX = event.clientX - rect.left;
     const mouseY = event.clientY - rect.top;
 
-    const allPoints = savedContours.flat().map(coord => coord.split('\t').map(Number));
-    if (allPoints.length === 0) return;
-    const minX = Math.min(...allPoints.map(p => p[0]));
-    const minY = Math.min(...allPoints.map(p => p[1]));
-    const maxX = Math.max(...allPoints.map(p => p[0]));
-    const maxY = Math.max(...allPoints.map(p => p[1]));
-    const padding = 60;
-    const scaleX = (canvas.width - padding * 2) / (maxY - minY);
-    const scaleY = (canvas.height - padding * 2) / (maxX - minX);
-    const scale = Math.min(scaleX, scaleY) * 0.9;
-    const offsetX = padding + (canvas.width - padding * 2 - (maxY - minY) * scale) / 2;
-    const offsetY = padding + (canvas.height - padding * 2 - (maxX - minX) * scale) / 2;
-    
-    let minDistSq = Infinity;
-    let nearestPointInfo = null;
-
-    savedContours.forEach((contour, contourIndex) => {
-        contour.forEach((pointStr, pointIndex) => {
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    savedContours.forEach(c => {
+        c.forEach(pointStr => {
             const [x, y] = pointStr.split('\t').map(Number);
-            const initialCanvasX = offsetX + (y - minY) * scale;
-            const initialCanvasY = canvas.height - (offsetY + (x - minX) * scale);
-            const screenX = (initialCanvasX - canvas.width / 2 + panX) * zoomLevel + canvas.width / 2;
-            const screenY = (initialCanvasY - canvas.height / 2 + panY) * zoomLevel + canvas.height / 2;
-            const distSq = (screenX - mouseX) ** 2 + (screenY - mouseY) ** 2;
-            
-            if (distSq < minDistSq) {
-                minDistSq = distSq;
-                nearestPointInfo = { x, y, contourIndex, pointIndex };
+            if (!isNaN(x) && !isNaN(y)) {
+                if (x < minX) minX = x;
+                if (x > maxX) maxX = x;
+                if (y < minY) minY = y;
+                if (y > maxY) maxY = y;
             }
         });
     });
-    
-    if (!nearestPointInfo) return;
+    if (minX === Infinity) return;
 
-    document.title = `${nearestPointInfo.x.toFixed(2)}\t${nearestPointInfo.y.toFixed(2)}`;
-    flashPointAnimation(nearestPointInfo.x, nearestPointInfo.y);
+    const diffX = (maxX - minX) === 0 ? 100 : (maxX - minX);
+    const diffY = (maxY - minY) === 0 ? 100 : (maxY - minY);
+    const padding = 60;
+    const scaleX = (canvas.width - padding * 2) / diffY;
+    const scaleY = (canvas.height - padding * 2) / diffX;
+    const scale = Math.min(scaleX, scaleY) * 0.9;
+    const offsetX = padding + (canvas.width - padding * 2 - diffY * scale) / 2;
+    const offsetY = padding + (canvas.height - padding * 2 - diffX * scale) / 2;
+
+    const toScreen = (x, y) => {
+        const cx = offsetX + (y - minY) * scale;
+        const cy = canvas.height - (offsetY + (x - minX) * scale);
+        return {
+            sx: (cx - canvas.width / 2 + panX) * zoomLevel + canvas.width / 2,
+            sy: (cy - canvas.height / 2 + panY) * zoomLevel + canvas.height / 2
+        };
+    };
 
     const textarea = document.getElementById('coordsInput');
-    const lines = textarea.value.split('\n');
-    let targetLineIndex = -1;
-    
-    const targetSmaller = Math.min(nearestPointInfo.x, nearestPointInfo.y).toFixed(2);
-    const targetLarger = Math.max(nearestPointInfo.x, nearestPointInfo.y).toFixed(2);
 
     
-    
-    
+    const POINT_THRESHOLD_SQ = 144;
+    let nearPoints = [];
 
-    for (let i = 0; i < lines.length; i++) {
-        const line = lines[i].trim();
-        const parts = line.split(/\t|\s{2,}/); 
-        if (parts.length < 2) continue;
+    savedContours.forEach((contour, cIdx) => {
+        const isClosed = isContourClosed(contour);
+        const area = isClosed ? calculateArea(contour) : 0;
 
-        const lineVal1 = parseFloat(parts[0].replace(',', '.'));
-        const lineVal2 = parseFloat(parts[1].replace(',', '.'));
+        contour.forEach((pointStr, pIdx) => {
+            const [x, y] = pointStr.split('\t').map(Number);
+            const s = toScreen(x, y);
+            const dSq = (s.sx - mouseX) ** 2 + (s.sy - mouseY) ** 2;
 
-        if (isNaN(lineVal1) || isNaN(lineVal2)) continue;
+            if (dSq <= POINT_THRESHOLD_SQ) {
+                nearPoints.push({ x, y, dSq, cIdx, pIdx, area });
+            }
+        });
+    });
 
-        const lineSmaller = Math.min(lineVal1, lineVal2).toFixed(2);
-        const lineLarger = Math.max(lineVal1, lineVal2).toFixed(2);
+    if (nearPoints.length > 0) {
+        
+        nearPoints.sort((a, b) => a.dSq - b.dSq || a.area - b.area);
+        const targetPt = nearPoints[0];
+
+        selectedContourIndex = targetPt.cIdx;
 
         
-
-        if (lineSmaller === targetSmaller && lineLarger === targetLarger) {
-            targetLineIndex = i;
-            
-            break; 
+        const ptRange = getPointTextRange(textarea.value, targetPt.cIdx, targetPt.pIdx);
+        if (ptRange) {
+            textarea.focus();
+            textarea.setSelectionRange(ptRange.start, ptRange.end);
+            const scrollRatio = ptRange.start / Math.max(1, textarea.value.length);
+            textarea.scrollTop = textarea.scrollHeight * scrollRatio - textarea.clientHeight / 2;
         }
-    }
 
-    if (targetLineIndex === -1) {
-        
+        flashPointAnimation(targetPt.x, targetPt.y);
+        document.title = `${targetPt.x.toFixed(2)}\t${targetPt.y.toFixed(2)}`;
+        showNotification(`Точка: ${targetPt.x.toFixed(2)}, ${targetPt.y.toFixed(2)} (Контур ${targetPt.cIdx + 1})`);
+
+        drawContour(savedContours);
         return; 
     }
 
     
-    
+    const canvasMouseX = (mouseX - canvas.width / 2) / zoomLevel + canvas.width / 2 - panX;
+    const canvasMouseY = (mouseY - canvas.height / 2) / zoomLevel + canvas.height / 2 - panY;
+    const clickY = minY + (canvasMouseX - offsetX) / scale;
+    const clickX = minX + (canvas.height - offsetY - canvasMouseY) / scale;
 
-    const textContent = textarea.value;
-    
-    const nth_occurrence = (string, char, n) => {
-        let index = string.indexOf(char);
-        for (let i = 1; i < n && index !== -1; i++) {
-            index = string.indexOf(char, index + 1);
+    const hitContours = [];
+
+    savedContours.forEach((contour, contourIndex) => {
+        if (!contour || contour.length < 2) return;
+        const pts = contour.map(p => p.split('\t').map(Number));
+        const isClosed = isContourClosed(contour);
+        const area = isClosed ? calculateArea(contour) : 0;
+
+        let isHit = false;
+        if (isClosed && pts.length >= 3) {
+            if (isPointInPolygon([clickX, clickY], pts)) {
+                isHit = true;
+            }
         }
-        return index;
-    };
-    
-    
-    const startPos = targetLineIndex === 0 ? 0 : nth_occurrence(textContent, '\n', targetLineIndex) + 1;
-    const endPos = startPos + lines[targetLineIndex].length;
 
-    
-    textarea.focus();
+        if (!isHit) {
+            const numSegs = isClosed ? pts.length : pts.length - 1;
+            for (let i = 0; i < numSegs; i++) {
+                const s1 = toScreen(pts[i][0], pts[i][1]);
+                const s2 = toScreen(pts[(i + 1) % pts.length][0], pts[(i + 1) % pts.length][1]);
+                if (pointSegmentDistSq(mouseX, mouseY, s1.sx, s1.sy, s2.sx, s2.sy) <= 144) {
+                    isHit = true;
+                    break;
+                }
+            }
+        }
 
-    
-    
-    
-    
-    setTimeout(() => {
-        textarea.setSelectionRange(startPos, endPos);
+        if (isHit) {
+            hitContours.push({ index: contourIndex, area, isClosed, contour });
+        }
+    });
+
+    if (hitContours.length > 0) {
         
-        textarea.scrollTop = textarea.scrollHeight * (startPos / textContent.length) - textarea.clientHeight / 2;
-    }, 0);
-    
+        hitContours.sort((a, b) => a.area - b.area);
+        const targetContourIndex = hitContours[0].index;
+        selectedContourIndex = targetContourIndex;
+
+        
+        const range = getContourTextRange(textarea.value, targetContourIndex);
+        if (range) {
+            textarea.focus();
+            textarea.setSelectionRange(range.start, range.end);
+            const scrollRatio = range.start / Math.max(1, textarea.value.length);
+            textarea.scrollTop = textarea.scrollHeight * scrollRatio - textarea.clientHeight / 2;
+        }
+
+        const cData = savedContours[targetContourIndex];
+        const isClosed = isContourClosed(cData);
+        const sizeInfo = isClosed ? `S = ${Math.round(calculateArea(cData))} м²` : `L = ${calculatePerimeter(cData).toFixed(2)} м`;
+        showNotification(`Выбран Контур ${targetContourIndex + 1} (${sizeInfo})`);
+
+        drawContour(savedContours);
+    }
 }
 
 
@@ -7336,7 +7684,7 @@ function importFile(isAppend = false) {
             }
 
             try {
-                // Последовательная обработка исключает конфликты диалогов выбора (например, для DXF)
+                
                 const validResults = [];
                 for (const file of files) {
                     const res = await processFileToCoordinates(file);
@@ -7354,7 +7702,7 @@ function importFile(isAppend = false) {
                 let newNames = [];
 
                 validResults.forEach(res => {
-                    // Нормализуем блок каждого файла: убираем лишние пробелы по краям
+                    
                     const fileContent = res.coordinates.join('\n').trim();
                     if (fileContent) {
                         allNewCoordsBlocks.push(fileContent);
@@ -7364,7 +7712,7 @@ function importFile(isAppend = false) {
                     }
                 });
 
-                // Все файлы объединяются строго через пустую строку (\n\n)
+                
                 const combinedText = allNewCoordsBlocks.join('\n\n');
 
                 if (isAppend) {
@@ -8466,7 +8814,7 @@ function extractCoordinatesFromMIF(mifContent) {
 
         if (!isDataSection) continue;
 
-        // Обработка точечных объектов: Point X Y
+        
         const pointMatch = line.match(/^Point\s+([+-]?\d+(?:[.,]\d+)?)[,\s\t]+([+-]?\d+(?:[.,]\d+)?)/i);
         if (pointMatch) {
             if (currentContour.length > 0) {
