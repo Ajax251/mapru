@@ -8836,13 +8836,248 @@ async function handleImportFromTextareaCoordinates(text, color = null) {
         }
         return objects;
     }
+    
+    function parseDelimitedLine(line, delimiter = ';') {
+    if (!line.includes(delimiter)) {
+        if (line.includes(';')) delimiter = ';';
+        else if (line.includes('\t')) delimiter = '\t';
+        else if (line.includes(',')) delimiter = ',';
+    }
+    const result = [];
+    let cur = '';
+    let inQuotes = false;
+    for (let i = 0; i < line.length; i++) {
+        const char = line[i];
+        if (char === '"') {
+            if (inQuotes && line[i + 1] === '"') {
+                cur += '"';
+                i++;
+            } else {
+                inQuotes = !inQuotes;
+            }
+        } else if (char === delimiter && !inQuotes) {
+            result.push(cur.trim());
+            cur = '';
+        } else {
+            cur += char;
+        }
+    }
+    result.push(cur.trim());
+    return result.map(s => s.replace(/^"|"$/g, '').trim());
+}
 
-async function processParsedFileContent(content, ext, baseName, fixedColor) {
+function extractNameFromMidRow(values, columnNames, fallbackName) {
+    if (!values || values.length === 0) return fallbackName;
+
+    
+    for (const val of values) {
+        if (typeof val === 'string' && /^\d{2}:\d{2}:\d{6,7}:\d+$/.test(val.trim())) {
+            return val.trim();
+        }
+    }
+
+    
+    if (columnNames && columnNames.length > 0) {
+        const map = {};
+        columnNames.forEach((col, idx) => {
+            if (idx < values.length) {
+                map[col.toLowerCase()] = values[idx];
+            }
+        });
+
+        const priorityKeys = [
+            'кадастровыйномер', 'кадастровый_номер', 'cadastralnumber',
+            'objectkey', 'учетныйномер', 'обозначение', 'номер',
+            'objectname', 'наименование', 'name', 'наименованиеучастка',
+            'layername'
+        ];
+
+        for (const k of priorityKeys) {
+            if (map[k] && String(map[k]).trim() !== '' && map[k] !== '0') {
+                return String(map[k]).trim();
+            }
+        }
+    }
+
+    
+    for (let i = values.length - 1; i >= 0; i--) {
+        const v = String(values[i]).trim();
+        if (v && v !== '0' && v !== '""') return v;
+    }
+
+    return fallbackName;
+}
+
+function parseMifWithMid(mifContent, midContent, baseName, fixedColor) {
+    const rawLines = mifContent.split(/\r?\n/);
+    let delimiter = ';';
+    const columns = [];
+    let dataIndex = -1;
+
+    for (let i = 0; i < rawLines.length; i++) {
+        const line = rawLines[i].trim();
+        if (/^delimiter\s+/i.test(line)) {
+            const match = line.match(/^delimiter\s+["']?([^"'\s]+)["']?/i);
+            if (match) delimiter = match[1];
+        } else if (/^columns\s+(\d+)/i.test(line)) {
+            const count = parseInt(line.match(/^columns\s+(\d+)/i)[1], 10);
+            for (let c = 0; c < count && (i + 1) < rawLines.length; c++) {
+                i++;
+                const colLine = rawLines[i].trim();
+                const colName = colLine.split(/\s+/)[0];
+                if (colName) columns.push(colName);
+            }
+        } else if (/^data\b/i.test(line)) {
+            dataIndex = i + 1;
+            break;
+        }
+    }
+
+    if (dataIndex === -1) return [];
+
+    const normalizePair = (c1, c2) => {
+        if (Math.abs(c1) <= 180 && Math.abs(c2) <= 180) {
+            return { x: roundCoord(c1), y: roundCoord(c2) };
+        }
+        return { x: roundCoord(Math.min(c1, c2)), y: roundCoord(Math.max(c1, c2)) };
+    };
+
+    const features = [];
+    let i = dataIndex;
+
+    while (i < rawLines.length) {
+        const line = rawLines[i].trim();
+        if (!line) { i++; continue; }
+        const upper = line.toUpperCase();
+
+        if (upper.startsWith('POINT')) {
+            const parts = line.split(/[\s,;\t]+/).filter(Boolean);
+            if (parts.length >= 3) {
+                const c1 = parseFloat(parts[1].replace(',', '.'));
+                const c2 = parseFloat(parts[2].replace(',', '.'));
+                if (isFinite(c1) && isFinite(c2)) {
+                    features.push({
+                        type: 'point',
+                        contours: [[normalizePair(c1, c2)]]
+                    });
+                }
+            }
+            i++;
+            continue;
+        }
+
+        if (upper.startsWith('LINE')) {
+            const parts = line.split(/[\s,;\t]+/).filter(Boolean);
+            if (parts.length >= 5) {
+                const p1 = normalizePair(parseFloat(parts[1].replace(',', '.')), parseFloat(parts[2].replace(',', '.')));
+                const p2 = normalizePair(parseFloat(parts[3].replace(',', '.')), parseFloat(parts[4].replace(',', '.')));
+                if (isFinite(p1.x) && isFinite(p2.x)) {
+                    features.push({ type: 'line', contours: [[p1, p2]] });
+                }
+            }
+            i++;
+            continue;
+        }
+
+        if (upper.startsWith('REGION')) {
+            const parts = line.split(/\s+/).filter(Boolean);
+            const numPolys = parseInt(parts[1], 10) || 1;
+            i++;
+            const contours = [];
+            for (let p = 0; p < numPolys && i < rawLines.length; p++) {
+                while (i < rawLines.length && !rawLines[i].trim()) i++;
+                const numPts = parseInt(rawLines[i].trim(), 10) || 0;
+                i++;
+                const contour = [];
+                for (let k = 0; k < numPts && i < rawLines.length; k++) {
+                    const ptParts = rawLines[i].trim().split(/[\s,;\t]+/).filter(Boolean);
+                    if (ptParts.length >= 2) {
+                        const c1 = parseFloat(ptParts[0].replace(',', '.'));
+                        const c2 = parseFloat(ptParts[1].replace(',', '.'));
+                        if (isFinite(c1) && isFinite(c2)) {
+                            contour.push(normalizePair(c1, c2));
+                        }
+                    }
+                    i++;
+                }
+                if (contour.length >= 3) {
+                    const first = contour[0];
+                    const last = contour[contour.length - 1];
+                    if (Math.hypot(first.x - last.x, first.y - last.y) > 0.001) {
+                        contour.push({ x: first.x, y: first.y });
+                    }
+                    contours.push(contour);
+                }
+            }
+            if (contours.length > 0) {
+                features.push({ type: 'polygon', contours: contours });
+            }
+            continue;
+        }
+
+        if (upper.startsWith('PLINE')) {
+            const parts = line.split(/\s+/).filter(Boolean);
+            let numSections = 1;
+            if (parts[1] && parts[1].toUpperCase() === 'MULTIPLE') {
+                numSections = parseInt(parts[2], 10) || 1;
+            }
+            i++;
+            const contours = [];
+            for (let s = 0; s < numSections && i < rawLines.length; s++) {
+                while (i < rawLines.length && !rawLines[i].trim()) i++;
+                const numPts = parseInt(rawLines[i].trim(), 10) || 0;
+                i++;
+                const contour = [];
+                for (let k = 0; k < numPts && i < rawLines.length; k++) {
+                    const ptParts = rawLines[i].trim().split(/[\s,;\t]+/).filter(Boolean);
+                    if (ptParts.length >= 2) {
+                        const c1 = parseFloat(ptParts[0].replace(',', '.'));
+                        const c2 = parseFloat(ptParts[1].replace(',', '.'));
+                        if (isFinite(c1) && isFinite(c2)) {
+                            contour.push(normalizePair(c1, c2));
+                        }
+                    }
+                    i++;
+                }
+                if (contour.length > 0) contours.push(contour);
+            }
+            if (contours.length > 0) {
+                features.push({ type: 'line', contours: contours });
+            }
+            continue;
+        }
+
+        i++;
+    }
+
+    const midRows = [];
+    if (midContent && midContent.trim()) {
+        const rawMidLines = midContent.split(/\r?\n/).map(l => l.trim()).filter(Boolean);
+        rawMidLines.forEach(l => {
+            midRows.push(parseDelimitedLine(l, delimiter));
+        });
+    }
+
+    const addedObjects = [];
+    features.forEach((feat, idx) => {
+        const fallbackName = features.length > 1 ? `${baseName}_${idx + 1}` : baseName;
+        let name = fallbackName;
+        if (idx < midRows.length) {
+            name = extractNameFromMidRow(midRows[idx], columns, fallbackName);
+        }
+        const newObj = addObjectInternal(feat.contours, name, feat.type, true, null, fixedColor);
+        if (newObj) addedObjects.push(newObj);
+    });
+
+    return addedObjects;
+}
+
+async function processParsedFileContent(content, ext, baseName, fixedColor, midContent = null) {
     let rawCoords = [];
     let parsedObjects = [];
 
     if (ext === 'mif') {
-        rawCoords = extractCoordinatesFromMIF(content);
+        return parseMifWithMid(content, midContent, baseName, fixedColor);
     } else if (ext === 'dxf') {
         const dxfData = parseDxfEnriched(content);
         
@@ -9232,8 +9467,24 @@ function extractCoordinatesFromMIF(mifContent) {
                      pointsInContour = 0;
                  }
              }
-        } else if (line.startsWith('Pen') || line.startsWith('PEN') || line.startsWith('Point')) {
-            continue;
+      
+const pointMatch = line.match(/^Point\s+([+-]?\d+(?:[.,]\d+)?)[,\s\t]+([+-]?\d+(?:[.,]\d+)?)/i);
+if (pointMatch) {
+    if (currentContour.length > 0) {
+        coordinates.push(...currentContour, '');
+        currentContour = [];
+    }
+    const px = parseFloat(pointMatch[1].replace(',', '.'));
+    const py = parseFloat(pointMatch[2].replace(',', '.'));
+    if (!isNaN(px) && !isNaN(py)) {
+        coordinates.push(`${Math.min(px, py).toFixed(2)}\t${Math.max(px, py).toFixed(2)}`, '');
+    }
+    continue;
+}
+
+if (/^(Pen|Symbol|Brush|Font)/i.test(line)) {
+    continue;
+}
         } else if (isDataSection && line.trim() !== '') {
              const potentialPointCount = parseInt(line.trim());
              if (!isNaN(potentialPointCount) && isRegionType && pointsInContour === 0) {
@@ -9814,7 +10065,7 @@ async function handleImportFromFile() {
     fileInput.type = 'file'; 
     fileInput.multiple = true; 
     
-    fileInput.accept = '.xml,.zip,.dxf,.mif,.csv,.txt,.geojson,.json,.kml,.xyh,.sxf,.jpg,.jpeg,.png'; 
+    fileInput.accept = '.xml,.zip,.dxf,.mif,.mid,.csv,.txt,.geojson,.json,.kml,.xyh,.sxf,.jpg,.jpeg,.png'; 
      
     fileInput.onchange = async (e) => {
         const files = Array.from(e.target.files); 
@@ -9826,11 +10077,47 @@ async function handleImportFromFile() {
             let allAddedObjects = [];
             let rasterImported = false;
 
+            
+            const mifFiles = [];
+            const midFilesMap = new Map();
+            const otherFiles = [];
+
             for (const file of files) {
+                const ext = file.name.split('.').pop().toLowerCase();
+                const baseName = file.name.split('.').slice(0, -1).join('.');
+                if (ext === 'mif') {
+                    mifFiles.push(file);
+                } else if (ext === 'mid') {
+                    midFilesMap.set(baseName.toLowerCase(), file);
+                } else {
+                    otherFiles.push(file);
+                }
+            }
+
+            
+            const singlePairing = (mifFiles.length === 1 && midFilesMap.size === 1 && files.length <= 2);
+            const singleMidFile = singlePairing ? Array.from(midFilesMap.values())[0] : null;
+
+            
+            for (const file of mifFiles) {
+                const baseName = file.name.split('.').slice(0, -1).join('.') || `Файл ${nextObjectId}`;
+                const content = await file.text();
+
+                let midContent = null;
+                const pairedMid = singlePairing ? singleMidFile : midFilesMap.get(baseName.toLowerCase());
+                if (pairedMid) {
+                    midContent = await pairedMid.text();
+                }
+
+                const added = await processParsedFileContent(content, 'mif', baseName, fixedColor, midContent);
+                allAddedObjects = allAddedObjects.concat(added);
+            }
+
+            
+            for (const file of otherFiles) {
                 const ext = file.name.split('.').pop().toLowerCase();
                 const baseName = file.name.split('.').slice(0, -1).join('.') || `Файл ${nextObjectId}`;
 
-                
                 if (['jpg', 'jpeg', 'png'].includes(ext)) {
                     await loadRasterImageFile(file);
                     rasterImported = true;
@@ -9848,29 +10135,56 @@ async function handleImportFromFile() {
                 } else if (ext === 'zip') {
                     const arrayBuffer = await file.arrayBuffer();
                     const zip = await JSZip.loadAsync(arrayBuffer);
-                    const validExts = ['txt', 'csv', 'mif', 'dxf', 'xml', 'geojson', 'json', 'kml', 'xyh'];
+                    const validExts = ['txt', 'csv', 'dxf', 'xml', 'geojson', 'json', 'kml', 'xyh'];
+
+                    const zipMifEntries = [];
+                    const zipMidEntries = new Map();
+                    const zipOtherEntries = [];
 
                     for (const relativePath in zip.files) {
                         const zipEntry = zip.files[relativePath];
                         if (zipEntry.dir) continue;
 
                         const fileExt = zipEntry.name.split('.').pop().toLowerCase();
-                        if (validExts.includes(fileExt)) {
-                            const content = await zipEntry.async("string");
-                            const entryBaseName = zipEntry.name.split('/').pop().split('.').slice(0, -1).join('.');
-                            const added = await processParsedFileContent(content, fileExt, entryBaseName, fixedColor);
-                            allAddedObjects = allAddedObjects.concat(added);
+                        const entryBase = zipEntry.name.split('/').pop().split('.').slice(0, -1).join('.');
+                        if (fileExt === 'mif') {
+                            zipMifEntries.push(zipEntry);
+                        } else if (fileExt === 'mid') {
+                            zipMidEntries.set(entryBase.toLowerCase(), zipEntry);
+                        } else if (validExts.includes(fileExt)) {
+                            zipOtherEntries.push(zipEntry);
                         }
+                    }
+
+                    const zipSinglePairing = (zipMifEntries.length === 1 && zipMidEntries.size === 1);
+                    const zipSingleMid = zipSinglePairing ? Array.from(zipMidEntries.values())[0] : null;
+
+                    for (const zipEntry of zipMifEntries) {
+                        const content = await zipEntry.async("string");
+                        const entryBaseName = zipEntry.name.split('/').pop().split('.').slice(0, -1).join('.');
+                        let midContent = null;
+                        const pairedEntry = zipSinglePairing ? zipSingleMid : zipMidEntries.get(entryBaseName.toLowerCase());
+                        if (pairedEntry) {
+                            midContent = await pairedEntry.async("string");
+                        }
+                        const added = await processParsedFileContent(content, 'mif', entryBaseName, fixedColor, midContent);
+                        allAddedObjects = allAddedObjects.concat(added);
+                    }
+
+                    for (const zipEntry of zipOtherEntries) {
+                        const fileExt = zipEntry.name.split('.').pop().toLowerCase();
+                        const entryBaseName = zipEntry.name.split('/').pop().split('.').slice(0, -1).join('.');
+                        const content = await zipEntry.async("string");
+                        const added = await processParsedFileContent(content, fileExt, entryBaseName, fixedColor);
+                        allAddedObjects = allAddedObjects.concat(added);
                     }
                 } else {
                     const content = await file.text();
-                    
                     if (tryImportGeoredactorWithRaster(content)) {
                         closeCoordsDialog();
                         showLoader(false);
                         return;
                     }
-                        
                     const added = await processParsedFileContent(content, ext, baseName, fixedColor);
                     allAddedObjects = allAddedObjects.concat(added);
                 }
