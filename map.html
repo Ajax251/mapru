@@ -11729,6 +11729,15 @@ function findObjectsUnderCursor(lat, lon, clickedTarget = null) {
 
         
         if (obj instanceof ymaps.Polygon) {
+         
+            const b = obj.geometry.getBounds();
+            if (b) {
+                const pad = toleranceMeters * 0.000015;
+                if (lat < b[0][0] - pad || lat > b[1][0] + pad || lon < b[0][1] - pad || lon > b[1][1] + pad) {
+                    return;
+                }
+            }
+
             let isInside = false;
             try {
                 const rawCoords = obj.geometry.getCoordinates();
@@ -26770,38 +26779,44 @@ async function exportMapToJson() {
     showLoader('Подготовка карты к экспорту...');
     
     try {
-        
-        function getSafeData(data) {
+        function getSafeData(data, visited = new WeakSet()) {
             if (typeof data !== 'object' || data === null) return data;
+            if (visited.has(data)) return undefined;
+            visited.add(data);
             
             if (Array.isArray(data)) {
-                return data.map(item => getSafeData(item));
+                return data.map(item => getSafeData(item, visited)).filter(item => item !== undefined);
             }
 
             const safeObj = {};
             for (const key in data) {
                 if (Object.prototype.hasOwnProperty.call(data, key)) {
+                    if (key.startsWith('_') || key === 'map' || key === 'parent' || key === 'events' || 
+                        key === 'state' || key === 'relatedPolygon' || key === 'polygon' || 
+                        key === 'vertices' || key === 'areaLabel' || key === 'segmentLabels') continue;
+                    
                     const value = data[key];
-                    
-                    
-                    if (key.startsWith('_') || key === 'map' || key === 'parent' || key === 'events' || key === 'state') continue;
                     if (typeof value === 'function') continue;
                     
-                    
-                    
                     if (value && typeof value === 'object') {
-                        if (value.constructor && value.constructor.name && value.constructor.name.startsWith('ymaps')) continue;
+                        if (value.geometry && typeof value.geometry.getType === 'function') continue;
                         if (value.events && typeof value.events.add === 'function') continue;
-                        
-                        if (value.options && typeof value.options.set === 'function') continue;
+                        if (value.options && typeof value.options.get === 'function') continue;
+                        if (value.constructor && value.constructor.name && value.constructor.name.startsWith('ymaps')) continue;
                     }
 
-                    safeObj[key] = getSafeData(value);
+                    // Исключаем дублирование координат внутри properties.featureData —
+                    // геометрия уже хранится в serializedFeature.geometry
+                    if (key === 'geometry' && value && (value.coordinates || value.type)) {
+                        safeObj[key] = { type: value.type || 'Polygon' };
+                        continue;
+                    }
+
+                    safeObj[key] = getSafeData(value, visited);
                 }
             }
             return safeObj;
         }
-        
 
         const mapData = {
             type: "MapData",
@@ -26821,25 +26836,24 @@ async function exportMapToJson() {
             }
         });
 
+        // Рекурсивный сдвиг с округлением до 7 знаков (снижает размер JSON в разы)
+        const revertOffsetCoord = (c) => {
+            if (!Array.isArray(c)) return c;
+            if (typeof c[0] === 'number') {
+                return [
+                    Number((c[0] + (mapOffsetY * 0.000008983)).toFixed(7)),
+                    Number((c[1] + (mapOffsetX * 0.000008983)).toFixed(7))
+                ];
+            }
+            return c.map(revertOffsetCoord);
+        };
+
         allObjects.forEach(obj => {
             if (!obj.geometry) return;
 
-            let geometryType = obj.geometry.getType();
-            let coordinates = obj.geometry.getCoordinates();
-            
-            let trueCoordinates;
-            const revertOffset = (coord) => [
-                coord[0] + (mapOffsetY * 0.000008983),
-                coord[1] + (mapOffsetX * 0.000008983)
-            ];
-
-            if (geometryType === 'Point') {
-                trueCoordinates = revertOffset(coordinates);
-            } else if (geometryType === 'LineString') {
-                trueCoordinates = coordinates.map(revertOffset);
-            } else if (geometryType === 'Polygon') {
-                trueCoordinates = coordinates.map(ring => ring.map(revertOffset));
-            }
+            const geometryType = obj.geometry.getType();
+            const coordinates = obj.geometry.getCoordinates();
+            const trueCoordinates = revertOffsetCoord(coordinates);
 
             const rawProperties = obj.properties.getAll();
             const rawOptions = obj.options.getAll();
@@ -26890,7 +26904,10 @@ async function exportMapToJson() {
             try {
                 const globalPx = map.converter.pageToGlobal([rect.left + rect.width/2, rect.top + rect.height/2]);
                 const geo = map.options.get('projection').fromGlobalPixels(globalPx, map.getZoom());
-                const trueGeo = [geo[0] + (mapOffsetY * 0.000008983), geo[1] + (mapOffsetX * 0.000008983)];
+                const trueGeo = [
+                    Number((geo[0] + (mapOffsetY * 0.000008983)).toFixed(7)),
+                    Number((geo[1] + (mapOffsetX * 0.000008983)).toFixed(7))
+                ];
 
                 mapData.texts.push({
                     content: span.textContent,
@@ -26905,7 +26922,8 @@ async function exportMapToJson() {
             } catch (err) {}
         });
 
-        const jsonString = JSON.stringify(mapData, null, 2);
+        // Компактный JSON без форматирования (null, 2), предотвращает RangeError
+        const jsonString = JSON.stringify(mapData);
         
         const zip = new JSZip();
         zip.file("map_data.json", jsonString);
@@ -26913,7 +26931,7 @@ async function exportMapToJson() {
         const blob = await zip.generateAsync({
             type: "blob",
             compression: "DEFLATE",
-            compressionOptions: { level: 9 }
+            compressionOptions: { level: 6 }
         });
 
         const dateStr = new Date().toISOString().slice(0,10);
@@ -27336,6 +27354,11 @@ function handleMapJsonImport(event) {
 
                         let featureData = props.featureData;
                         if ((!featureData || !featureData.properties) && props.cadastralNumber) {
+                            
+                            if (featureData && (!featureData.geometry || !featureData.geometry.coordinates)) {
+    featureData.geometry = f.geometry;
+}
+
                             featureData = { 
                                 type: "Feature", 
                                 geometry: f.geometry, 
@@ -28836,9 +28859,18 @@ async function forestryMenuItemHandler(contextMenu, map, polygons, polygonStyle,
             }).filter(r => r !== null);
 
             if (allProcessedRings.length > 0) {
+                // Привязываем данные только текущего контура, а не весь гигантский MultiPolygon
+                const singleContourFeature = {
+                    type: "Feature",
+                    id: `${feature.id || 'forestry'}_${polygonIndex}`,
+                    properties: feature.properties,
+                    geometry: { type: "Polygon", coordinates: polygonRings }
+                };
+
                 const polygonObj = new ymaps.Polygon(allProcessedRings, {
-                    featureData: feature,
-                    cadastralNumber: regNumbBorder
+                    featureData: singleContourFeature,
+                    cadastralNumber: regNumbBorder,
+                    isZouit: true
                 }, {
                     strokeColor: '#228B22',
                     strokeWidth: polygonStyle.width,
@@ -28863,16 +28895,26 @@ async function forestryMenuItemHandler(contextMenu, map, polygons, polygonStyle,
                     combinedBounds[1][1] = Math.max(combinedBounds[1][1], bounds[1][1]);
                 }
 
-                const outerRingCoords = allProcessedRings[0].map(c => [c[1], c[0]]);
-                const turfContour = turf.polygon([outerRingCoords]);
-                const clickPoint = turf.point([lon, lat]);
-                if (turf.booleanPointInPolygon(clickPoint, turfContour)) {
-                    const centroidFeature = turf.centroid(turfContour);
-                    const centroidCoordsGeo = centroidFeature.geometry.coordinates;
-                    clickedContourCentroid = [
-                        centroidCoordsGeo[1] - mapOffsetY * 0.000008983,
-                        centroidCoordsGeo[0] - mapOffsetX * 0.000008983
-                    ];
+                // Прекращаем тяжелый расчет точек, как только центр для метки найден
+                if (!clickedContourCentroid) {
+                    const outerRingCoords = allProcessedRings[0].map(c => [c[1], c[0]]);
+                    if (outerRingCoords.length >= 3) {
+                        const first = outerRingCoords[0], last = outerRingCoords[outerRingCoords.length - 1];
+                        if (first[0] !== last[0] || first[1] !== last[1]) outerRingCoords.push([...first]);
+                        if (outerRingCoords.length >= 4) {
+                            try {
+                                const turfContour = turf.polygon([outerRingCoords]);
+                                const clickPoint = turf.point([lon, lat]);
+                                if (turf.booleanPointInPolygon(clickPoint, turfContour)) {
+                                    const centroidFeature = turf.centroid(turfContour);
+                                    clickedContourCentroid = [
+                                        centroidFeature.geometry.coordinates[1],
+                                        centroidFeature.geometry.coordinates[0]
+                                    ];
+                                }
+                            } catch (e) {}
+                        }
+                    }
                 }
             }
         }
