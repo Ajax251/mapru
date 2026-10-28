@@ -6690,7 +6690,6 @@ async function checkNewParcelBoundaries(prevCadNumber, parcelIndex, button) {
     statusDiv.innerHTML = '';
 
     try {
-        
         const newParcels = lastXmlDoc.querySelectorAll('NewParcel');
         const targetParcel = newParcels[parcelIndex];
         if (!targetParcel) throw new Error("Участок не найден в XML.");
@@ -6711,133 +6710,226 @@ async function checkNewParcelBoundaries(prevCadNumber, parcelIndex, button) {
 
         if (newContours.length === 0) throw new Error("Не найдены координаты образуемого участка.");
 
-        
         const accessNodes = targetParcel.querySelectorAll('ProvidingPassCadastralNumbers > CadastralNumber, ProvidingPassCadastralNumbers > Other');
         const accessTexts = Array.from(accessNodes).map(n => n.textContent.trim().toLowerCase());
         const prevCadLower = prevCadNumber.toLowerCase();
-        
         const hasAccessThroughPrev = accessTexts.some(text => text.includes(prevCadLower));
 
-        
         currentMskSystem = detectMskSystem(prevCadNumber);
         if (!currentMskSystem) throw new Error("Не удалось определить МСК для исходного участка.");
 
-        const egrnContours = await fetchEgrnCoordinates(prevCadNumber);
-        if (!egrnContours || egrnContours.length === 0) throw new Error(`Исходный участок ${prevCadNumber} не найден в ЕГРН (или нет геометрии).`);
-
-        button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Анализ...</span>';
-        await new Promise(resolve => setTimeout(resolve, 300)); 
-
-        
-        let isOutside = false;
-        let minDistanceToEgrnBorder = Infinity;
-
-        for (const newContour of newContours) {
-            for (const pt of newContour) {
-                let pointIsInsideAnyEgrnRing = false;
-                
-                for (const egrnRing of egrnContours) {
-                    
-                    if (isPointInPolygon(pt, egrnRing)) {
-                        pointIsInsideAnyEgrnRing = true;
-                    }
-                    
-                    
-                    for (let i = 0; i < egrnRing.length - 1; i++) {
-                        const dist = getDistanceToSegment(pt, egrnRing[i], egrnRing[i+1]);
-                        if (dist < minDistanceToEgrnBorder) {
-                            minDistanceToEgrnBorder = dist;
-                        }
-                    }
-                }
-
-                
-                if (!pointIsInsideAnyEgrnRing && minDistanceToEgrnBorder > 0.05) {
-                    isOutside = true;
-                }
+        // Проверяем статус исходного ЗУ в ЕГРН
+        let rawNspdData = getCachedGeo(prevCadNumber);
+        if (!rawNspdData) {
+            const searchUrl = `https://nspd.gov.ru/api/geoportal/v2/search/geoportal?thematicSearchId=1&query=${encodeURIComponent(prevCadNumber)}`;
+            rawNspdData = await cachedNspdFetch(searchUrl);
+            if (rawNspdData && rawNspdData.data?.features?.length) {
+                setCachedGeo(prevCadNumber, rawNspdData);
             }
         }
 
-        
-        let resultHtml = '';
+        const feature = rawNspdData?.data?.features?.[0];
+        const options = feature?.properties?.options || {};
+        const isEz = options.subtype === 'Единое землепользование' || options.land_record_subtype === 'Единое землепользование';
 
-        if (isOutside) {
-            resultHtml += `
-            <div class="validation-message validation-error" style="align-items:flex-start;">
-                ${sectionIcons.errorIcon}
-                <div>
-                    <strong>ВНИМАНИЕ: Образуемый участок выходит за границы исходного!</strong><br>
-                    <span style="font-size:0.9em;">Точки образуемого ЗУ находятся за пределами ${prevCadNumber} (макс. отклонение от границы > 5 см).</span>
-                </div>
-            </div>`;
-        } else {
-            resultHtml += `
-            <div class="validation-message validation-success" style="margin-bottom:8px;">
-                ${sectionIcons.successIcon}
-                <strong>Геометрия корректна:</strong> Образуемый участок находится внутри исходного ЗУ.
-            </div>`;
+        let resultHtml = '';
+        let egrnContoursForSchema = [];
+        let isOutside = false;
+
+        if (isEz) {
+            // === Исходный участок - ЕДИНОЕ ЗЕМЛЕПОЛЬЗОВАНИЕ ===
+            button.innerHTML = '<i class="fas fa-sync-alt fa-spin"></i> <span class="btn-text">Анализ состава ЕЗ...</span>';
             
-            
-            if (minDistanceToEgrnBorder > 0.10) {
-                if (hasAccessThroughPrev) {
-                    resultHtml += `
-                    <div class="validation-message validation-success">
-                        <i class="fas fa-check-circle" style="color:var(--success-color); font-size:1.2rem;"></i>
-                        <div>
-                            <strong>Доступ обеспечен верно:</strong> Участок образуется "внутри" (в ${minDistanceToEgrnBorder.toFixed(2)} м. от границы исходного ЗУ), и доступ прописан через ${prevCadNumber}.
-                        </div>
-                    </div>`;
-                } else {
-                    resultHtml += `
-                    <div class="validation-message validation-error" style="align-items:flex-start;">
-                        ${sectionIcons.errorIcon}
-                        <div>
-                            <strong>Ошибка обеспечения доступа!</strong><br>
-                            <span style="font-size:0.9em;">Участок образуется "в глубине" (в ${minDistanceToEgrnBorder.toFixed(2)} м. от внешних границ). Доступ ОБЯЗАТЕЛЬНО должен быть обеспечен через исходный ЗУ <b>${prevCadNumber}</b>, но он не указан в XML.</span>
-                        </div>
-                    </div>`;
-                }
-            } else {
-                resultHtml += `
-                <div class="validation-message" style="background:#f0f9ff; border:1px solid #bae6fd; color:#0369a1;">
-                    <i class="fas fa-info-circle" style="font-size:1.2rem;"></i>
+            const changeParcelNode = lastXmlDoc.querySelector(`FormParcels > ChangeParcel[CadastralNumber="${prevCadNumber}"], ChangeParcel[CadastralNumber="${prevCadNumber}"]`);
+            const transEntries = Array.from(changeParcelNode?.querySelectorAll('TransformationEntryParcels > TransformationEntryParcel') || []).map(n => n.getAttribute('CadastralNumber')).filter(Boolean);
+            const delEntries = Array.from(changeParcelNode?.querySelectorAll('DeleteEntryParcels > DeleteEntryParcel') || []).map(n => n.getAttribute('CadastralNumber')).filter(Boolean);
+
+            if (!changeParcelNode) {
+                resultHtml += `<div class="validation-message validation-error" style="align-items:flex-start;">
+                    ${sectionIcons.errorIcon}
                     <div>
-                        <strong>Участок прилегает к границе.</strong><br>
-                        <span style="font-size:0.9em;">(Отступ от границы ЕГРН: ${(minDistanceToEgrnBorder * 100).toFixed(1)} см). В таком случае доступ не обязательно должен осуществляться через исходный участок.</span>
+                        <strong>КРИТИЧЕСКАЯ ОШИБКА:</strong> Исходный участок <b>${prevCadNumber}</b> является Единым землепользованием, однако в межевом плане отсутствует раздел <code>&lt;ChangeParcel CadastralNumber="${prevCadNumber}"&gt;</code>!
+                    </div>
+                </div>`;
+            } else if (transEntries.length === 0 && delEntries.length === 0) {
+                resultHtml += `<div class="validation-message validation-error" style="align-items:flex-start;">
+                    ${sectionIcons.errorIcon}
+                    <div>
+                        <strong>ОШИБКА: Исходный ЗУ — Единое землепользование!</strong><br>
+                        В разделе <code>&lt;ChangeParcel CadastralNumber="${prevCadNumber}"&gt;</code> не заполнено ни одного обособленного/условного участка!<br>
+                        Обязательно должен быть указан хотя бы один преобразуемый (<code>&lt;TransformationEntryParcels&gt;</code>) или исключаемый (<code>&lt;DeleteEntryParcels&gt;</code>) обособленный участок.
                     </div>
                 </div>`;
             }
+
+            const allSpecifiedEntries = [...transEntries, ...delEntries];
+            let matchedEntryFound = false;
+            let newParcelArea = calculateTotalArealGeometryArea(newContours);
+
+            for (const entryKn of allSpecifiedEntries) {
+                try {
+                    const entryContours = await fetchEgrnCoordinates(entryKn);
+                    if (entryContours && entryContours.length > 0) {
+                        egrnContoursForSchema.push(...entryContours);
+                        const overlapArea = checkPlanarOverlap(newContours, entryContours);
+
+                        if (overlapArea > 0.01) {
+                            matchedEntryFound = true;
+                            const entryTotalArea = calculateTotalArealGeometryArea(entryContours);
+                            const isFullAbsorption = (entryTotalArea > 0 && overlapArea >= entryTotalArea * 0.99) || Math.abs(overlapArea - entryTotalArea) < 0.1;
+                            const isTransformation = transEntries.includes(entryKn);
+                            const isDeletion = delEntries.includes(entryKn);
+
+                            if (isFullAbsorption) {
+                                if (isTransformation) {
+                                    resultHtml += `<div class="validation-message validation-warning" style="align-items:flex-start;">
+                                        ${sectionIcons.warningIcon}
+                                        <div>
+                                            <strong>Внимание по обособленному участку ${entryKn}:</strong> Образуемый ЗУ полностью перекрывает (поглощает) обособленный участок (площадь наложения: ${overlapArea.toFixed(2)} м² из ${entryTotalArea.toFixed(2)} м²).<br>
+                                            Участок должен быть указан как <b>исключаемый</b> (<code>&lt;DeleteEntryParcels&gt;</code>), а не как преобразуемый!
+                                        </div>
+                                    </div>`;
+                                } else {
+                                    resultHtml += `<div class="validation-message validation-success" style="margin-bottom:8px;">
+                                        ${sectionIcons.successIcon}
+                                        <span><b>${entryKn}</b>: Обособленный ЗУ полностью перекрывается образуемым ЗУ и корректно указан в <code>&lt;DeleteEntryParcels&gt;</code> (исключаемый).</span>
+                                    </div>`;
+                                }
+                            } else {
+                                if (isDeletion) {
+                                    resultHtml += `<div class="validation-message validation-error" style="align-items:flex-start;">
+                                        ${sectionIcons.errorIcon}
+                                        <div>
+                                            <strong>Ошибка по обособленному участку ${entryKn}:</strong> Образуемый ЗУ лишь частично накладывается на обособленный ЗУ (площадь: ${overlapArea.toFixed(2)} м² из ${entryTotalArea.toFixed(2)} м²).<br>
+                                            Участок делится с сохранением в измененных границах и должен быть указан в <code>&lt;TransformationEntryParcels&gt;</code> (преобразуемый), а не в &lt;DeleteEntryParcels&gt;!
+                                        </div>
+                                    </div>`;
+                                } else {
+                                    resultHtml += `<div class="validation-message validation-success" style="margin-bottom:8px;">
+                                        ${sectionIcons.successIcon}
+                                        <span><b>${entryKn}</b>: Образуемый ЗУ частично располагается на обособленном ЗУ (${overlapArea.toFixed(2)} м²) и корректно указан в <code>&lt;TransformationEntryParcels&gt;</code> (преобразуемый).</span>
+                                    </div>`;
+                                }
+                            }
+
+                            // Проверяем выход образуемого ЗУ за рамки обособленного участка
+                            for (const pt of newContours[0]) {
+                                let inside = false;
+                                for (const ec of entryContours) {
+                                    if (isPointInPolygon(pt, ec)) { inside = true; break; }
+                                    for (let i = 0; i < ec.length - 1; i++) {
+                                        if (getDistanceToSegment(pt, ec[i], ec[i+1]) <= 0.05) { inside = true; break; }
+                                    }
+                                }
+                                if (!inside) {
+                                    isOutside = true;
+                                    break;
+                                }
+                            }
+                        }
+                    }
+                } catch (e) {
+                    console.warn(`Не удалось загрузить координаты обособленного ЗУ ${entryKn}:`, e);
+                }
+            }
+
+            if (!matchedEntryFound && allSpecifiedEntries.length > 0) {
+                isOutside = true;
+                resultHtml += `<div class="validation-message validation-error" style="align-items:flex-start;">
+                    ${sectionIcons.errorIcon}
+                    <div>
+                        <strong>ОШИБКА РАСПОЛОЖЕНИЯ:</strong> Образуемый ЗУ не попадает в границы указанных в XML обособленных участков (${allSpecifiedEntries.join(', ')})!
+                    </div>
+                </div>`;
+            }
+
+            if (hasAccessThroughPrev) {
+                resultHtml += `<div class="validation-message validation-success" style="margin-top:6px;">
+                    ${sectionIcons.successIcon} Доступ обеспечен через исходное Единое землепользование <code>${prevCadNumber}</code>.
+                </div>`;
+            } else {
+                resultHtml += `<div class="validation-message validation-warning" style="margin-top:6px;">
+                    ${sectionIcons.warningIcon} В реквизите обеспечения доступа рекомендуется указать исходное Единое землепользование <code>${prevCadNumber}</code>.
+                </div>`;
+            }
+
+        } else {
+            // === Стандартный земельный участок ===
+            const egrnContours = await fetchEgrnCoordinates(prevCadNumber);
+            if (!egrnContours || egrnContours.length === 0) throw new Error(`Исходный участок ${prevCadNumber} не найден в ЕГРН (или нет геометрии).`);
+            egrnContoursForSchema = egrnContours;
+
+            let minDistanceToEgrnBorder = Infinity;
+            for (const newContour of newContours) {
+                for (const pt of newContour) {
+                    let pointIsInsideAnyEgrnRing = false;
+                    for (const egrnRing of egrnContours) {
+                        if (isPointInPolygon(pt, egrnRing)) pointIsInsideAnyEgrnRing = true;
+                        for (let i = 0; i < egrnRing.length - 1; i++) {
+                            const dist = getDistanceToSegment(pt, egrnRing[i], egrnRing[i+1]);
+                            if (dist < minDistanceToEgrnBorder) minDistanceToEgrnBorder = dist;
+                        }
+                    }
+                    if (!pointIsInsideAnyEgrnRing && minDistanceToEgrnBorder > 0.05) {
+                        isOutside = true;
+                    }
+                }
+            }
+
+            if (isOutside) {
+                resultHtml += `<div class="validation-message validation-error" style="align-items:flex-start;">
+                    ${sectionIcons.errorIcon}
+                    <div>
+                        <strong>ВНИМАНИЕ: Образуемый участок выходит за границы исходного!</strong><br>
+                        <span style="font-size:0.9em;">Точки образуемого ЗУ находятся за пределами ${prevCadNumber} (макс. отклонение от границы > 5 см).</span>
+                    </div>
+                </div>`;
+            } else {
+                resultHtml += `<div class="validation-message validation-success" style="margin-bottom:8px;">
+                    ${sectionIcons.successIcon} <strong>Геометрия корректна:</strong> Образуемый участок находится внутри исходного ЗУ.
+                </div>`;
+
+                if (minDistanceToEgrnBorder > 0.10) {
+                    if (hasAccessThroughPrev) {
+                        resultHtml += `<div class="validation-message validation-success">
+                            <i class="fas fa-check-circle" style="color:var(--success-color); font-size:1.2rem;"></i>
+                            <div><strong>Доступ обеспечен верно:</strong> Участок образуется "внутри" (в ${minDistanceToEgrnBorder.toFixed(2)} м. от границы), доступ прописан через ${prevCadNumber}.</div>
+                        </div>`;
+                    } else {
+                        resultHtml += `<div class="validation-message validation-error" style="align-items:flex-start;">
+                            ${sectionIcons.errorIcon}
+                            <div><strong>Ошибка обеспечения доступа!</strong><br><span style="font-size:0.9em;">Участок образуется "в глубине" (${minDistanceToEgrnBorder.toFixed(2)} м. от границ). Доступ ОБЯЗАТЕЛЬНО должен быть обеспечен через исходный ЗУ <b>${prevCadNumber}</b>.</span></div>
+                        </div>`;
+                    }
+                } else {
+                    resultHtml += `<div class="validation-message" style="background:#f0f9ff; border:1px solid #bae6fd; color:#0369a1;">
+                        <i class="fas fa-info-circle" style="font-size:1.2rem;"></i>
+                        <div><strong>Участок прилегает к границе</strong> (${(minDistanceToEgrnBorder * 100).toFixed(1)} см от границы). Прямой доступ к землям общего пользования возможен.</div>
+                    </div>`;
+                }
+            }
         }
-        
-        
-        
-        
+
         newParcelChecksData[parcelIndex] = {
             prevCadNumber,
-            egrnContours,
+            egrnContours: egrnContoursForSchema,
             newContours,
             isOutside
         };
 
-        
-        resultHtml += `
-        <div style="margin-top:12px;">
-            <button class="print-btn open-new-parcel-schema-btn" data-index="${parcelIndex}" style="padding:6px 14px; font-size:0.9rem;">
-                <i class="fas fa-map-marked-alt"></i> Показать на схеме
-            </button>
-        </div>`;
-
-        
+        if (egrnContoursForSchema.length > 0) {
+            resultHtml += `<div style="margin-top:12px;">
+                <button class="print-btn open-new-parcel-schema-btn" data-index="${parcelIndex}" style="padding:6px 14px; font-size:0.9rem;">
+                    <i class="fas fa-map-marked-alt"></i> Показать на схеме
+                </button>
+            </div>`;
+        }
 
         statusDiv.innerHTML = resultHtml;
 
     } catch (error) {
         console.error("Ошибка проверки образуемого участка:", error);
-        statusDiv.innerHTML = `
-        <div class="validation-message validation-warning">
-            ${sectionIcons.warningIcon}
-            <span><strong>Не удалось выполнить проверку:</strong> ${error.message}</span>
-        </div>`;
+        statusDiv.innerHTML = `<div class="validation-message validation-warning">${sectionIcons.warningIcon} <span><strong>Не удалось выполнить проверку:</strong> ${error.message}</span></div>`;
     } finally {
         button.disabled = false;
         button.innerHTML = originalButtonHtml;
@@ -7058,13 +7150,29 @@ async function performOverlapCheck(button) {
             
             const parentNodes = All(targetNode, 'ParentCadastralNumbers > CadastralNumber, ParentCadastralNumbers CadastralNumber');
             parentCadNums = Array.from(parentNodes).map(n => n.textContent.trim().toLowerCase());
-        } else if (type === 'new') {
+     } else if (type === 'new') {
             targetNode = All(lastXmlDoc, 'NewParcel')[index];
             cadastralBlock = T(targetNode, 'CadastralBlock');
             currentMskSystem = detectMskSystem(cadastralBlock);
             
             const prevNodes = All(targetNode, 'PrevCadastralNumbers > CadastralNumber');
             parentCadNums = Array.from(prevNodes).map(n => n.textContent.trim().toLowerCase());
+
+            // Если есть ChangeParcel (раздел с измененным ЗУ), добавляем входящие обособленные участки ЕЗ в список разрешенных
+            const changeParcelsInDoc = All(lastXmlDoc, 'FormParcels > ChangeParcel, ChangeParcel');
+            changeParcelsInDoc.forEach(cp => {
+                const cpCad = A(cp, 'CadastralNumber');
+                if (cpCad && !parentCadNums.includes(cpCad.toLowerCase())) {
+                    parentCadNums.push(cpCad.toLowerCase());
+                }
+                // Добавляем преобразуемые и исключаемые входящие участки ЕЗ
+                All(cp, 'TransformationEntryParcels > TransformationEntryParcel, DeleteEntryParcels > DeleteEntryParcel').forEach(ep => {
+                    const epCad = A(ep, 'CadastralNumber');
+                    if (epCad && !parentCadNums.includes(epCad.toLowerCase())) {
+                        parentCadNums.push(epCad.toLowerCase());
+                    }
+                });
+            });
         } else {
             targetNode = All(lastXmlDoc, 'SpecifyParcel > ExistParcel')[index];
             targetCadNum = A(targetNode, 'CadastralNumber');
@@ -7308,11 +7416,22 @@ async function performOverlapCheck(button) {
                 continue;
             }
             
-            const isParentZu = (type === 'tp' || type === 'new') && fCadNum && parentCadNums.includes(fCadNum.toLowerCase());
+          const isParentZu = (type === 'tp' || type === 'new') && fCadNum && parentCadNums.includes(fCadNum.toLowerCase());
             if (isParentZu) {
                 let statusClass = 'success';
                 let typeText = type === 'tp' ? 'Родительский земельный участок' : 'Исходный земельный участок';
-                let msg = `<b>${fCadNum}</b> (${typeText}).<br><span style="font-size:0.9em;">Объект располагается в границах этого ЗУ. Площадь ЗУ в ЕГРН: ${fArea} кв.м.</span>`;
+
+                // Проверяем, является ли участок обособленным в составе ChangeParcel
+                const isTransEntry = !!lastXmlDoc.querySelector(`TransformationEntryParcels > TransformationEntryParcel[CadastralNumber="${fCadNum}"]`);
+                const isDelEntry = !!lastXmlDoc.querySelector(`DeleteEntryParcels > DeleteEntryParcel[CadastralNumber="${fCadNum}"]`);
+
+                if (isTransEntry) {
+                    typeText = 'Преобразуемый входящий ЗУ Единого землепользования (&lt;TransformationEntryParcel&gt;)';
+                } else if (isDelEntry) {
+                    typeText = 'Исключаемый входящий ЗУ Единого землепользования (&lt;DeleteEntryParcel&gt;)';
+                }
+
+                let msg = `<b>${fCadNum}</b> (${typeText}).<br><span style="font-size:0.9em;">Объект располагается в границах этого ЗУ (наложение правомерно). Площадь ЗУ в ЕГРН: ${fArea} кв.м.</span>`;
                 reportItems.push(`<div class="overlap-item ${statusClass}">${msg}</div>`);
                 
                 egrnPolygonsRenderData.push({ rings: fWgsRings, type: 'self', cadNum: fCadNum });
@@ -7338,7 +7457,12 @@ async function performOverlapCheck(button) {
                     </div>`;
                 } else {
                     let errWord = type === 'tp' ? 'Объект пересекает границы' : 'Участок накладывается на';
-                    msg += `<br><b>ОШИБКА:</b> ${errWord} участок, который <b>НЕ УКАЗАН</b> в XML как смежный или родительский!`;
+                    msg += `<br><b>ОШИБКА:</b> ${errWord} сторонний участок, который <b>НЕ УКАЗАН</b> в XML:<br>` +
+       `<span style="font-size:0.88em; color:#7f1d1d; line-height:1.4; display:inline-block; margin-top:3px;">` +
+       `• не заявлен как смежный (<code>&lt;SpecifyRelatedParcel&gt;</code>);<br>` +
+       `• не указан как исходный или входящий в Единое землепользование (` +
+       `преобразуемый <code>&lt;TransformationEntryParcel&gt;</code> / исключаемый <code>&lt;DeleteEntryParcel&gt;</code>).` +
+       `</span>`;
                 }
 
                 reportItems.push(`<div class="overlap-item ${statusClass}">${msg}</div>`);
@@ -11963,6 +12087,34 @@ function runValidation(xmlDoc, xmlText) {
                 </div>
             </div>`);
     }
+    
+    
+    // Проверка способа образования "Раздел с измененным ЗУ" (Method="3")
+    const formParcelsNode = xmlDoc.querySelector('FormParcels');
+    const methodAttr = formParcelsNode?.getAttribute('Method');
+    if (methodAttr === '3') {
+        const changeParcelNode = xmlDoc.querySelector('FormParcels > ChangeParcel, ChangeParcel');
+        const changeCadNumber = changeParcelNode?.getAttribute('CadastralNumber')?.trim();
+
+        if (!changeParcelNode || !changeCadNumber) {
+            messages.push(`
+                <div class="validation-message validation-error" style="align-items:flex-start;">
+                    ${sectionIcons.errorIcon}
+                    <div>
+                        <strong>КРИТИЧЕСКАЯ ОШИБКА:</strong> При способе образования <b>«Раздел с измененным земельным участком»</b> (<code>Method="3"</code>) в XML обязательно должен быть указан раздел <code>&lt;ChangeParcel CadastralNumber="..."&gt;</code> с кадастровым номером сохраняемого в измененных границах участка!
+                    </div>
+                </div>
+            `);
+        } else {
+            messages.push(`
+                <div class="validation-message validation-success">
+                    ${sectionIcons.successIcon}
+                    <span><b>Раздел с измененным ЗУ:</b> указан измененный участок <code>${changeCadNumber}</code>.</span>
+                </div>
+            `);
+        }
+    }
+    
 
     
     const xmlApproxParcels = All(xmlDoc, 'SpecifyParcelApproximal > ExistParcel, SpecifyRelatedParcel');
@@ -13200,6 +13352,7 @@ function runValidation(xmlDoc, xmlText) {
     });
 
     
+    // --- 5. Измененный земельный участок (при разделе с измененным ЗУ) ---
     const changeParcels = All(xmlDoc, 'FormParcels > ChangeParcel, ChangeParcel');
     for (const changeParcel of changeParcels) {
         sectionsFound++;
@@ -13211,6 +13364,20 @@ function runValidation(xmlDoc, xmlText) {
             <div class="info-card" style="grid-column: 1 / -1;"><div class="info-label">Обеспечение доступа</div><div class="info-value">${getAccessInfo(changeParcel)}</div></div>
         </div>`;
 
+        // Преобразуемые входящие участки Единого землепользования
+        const transEntries = All(changeParcel, 'TransformationEntryParcels > TransformationEntryParcel');
+        if (transEntries.length > 0) {
+            const list = Array.from(transEntries).map(n => `<div class="info-card" style="border-left: 3px solid var(--accent-color);"><div class="info-value"><code>${A(n, 'CadastralNumber')}</code></div></div>`).join('');
+            sectionContent += `<div class="subsection"><div class="subsection-title"><i class="fas fa-layer-group" style="color:var(--accent-color);"></i> Преобразуемые входящие участки ЕЗ (&lt;TransformationEntryParcels&gt;) (${transEntries.length} шт.)</div><div class="info-grid">${list}</div></div>`;
+        }
+
+        // Исключаемые входящие участки Единого землепользования
+        const delEntries = All(changeParcel, 'DeleteEntryParcels > DeleteEntryParcel');
+        if (delEntries.length > 0) {
+            const list = Array.from(delEntries).map(n => `<div class="info-card" style="border-left: 3px solid var(--error-color);"><div class="info-value"><code>${A(n, 'CadastralNumber')}</code></div></div>`).join('');
+            sectionContent += `<div class="subsection"><div class="subsection-title"><i class="fas fa-trash-alt" style="color:var(--error-color);"></i> Исключаемые входящие участки ЕЗ (&lt;DeleteEntryParcels&gt;) (${delEntries.length} шт.)</div><div class="info-grid">${list}</div></div>`;
+        }
+
         const innerOksNodes = All(changeParcel, 'InnerCadastralNumbers > CadastralNumber');
         if (innerOksNodes.length > 0) {
             const oksList = Array.from(innerOksNodes).map(node => `<div class="info-card"><div class="info-value">${node.textContent.trim()}</div></div>`).join('');
@@ -13218,7 +13385,7 @@ function runValidation(xmlDoc, xmlText) {
         }
 
         const delBorders = All(changeParcel, 'DeleteAllBorder');
-        if(delBorders.length > 0) {
+        if (delBorders.length > 0) {
             const delList = Array.from(delBorders).map(db => A(db, 'NumberRecord') || A(db, 'Definition') || 'б/н').join(', ');
             sectionContent += `<div class="subsection"><div class="subsection-title">Исключаемые контуры</div><div class="conclusion-text">Учетные номера: ${delList}</div></div>`;
         }
