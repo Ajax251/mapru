@@ -12656,6 +12656,9 @@ map.events.add('click', function (e) {
         <div class="custom-context-menu-item" id="quick-report-menu-item" >
             <i class="fas fa-bolt" style="color: #f59e0b;"></i>Быстрый анализ 
         </div>
+        
+     
+
         <div class="custom-context-menu-item" id="parcels-on-object-menu-item">
             <i class="fas fa-layer-group"></i>Земельные участки на объекте
         </div>
@@ -12675,6 +12678,12 @@ map.events.add('click', function (e) {
         <div class="custom-context-menu-item" id="find-on-map-menu-item">
             <i class="fas fa-search"></i>Найти наложения
         </div>
+        
+           <div class="custom-context-menu-item" id="zero-quarter-analysis-menu-item">
+    <i class="fas fa-bullseye" style="color: #8b5cf6;"></i>Поиск в нулевом квартале
+</div>
+
+
         <div class="custom-context-menu-item" id="consolidated-report-menu-item">
             <i class="fas fa-file-invoice"></i>Отчет (площадной)
         </div>
@@ -13001,6 +13010,16 @@ contextMenu.addEventListener('click', async function (event) {
             measureArea();
         }
     
+    
+    if (event.target.id === 'zero-quarter-analysis-menu-item' || event.target.closest('#zero-quarter-analysis-menu-item')) {
+    contextMenu.style.display = 'none';
+    const lat = parseFloat(contextMenu.dataset.lat);
+    const lon = parseFloat(contextMenu.dataset.lon);
+    await handleZeroQuarterAnalysisWorkflow(lat, lon);
+}
+
+
+
     
 if (event.target.id === 'open-infographics-menu-item' || event.target.closest('#open-infographics-menu-item')) {
     contextMenu.style.display = 'none';
@@ -22264,6 +22283,28 @@ function populateSidebarWithParcels(features, loadDate = null) {
     sidebar.classList.remove('hidden', 'collapsed');
     toggleBtn.innerHTML = '<i class="fas fa-chevron-right"></i>';
     isSidebarCollapsed = false;
+    
+    
+if (correspondingPolygon) {
+    itemDiv.addEventListener('dblclick', (e) => {
+        if (map) {
+            try {
+                const bounds = correspondingPolygon.geometry.getBounds();
+                map.setBounds(bounds, { checkZoomRange: true, duration: 400 });
+                const oldFill = correspondingPolygon.options.get('fillColor');
+                correspondingPolygon.options.set('fillColor', '#FFFF0080');
+                setTimeout(() => correspondingPolygon.options.set('fillColor', oldFill), 1000);
+            } catch (err) {}
+        }
+
+        
+        if (correspondingPolygon.properties?.get('featureData')?.properties?._isZeroQuarter) {
+            handleZeroQuarterObjectClick(correspondingPolygon, e);
+        }
+    });
+    itemDiv.style.cursor = 'pointer';
+    itemDiv.title = 'Двойной клик - открыть Карточку и показать на карте';
+}
 
     
     if (filterInput) {
@@ -26229,6 +26270,555 @@ if (targetObject) {
 }
 
 
+async function handleZeroQuarterAnalysisWorkflow(lat, lon) {
+    let targetObject = selectedLine || findPolygonAtPoint(lat, lon) || findLineAtPoint(lat, lon);
+
+    if (!targetObject) {
+        const candidateObjects = polygons.filter(obj => 
+            obj instanceof ymaps.Polygon || (obj instanceof ymaps.Polyline && obj.properties.get('isDrawableLine'))
+        );
+
+        if (candidateObjects.length === 1) {
+            targetObject = candidateObjects[0];
+        } else if (candidateObjects.length > 1) {
+            showPolygonSelectionModal(candidateObjects, async (selectedObj) => {
+                if (selectedObj) await processZeroQuarterWorkflow(selectedObj, lat, lon);
+            }, "Выберите объект для анализа наложений");
+            return;
+        } else {
+            showNotification('Сначала выберите или нарисуйте объект на карте', 'warning');
+            return;
+        }
+    }
+
+    await processZeroQuarterWorkflow(targetObject, lat, lon);
+}
+
+async function processZeroQuarterWorkflow(targetObject, lat, lon) {
+    
+    let defaultQuarter = '';
+    const cn = targetObject.properties?.get('cadastralNumber');
+    if (cn && cn.includes(':')) {
+        const parts = cn.split(':');
+        if (parts.length >= 3) {
+            const zeroes = '0'.repeat(parts[2].length);
+            defaultQuarter = `${parts[0]}:${parts[1]}:${zeroes}`;
+        }
+    } else if (currentQuarterNumber) {
+        const parts = currentQuarterNumber.split(':');
+        if (parts.length >= 3) {
+            const zeroes = '0'.repeat(parts[2].length);
+            defaultQuarter = `${parts[0]}:${parts[1]}:${zeroes}`;
+        }
+    } else if (cityInput && cityInput.value.includes(':')) {
+        const parts = cityInput.value.trim().split(':');
+        if (parts.length >= 2) {
+            defaultQuarter = `${parts[0]}:${parts[1]}:000000`;
+        }
+    }
+
+    const quarterNumber = await promptZeroQuarterInput(defaultQuarter || '');
+    if (!quarterNumber) return;
+
+    await executeZeroQuarterSearch(targetObject, quarterNumber);
+}
+
+
+function promptZeroQuarterInput(defaultQuarter) {
+    return new Promise((resolve) => {
+        const modal = document.createElement('div');
+        modal.className = 'color-modal';
+        modal.style.cssText = `
+            display: block !important; position: fixed; top: 50%; left: 50%;
+            transform: translate(-50%, -50%); width: 400px; max-width: 90vw;
+            z-index: 20050; background: #ffffff; border-radius: 14px;
+            box-shadow: 0 15px 35px rgba(0,0,0,0.3); padding: 22px;
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            border: 1px solid #cbd5e1; text-align: center;
+        `;
+
+        modal.innerHTML = `
+            <h3 style="margin: 0 0 10px 0; color: #1e3a8a; font-size: 1.2rem;">Поиск в нулевом квартале</h3>
+            <p style="font-size: 0.85rem; color: #64748b; margin-bottom: 14px;">
+                Введите номер нулевого квартала  
+                Из архива будут загружены <u>только пересекающиеся</u> объекты.
+            </p>
+            <input type="text" id="zero-quarter-modal-input" value="${defaultQuarter}" 
+                   style="width: 85%; padding: 10px; border-radius: 8px; border: 1.5px solid #3b82f6; 
+                          font-family: monospace; font-size: 1.05rem; text-align: center; outline: none; margin-bottom: 18px;">
+            <div style="display: flex; gap: 10px; width: 100%;">
+                <button id="zero-quarter-submit" style="flex: 1.2; padding: 10px; border: none; border-radius: 8px; background: linear-gradient(135deg, #8b5cf6, #6d28d9); color: white; font-weight: bold; cursor: pointer;">
+                    <i class="fas fa-search"></i> Найти наложения
+                </button>
+                <button id="zero-quarter-cancel" style="flex: 1; padding: 10px; border: 1px solid #cbd5e1; border-radius: 8px; background: #fff; color: #64748b; cursor: pointer; font-weight: 600;">
+                    Отмена
+                </button>
+            </div>
+        `;
+
+        document.body.appendChild(modal);
+        const input = modal.querySelector('#zero-quarter-modal-input');
+        input.addEventListener('input', function () {
+    formatCadastralNumber(this);
+});
+
+        input.focus();
+        input.select();
+
+        const close = (val) => { modal.remove(); resolve(val); };
+        modal.querySelector('#zero-quarter-submit').onclick = () => {
+            const val = input.value.trim();
+            if (val.match(/^\d{2}:\d{2}:\d{6,7}$/)) {
+                close(val);
+            } else {
+                alert('Введите корректный номер квартала');
+            }
+        };
+        modal.querySelector('#zero-quarter-cancel').onclick = () => close(null);
+        input.onkeydown = (e) => {
+            if (e.key === 'Enter') modal.querySelector('#zero-quarter-submit').click();
+            if (e.key === 'Escape') close(null);
+        };
+    });
+}
+
+
+ 
+ 
+async function handleZeroQuarterObjectClick(targetObject, e) {
+    if (!targetObject) return;
+    
+    
+    if (e) {
+        if (typeof e.stopPropagation === 'function') e.stopPropagation();
+        if (typeof e.preventDefault === 'function') e.preventDefault();
+        const domEvt = e.get ? e.get('domEvent') : null;
+        if (domEvt && typeof domEvt.stopPropagation === 'function') domEvt.stopPropagation();
+    }
+
+    
+    const existingStyleModal = document.querySelector('.color-modal');
+    if (existingStyleModal && !existingStyleModal.id) existingStyleModal.remove();
+
+    const domEvent = e?.get ? (e.get('domEvent')?.originalEvent || e.get('domEvent') || {}) : (e || {});
+    const pageX = domEvent.clientX || domEvent.pageX || (window.innerWidth / 2);
+    const pageY = domEvent.clientY || domEvent.pageY || (window.innerHeight / 2);
+
+    let initialFeature = targetObject.properties?.get('featureData') || {};
+    let cn = targetObject.properties?.get('cadastralNumber') ||
+             initialFeature.properties?.options?.cad_num || 
+             initialFeature.properties?.options?.cad_number || 
+             initialFeature.properties?.descr;
+
+    if (!cn || cn === 'Без номера') return;
+
+    
+    try { await navigator.clipboard.writeText(cn); } catch (err) {}
+
+    
+    if (initialFeature._egrnLoaded) {
+        window.currentPopoverObject = targetObject;
+        showDashboardPopover(initialFeature, pageX, pageY);
+        return;
+    }
+
+  
+
+    let finalFeature = initialFeature;
+
+    try {
+        const egrnFeature = await fetchCadastralData(cn);
+
+        if (egrnFeature && egrnFeature.properties) {
+            finalFeature = {
+                ...egrnFeature,
+                geometry: initialFeature.geometry || egrnFeature.geometry,
+                _egrnLoaded: true
+            };
+            targetObject.properties.set('featureData', finalFeature);
+    
+        } else {
+            finalFeature._egrnLoaded = true;
+            showNotification(`В ЕГРН нет сведений по ${cn}. Отображены данные из архива.`, 'warning', 'info-circle', 4000);
+        }
+    } catch (err) {
+        showNotification(`Сбой запроса ЕГРН. Отображены данные архива.`, 'info');
+    } finally {
+        hideLoader();
+    }
+
+    
+    window.currentPopoverObject = targetObject;
+    showDashboardPopover(finalFeature, pageX, pageY);
+}
+ 
+async function executeZeroQuarterSearch(targetObject, zeroQuarter) {
+    showLoader(`Анализ квартала ${zeroQuarter}...`);
+
+    try {
+        const formattedQuarter = zeroQuarter.replace(/:/g, '_');
+        const responseList = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}?search=${formattedQuarter}`);
+        if (!responseList.ok) throw new Error('Ошибка связи с хранилищем mapruapp');
+
+        const fileList = await responseList.json();
+        let jsonFiles = fileList ? fileList.filter(file => file.name.startsWith(formattedQuarter) && file.name.toLowerCase().endsWith('.json.zip')) : [];
+
+        if (jsonFiles.length === 0) {
+            hideLoader();
+            showNotification(`Архив не найден для квартала ${zeroQuarter}`, 'warning');
+            return;
+        }
+
+        jsonFiles.sort((a, b) => b.name.localeCompare(a.name));
+        const latestFile = jsonFiles[0];
+
+    
+        const responseFile = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}/${latestFile.name}`);
+        if (!responseFile.ok) throw new Error('Ошибка скачивания архива');
+        const blob = await responseFile.blob();
+
+
+        const zip = await JSZip.loadAsync(blob);
+        const jsonEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.json') && !f.dir);
+        if (!jsonEntry) throw new Error('В архиве не найден JSON файл');
+
+        const jsonContent = await jsonEntry.async('string');
+        const jsonData = JSON.parse(jsonContent);
+
+        if (!jsonData.objects || !Array.isArray(jsonData.objects)) {
+            throw new Error('Некорректная структура объектов в JSON файле');
+        }
+
+  
+        await new Promise(r => setTimeout(r, 50));
+
+        
+        const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
+        const destSystem = (typeof COORDINATE_SYSTEMS !== 'undefined') ? COORDINATE_SYSTEMS.find(s => s.value === destSc) : null;
+        if (!destSystem || !destSystem.def) throw new Error(`Не найдено определение СК ${destSc}`);
+
+        proj4.defs(destSc, destSystem.def);
+        let mskOffsetX = 0, mskOffsetY = 0;
+        if (localStorage.getItem('autoLoadMskOffset') !== 'false') {
+            mskOffsetX = destSystem.offsetX || 0;
+            mskOffsetY = destSystem.offsetY || 0;
+        } else {
+            mskOffsetX = parseFloat((localStorage.getItem('savedMskOffsetX') || '0').replace(',', '.')) || 0;
+            mskOffsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
+        }
+
+        
+        const isTargetLine = targetObject instanceof ymaps.Polyline;
+        const targetCoords = targetObject.geometry.getCoordinates();
+        let targetTurfGeom = null;
+
+        if (isTargetLine) {
+            targetTurfGeom = turf.lineString(targetCoords.map(c => [c[1], c[0]]));
+        } else {
+            const rings = targetCoords.map(ring => {
+                let r = ring.map(c => [c[1], c[0]]);
+                if (r.length > 2 && (r[0][0] !== r[r.length - 1][0] || r[0][1] !== r[r.length - 1][1])) {
+                    r.push([...r[0]]);
+                }
+                return r;
+            });
+            targetTurfGeom = turf.polygon(rings);
+        }
+
+        const targetBbox = turf.bbox(targetTurfGeom); 
+
+        const demuxed = {
+            zu: [],
+            oks: [],
+            structure: [],
+            zouit: []
+        };
+
+        
+        for (const obj of jsonData.objects) {
+            if (!obj.contours || obj.contours.length === 0) continue;
+
+            
+            const firstContour = obj.contours[0];
+            const pFirst = firstContour[0];
+            const pLast = firstContour[firstContour.length - 1];
+            
+            
+            const isClosed = firstContour.length > 2 &&
+                Math.abs(pFirst.x - pLast.x) < 0.01 &&
+                Math.abs(pFirst.y - pLast.y) < 0.01;
+
+            const allRingsWgs = [];
+            const allRings3857 = [];
+            let objMinLon = Infinity, objMaxLon = -Infinity, objMinLat = Infinity, objMaxLat = -Infinity;
+
+            for (const ring of obj.contours) {
+                const ringWgs = [];
+                const ring3857 = [];
+
+                for (const pt of ring) {
+                    const corrX = pt.x - mskOffsetX;
+                    const corrY = pt.y - mskOffsetY;
+                    
+                    const pt3857 = proj4(destSc, "EPSG:3857", [corrY, corrX]);
+                    const wgs = proj4("EPSG:3857", "EPSG:4326", pt3857);
+
+                    ring3857.push(pt3857);
+                    ringWgs.push(wgs);
+
+                    if (wgs[0] < objMinLon) objMinLon = wgs[0];
+                    if (wgs[0] > objMaxLon) objMaxLon = wgs[0];
+                    if (wgs[1] < objMinLat) objMinLat = wgs[1];
+                    if (wgs[1] > objMaxLat) objMaxLat = wgs[1];
+                }
+
+                if (ringWgs.length < 2) continue;
+
+                
+                if (isClosed && ringWgs.length > 2) {
+                    if (ringWgs[0][0] !== ringWgs[ringWgs.length - 1][0] || ringWgs[0][1] !== ringWgs[ringWgs.length - 1][1]) {
+                        ringWgs.push([...ringWgs[0]]);
+                        ring3857.push([...ring3857[0]]);
+                    }
+                }
+
+                allRingsWgs.push(ringWgs);
+                allRings3857.push(ring3857);
+            }
+
+            if (allRingsWgs.length === 0) continue;
+
+            
+            if (objMaxLon < targetBbox[0] || objMinLon > targetBbox[2] || 
+                objMaxLat < targetBbox[1] || objMinLat > targetBbox[3]) {
+                continue;
+            }
+
+            
+            let objTurfGeom = null;
+            try {
+                if (isClosed) {
+                    objTurfGeom = allRingsWgs.length > 1 ? turf.multiPolygon([allRingsWgs]) : turf.polygon(allRingsWgs);
+                } else {
+                    objTurfGeom = allRingsWgs.length > 1 ? turf.multiLineString(allRingsWgs) : turf.lineString(allRingsWgs[0]);
+                }
+            } catch (e) {
+                continue;
+            }
+
+            
+            try {
+                if (turf.booleanIntersects(targetTurfGeom, objTurfGeom)) {
+                    const rawType = (obj.type || '').toLowerCase();
+                    const isBuilding = rawType === 'building';
+                    const isConstruction = rawType === 'construction';
+
+                    
+                    let geometryType = '';
+                    let geomCoords = null;
+
+                    if (isClosed) {
+                        geometryType = allRings3857.length > 1 ? "MultiPolygon" : "Polygon";
+                        geomCoords = allRings3857.length > 1 ? [allRings3857] : allRings3857;
+                    } else {
+                        geometryType = allRings3857.length > 1 ? "MultiLineString" : "LineString";
+                        geomCoords = allRings3857.length > 1 ? allRings3857 : allRings3857[0];
+                    }
+
+                    const feature = {
+                        type: "Feature",
+                        id: obj.id,
+                        geometry: {
+                            type: geometryType,
+                            coordinates: geomCoords
+                        },
+                        properties: {
+                            descr: obj.id,
+                            category: isBuilding ? 36369 : (isConstruction ? 36383 : 36368),
+                            options: {
+                                cad_num: obj.id,
+                                cad_number: obj.id,
+                                readable_address: obj.address || `Объект (${zeroQuarter})`,
+                                area: isClosed ? (obj.area || null) : null,
+                                params_extension: !isClosed ? (obj.length || null) : null
+                            }
+                        }
+                    };
+
+                    
+                    if (isBuilding) {
+                        demuxed.oks.push(feature);
+                    } else if (isConstruction || !isClosed) {
+                        demuxed.structure.push(feature);
+                    } else {
+                        demuxed.zu.push(feature);
+                    }
+                }
+            } catch (err) {}
+        }
+
+        const totalFound = demuxed.zu.length + demuxed.oks.length + demuxed.structure.length;
+
+        if (totalFound === 0) {
+            hideLoader();
+            showNotification(`В квартале ${zeroQuarter} пересечений с объектом не найдено`, 'info');
+            return;
+        }
+
+        showLoader(`Отрисовка найденных объектов (ЗУ: ${demuxed.zu.length}, ОКС: ${demuxed.oks.length}, Сооружений: ${demuxed.structure.length})...`);
+
+        
+        await drawZeroQuarterFeatures(demuxed);
+
+        
+        if (demuxed.zu.length > 0) parcelFeaturesData.push(...demuxed.zu);
+        if (demuxed.oks.length > 0) buildingFeaturesData.push(...demuxed.oks);
+        if (demuxed.structure.length > 0) structureFeaturesData.push(...demuxed.structure);
+
+        
+        populateSidebarWithAllObjects(demuxed);
+
+        let jsonDate = '';
+        const dateMatch = (jsonEntry.name || '').match(/\d{4}[-_.]\d{2}[-_.]\d{2}/) ||
+                          (latestFile.name || '').match(/\d{4}[-_.]\d{2}[-_.]\d{2}/) ||
+                          (jsonData.source_xml_name_in_zip || '').match(/\d{4}[-_.]\d{2}[-_.]\d{2}/);
+        if (dateMatch) {
+            jsonDate = dateMatch[0].replace(/_/g, '-');
+        }
+
+        
+        const sidebarTitleText = jsonDate ? `${zeroQuarter} (${jsonDate})` : zeroQuarter;
+
+        
+        populateSidebarWithAllObjects(demuxed, sidebarTitleText);
+
+        showNotification(`Найдено в ${zeroQuarter}${jsonDate ? ' от ' + jsonDate : ''}: ${totalFound} объектов`, 'success');
+
+    } catch (e) {
+        console.error("Ошибка поиска в нулевом квартале:", e);
+        showNotification(`Ошибка: ${e.message}`, 'error');
+    } finally {
+        hideLoader();
+    }
+}
+
+async function drawZeroQuarterFeatures(demuxed) {
+    
+    if (demuxed.zu.length > 0) {
+        const drawnZu = await drawFoundParcels(demuxed.zu, true);
+        drawnZu.forEach(obj => {
+            obj.events.add('dblclick', (e) => {
+                e.stopPropagation();
+                handleZeroQuarterObjectClick(obj, e);
+            });
+        });
+    }
+
+    
+    if (demuxed.oks.length > 0) {
+        const startLen = polygons.length;
+        await processAndDrawBuildings(demuxed.oks);
+        const drawnOks = polygons.slice(startLen);
+        drawnOks.forEach(obj => {
+            obj.events.add('dblclick', (e) => {
+                e.stopPropagation();
+                handleZeroQuarterObjectClick(obj, e);
+            });
+        });
+    }
+
+    
+    if (demuxed.structure.length > 0) {
+        for (const f of demuxed.structure) {
+            const geom = f.geometry;
+            const props = f.properties || {};
+            const opts = props.options || {};
+            const cn = opts.cad_number || opts.cad_num || props.descr || 'Без номера';
+            const address = opts.address_readable_address || opts.readable_address || 'Адрес не указан';
+            const isLine = geom.type === 'LineString' || geom.type === 'MultiLineString';
+
+            const hintContent = {
+                cadastralNumber: `Сооружение: ${cn}`,
+                address: address,
+                area: opts.params_extension ? `Протяженность: ${opts.params_extension} м` : (opts.area ? `Площадь: ${opts.area} м²` : '')
+            };
+
+            if (isLine) {
+                const linesCoords = geom.type === 'LineString' ? [geom.coordinates] : geom.coordinates;
+
+                linesCoords.forEach(lineCoords3857 => {
+                    const offsetCoords = lineCoords3857.map(coord => {
+                        const p = proj4('EPSG:3857', 'EPSG:4326', coord);
+                        return [
+                            p[1] - mapOffsetY * 0.000008983,
+                            p[0] - mapOffsetX * 0.000008983
+                        ];
+                    });
+
+                    
+                    const polyline = new ymaps.Polyline(offsetCoords, {
+                        cadastralNumber: cn,
+                        hintContent: hintContent,
+                        isStructure: true,
+                        _isZeroQuarter: true,
+                        featureData: f
+                    }, {
+                        strokeColor: polygonStyle.structuresColor || '#ea580c',
+                        strokeWidth: polygonStyle.width || 3,
+                        strokeOpacity: loadedObjectOpacity || 0.85,
+                        cursor: 'pointer',
+                        hintLayout: customHintLayout
+                    });
+
+                    polyline.events.add('dblclick', (e) => {
+                        e.stopPropagation();
+                        handleZeroQuarterObjectClick(polyline, e);
+                    });
+
+                    map.geoObjects.add(polyline);
+                    polygons.push(polyline);
+
+                    
+                    const midIdx = Math.floor(offsetCoords.length / 2);
+                    const midCoord = offsetCoords[midIdx];
+                    const parts = cn.split(':');
+                    const shortCn = parts.length > 3 ? ':' + parts[parts.length - 1] : cn;
+
+                    const label = new ymaps.Placemark(midCoord, {
+                        iconContent: shortCn,
+                        hintContent: hintContent,
+                        cadastralNumber: cn,
+                        featureData: f,
+                        _isZeroQuarter: true
+                    }, {
+                        iconLayout: customPlacemarkLayout,
+                        visible: map.getZoom() > 14
+                    });
+                    
+                    label.events.add('dblclick', (e) => {
+                        e.stopPropagation();
+                        handleZeroQuarterObjectClick(polyline, e);
+                    });
+
+                    map.geoObjects.add(label);
+                    polygons.push(label);
+                    parcelPlacemarks.push(label);
+                });
+            } else {
+                const startLen = polygons.length;
+                await processAndDrawStructures([f]);
+                const drawnStr = polygons.slice(startLen);
+                drawnStr.forEach(obj => {
+                    obj.events.add('dblclick', (e) => {
+                        e.stopPropagation();
+                        handleZeroQuarterObjectClick(obj, e);
+                    });
+                });
+            }
+        }
+    }
+}
+
 async function executeParcelsOnObjectSearch(targetObject) {
     
       if (localStorage.getItem('laQuick_analysis') === 'true') {
@@ -26805,8 +27395,8 @@ async function exportMapToJson() {
                         if (value.constructor && value.constructor.name && value.constructor.name.startsWith('ymaps')) continue;
                     }
 
-                    // Исключаем дублирование координат внутри properties.featureData —
-                    // геометрия уже хранится в serializedFeature.geometry
+                    
+                    
                     if (key === 'geometry' && value && (value.coordinates || value.type)) {
                         safeObj[key] = { type: value.type || 'Polygon' };
                         continue;
@@ -26836,7 +27426,7 @@ async function exportMapToJson() {
             }
         });
 
-        // Рекурсивный сдвиг с округлением до 7 знаков (снижает размер JSON в разы)
+        
         const revertOffsetCoord = (c) => {
             if (!Array.isArray(c)) return c;
             if (typeof c[0] === 'number') {
@@ -26922,7 +27512,7 @@ async function exportMapToJson() {
             } catch (err) {}
         });
 
-        // Компактный JSON без форматирования (null, 2), предотвращает RangeError
+        
         const jsonString = JSON.stringify(mapData);
         
         const zip = new JSZip();
@@ -28859,7 +29449,7 @@ async function forestryMenuItemHandler(contextMenu, map, polygons, polygonStyle,
             }).filter(r => r !== null);
 
             if (allProcessedRings.length > 0) {
-                // Привязываем данные только текущего контура, а не весь гигантский MultiPolygon
+                
                 const singleContourFeature = {
                     type: "Feature",
                     id: `${feature.id || 'forestry'}_${polygonIndex}`,
@@ -28895,7 +29485,7 @@ async function forestryMenuItemHandler(contextMenu, map, polygons, polygonStyle,
                     combinedBounds[1][1] = Math.max(combinedBounds[1][1], bounds[1][1]);
                 }
 
-                // Прекращаем тяжелый расчет точек, как только центр для метки найден
+                
                 if (!clickedContourCentroid) {
                     const outerRingCoords = allProcessedRings[0].map(c => [c[1], c[0]]);
                     if (outerRingCoords.length >= 3) {
@@ -30751,102 +31341,150 @@ function populateSidebarWithAllObjects(results) {
     }
     if (filterInput) filterInput.value = '';
 
-    const totalCount = results.zu.length + results.oks.length + results.structure.length + results.zouit.length;
+    const totalCount = results.zu.length + results.oks.length + results.structure.length + (results.zouit ? results.zouit.length : 0);
     sidebar.dataset.totalCount = totalCount;
-    sidebar.dataset.titlePrefix = 'Все объекты рядом';
-    sidebarTitle.textContent = sidebar.dataset.titlePrefix + ' (' + totalCount + ')';
+    sidebar.dataset.titlePrefix = 'Объекты';
+    sidebarTitle.textContent = `${sidebar.dataset.titlePrefix} (${totalCount})`;
 
-    let noResultsMsg = contentDiv.querySelector('.no-results-message');
-    if (!noResultsMsg) {
-        noResultsMsg = document.createElement('div');
-        noResultsMsg.className = 'no-results-message';
-        noResultsMsg.style.display = 'none';
-        noResultsMsg.style.padding = '20px';
-        noResultsMsg.style.textAlign = 'center';
-        noResultsMsg.style.color = '#6b7280';
-        contentDiv.appendChild(noResultsMsg);
-    }
+    let noResultsMsg = document.createElement('div');
+    noResultsMsg.className = 'no-results-message';
+    noResultsMsg.style.cssText = 'padding:20px; text-align:center; color:#6b7280; display:' + (totalCount === 0 ? 'block' : 'none');
+    noResultsMsg.textContent = 'Объекты не найдены.';
+    contentDiv.appendChild(noResultsMsg);
 
     if (totalCount === 0) {
-        noResultsMsg.style.display = 'block';
-        noResultsMsg.textContent = 'Объекты не найдены.';
         if (footer) footer.style.display = 'none';
         return;
     }
 
-    noResultsMsg.style.display = 'none';
     let itemIndex = 1;
+    const seenAllKeys = new Set();
 
-   const seenAllKeys = new Set();
     const addSidebarItem = (feature, typeLabel, primaryColor) => {
         const properties = feature.properties || {};
         const options = properties.options || {};
         
-        let cadNumber = '';
+        const cadNumber = options.cad_number || options.cad_num || properties.descr || 'Без номера';
         let primaryDesc = '';
         let secondaryDesc = '';
-        let thirdDesc = '';
+        let thirdDesc = null;
 
         if (typeLabel === 'ЗУ') {
-            cadNumber = properties.descr || 'Без номера';
-            primaryDesc = options.readable_address || 'Адрес не указан';
+            primaryDesc = (options.readable_address && options.readable_address !== 'Адрес не указан') ? options.readable_address : 'Земельный участок';
             secondaryDesc = (typeof getAreaText === 'function') ? getAreaText(options) : (options.area ? options.area + ' м²' : '');
+            const vri = options.permitted_use_established_by_document || options.permitted_use;
+            thirdDesc = vri ? `ВРИ: ${vri}` : null;
         } else if (typeLabel === 'ОКС') {
-            cadNumber = options.cad_num || properties.descr || 'Без номера';
-            primaryDesc = properties.descr || 'Тип не указан';
+            primaryDesc = options.purpose || options.building_name || options.name || 'Здание';
             secondaryDesc = options.readable_address || 'Адрес не указан';
-            thirdDesc = options.build_record_area ? 'Площадь: ' + options.build_record_area + ' м²' : 'Площадь не указана';
+            thirdDesc = options.build_record_area ? `Площадь: ${options.build_record_area} м²` : (options.area ? `Площадь: ${options.area} м²` : null);
         } else if (typeLabel === 'Сооружение') {
-            cadNumber = options.cad_number || properties.descr || 'Без номера';
-            primaryDesc = options.params_name || properties.descr || 'Тип не указан';
-            secondaryDesc = options.address_readable_address || 'Адрес не указан';
-            thirdDesc = options.params_extension ? 'Протяженность: ' + options.params_extension + ' м' : null;
+            
+            primaryDesc = options.params_name || options.params_purpose || options.name || 'Сооружение';
+            if (primaryDesc === cadNumber) primaryDesc = 'Сооружение';
+            secondaryDesc = options.address_readable_address || options.readable_address || 'Адрес не указан';
+            thirdDesc = options.params_extension ? `Протяженность: ${options.params_extension} м` : (options.area ? `Площадь: ${options.area} м²` : null);
         } else if (typeLabel === 'ЗОУИТ') {
-            cadNumber = options.reg_numb_border || properties.descr || 'Без номера';
-            primaryDesc = options.name_by_doc || 'Название не указано';
+            primaryDesc = options.name_by_doc || 'Зона';
             secondaryDesc = options.content_restrict_encumbrances || 'Ограничения не указаны';
-            thirdDesc = options.registration_date ? 'Дата рег.: ' + options.registration_date : null;
+            thirdDesc = options.registration_date ? `Дата рег.: ${options.registration_date}` : null;
         }
 
-        
-        if (cadNumber && cadNumber !== 'Без номера' && cadNumber !== 'Объект') {
+        if (cadNumber && cadNumber !== 'Без номера') {
             if (seenAllKeys.has(cadNumber)) return;
             seenAllKeys.add(cadNumber);
         }
 
         const itemDiv = document.createElement('div');
         itemDiv.className = 'sidebar-item';
-        itemDiv.dataset.cadnum = cadNumber ? cadNumber.toLowerCase() : '';
+        itemDiv.dataset.cadnum = cadNumber.toLowerCase();
 
-        let html = '<p>' + itemIndex + '. [' + typeLabel + '] ' + cadNumber + '</p>';
-        html += '<p style="color: ' + primaryColor + ';">' + primaryDesc + '</p>';
-        html += '<p>' + secondaryDesc + '</p>';
+        let html = `<p>${itemIndex}. [${typeLabel}] <b>${cadNumber}</b></p>`;
+        html += `<p style="color: ${primaryColor}; font-weight: 600;">${primaryDesc}</p>`;
+        html += `<p>${secondaryDesc}</p>`;
         if (thirdDesc) {
-            html += '<p style="font-size: 0.85em; color: #666;">' + thirdDesc + '</p>';
+            html += `<p style="font-size: 0.82em; color: #64748b; margin-top: 2px;">${thirdDesc}</p>`;
         }
         itemDiv.innerHTML = html;
         itemDiv._searchStr = `${cadNumber} ${primaryDesc} ${secondaryDesc} ${thirdDesc || ''}`.toLowerCase();
 
-        const correspondingPolygon = polygons.find(p => {
-            if (!(p instanceof ymaps.Polygon)) return false;
-            const pCadNum = p.properties?.get('cadastralNumber');
-            return pCadNum && pCadNum === cadNumber;
+        
+        const targetCadLower = cadNumber.trim().toLowerCase();
+        const correspondingObject = polygons.find(p => {
+            if (!(p instanceof ymaps.Polygon) && !(p instanceof ymaps.Polyline)) return false;
+            const pCn = String(p.properties?.get('cadastralNumber') || '').trim().toLowerCase();
+            return pCn === targetCadLower;
         });
 
-        if (correspondingPolygon) {
-            itemDiv.addEventListener('dblclick', () => {
+        if (correspondingObject) {
+            itemDiv.style.cursor = 'pointer';
+
+            
+            const flashObjectOnMap = () => {
+                const oldStroke = correspondingObject.options.get('strokeColor');
+                const oldWidth = correspondingObject.options.get('strokeWidth') || 3;
+                const oldFill = correspondingObject.options.get('fillColor');
+
+                if (correspondingObject instanceof ymaps.Polyline) {
+                    correspondingObject.options.set({
+                        strokeColor: '#FFFF00',
+                        strokeWidth: oldWidth + 4
+                    });
+                    setTimeout(() => {
+                        correspondingObject.options.set({
+                            strokeColor: oldStroke,
+                            strokeWidth: oldWidth
+                        });
+                    }, 1400);
+                } else {
+                    correspondingObject.options.set({
+                        fillColor: '#FFFF0080',
+                        strokeColor: '#FF0000'
+                    });
+                    setTimeout(() => {
+                        correspondingObject.options.set({
+                            fillColor: oldFill,
+                            strokeColor: oldStroke
+                        });
+                    }, 1400);
+                }
+            };
+
+            
+            itemDiv.addEventListener('click', () => {
+                contentDiv.querySelectorAll('.sidebar-item').forEach(el => el.style.borderLeft = '1px solid #f1f5f9');
+                itemDiv.style.borderLeft = `4px solid ${primaryColor}`;
+
                 if (map) {
-                    try {
-                        const bounds = correspondingPolygon.geometry.getBounds();
-                        map.setBounds(bounds, { checkZoomRange: true, duration: 500 });
-                        const oldFill = correspondingPolygon.options.get('fillColor');
-                        correspondingPolygon.options.set('fillColor', '#FFFF0080');
-                        setTimeout(() => correspondingPolygon.options.set('fillColor', oldFill), 1000);
-                    } catch (e) {}
+                    const bounds = correspondingObject.geometry.getBounds();
+                    if (bounds) {
+                        const center = [(bounds[0][0] + bounds[1][0]) / 2, (bounds[0][1] + bounds[1][1]) / 2];
+                        map.panTo(center, { duration: 300 });
+                        flashObjectOnMap();
+                    }
                 }
             });
-            itemDiv.style.cursor = 'pointer';
-            itemDiv.title = 'Двойной клик - показать на карте';
+
+            
+            itemDiv.addEventListener('dblclick', async (e) => {
+                if (map) {
+                    const bounds = correspondingObject.geometry.getBounds();
+                    if (bounds) {
+                        const latMargin = Math.max((bounds[1][0] - bounds[0][0]) * 0.3, 0.0005);
+                        const lonMargin = Math.max((bounds[1][1] - bounds[0][1]) * 0.3, 0.0005);
+                        map.setBounds([
+                            [bounds[0][0] - latMargin, bounds[0][1] - lonMargin],
+                            [bounds[1][0] + latMargin, bounds[1][1] + lonMargin]
+                        ], { checkZoomRange: true, duration: 400 });
+                        flashObjectOnMap();
+                    }
+                }
+
+                
+                await handleZeroQuarterObjectClick(correspondingObject, e);
+            });
+
+            itemDiv.title = 'Клик — показать на карте; Двойной клик — открыть Карточку (ЕГРН)';
         }
 
         contentDiv.appendChild(itemDiv);
@@ -30855,21 +31493,22 @@ function populateSidebarWithAllObjects(results) {
 
     results.zu.forEach(f => addSidebarItem(f, 'ЗУ', '#1e88e5'));
     results.oks.forEach(f => addSidebarItem(f, 'ОКС', '#217346'));
-    results.structure.forEach(f => addSidebarItem(f, 'Сооружение', '#d83b01'));
-    results.zouit.forEach(f => addSidebarItem(f, 'ЗОУИТ', '#7c3aed'));
+    results.structure.forEach(f => addSidebarItem(f, 'Сооружение', '#ea580c'));
+    if (results.zouit) {
+        results.zouit.forEach(f => addSidebarItem(f, 'ЗОУИТ', '#7c3aed'));
+    }
 
     if (footer) footer.style.display = 'flex';
     sidebar.classList.remove('hidden', 'collapsed');
-    toggleBtn.innerHTML = '<i class="fas fa-chevron-right"></i>';
+    if (toggleBtn) toggleBtn.innerHTML = '<i class="fas fa-chevron-right"></i>';
     isSidebarCollapsed = false;
 
     if (filterInput) {
         filterInput.oninput = () => {
             clearTimeout(filterCadnumDebounceTimer);
-            filterCadnumDebounceTimer = setTimeout(filterParcelList, 150); 
+            filterCadnumDebounceTimer = setTimeout(filterParcelList, 150);
         };
     }
-    
     if (copyFilteredBtn) copyFilteredBtn.onclick = copyFilteredCadnums;
 }
 
