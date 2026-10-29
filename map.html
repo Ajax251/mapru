@@ -29150,16 +29150,59 @@ async function executeScreenshot(scale, action = 'editor') {
     loader.style.backgroundColor = 'rgba(15, 23, 42, 0.95)';
     showLoader(`Генерация снимка в качестве x${scale}...<br><span style="font-size:0.8rem;color:#94a3b8; font-weight: normal;">Пожалуйста, не трогайте мышь пару секунд</span>`);
 
+    window.isExportingRaster = true;
+
+    if (map.balloon) map.balloon.close();
+    if (map.hint) map.hint.close(true);
+
+    // 1. Скрываем служебные панели Yandex
+    const panesToHide = ['controls', 'copyrights'];
+    const hiddenPanes = [];
+    panesToHide.forEach(paneName => {
+        try {
+            const pane = map.panes.get(paneName);
+            if (pane) {
+                const el = pane.getElement();
+                if (el && el.style.display !== 'none') {
+                    el.style.oldDisplay = el.style.display;
+                    el.style.display = 'none';
+                    hiddenPanes.push(el);
+                }
+            }
+        } catch (e) {}
+    });
+
+    // 2. Отключаем слой панорам Яндекса
+    let panoLayerActive = false;
+    if (typeof yandexPanoLayer !== 'undefined' && yandexPanoLayer && map.layers.indexOf(yandexPanoLayer) !== -1) {
+        map.layers.remove(yandexPanoLayer);
+        panoLayerActive = true;
+    }
+
+    // 3. Временно убираем внешнюю рамку и тени у #map (как в Геоснимке)
+    const origBorder = mapElement.style.border;
+    const origBorderRadius = mapElement.style.borderRadius;
+    const origBoxShadow = mapElement.style.boxShadow;
+
+    mapElement.style.border = 'none';
+    mapElement.style.borderRadius = '0px';
+    mapElement.style.boxShadow = 'none';
+
     const origWidth = mapElement.clientWidth;
     const origHeight = mapElement.clientHeight;
     const origCenter = map.getCenter();
     const origZoom = map.getZoom();
 
-    const newWidth = origWidth * scale;
-    const newHeight = origHeight * scale;
+    const newWidth = Math.round(origWidth * scale);
+    const newHeight = Math.round(origHeight * scale);
     
     const zoomOffset = Math.round(Math.log2(scale)); 
-    const newZoom = origZoom + zoomOffset;
+    const newZoom = Math.min(21, origZoom + zoomOffset);
+
+    // Определяем, тёмная ли подложка (спутник/гибрид)
+    const currentMode = localStorage.getItem('mapMode') || 'map';
+    const isDarkLayer = currentMode.includes('sat') || currentMode.includes('hyb') || currentMode === 'satellite' || currentMode === 'hybrid';
+    const seamFallbackColor = isDarkLayer ? '#111a24' : '#ffffff';
 
     try {
         if (scale > 1) {
@@ -29214,9 +29257,15 @@ async function executeScreenshot(scale, action = 'editor') {
             });
 
             map.container.fitToViewport();
-            map.setCenter(origCenter, newZoom);
+            await map.setCenter(origCenter, newZoom, { duration: 0, checkZoomRange: false });
+
+            if (typeof applyGoogleOffsetCSS === 'function') {
+                applyGoogleOffsetCSS();
+            }
 
             await new Promise(r => setTimeout(r, 1500 + (scale * 1000)));
+        } else {
+            await new Promise(r => setTimeout(r, 200));
         }
 
         const canvas = await html2canvas(mapElement, {
@@ -29226,13 +29275,72 @@ async function executeScreenshot(scale, action = 'editor') {
             scale: 1, 
             width: scale > 1 ? newWidth : origWidth,
             height: scale > 1 ? newHeight : origHeight,
+            scrollX: 0,
+            scrollY: 0,
             ignoreElements: (element) => {
                 if (typeof element.className === 'string') {
-                    return element.className.includes('-copyright') || 
-                           element.className.includes('-gototech') || 
-                           element.className.includes('-gotoymaps');
+                    if (element.className.includes('-copyright') || 
+                        element.className.includes('-gototech') || 
+                        element.className.includes('-gotoymaps')) {
+                        return true;
+                    }
+                }
+                if (element.id === 'map-grid-canvas' || element.id === 'pip-map-resize-handle') {
+                    return true;
+                }
+                if (element.tagName === 'IMG' && element.src && element.src.includes('l=stv') && !element.src.includes('sta')) {
+                    return true;
                 }
                 return false;
+            },
+            // ГАРАНТИРОВАННОЕ УДАЛЕНИЕ ШВОВ МЕЖДУ ТАЙЛАМИ
+            onclone: (clonedDoc) => {
+                // 1. Принудительно глушим белый фон #ffffff !important из CSS строки 55
+                const fixStyle = clonedDoc.createElement('style');
+                fixStyle.textContent = `
+                    #map,
+                    [class*="ymaps-2-1"][class*="-map-bg"],
+                    [class*="ymaps-2-1"][class*="-ground-pane"],
+                    [class*="ymaps-2-1"][class*="-tiles-pane"],
+                    [class*="ymaps-2-1"][class*="-layers-pane"] {
+                        background: ${seamFallbackColor} !important;
+                        background-color: ${seamFallbackColor} !important;
+                        background-image: none !important;
+                    }
+
+                    /* 2. Разрешаем тайлам выходить за границы контейнеров */
+                    [class*="ymaps-2-1"][class*="-tile"],
+                    ymaps[class*="-tile"] {
+                        overflow: visible !important;
+                    }
+
+                    /* 3. Физический нахлест: увеличиваем высоту тайлов на 2px и ширину на 1px */
+                    [class*="ymaps-2-1"][class*="-ground-pane"] img,
+                    [class*="ymaps-2-1"][class*="-tiles-pane"] img,
+                    img[src*="googleapis.com"],
+                    img[src*="maps.yandex.net"],
+                    [class*="ymaps-2-1"][class*="-tile__image"] {
+                        height: 258px !important;
+                        min-height: 258px !important;
+                        width: 257px !important;
+                        min-width: 257px !important;
+                        max-width: none !important;
+                        max-height: none !important;
+                        transform-origin: top left !important;
+                    }
+                `;
+                clonedDoc.head.appendChild(fixStyle);
+
+                // 4. Округляем дробный сдвиг подложки (applyGoogleOffsetCSS), который сбивает сетку
+                const groundPane = clonedDoc.querySelector('[class*="-ground-pane"]');
+                if (groundPane) {
+                    if (groundPane.style.marginTop) {
+                        groundPane.style.marginTop = Math.round(parseFloat(groundPane.style.marginTop)) + 'px';
+                    }
+                    if (groundPane.style.marginLeft) {
+                        groundPane.style.marginLeft = Math.round(parseFloat(groundPane.style.marginLeft)) + 'px';
+                    }
+                }
             }
         });
 
@@ -29251,7 +29359,6 @@ async function executeScreenshot(scale, action = 'editor') {
                 showNotification(`Снимок сохранен в JPG без сжатия (x${scale})`, 'success', 'check-circle');
             }, 'image/jpeg', 1.0);
         } else {
-            
             canvas.toBlob(async (blob) => {
                 if (!blob) throw new Error('Не удалось создать Blob');
                 await navigator.clipboard.write([ new ClipboardItem({ [blob.type]: blob }) ]);
@@ -29285,8 +29392,8 @@ async function executeScreenshot(scale, action = 'editor') {
             document.querySelectorAll('.draggable-text span').forEach(span => {
                 if (span.dataset.origFontSize !== undefined) {
                     span.style.fontSize = span.dataset.origFontSize;
-                    span.style.padding = span.dataset.origPadding;
-                    span.style.borderWidth = span.dataset.origBorderWidth;
+                    span.dataset.origPadding = span.dataset.origPadding;
+                    span.dataset.origBorderWidth = span.dataset.origBorderWidth;
                     delete span.dataset.origFontSize;
                     delete span.dataset.origPadding;
                     delete span.dataset.origBorderWidth;
@@ -29294,9 +29401,27 @@ async function executeScreenshot(scale, action = 'editor') {
             });
 
             map.container.fitToViewport();
-            map.setCenter(origCenter, origZoom);
-            await new Promise(r => setTimeout(r, 500));
+            await map.setCenter(origCenter, origZoom, { duration: 0 });
+
+            if (typeof applyGoogleOffsetCSS === 'function') {
+                applyGoogleOffsetCSS();
+            }
+            await new Promise(r => setTimeout(r, 300));
         }
+
+        mapElement.style.border = origBorder;
+        mapElement.style.borderRadius = origBorderRadius;
+        mapElement.style.boxShadow = origBoxShadow;
+
+        if (panoLayerActive && typeof yandexPanoLayer !== 'undefined' && yandexPanoLayer) {
+            map.layers.add(yandexPanoLayer);
+        }
+        hiddenPanes.forEach(el => {
+            el.style.display = el.style.oldDisplay || '';
+            delete el.style.oldDisplay;
+        });
+
+        window.isExportingRaster = false;
 
         widgetElement.style.visibility = 'visible';
         legends.forEach(l => l.style.visibility = '');
