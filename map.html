@@ -26307,6 +26307,10 @@ async function processZeroQuarterWorkflow(targetObject, lat, lon) {
 
 function promptZeroQuarterInput(defaultQuarter) {
     return new Promise((resolve) => {
+        // Загружаем последнее введенное значение из localStorage
+        const savedZeroQuarter = localStorage.getItem('savedZeroQuarter');
+        const initialValue = savedZeroQuarter || defaultQuarter || '';
+
         const modal = document.createElement('div');
         modal.className = 'color-modal';
         modal.style.cssText = `
@@ -26324,7 +26328,7 @@ function promptZeroQuarterInput(defaultQuarter) {
                 Введите номер нулевого квартала  
                 Из архива будут загружены <u>только пересекающиеся</u> объекты. Сведения актуальны на дату формирования XML КПТ и могут отличаться от данных ЕГРН
             </p>
-            <input type="text" id="zero-quarter-modal-input" value="${defaultQuarter}" 
+            <input type="text" id="zero-quarter-modal-input" value="${initialValue}" 
                    style="width: 85%; padding: 10px; border-radius: 8px; border: 1.5px solid #3b82f6; 
                           font-family: monospace; font-size: 1.05rem; text-align: center; outline: none; margin-bottom: 18px;">
             <div style="display: flex; gap: 10px; width: 100%;">
@@ -26340,8 +26344,8 @@ function promptZeroQuarterInput(defaultQuarter) {
         document.body.appendChild(modal);
         const input = modal.querySelector('#zero-quarter-modal-input');
         input.addEventListener('input', function () {
-    formatCadastralNumber(this);
-});
+            formatCadastralNumber(this);
+        });
 
         input.focus();
         input.select();
@@ -26350,6 +26354,7 @@ function promptZeroQuarterInput(defaultQuarter) {
         modal.querySelector('#zero-quarter-submit').onclick = () => {
             const val = input.value.trim();
             if (val.match(/^\d{2}:\d{2}:\d{6,7}$/)) {
+                localStorage.setItem('savedZeroQuarter', val); // Запоминаем введенный номер
                 close(val);
             } else {
                 alert('Введите корректный номер квартала');
@@ -26362,7 +26367,6 @@ function promptZeroQuarterInput(defaultQuarter) {
         };
     });
 }
-
 
  
  
@@ -26453,11 +26457,9 @@ async function executeZeroQuarterSearch(targetObject, zeroQuarter) {
         jsonFiles.sort((a, b) => b.name.localeCompare(a.name));
         const latestFile = jsonFiles[0];
 
-    
         const responseFile = await fetch(`${STORAGE_API_URL}/${BUCKET_NAME}/${latestFile.name}`);
         if (!responseFile.ok) throw new Error('Ошибка скачивания архива');
         const blob = await responseFile.blob();
-
 
         const zip = await JSZip.loadAsync(blob);
         const jsonEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.json') && !f.dir);
@@ -26470,10 +26472,8 @@ async function executeZeroQuarterSearch(targetObject, zeroQuarter) {
             throw new Error('Некорректная структура объектов в JSON файле');
         }
 
-  
         await new Promise(r => setTimeout(r, 50));
 
-        
         const destSc = localStorage.getItem('savedDefaultMskSystem') || 'EPSG:6331602';
         const destSystem = (typeof COORDINATE_SYSTEMS !== 'undefined') ? COORDINATE_SYSTEMS.find(s => s.value === destSc) : null;
         if (!destSystem || !destSystem.def) throw new Error(`Не найдено определение СК ${destSc}`);
@@ -26488,7 +26488,6 @@ async function executeZeroQuarterSearch(targetObject, zeroQuarter) {
             mskOffsetY = parseFloat((localStorage.getItem('savedMskOffsetY') || '0').replace(',', '.')) || 0;
         }
 
-        
         const isTargetLine = targetObject instanceof ymaps.Polyline;
         const targetCoords = targetObject.geometry.getCoordinates();
         let targetTurfGeom = null;
@@ -26515,19 +26514,26 @@ async function executeZeroQuarterSearch(targetObject, zeroQuarter) {
             zouit: []
         };
 
-        
         for (const obj of jsonData.objects) {
             if (!obj.contours || obj.contours.length === 0) continue;
 
-            
-            const firstContour = obj.contours[0];
-            const pFirst = firstContour[0];
-            const pLast = firstContour[firstContour.length - 1];
-            
-            
-            const isClosed = firstContour.length > 2 &&
-                Math.abs(pFirst.x - pLast.x) < 0.01 &&
-                Math.abs(pFirst.y - pLast.y) < 0.01;
+            const isContourClosed = (c) => {
+                if (!c || c.length < 3) return false;
+                const p1 = c[0];
+                const p2 = c[c.length - 1];
+                return Math.abs(p1.x - p2.x) < 0.01 && Math.abs(p1.y - p2.y) < 0.01;
+            };
+
+            const rawType = (obj.type || '').toLowerCase();
+            const isConstruction = rawType === 'construction' || rawType === 'сооружение';
+            const isBuilding = rawType === 'building' || rawType === 'здание';
+
+            // Проверяем все контуры объекта: если хотя бы один контур открыт — объект линейный
+            const hasOpenContours = obj.contours.some(c => c.length > 1 && !isContourClosed(c));
+            const allContoursClosed = obj.contours.every(c => c.length <= 1 || isContourClosed(c));
+
+            const isLinear = hasOpenContours || (isConstruction && !allContoursClosed);
+            const isClosed = !isLinear && allContoursClosed;
 
             const allRingsWgs = [];
             const allRings3857 = [];
@@ -26555,8 +26561,9 @@ async function executeZeroQuarterSearch(targetObject, zeroQuarter) {
 
                 if (ringWgs.length < 2) continue;
 
-                
-                if (isClosed && ringWgs.length > 2) {
+                // Замыкаем координаты ТОЛЬКО если данный конкретный контур исходно замкнут
+                const ringClosed = isContourClosed(ring);
+                if (ringClosed && ringWgs.length > 2) {
                     if (ringWgs[0][0] !== ringWgs[ringWgs.length - 1][0] || ringWgs[0][1] !== ringWgs[ringWgs.length - 1][1]) {
                         ringWgs.push([...ringWgs[0]]);
                         ring3857.push([...ring3857[0]]);
@@ -26569,73 +26576,75 @@ async function executeZeroQuarterSearch(targetObject, zeroQuarter) {
 
             if (allRingsWgs.length === 0) continue;
 
-            
+            // Быстрая фильтрация по BBox
             if (objMaxLon < targetBbox[0] || objMinLon > targetBbox[2] || 
                 objMaxLat < targetBbox[1] || objMinLat > targetBbox[3]) {
                 continue;
             }
 
-            
-            let objTurfGeom = null;
+            // Поконтурная проверка пересечений через Turf
+            let isIntersecting = false;
             try {
-                if (isClosed) {
-                    objTurfGeom = allRingsWgs.length > 1 ? turf.multiPolygon([allRingsWgs]) : turf.polygon(allRingsWgs);
-                } else {
-                    objTurfGeom = allRingsWgs.length > 1 ? turf.multiLineString(allRingsWgs) : turf.lineString(allRingsWgs[0]);
-                }
-            } catch (e) {
-                continue;
-            }
+                for (const ringWgs of allRingsWgs) {
+                    if (ringWgs.length < 2) continue;
+                    const ringClosed = ringWgs.length >= 4 &&
+                        Math.abs(ringWgs[0][0] - ringWgs[ringWgs.length - 1][0]) < 1e-7 &&
+                        Math.abs(ringWgs[0][1] - ringWgs[ringWgs.length - 1][1]) < 1e-7;
 
-            
-            try {
-                if (turf.booleanIntersects(targetTurfGeom, objTurfGeom)) {
-                    const rawType = (obj.type || '').toLowerCase();
-                    const isBuilding = rawType === 'building';
-                    const isConstruction = rawType === 'construction';
-
-                    
-                    let geometryType = '';
-                    let geomCoords = null;
-
-                    if (isClosed) {
-                        geometryType = allRings3857.length > 1 ? "MultiPolygon" : "Polygon";
-                        geomCoords = allRings3857.length > 1 ? [allRings3857] : allRings3857;
+                    let cGeom = null;
+                    if (ringClosed && isClosed) {
+                        cGeom = turf.polygon([ringWgs]);
                     } else {
-                        geometryType = allRings3857.length > 1 ? "MultiLineString" : "LineString";
-                        geomCoords = allRings3857.length > 1 ? allRings3857 : allRings3857[0];
+                        cGeom = turf.lineString(ringWgs);
                     }
 
-                    const feature = {
-                        type: "Feature",
-                        id: obj.id,
-                        geometry: {
-                            type: geometryType,
-                            coordinates: geomCoords
-                        },
-                        properties: {
-                            descr: obj.id,
-                            category: isBuilding ? 36369 : (isConstruction ? 36383 : 36368),
-                            options: {
-                                cad_num: obj.id,
-                                cad_number: obj.id,
-                                readable_address: obj.address || `Объект (${zeroQuarter})`,
-                                area: isClosed ? (obj.area || null) : null,
-                                params_extension: !isClosed ? (obj.length || null) : null
-                            }
-                        }
-                    };
-
-                    
-                    if (isBuilding) {
-                        demuxed.oks.push(feature);
-                    } else if (isConstruction || !isClosed) {
-                        demuxed.structure.push(feature);
-                    } else {
-                        demuxed.zu.push(feature);
+                    if (turf.booleanIntersects(targetTurfGeom, cGeom)) {
+                        isIntersecting = true;
+                        break;
                     }
                 }
             } catch (err) {}
+
+            if (isIntersecting) {
+                let geometryType = '';
+                let geomCoords = null;
+
+                if (isClosed) {
+                    geometryType = allRings3857.length > 1 ? "MultiPolygon" : "Polygon";
+                    geomCoords = allRings3857.length > 1 ? allRings3857.map(r => [r]) : allRings3857;
+                } else {
+                    geometryType = allRings3857.length > 1 ? "MultiLineString" : "LineString";
+                    geomCoords = allRings3857.length > 1 ? allRings3857 : allRings3857[0];
+                }
+
+                const feature = {
+                    type: "Feature",
+                    id: obj.id,
+                    geometry: {
+                        type: geometryType,
+                        coordinates: geomCoords
+                    },
+                    properties: {
+                        descr: obj.id,
+                        category: isBuilding ? 36369 : (isConstruction || isLinear ? 36383 : 36368),
+                        options: {
+                            cad_num: obj.id,
+                            cad_number: obj.id,
+                            readable_address: obj.address || `Объект (${zeroQuarter})`,
+                            area: isClosed ? (obj.area || null) : null,
+                            params_extension: isLinear ? (obj.length || null) : null
+                        }
+                    }
+                };
+
+                if (isBuilding && isClosed) {
+                    demuxed.oks.push(feature);
+                } else if (isConstruction || isLinear) {
+                    demuxed.structure.push(feature);
+                } else {
+                    demuxed.zu.push(feature);
+                }
+            }
         }
 
         const totalFound = demuxed.zu.length + demuxed.oks.length + demuxed.structure.length;
@@ -26648,16 +26657,11 @@ async function executeZeroQuarterSearch(targetObject, zeroQuarter) {
 
         showLoader(`Отрисовка найденных объектов (ЗУ: ${demuxed.zu.length}, ОКС: ${demuxed.oks.length}, Сооружений: ${demuxed.structure.length})...`);
 
-        
         await drawZeroQuarterFeatures(demuxed);
 
-        
         if (demuxed.zu.length > 0) parcelFeaturesData.push(...demuxed.zu);
         if (demuxed.oks.length > 0) buildingFeaturesData.push(...demuxed.oks);
         if (demuxed.structure.length > 0) structureFeaturesData.push(...demuxed.structure);
-
-        
-        populateSidebarWithAllObjects(demuxed);
 
         let jsonDate = '';
         const dateMatch = (jsonEntry.name || '').match(/\d{4}[-_.]\d{2}[-_.]\d{2}/) ||
@@ -26667,10 +26671,8 @@ async function executeZeroQuarterSearch(targetObject, zeroQuarter) {
             jsonDate = dateMatch[0].replace(/_/g, '-');
         }
 
-        
         const sidebarTitleText = jsonDate ? `${zeroQuarter} (${jsonDate})` : zeroQuarter;
 
-        
         populateSidebarWithAllObjects(demuxed, sidebarTitleText);
 
         showNotification(`Найдено в ${zeroQuarter}${jsonDate ? ' от ' + jsonDate : ''}: ${totalFound} объектов`, 'success');
@@ -26727,7 +26729,19 @@ async function drawZeroQuarterFeatures(demuxed) {
             if (isLine) {
                 const linesCoords = geom.type === 'LineString' ? [geom.coordinates] : geom.coordinates;
 
-                linesCoords.forEach(lineCoords3857 => {
+                // Находим самый длинный контур для размещения подписи
+                let maxLenIdx = 0;
+                let maxLen = 0;
+                linesCoords.forEach((lc, idx) => {
+                    if (lc && lc.length > maxLen) {
+                        maxLen = lc.length;
+                        maxLenIdx = idx;
+                    }
+                });
+
+                linesCoords.forEach((lineCoords3857, lIdx) => {
+                    if (!lineCoords3857 || lineCoords3857.length < 2) return;
+
                     const offsetCoords = lineCoords3857.map(coord => {
                         const p = proj4('EPSG:3857', 'EPSG:4326', coord);
                         return [
@@ -26736,7 +26750,6 @@ async function drawZeroQuarterFeatures(demuxed) {
                         ];
                     });
 
-                    
                     const polyline = new ymaps.Polyline(offsetCoords, {
                         cadastralNumber: cn,
                         hintContent: hintContent,
@@ -26744,7 +26757,7 @@ async function drawZeroQuarterFeatures(demuxed) {
                         _isZeroQuarter: true,
                         featureData: f
                     }, {
-                        strokeColor: polygonStyle.structuresColor || '#ea580c',
+                        strokeColor: polygonStyle.structuresColor || '#00BFFF',
                         strokeWidth: polygonStyle.width || 3,
                         strokeOpacity: loadedObjectOpacity || 0.85,
                         cursor: 'pointer',
@@ -26759,31 +26772,33 @@ async function drawZeroQuarterFeatures(demuxed) {
                     map.geoObjects.add(polyline);
                     polygons.push(polyline);
 
-                    
-                    const midIdx = Math.floor(offsetCoords.length / 2);
-                    const midCoord = offsetCoords[midIdx];
-                    const parts = cn.split(':');
-                    const shortCn = parts.length > 3 ? ':' + parts[parts.length - 1] : cn;
+                    // Метка только на основном отрезке
+                    if (lIdx === maxLenIdx && offsetCoords.length >= 2) {
+                        const midIdx = Math.floor(offsetCoords.length / 2);
+                        const midCoord = offsetCoords[midIdx];
+                        const parts = cn.split(':');
+                        const shortCn = parts.length > 3 ? ':' + parts[parts.length - 1] : cn;
 
-                    const label = new ymaps.Placemark(midCoord, {
-                        iconContent: shortCn,
-                        hintContent: hintContent,
-                        cadastralNumber: cn,
-                        featureData: f,
-                        _isZeroQuarter: true
-                    }, {
-                        iconLayout: customPlacemarkLayout,
-                        visible: map.getZoom() > 14
-                    });
-                    
-                    label.events.add('dblclick', (e) => {
-                        e.stopPropagation();
-                        handleZeroQuarterObjectClick(polyline, e);
-                    });
+                        const label = new ymaps.Placemark(midCoord, {
+                            iconContent: shortCn,
+                            hintContent: hintContent,
+                            cadastralNumber: cn,
+                            featureData: f,
+                            _isZeroQuarter: true
+                        }, {
+                            iconLayout: customPlacemarkLayout,
+                            visible: map.getZoom() > 14
+                        });
+                        
+                        label.events.add('dblclick', (e) => {
+                            e.stopPropagation();
+                            handleZeroQuarterObjectClick(polyline, e);
+                        });
 
-                    map.geoObjects.add(label);
-                    polygons.push(label);
-                    parcelPlacemarks.push(label);
+                        map.geoObjects.add(label);
+                        polygons.push(label);
+                        parcelPlacemarks.push(label);
+                    }
                 });
             } else {
                 const startLen = polygons.length;
