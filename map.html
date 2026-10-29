@@ -22253,8 +22253,12 @@ function populateSidebarWithParcels(features, loadDate = null) {
             });
 
             
-            itemDiv.addEventListener('dblclick', () => {
+         // Двойной клик — приблизить к объекту
+            itemDiv.addEventListener('dblclick', (e) => {
                 focusOnPolygon(true);
+                if (correspondingPolygon?.properties?.get('featureData')?.properties?._isZeroQuarter) {
+                    handleZeroQuarterObjectClick(correspondingPolygon, e);
+                }
             });
 
             contentDiv.appendChild(itemDiv);
@@ -22283,30 +22287,7 @@ function populateSidebarWithParcels(features, loadDate = null) {
     sidebar.classList.remove('hidden', 'collapsed');
     toggleBtn.innerHTML = '<i class="fas fa-chevron-right"></i>';
     isSidebarCollapsed = false;
-    
-    
-if (correspondingPolygon) {
-    itemDiv.addEventListener('dblclick', (e) => {
-        if (map) {
-            try {
-                const bounds = correspondingPolygon.geometry.getBounds();
-                map.setBounds(bounds, { checkZoomRange: true, duration: 400 });
-                const oldFill = correspondingPolygon.options.get('fillColor');
-                correspondingPolygon.options.set('fillColor', '#FFFF0080');
-                setTimeout(() => correspondingPolygon.options.set('fillColor', oldFill), 1000);
-            } catch (err) {}
-        }
 
-        
-        if (correspondingPolygon.properties?.get('featureData')?.properties?._isZeroQuarter) {
-            handleZeroQuarterObjectClick(correspondingPolygon, e);
-        }
-    });
-    itemDiv.style.cursor = 'pointer';
-    itemDiv.title = 'Двойной клик - открыть Карточку и показать на карте';
-}
-
-    
     if (filterInput) {
         filterInput.oninput = () => {
             clearTimeout(filterCadnumDebounceTimer);
@@ -27830,35 +27811,45 @@ function handleMapJsonImport(event) {
 
     reader.onload = async (e) => {
         try {
-            showLoader('Импорт данных...');
+            showLoader('Чтение и распаковка данных...');
             const arrayBuffer = e.target.result;
-            let jsonContent = null;
+            const allParsedData = [];
 
+            // 1. Попытка открыть как ZIP (поддержка множественных JSON внутри архива)
             try {
                 const zip = await JSZip.loadAsync(arrayBuffer);
-                let jsonFile = zip.file("map_data.json");
-                if (!jsonFile) {
-                    const files = Object.keys(zip.files);
-                    const anyJson = files.find(name => name.toLowerCase().endsWith('.json') && !name.startsWith('__MACOSX'));
-                    if (anyJson) jsonFile = zip.file(anyJson);
-                }
-                if (jsonFile) {
-                    jsonContent = await jsonFile.async("string");
+                const jsonFileNames = Object.keys(zip.files).filter(name =>
+                    name.toLowerCase().endsWith('.json') &&
+                    !name.startsWith('__MACOSX') &&
+                    !zip.files[name].dir
+                );
+
+                for (const fName of jsonFileNames) {
+                    try {
+                        const text = await zip.file(fName).async('string');
+                        if (text && text.trim()) {
+                            allParsedData.push(JSON.parse(text));
+                        }
+                    } catch (err) {
+                        console.warn(`Ошибка чтения ${fName} из zip:`, err);
+                    }
                 }
             } catch (zipError) {
+                // 2. Если не ZIP — читаем как обычный одиночный JSON
                 const decoder = new TextDecoder("utf-8");
-                jsonContent = decoder.decode(arrayBuffer);
+                const jsonContent = decoder.decode(arrayBuffer);
+                if (jsonContent && jsonContent.trim()) {
+                    allParsedData.push(JSON.parse(jsonContent));
+                }
             }
 
-            if (!jsonContent || !jsonContent.trim()) {
-                throw new Error("Файл пуст или имеет неподдерживаемый формат.");
+            if (allParsedData.length === 0) {
+                throw new Error("Файл пуст или не содержит корректных JSON данных.");
             }
 
-            const parsedData = JSON.parse(jsonContent);
-
-            
-            if (parsedData.type === 'MapData' && Array.isArray(parsedData.features)) {
-                const mapData = parsedData;
+            // Проверка: одиночный ли это собственный файл MapData
+            if (allParsedData.length === 1 && allParsedData[0].type === 'MapData' && Array.isArray(allParsedData[0].features)) {
+                const mapData = allParsedData[0];
                 clearMapAndResetTheme();
 
                 let importedCount = 0;
@@ -27918,20 +27909,15 @@ function handleMapJsonImport(event) {
                             if (key !== 'relatedPolygonCadastralNumber' && key !== 'relatedPolygonId') ymapsObj.properties.set(key, flags[key]);
                         });
 
-                        
                         ymapsObj.properties.set('isImported', true);
                         ymapsObj.options.set('visible', true);
-                        
-                   
-                 
 
                         map.geoObjects.add(ymapsObj);
                         
-                        
-                           const importedCn = props.cadastralNumber || props.descr || props.options?.cad_num || props.options?.cad_number || f.properties?.descr;
-                    if (importedCn) {
-                        ymapsObj.properties.set('cadastralNumber', importedCn);
-                    }
+                        const importedCn = props.cadastralNumber || props.descr || props.options?.cad_num || props.options?.cad_number || f.properties?.descr;
+                        if (importedCn) {
+                            ymapsObj.properties.set('cadastralNumber', importedCn);
+                        }
                     
                         if (flags.isAreaMeasurement) areaObjects.push(ymapsObj);
                         else polygons.push(ymapsObj);
@@ -27944,11 +27930,9 @@ function handleMapJsonImport(event) {
 
                         let featureData = props.featureData;
                         if ((!featureData || !featureData.properties) && props.cadastralNumber) {
-                            
                             if (featureData && (!featureData.geometry || !featureData.geometry.coordinates)) {
-    featureData.geometry = f.geometry;
-}
-
+                                featureData.geometry = f.geometry;
+                            }
                             featureData = { 
                                 type: "Feature", 
                                 geometry: f.geometry, 
@@ -27964,32 +27948,27 @@ function handleMapJsonImport(event) {
                             ymapsObj.properties.set('featureData', featureData);
                         }
 
-                     if (featureData && !flags.isCustomLabel && !flags.isVertexPoint && !props.isCoordLabel) {
-    const fProps = featureData.properties || {};
-    const fOpts = fProps.options || {};
-    const cat = fProps.category;
-    const catName = (fProps.categoryName || '').toLowerCase();
-    const cadNum = props.cadastralNumber || fProps.descr || fOpts.cad_num || fOpts.cad_number || '';
+                        if (featureData && !flags.isCustomLabel && !flags.isVertexPoint && !props.isCoordLabel) {
+                            const fProps = featureData.properties || {};
+                            const fOpts = fProps.options || {};
+                            const cat = fProps.category;
+                            const catName = (fProps.categoryName || '').toLowerCase();
+                            const cadNum = props.cadastralNumber || fProps.descr || fOpts.cad_num || fOpts.cad_number || '';
 
-    const isB = flags.isBuilding || props.isBuilding || cat === 36369 || catName.includes('здани') || !!fOpts.build_record_area || (fOpts.cad_num && fOpts.purpose);
-    const isS = flags.isStructure || props.isStructure || cat === 36383 || catName.includes('сооружен') || !!fOpts.params_extension || !!fOpts.params_purpose;
-    const isZ = flags.isZouit || props.isZouit || cat === 36940 || cat === 36315 || cat === 36281 || cat === 36278 || cat === 36314 ||
-                catName.includes('зон') || catName.includes('границ') || catName.includes('пункт') || catName.includes('лесничеств') ||
-                !!fOpts.content_restrict_encumbrances || (!!fOpts.reg_numb_border && !fOpts.land_record_type);
-    const isP = flags.isParcelInQuarter || flags.isFoundInArea || flags.isParcelFromSingleSearch ||
-                cat === 36368 || catName.includes('земельн') || !!fOpts.land_record_type || !!fOpts.land_record_category_type || !!fOpts.specified_area || !!fOpts.declared_area ||
-                (type === 'Polygon' && isValidCadastralNumber(cadNum));
+                            const isB = flags.isBuilding || props.isBuilding || cat === 36369 || catName.includes('здани') || !!fOpts.build_record_area || (fOpts.cad_num && fOpts.purpose);
+                            const isS = flags.isStructure || props.isStructure || cat === 36383 || catName.includes('сооружен') || !!fOpts.params_extension || !!fOpts.params_purpose;
+                            const isZ = flags.isZouit || props.isZouit || cat === 36940 || cat === 36315 || cat === 36281 || cat === 36278 || cat === 36314 ||
+                                        catName.includes('зон') || catName.includes('границ') || catName.includes('пункт') || catName.includes('лесничеств') ||
+                                        !!fOpts.content_restrict_encumbrances || (!!fOpts.reg_numb_border && !fOpts.land_record_type);
+                            const isP = flags.isParcelInQuarter || flags.isFoundInArea || flags.isParcelFromSingleSearch ||
+                                        cat === 36368 || catName.includes('земельн') || !!fOpts.land_record_type || !!fOpts.land_record_category_type || !!fOpts.specified_area || !!fOpts.declared_area ||
+                                        (type === 'Polygon' && isValidCadastralNumber(cadNum));
 
-    if (isB) {
-        restoredBuildingsData.push(featureData);
-    } else if (isS) {
-        restoredStructuresData.push(featureData);
-    } else if (isZ) {
-        restoredZouitsData.push(featureData);
-    } else if (isP) {
-        restoredParcelsData.push(featureData);
-    }
-}
+                            if (isB) restoredBuildingsData.push(featureData);
+                            else if (isS) restoredStructuresData.push(featureData);
+                            else if (isZ) restoredZouitsData.push(featureData);
+                            else if (isP) restoredParcelsData.push(featureData);
+                        }
                         importedCount++;
                     }
                 });
@@ -28034,73 +28013,119 @@ function handleMapJsonImport(event) {
                     });
                 }
 
-             parcelFeaturesData = restoredParcelsData;
-buildingFeaturesData = restoredBuildingsData;
-structureFeaturesData = restoredStructuresData;
-zouitFeaturesData = restoredZouitsData;
+                parcelFeaturesData = restoredParcelsData;
+                buildingFeaturesData = restoredBuildingsData;
+                structureFeaturesData = restoredStructuresData;
+                zouitFeaturesData = restoredZouitsData;
 
-const categoryCount = (restoredParcelsData.length > 0 ? 1 : 0) +
-                      (restoredBuildingsData.length > 0 ? 1 : 0) +
-                      (restoredStructuresData.length > 0 ? 1 : 0) +
-                      (restoredZouitsData.length > 0 ? 1 : 0);
+                const categoryCount = (restoredParcelsData.length > 0 ? 1 : 0) +
+                                      (restoredBuildingsData.length > 0 ? 1 : 0) +
+                                      (restoredStructuresData.length > 0 ? 1 : 0) +
+                                      (restoredZouitsData.length > 0 ? 1 : 0);
 
-if (categoryCount > 1) {
-
-    populateSidebarWithAllObjects({
-        zu: restoredParcelsData,
-        oks: restoredBuildingsData,
-        structure: restoredStructuresData,
-        zouit: restoredZouitsData
-    });
-    const sidebarTitle = document.getElementById('sidebar-title');
-    if (sidebarTitle) {
-        sidebarTitle.textContent = `Импорт (${restoredParcelsData.length + restoredBuildingsData.length + restoredStructuresData.length + restoredZouitsData.length})`;
-    }
-} else if (restoredBuildingsData.length > 0) {
-    
-    await populateSidebarWithFoundObjects(restoredBuildingsData, 'Здания');
-} else if (restoredParcelsData.length > 0) {
-    populateSidebarWithParcels(restoredParcelsData, "Импорт MapData");
-} else if (restoredStructuresData.length > 0) {
-    await populateSidebarWithFoundObjects(restoredStructuresData, 'Сооружения');
-} else if (restoredZouitsData.length > 0) {
-    await populateSidebarWithFoundObjects(restoredZouitsData, 'ЗОУИТ');
-}
+                if (categoryCount > 1) {
+                    populateSidebarWithAllObjects({
+                        zu: restoredParcelsData,
+                        oks: restoredBuildingsData,
+                        structure: restoredStructuresData,
+                        zouit: restoredZouitsData
+                    });
+                } else if (restoredBuildingsData.length > 0) {
+                    await populateSidebarWithFoundObjects(restoredBuildingsData, 'Здания');
+                } else if (restoredParcelsData.length > 0) {
+                    populateSidebarWithParcels(restoredParcelsData, "Импорт MapData");
+                } else if (restoredStructuresData.length > 0) {
+                    await populateSidebarWithFoundObjects(restoredStructuresData, 'Сооружения');
+                } else if (restoredZouitsData.length > 0) {
+                    await populateSidebarWithFoundObjects(restoredZouitsData, 'ЗОУИТ');
+                }
 
                 applyCurrentTheme();
                 showNotification(`Карта восстановлена. Объектов: ${importedCount}`, 'success', 'check-circle');
 
             } else {
-                
+                // Универсальный разбор любых JSON (НСПД response, FeatureCollection, одиночные Feature, объекты кэша cadNum+feature)
                 clearMapAndResetTheme();
-                
-                let featuresToImport = [];
 
-                if (Array.isArray(parsedData)) {
-                    featuresToImport = parsedData;
-                } else if (parsedData.type === 'FeatureCollection' && Array.isArray(parsedData.features)) {
-                    featuresToImport = parsedData.features;
-                } else if (parsedData.features && Array.isArray(parsedData.features)) {
-                    featuresToImport = parsedData.features;
-                } else if (parsedData.data && Array.isArray(parsedData.data.features)) {
-                    featuresToImport = parsedData.data.features;
-                } else if (parsedData.data && Array.isArray(parsedData.data)) {
-                    featuresToImport = parsedData.data;
-                } else if (parsedData.geometry && (parsedData.properties || parsedData.type === 'Feature')) {
-                    featuresToImport = [parsedData];
+                function extractFeaturesFromAnyJson(data) {
+                    if (!data) return [];
+                    const list = [];
+
+                    if (Array.isArray(data)) {
+                        data.forEach(item => list.push(...extractFeaturesFromAnyJson(item)));
+                    } else if (data.data?.features && Array.isArray(data.data.features)) {
+                        list.push(...data.data.features);
+                    } else if (data.data?.type === 'FeatureCollection' && Array.isArray(data.data.features)) {
+                        list.push(...data.data.features);
+                    } else if (data.type === 'FeatureCollection' && Array.isArray(data.features)) {
+                        list.push(...data.features);
+                    } else if (data.features && Array.isArray(data.features)) {
+                        list.push(...data.features);
+                    } else if (data.feature && typeof data.feature === 'object') {
+                        const f = data.feature;
+                        if (!f.properties) f.properties = {};
+                        if (data.cadNum && !f.properties.descr) f.properties.descr = data.cadNum;
+                        if (data.options && !f.properties.options) f.properties.options = data.options;
+                        list.push(f);
+                    } else if (data.type === 'Feature' || data.geometry) {
+                        list.push(data);
+                    }
+                    return list;
                 }
 
-                if (!featuresToImport || featuresToImport.length === 0) {
-                    throw new Error("Файл не содержит распознаваемых объектов (features).");
+                function ensureFeatureCrs3857(feature) {
+                    if (!feature?.geometry?.coordinates) return feature;
+                    let firstPt = null;
+                    function findPt(arr) {
+                        if (firstPt) return;
+                        if (Array.isArray(arr) && typeof arr[0] === 'number') { firstPt = arr; }
+                        else if (Array.isArray(arr) && arr.length > 0) { findPt(arr[0]); }
+                    }
+                    findPt(feature.geometry.coordinates);
+                    // Если координаты в WGS84 градусах — переводим в EPSG:3857 для единообразной отрисовки
+                    if (firstPt && Math.abs(firstPt[0]) <= 180 && Math.abs(firstPt[1]) <= 90) {
+                        function convertTo3857(arr) {
+                            if (typeof arr[0] === 'number') {
+                                return proj4('EPSG:4326', 'EPSG:3857', [arr[0], arr[1]]);
+                            }
+                            return arr.map(convertTo3857);
+                        }
+                        feature.geometry.coordinates = convertTo3857(feature.geometry.coordinates);
+                    }
+                    return feature;
                 }
+
+                let rawFeatures = [];
+                allParsedData.forEach(pData => {
+                    rawFeatures.push(...extractFeaturesFromAnyJson(pData));
+                });
+
+                if (rawFeatures.length === 0) {
+                    throw new Error("Не удалось извлечь объекты геометрии (features) из загруженных JSON.");
+                }
+
+                // Дедупликация объектов
+                const seenIds = new Set();
+                const uniqueFeatures = [];
+                rawFeatures.forEach(f => {
+                    if (!f || !f.geometry) return;
+                    ensureFeatureCrs3857(f);
+                    const props = f.properties || {};
+                    const opts = props.options || {};
+                    const id = f.id || props.descr || opts.cad_num || opts.cad_number || opts.reg_numb_border;
+                    if (id) {
+                        if (seenIds.has(id)) return;
+                        seenIds.add(id);
+                    }
+                    uniqueFeatures.push(f);
+                });
 
                 const parcels = [];
                 const buildings = [];
                 const structures = [];
                 const zouits = [];
 
-                featuresToImport.forEach(f => {
-                    if (!f || !f.geometry) return;
+                uniqueFeatures.forEach(f => {
                     const props = f.properties || {};
                     const opts = props.options || {};
                     const cat = props.category;
@@ -28128,7 +28153,6 @@ if (categoryCount > 1) {
                 structureFeaturesData = structures;
                 zouitFeaturesData = zouits;
 
-                
                 if (parcels.length > 0) {
                     await processAndDrawParcels(parcels, 'quarter', true);
                 }
@@ -28142,43 +28166,36 @@ if (categoryCount > 1) {
                     await processAndDrawZouits(zouits);
                 }
 
-                
                 polygons.forEach(obj => {
-                    if (obj && obj.properties) {
-                        obj.properties.set('isImported', true);
-                    }
-                    if (obj && obj.options) {
-                        obj.options.set('visible', true);
-                    }
+                    if (obj && obj.properties) obj.properties.set('isImported', true);
+                    if (obj && obj.options) obj.options.set('visible', true);
                 });
                 parcelPlacemarks.forEach(pm => {
-                    if (pm && pm.properties) {
-                        pm.properties.set('isImported', true);
-                    }
+                    if (pm && pm.properties) pm.properties.set('isImported', true);
                 });
 
-           const countCategories = (parcels.length > 0 ? 1 : 0) +
-                        (buildings.length > 0 ? 1 : 0) +
-                        (structures.length > 0 ? 1 : 0) +
-                        (zouits.length > 0 ? 1 : 0);
+                const countCategories = (parcels.length > 0 ? 1 : 0) +
+                                        (buildings.length > 0 ? 1 : 0) +
+                                        (structures.length > 0 ? 1 : 0) +
+                                        (zouits.length > 0 ? 1 : 0);
 
-const importDate = new Date().toLocaleDateString('ru-RU');
-if (countCategories > 1) {
-    populateSidebarWithAllObjects({
-        zu: parcels,
-        oks: buildings,
-        structure: structures,
-        zouit: zouits
-    });
-} else if (buildings.length > 0) {
-    await populateSidebarWithFoundObjects(buildings, 'Здания (Импорт)');
-} else if (parcels.length > 0) {
-    populateSidebarWithParcels(parcels, `Импорт (${importDate})`);
-} else if (structures.length > 0) {
-    await populateSidebarWithFoundObjects(structures, 'Сооружения (Импорт)');
-} else if (zouits.length > 0) {
-    await populateSidebarWithFoundObjects(zouits, 'ЗОУИТ (Импорт)');
-}
+                const importDate = new Date().toLocaleDateString('ru-RU');
+                if (countCategories > 1) {
+                    populateSidebarWithAllObjects({
+                        zu: parcels,
+                        oks: buildings,
+                        structure: structures,
+                        zouit: zouits
+                    });
+                } else if (buildings.length > 0) {
+                    await populateSidebarWithFoundObjects(buildings, 'Здания (Импорт)');
+                } else if (parcels.length > 0) {
+                    populateSidebarWithParcels(parcels, `Импорт (${importDate})`);
+                } else if (structures.length > 0) {
+                    await populateSidebarWithFoundObjects(structures, 'Сооружения (Импорт)');
+                } else if (zouits.length > 0) {
+                    await populateSidebarWithFoundObjects(zouits, 'ЗОУИТ (Импорт)');
+                }
 
                 let allBounds = null;
                 polygons.forEach(obj => {
@@ -28200,10 +28217,8 @@ if (countCategories > 1) {
                     await map.setBounds(allBounds, { checkZoomRange: true, duration: 300 });
                 }
 
-                
                 updatePlacemarksVisibility();
-
-                showNotification(`Импортировано: ЗУ: ${parcels.length}, ОКС: ${buildings.length + structures.length}, Зон: ${zouits.length}`, 'success', 'file-import');
+                showNotification(`Успешно импортировано: ${uniqueFeatures.length} объектов (ЗУ: ${parcels.length}, ОКС: ${buildings.length + structures.length}, Зон: ${zouits.length})`, 'success', 'file-import');
             }
 
         } catch (error) {
