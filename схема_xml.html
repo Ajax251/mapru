@@ -2827,10 +2827,11 @@ self.onmessage = function(e) {
 };
 `;
 
+const jszipUrl = new URL('webfonts/jszip.min.js', window.location.href).href;
 const READER_WORKER_CODE = `
-importScripts('webfonts/jszip.min.js');
-
 function fastTagChain(block, chainStr) {
+
+
     const tags = chainStr.split('>');
     let searchStart = 0;
     let searchEnd = block.length;
@@ -3031,110 +3032,123 @@ function createInlineWorker(codeStr) {
     return { worker, url };
 }
 
+// Замените функцию parseXmlFastAsync на эту:
 function parseXmlFastAsync(source, isZip, filters, onProgress) {
-    return new Promise((resolve, reject) => {
-        const readerObj = createInlineWorker(READER_WORKER_CODE);
-        const parserPool = [];
-        const parserCount = Math.max(1, CPU_THREADS - 1);
-        const startTime = performance.now();
-
-        const coresStats = [];
-        for (let i = 0; i < parserCount; i++) {
-            parserPool.push(createInlineWorker(PARSER_WORKER_CODE));
-            coresStats.push({ busy: false, processedCount: 0 });
-        }
-
-        const parcels = [];
-        const buildings = [];
-        const zones = [];
-        let meta = null;
-        let pendingParsers = 0;
-        let readerDone = false;
-        let nextWorker = 0;
-        let currentPercent = 0;
-
-        function updateUI() {
-            const elapsed = ((performance.now() - startTime) / 1000).toFixed(1) + ' сек';
-            const totalProcessed = parcels.length + buildings.length + zones.length;
-            let estimated = null;
-            if (currentPercent > 5) {
-                estimated = Math.round((totalProcessed / currentPercent) * 100);
+    return new Promise(async (resolve, reject) => {
+        try {
+            if (isZip) {
+                const zip = await JSZip.loadAsync(source);
+                const xmlEntry = Object.values(zip.files).find(f => f.name.toLowerCase().endsWith('.xml') && !f.dir);
+                if (!xmlEntry) throw new Error('В архиве не найден XML-файл');
+                const xmlText = await xmlEntry.async('string');
+                source = new Blob([xmlText], { type: 'text/xml' });
+                isZip = false;
             }
 
-            renderCustomLoader({
-                title: `Обработка (${parserCount} ядер CPU)...`,
-                percent: currentPercent,
-                processedCount: totalProcessed,
-                estimatedTotal: estimated,
-                timeFormatted: elapsed,
-                cores: coresStats
-            });
-        }
+            const readerObj = createInlineWorker(READER_WORKER_CODE);
+            const parserPool = [];
+            const parserCount = Math.max(1, CPU_THREADS - 1);
+            const startTime = performance.now();
 
-        function cleanup() {
-            readerObj.worker.terminate();
-            URL.revokeObjectURL(readerObj.url);
-            for (let i = 0; i < parserPool.length; i++) {
-                parserPool[i].worker.terminate();
-                URL.revokeObjectURL(parserPool[i].url);
+            const coresStats = [];
+            for (let i = 0; i < parserCount; i++) {
+                parserPool.push(createInlineWorker(PARSER_WORKER_CODE));
+                coresStats.push({ busy: false, processedCount: 0 });
             }
-        }
 
-        function checkFinish() {
-            if (readerDone && pendingParsers <= 0) {
-                cleanup();
-                resolve({ parcels, buildings, zones, meta });
-            }
-        }
+            const parcels = [];
+            const buildings = [];
+            const zones = [];
+            let meta = null;
+            let pendingParsers = 0;
+            let readerDone = false;
+            let nextWorker = 0;
+            let currentPercent = 0;
 
-        for (let i = 0; i < parserPool.length; i++) {
-            const workerIdx = i;
-            parserPool[workerIdx].worker.onmessage = (e) => {
-                const results = e.data.results;
-                for (let j = 0; j < results.length; j++) {
-                    const r = results[j];
-                    if (r.category === 'parcel') parcels.push(r);
-                    else if (r.category === 'building') buildings.push(r);
-                    else if (r.category === 'zone') zones.push(r);
+            function updateUI() {
+                const elapsed = ((performance.now() - startTime) / 1000).toFixed(1) + ' сек';
+                const totalProcessed = parcels.length + buildings.length + zones.length;
+                let estimated = null;
+                if (currentPercent > 5) {
+                    estimated = Math.round((totalProcessed / currentPercent) * 100);
                 }
-                coresStats[workerIdx].busy = false;
-                coresStats[workerIdx].processedCount += results.length;
-                pendingParsers--;
-                updateUI();
-                checkFinish();
-            };
-        }
 
-        readerObj.worker.onmessage = (e) => {
-            const data = e.data;
-            if (data.type === 'meta') {
-                meta = data.meta;
-            } else if (data.type === 'progress') {
-                currentPercent = data.percent;
-                updateUI();
-            } else if (data.type === 'batch') {
-                pendingParsers++;
-                const targetIdx = nextWorker;
-                nextWorker = (nextWorker + 1) % parserPool.length;
-
-                coresStats[targetIdx].busy = true;
-                parserPool[targetIdx].worker.postMessage({ items: data.items });
-                updateUI();
-            } else if (data.type === 'eof') {
-                readerDone = true;
-                currentPercent = 100;
-                updateUI();
-                checkFinish();
-            } else if (data.type === 'error') {
-                cleanup();
-                reject(new Error(data.message));
+                renderCustomLoader({
+                    title: `Обработка (${parserCount} ядер CPU)...`,
+                    percent: currentPercent,
+                    processedCount: totalProcessed,
+                    estimatedTotal: estimated,
+                    timeFormatted: elapsed,
+                    cores: coresStats
+                });
             }
-        };
 
-        readerObj.worker.postMessage({ source, isZip, filters });
+            function cleanup() {
+                readerObj.worker.terminate();
+                URL.revokeObjectURL(readerObj.url);
+                for (let i = 0; i < parserPool.length; i++) {
+                    parserPool[i].worker.terminate();
+                    URL.revokeObjectURL(parserPool[i].url);
+                }
+            }
+
+            function checkFinish() {
+                if (readerDone && pendingParsers <= 0) {
+                    cleanup();
+                    resolve({ parcels, buildings, zones, meta });
+                }
+            }
+
+            for (let i = 0; i < parserPool.length; i++) {
+                const workerIdx = i;
+                parserPool[workerIdx].worker.onmessage = (e) => {
+                    const results = e.data.results;
+                    for (let j = 0; j < results.length; j++) {
+                        const r = results[j];
+                        if (r.category === 'parcel') parcels.push(r);
+                        else if (r.category === 'building') buildings.push(r);
+                        else if (r.category === 'zone') zones.push(r);
+                    }
+                    coresStats[workerIdx].busy = false;
+                    coresStats[workerIdx].processedCount += results.length;
+                    pendingParsers--;
+                    updateUI();
+                    checkFinish();
+                };
+            }
+
+            readerObj.worker.onmessage = (e) => {
+                const data = e.data;
+                if (data.type === 'meta') {
+                    meta = data.meta;
+                } else if (data.type === 'progress') {
+                    currentPercent = data.percent;
+                    updateUI();
+                } else if (data.type === 'batch') {
+                    pendingParsers++;
+                    const targetIdx = nextWorker;
+                    nextWorker = (nextWorker + 1) % parserPool.length;
+
+                    coresStats[targetIdx].busy = true;
+                    parserPool[targetIdx].worker.postMessage({ items: data.items });
+                    updateUI();
+                } else if (data.type === 'eof') {
+                    readerDone = true;
+                    currentPercent = 100;
+                    updateUI();
+                    checkFinish();
+                } else if (data.type === 'error') {
+                    cleanup();
+                    reject(new Error(data.message));
+                }
+            };
+
+            readerObj.worker.postMessage({ source, isZip: false, filters });
+        } catch (err) {
+            reject(err);
+        }
     });
 }
-
 
     
     const quarterInput = document.getElementById('quarterInput'); 
